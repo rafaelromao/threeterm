@@ -1,0 +1,19 @@
+# Local disposable spike and evidence artifacts.
+/tmp/
+
+# Local agent memory cache.
+token-optimizer/
+
+# OS / editor cruft.
+.DS_Store
+Thumbs.db
+
+# Editor swap / state.
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Rust build output (introduced if/when implementation begins).
+target/
+**/target/

@@ -119,13 +119,6 @@ pub enum Envelope {
     },
 }
 
-/// Returns the canonical `schema_version` string the host stamps into
-/// every outgoing envelope. The worker rejects envelopes that do not
-/// carry this exact string in their `schema_version` field.
-pub fn current_schema_version() -> String {
-    crate::schema_version().to_string()
-}
-
 impl Envelope {
     /// Returns the `schema_version` carried by this envelope. Used by the
     /// frame parser to reject envelopes from a mismatched protocol version

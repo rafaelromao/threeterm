@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -89,8 +89,9 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    #[allow(clippy::too_many_arguments)]
     fn seal(
-        generation_id: &str,
+        _generation_id: &str,
         revision_id: &str,
         log: &TransactionLog,
         graph: &FeatureGraph,
@@ -102,7 +103,14 @@ impl Manifest {
         let mut manifest = Self {
             schema_version: schema_epoch().to_string(),
             schema_generation: MANIFEST_SCHEMA_GENERATION,
-            generation_id: generation_id.to_string(),
+            // The Project Generation identity is the canonical log
+            // digest. For new bundles and append operations, the
+            // chain head is the identity. The v0 → v1 migration
+            // path constructs the manifest directly (without going
+            // through this seal) so the prior identity is preserved.
+            // The `generation_id` parameter is retained as the
+            // revision-level id used in error messages.
+            generation_id: terminal_log_digest.clone(),
             revision_id: revision_id.to_string(),
             revision_count: 1,
             transaction_count: log.len(),
@@ -386,9 +394,11 @@ impl Bundle {
     }
 
     pub fn create(root: impl Into<PathBuf>) -> Result<Self, BundleError> {
-        let mut random = [0_u8; 16];
-        File::open("/dev/urandom")?.read_exact(&mut random)?;
-        Self::create_for_test(root, &hex(&random))
+        // The Project Generation identity is the canonical log digest;
+        // a fresh bundle's identity is the empty log identity. After the
+        // first accepted command transaction, the identity advances to
+        // the chain head.
+        Self::create_for_test(root, EMPTY_LOG_DIGEST_HEX)
     }
 
     pub fn create_for_test(
@@ -539,7 +549,11 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
         .ok_or_else(|| {
             BundleError::Invalid("fresh generation must contain one empty revision".to_string())
         })?;
-    let bundle = Bundle::create_with_revision(path, &generation.id, &revision.id)?;
+    // The Project Generation identity is the canonical log digest; for
+    // a fresh bundle the chain is empty, so the seal writes the empty
+    // log identity. The `generation.id` parameter is ignored for the
+    // identity invariant.
+    let bundle = Bundle::create_with_revision(path, EMPTY_LOG_DIGEST_HEX, &revision.id)?;
     Ok(bundle.open()?.manifest)
 }
 

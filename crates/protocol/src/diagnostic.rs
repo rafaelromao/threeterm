@@ -20,6 +20,7 @@ pub enum DiagnosticCode {
     /// is supplied without a value.
     UnknownCommand,
     PersistenceFailure,
+    IntegrityFailure,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -43,6 +44,14 @@ impl Diagnostic {
     pub fn persistence_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::PersistenceFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn integrity_failure(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::IntegrityFailure,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

@@ -9,6 +9,8 @@ description = "Headless Automation CLI adapter for the ThreeTerm domain command 
 
 [dependencies]
 serde_json = { workspace = true }
+threeterm-domain = { path = "../domain" }
+threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 
 [[bin]]

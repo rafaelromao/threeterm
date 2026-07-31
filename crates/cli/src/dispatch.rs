@@ -9,7 +9,10 @@
 use std::ffi::OsString;
 use std::io::Write;
 
+use std::path::Path;
+
 use serde_json::Value;
+use threeterm_domain::ProjectGeneration;
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 
@@ -22,10 +25,12 @@ pub const EXIT_OK: i32 = 0;
 /// used for every `unknown_command` failure so the caller's switch on
 /// `Diagnostic.code` is the single parsing surface.
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
+pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPlan<'a> {
     List,
+    NewProject { path: &'a str },
     Unknown { arg: &'a str },
 }
 
@@ -41,24 +46,24 @@ fn plan<'a, I>(args: I) -> DispatchPlan<'a>
 where
     I: IntoIterator<Item = &'a OsString>,
 {
-    let mut iter = args.into_iter();
-
-    let Some(first) = iter.next() else {
-        return DispatchPlan::Unknown { arg: "" };
-    };
-
-    if first != "--machine" {
-        return DispatchPlan::Unknown {
-            arg: first.to_str().unwrap_or(""),
-        };
-    }
-
-    match iter.next() {
-        Some(value) if value == "list" => DispatchPlan::List,
-        Some(value) => DispatchPlan::Unknown {
-            arg: value.to_str().unwrap_or(""),
+    let values: Vec<&OsString> = args.into_iter().collect();
+    match values.as_slice() {
+        [command, path] if *command == "new-project" => DispatchPlan::NewProject {
+            path: path.to_str().unwrap_or(""),
         },
-        None => DispatchPlan::Unknown { arg: "--machine" },
+        [machine, command, path] if *machine == "--machine" && *command == "new-project" => {
+            DispatchPlan::NewProject {
+                path: path.to_str().unwrap_or(""),
+            }
+        }
+        [machine, command] if *machine == "--machine" && *command == "list" => DispatchPlan::List,
+        [machine, argument, ..] if *machine == "--machine" => DispatchPlan::Unknown {
+            arg: argument.to_str().unwrap_or(""),
+        },
+        [first, ..] => DispatchPlan::Unknown {
+            arg: first.to_str().unwrap_or(""),
+        },
+        [] => DispatchPlan::Unknown { arg: "" },
     }
 }
 
@@ -74,6 +79,7 @@ where
 
     match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
+        DispatchPlan::NewProject { path } => emit_new_project(path, stdout, stderr),
         DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
     }
 }
@@ -105,6 +111,43 @@ fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
         Err(error) => emit_internal_error(&format!("listing write failed: {error}"), stderr),
     }
+}
+
+fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    let generation = ProjectGeneration::fresh();
+    match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
+        Ok(manifest) => {
+            let response = serde_json::json!({
+                "generation_id": generation.id,
+                "manifest": manifest,
+            });
+            match serde_json::to_writer_pretty(&mut *stdout, &response) {
+                Ok(()) => {
+                    let _ = writeln!(stdout);
+                    EXIT_OK
+                }
+                Err(error) => {
+                    emit_internal_error(&format!("response write failed: {error}"), stderr)
+                }
+            }
+        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = Diagnostic::persistence_failure(detail);
+    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+        Ok(()) => {
+            let _ = writeln!(stderr);
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+        }
+    }
+    EXIT_PERSISTENCE_FAILURE
 }
 
 fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
@@ -158,20 +201,23 @@ mod tests {
             .as_array()
             .expect("dispatch output is a top-level JSON array");
 
-        assert_eq!(commands.len(), 1, "one entry in the seeded registry");
-        assert_eq!(commands[0]["id"], "list");
-        assert_eq!(commands[0]["name"], "list");
-        assert_eq!(commands[0]["schema_version"], "threeterm.command.list/1");
+        assert_eq!(commands.len(), 2, "two registered commands");
+        let list = commands
+            .iter()
+            .find(|command| command["id"] == "list")
+            .expect("list command is registered");
+        assert_eq!(list["name"], "list");
+        assert_eq!(list["schema_version"], "threeterm.command.list/1");
         assert_eq!(
-            commands[0]["request_schema_version"],
+            list["request_schema_version"],
             "threeterm.command.list.request/1"
         );
         assert_eq!(
-            commands[0]["response_schema_version"],
+            list["response_schema_version"],
             "threeterm.command.list.response/1"
         );
-        assert!(commands[0]["request_schema"].is_object());
-        assert!(commands[0]["response_schema"].is_object());
+        assert!(list["request_schema"].is_object());
+        assert!(list["response_schema"].is_object());
     }
 
     #[test]

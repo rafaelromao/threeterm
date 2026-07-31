@@ -174,7 +174,7 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             schema_version: "threeterm.command.save/1",
             request_schema_version: "threeterm.command.save.request/1",
             request_schema: SAVE_REQUEST_SCHEMA.clone(),
-            response_schema_version: "threeterm.command.save.response/1",
+            response_schema_version: SAVE_RESPONSE_SCHEMA_VERSION,
             response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
@@ -186,7 +186,7 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             schema_version: "threeterm.command.load/1",
             request_schema_version: "threeterm.command.load.request/1",
             request_schema: LOAD_REQUEST_SCHEMA.clone(),
-            response_schema_version: "threeterm.command.load.response/1",
+            response_schema_version: LOAD_RESPONSE_SCHEMA_VERSION,
             response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
@@ -197,6 +197,8 @@ pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
+pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
+pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

@@ -171,6 +171,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_graph_and_revision_hashes_are_pinned() {
+        let graph = FeatureGraph::empty();
+        assert_eq!(
+            graph.graph_hash_hex(),
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+        assert_eq!(
+            graph.revision_hash_hex(&"0".repeat(64)),
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7"
+        );
+    }
+
+    #[test]
     fn revision_hash_changes_with_graph_or_log_digest() {
         let empty = FeatureGraph::empty();
         let empty_revision = empty.revision_hash_hex(&"0".repeat(64));

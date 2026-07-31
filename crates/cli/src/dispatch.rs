@@ -7,13 +7,12 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
+pub use threeterm_protocol::schema::{LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_INTEGRITY_FAILURE: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
-pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
-pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DispatchPlan {
@@ -359,6 +358,17 @@ mod tests {
     fn dispatch_rejects_missing_save_and_load_arguments() {
         for (arguments, expected) in [
             (vec!["--machine", "save"], "save"),
+            (
+                vec![
+                    "--machine",
+                    "save",
+                    "--feature-id",
+                    "box-1",
+                    "--kind",
+                    "box",
+                ],
+                "--feature-id",
+            ),
             (vec!["--machine", "save", "bundle"], "--feature-id"),
             (
                 vec!["--machine", "save", "bundle", "--feature-id", "box-1"],

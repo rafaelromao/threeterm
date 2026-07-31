@@ -133,7 +133,7 @@ impl TransactionLog {
         ));
     }
 
-    fn terminal_digest_hex(&self) -> &str {
+    pub fn terminal_digest_hex(&self) -> &str {
         self.entries
             .last()
             .map_or(EMPTY_LOG_DIGEST_HEX, |entry| entry.terminal_digest.as_str())
@@ -587,6 +587,38 @@ mod tests {
         assert!(matches!(
             bundle.open(),
             Err(BundleError::LogBrokenLink { log_index: 0, .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn altered_previous_digest_is_reported_as_broken_link() {
+        let root = temp_root("previous-link");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first feature appends");
+        bundle
+            .append_feature("box-2", "box")
+            .expect("second feature appends");
+        let path = root.join(TRANSACTIONS_LOG_FILENAME);
+        let contents = fs::read_to_string(&path).expect("log reads");
+        let mut entries: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("entry parses"))
+            .collect();
+        entries[1]["previous_digest"] = "f".repeat(64).into();
+        let rewritten = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).expect("entry serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&path, rewritten).expect("log writes");
+        assert!(matches!(
+            bundle.open(),
+            Err(BundleError::LogBrokenLink { log_index: 1, .. })
         ));
         let _ = fs::remove_dir_all(root);
     }

@@ -25,6 +25,7 @@ pub const EXIT_OK: i32 = 0;
 /// used for every `unknown_command` failure so the caller's switch on
 /// `Diagnostic.code` is the single parsing surface.
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
+pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPlan<'a> {
@@ -114,7 +115,7 @@ fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 
 fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     if path.is_empty() {
-        return emit_unknown_command("new-project", stderr);
+        return emit_persistence_error("destination must not be empty", stderr);
     }
     let generation = ProjectGeneration::fresh();
     match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
@@ -133,23 +134,22 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
                 }
             }
         }
-        Err(error) => {
-            let diagnostic = Diagnostic::persistence_failure(&error.to_string());
-            match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
-                Ok(()) => {
-                    let _ = writeln!(stderr);
-                }
-                Err(write_error) => {
-                    let _ = writeln!(
-                        stderr,
-                        "fatal: failed to serialize diagnostic: {write_error}"
-                    );
-                }
-            }
-            EXIT_UNKNOWN_COMMAND
-        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
 }
+fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = Diagnostic::persistence_failure(detail);
+    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+        Ok(()) => {
+            let _ = writeln!(stderr);
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+        }
+    }
+    EXIT_PERSISTENCE_FAILURE
+}
+
 fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
     let diagnostic = Diagnostic::unknown_command(arg);
 
@@ -201,7 +201,7 @@ mod tests {
             .as_array()
             .expect("dispatch output is a top-level JSON array");
 
-        assert_eq!(commands.len(), 1, "one entry in the seeded registry");
+        assert_eq!(commands.len(), 2, "two registered commands");
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

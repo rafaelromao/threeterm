@@ -9,7 +9,7 @@
 //! static entry in `COMMAND_REGISTRY`; the dispatcher, serializer, and
 //! schema hash pick it up automatically.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use serde::Serialize;
@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 /// Wrapped in a newtype so the registry can be keyed by `CommandId` rather
 /// than by topology indexes or in-process kernel object identity (closed
 /// issue #23).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct CommandId(pub &'static str);
 
@@ -103,8 +103,8 @@ pub static NEW_PROJECT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 /// The static command registry, keyed by `CommandId`.
-pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyLock::new(|| {
-    let mut map = HashMap::new();
+pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
+    let mut map = BTreeMap::new();
     map.insert(
         LIST_COMMAND_ID,
         CommandSchema {
@@ -115,6 +115,18 @@ pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyL
             request_schema: LIST_REQUEST_SCHEMA.clone(),
             response_schema_version: "threeterm.command.list.response/1",
             response_schema: LIST_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        NEW_PROJECT_COMMAND_ID,
+        CommandSchema {
+            id: NEW_PROJECT_COMMAND_ID,
+            name: "new-project",
+            schema_version: "threeterm.command.new-project/1",
+            request_schema_version: "threeterm.command.new-project.request/1",
+            request_schema: NEW_PROJECT_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.new-project.response/1",
+            response_schema: NEW_PROJECT_RESPONSE_SCHEMA.clone(),
         },
     );
     map

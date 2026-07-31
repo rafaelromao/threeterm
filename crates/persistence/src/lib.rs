@@ -188,6 +188,15 @@ mod tests {
     }
 
     #[test]
+    fn tampered_transaction_log_is_rejected() {
+        let root = std::env::temp_dir().join(format!("threeterm-tamper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        write_fresh(&root, ProjectGeneration::with_id("generation-test")).expect("bundle writes");
+        fs::write(root.join(TRANSACTIONS_FILE), b"tampered\n").expect("log changes");
+        assert!(load(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn fresh_bundle_round_trips_empty_generation() {
         let root = std::env::temp_dir().join(format!("threeterm-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);

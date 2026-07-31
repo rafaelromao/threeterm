@@ -17,8 +17,5 @@ threeterm-protocol = { path = "../protocol" }
 name = "threeterm"
 path = "src/main.rs"
 
-[dev-dependencies]
-threeterm-persistence = { path = "../persistence" }
-
 [lints]
 workspace = true

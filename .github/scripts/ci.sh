@@ -15,7 +15,7 @@ echo "==> Pinned Rust toolchain channel: ${CHANNEL}"
 if ! command -v rustc >/dev/null 2>&1; then
     echo "==> Installing rustup + pinned toolchain ${CHANNEL}"
     if command -v pacman >/dev/null 2>&1; then
-        pacman -Syu --noconfirm rustup
+        pacman -Syu --noconfirm rustup gcc
     else
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain "${CHANNEL}" \
@@ -23,6 +23,11 @@ if ! command -v rustc >/dev/null 2>&1; then
         # shellcheck source=/dev/null
         source "${HOME}/.cargo/env"
     fi
+fi
+
+if ! command -v cc >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
+    echo "==> Installing gcc (C linker) via pacman"
+    pacman -Syu --noconfirm gcc
 fi
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then

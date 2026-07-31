@@ -13,6 +13,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
+use threeterm_domain::graph::CommandIntent;
+use threeterm_host::service::ProjectService;
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 
@@ -26,11 +28,15 @@ pub const EXIT_OK: i32 = 0;
 /// `Diagnostic.code` is the single parsing surface.
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
+pub const EXIT_INVALID_REQUEST: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPlan<'a> {
     List,
     NewProject { path: &'a str },
+    Identity { path: &'a str },
+    Load { path: &'a str },
+    Apply { path: &'a str, intent: &'a str },
     Unknown { arg: &'a str },
 }
 
@@ -38,6 +44,14 @@ enum DispatchPlan<'a> {
 ///
 /// The grammar is:
 /// - `["--machine", "list"]` -> `DispatchPlan::List`
+/// - `["new-project", <path>]` -> `DispatchPlan::NewProject`
+/// - `["--machine", "new-project", <path>]` -> `DispatchPlan::NewProject`
+/// - `["identity", <path>]` -> `DispatchPlan::Identity`
+/// - `["--machine", "identity", <path>]` -> `DispatchPlan::Identity`
+/// - `["load", <path>]` -> `DispatchPlan::Load`
+/// - `["--machine", "load", <path>]` -> `DispatchPlan::Load`
+/// - `["apply", <path>, <intent-json>]` -> `DispatchPlan::Apply`
+/// - `["--machine", "apply", <path>, <intent-json>]` -> `DispatchPlan::Apply`
 /// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
 /// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
 /// - `[]` -> `DispatchPlan::Unknown { arg: "" }`
@@ -47,13 +61,42 @@ where
     I: IntoIterator<Item = &'a OsString>,
 {
     let values: Vec<&OsString> = args.into_iter().collect();
+    let at = |slice: &[&'a OsString], index: usize| -> &'a str {
+        slice.get(index).and_then(|s| s.to_str()).unwrap_or("")
+    };
     match values.as_slice() {
         [command, path] if *command == "new-project" => DispatchPlan::NewProject {
-            path: path.to_str().unwrap_or(""),
+            path: at(values.as_slice(), 1),
+        },
+        [command, path] if *command == "identity" => DispatchPlan::Identity {
+            path: at(values.as_slice(), 1),
+        },
+        [command, path] if *command == "load" => DispatchPlan::Load {
+            path: at(values.as_slice(), 1),
+        },
+        [command, path, intent] if *command == "apply" => DispatchPlan::Apply {
+            path: at(values.as_slice(), 1),
+            intent: at(values.as_slice(), 2),
         },
         [machine, command, path] if *machine == "--machine" && *command == "new-project" => {
             DispatchPlan::NewProject {
-                path: path.to_str().unwrap_or(""),
+                path: at(values.as_slice(), 2),
+            }
+        }
+        [machine, command, path] if *machine == "--machine" && *command == "identity" => {
+            DispatchPlan::Identity {
+                path: at(values.as_slice(), 2),
+            }
+        }
+        [machine, command, path] if *machine == "--machine" && *command == "load" => {
+            DispatchPlan::Load {
+                path: at(values.as_slice(), 2),
+            }
+        }
+        [machine, command, path, intent] if *machine == "--machine" && *command == "apply" => {
+            DispatchPlan::Apply {
+                path: at(values.as_slice(), 2),
+                intent: at(values.as_slice(), 3),
             }
         }
         [machine, command] if *machine == "--machine" && *command == "list" => DispatchPlan::List,
@@ -80,6 +123,9 @@ where
     match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(path, stdout, stderr),
+        DispatchPlan::Identity { path } => emit_identity(path, stdout, stderr),
+        DispatchPlan::Load { path } => emit_load(path, stdout, stderr),
+        DispatchPlan::Apply { path, intent } => emit_apply(path, intent, stdout, stderr),
         DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
     }
 }
@@ -117,25 +163,134 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
     if path.is_empty() {
         return emit_persistence_error("destination must not be empty", stderr);
     }
-    let generation = ProjectGeneration::fresh();
-    match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
-        Ok(manifest) => {
-            let response = serde_json::json!({
-                "generation_id": generation.id,
-                "manifest": manifest,
-            });
-            match serde_json::to_writer_pretty(&mut *stdout, &response) {
-                Ok(()) => {
-                    let _ = writeln!(stdout);
-                    EXIT_OK
-                }
-                Err(error) => {
-                    emit_internal_error(&format!("response write failed: {error}"), stderr)
-                }
-            }
+    let service = ProjectService::new();
+    match service.new_project(Path::new(path)) {
+        Ok(generation) => {
+            let manifest =
+                match threeterm_persistence::bundle::load(Path::new(path)).map(|b| b.manifest) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        return emit_persistence_error(&error.to_string(), stderr);
+                    }
+                };
+            write_manifest_response(stdout, stderr, &generation, &manifest)
         }
         Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
+}
+
+fn emit_identity(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    let service = ProjectService::new();
+    match service.identity(Path::new(path)) {
+        Ok(generation) => match threeterm_persistence::bundle::load(Path::new(path)) {
+            Ok(bundle) => {
+                let response = serde_json::json!({
+                    "generation_id": generation.id,
+                    "log_identity": bundle.manifest.log_identity,
+                });
+                write_json(stdout, stderr, &response)
+            }
+            Err(error) => emit_persistence_error(&error.to_string(), stderr),
+        },
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
+fn emit_load(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    let service = ProjectService::new();
+    match service.load(Path::new(path)) {
+        Ok(generation) => match threeterm_persistence::bundle::load(Path::new(path)) {
+            Ok(bundle) => {
+                let response = serde_json::json!({
+                    "generation_id": generation.id,
+                    "manifest": bundle.manifest,
+                    "transactions": bundle.transactions,
+                });
+                write_json(stdout, stderr, &response)
+            }
+            Err(error) => emit_persistence_error(&error.to_string(), stderr),
+        },
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
+fn emit_apply(
+    path: &str,
+    intent_json: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    if intent_json.is_empty() {
+        return emit_invalid_request("apply requires a JSON intent argument", stderr);
+    }
+    let intent: CommandIntent = match serde_json::from_str(intent_json) {
+        Ok(intent) => intent,
+        Err(error) => {
+            return emit_invalid_request(
+                &format!("intent JSON is not a valid CommandIntent: {error}"),
+                stderr,
+            );
+        }
+    };
+    let service = ProjectService::new();
+    match service.apply(Path::new(path), &intent) {
+        Ok(generation) => {
+            let manifest =
+                match threeterm_persistence::bundle::load(Path::new(path)).map(|b| b.manifest) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        return emit_persistence_error(&error.to_string(), stderr);
+                    }
+                };
+            write_manifest_response(stdout, stderr, &generation, &manifest)
+        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
+fn write_manifest_response(
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    generation: &ProjectGeneration,
+    manifest: &threeterm_persistence::bundle::Manifest,
+) -> i32 {
+    let response = serde_json::json!({
+        "generation_id": generation.id,
+        "manifest": manifest,
+    });
+    write_json(stdout, stderr, &response)
+}
+
+fn write_json(stdout: &mut dyn Write, stderr: &mut dyn Write, value: &Value) -> i32 {
+    match serde_json::to_writer_pretty(&mut *stdout, value) {
+        Ok(()) => {
+            let _ = writeln!(stdout);
+            EXIT_OK
+        }
+        Err(error) => emit_internal_error(&format!("response write failed: {error}"), stderr),
+    }
+}
+
+fn emit_invalid_request(detail: &str, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = Diagnostic::persistence_failure(detail);
+    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+        Ok(()) => {
+            let _ = writeln!(stderr);
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+        }
+    }
+    EXIT_INVALID_REQUEST
 }
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
     let diagnostic = Diagnostic::persistence_failure(detail);
@@ -201,7 +356,7 @@ mod tests {
             .as_array()
             .expect("dispatch output is a top-level JSON array");
 
-        assert_eq!(commands.len(), 2, "two registered commands");
+        assert_eq!(commands.len(), 5, "five registered commands");
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

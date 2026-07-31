@@ -102,6 +102,86 @@ pub static NEW_PROJECT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+/// Canonical request schema document for the `apply` command.
+///
+/// The `intent` is a closed enumeration serialized as a tagged union:
+/// `{ "kind": "add-feature", "feature_id": "...", "feature_kind": "...",
+///   "parameters": {...} }`,
+/// `{ "kind": "set-parameter", "feature_id": "...", "parameter": "...",
+///   "value": ... }`, or
+/// `{ "kind": "remove-feature", "feature_id": "..." }`.
+pub static APPLY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["destination", "intent"],
+        "properties": {
+            "destination": { "type": "string", "minLength": 1 },
+            "intent": { "type": "object" }
+        },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `apply` command.
+pub static APPLY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["generation_id", "manifest"],
+        "properties": {
+            "generation_id": { "type": "string" },
+            "manifest": { "type": "object" }
+        },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical request schema document for the `identity` command.
+pub static IDENTITY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["destination"],
+        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `identity` command.
+pub static IDENTITY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["generation_id", "log_identity"],
+        "properties": {
+            "generation_id": { "type": "string" },
+            "log_identity": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical request schema document for the `load` command.
+pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["destination"],
+        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `load` command.
+pub static LOAD_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["generation_id", "manifest", "transactions"],
+        "properties": {
+            "generation_id": { "type": "string" },
+            "manifest": { "type": "object" },
+            "transactions": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -129,11 +209,50 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: NEW_PROJECT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        APPLY_COMMAND_ID,
+        CommandSchema {
+            id: APPLY_COMMAND_ID,
+            name: "apply",
+            schema_version: "threeterm.command.apply/1",
+            request_schema_version: "threeterm.command.apply.request/1",
+            request_schema: APPLY_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.apply.response/1",
+            response_schema: APPLY_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        IDENTITY_COMMAND_ID,
+        CommandSchema {
+            id: IDENTITY_COMMAND_ID,
+            name: "identity",
+            schema_version: "threeterm.command.identity/1",
+            request_schema_version: "threeterm.command.identity.request/1",
+            request_schema: IDENTITY_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.identity.response/1",
+            response_schema: IDENTITY_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        LOAD_COMMAND_ID,
+        CommandSchema {
+            id: LOAD_COMMAND_ID,
+            name: "load",
+            schema_version: "threeterm.command.load/1",
+            request_schema_version: "threeterm.command.load.request/1",
+            request_schema: LOAD_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.load.response/1",
+            response_schema: LOAD_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
+pub const APPLY_COMMAND_ID: CommandId = CommandId("apply");
+pub const IDENTITY_COMMAND_ID: CommandId = CommandId("identity");
+pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

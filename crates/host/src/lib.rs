@@ -1,3 +1,5 @@
+pub mod service;
+
 pub fn schema_version() -> &'static str {
     "threeterm.host/1"
 }

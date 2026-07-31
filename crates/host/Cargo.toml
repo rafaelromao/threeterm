@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries."
+description = "Rust host crate skeleton for the ThreeTerm MVP."
+
+[dependencies]
+serde_json = { workspace = true }
+threeterm-domain = { path = "../domain" }
+threeterm-persistence = { path = "../persistence" }
 
 [lints]
 workspace = true

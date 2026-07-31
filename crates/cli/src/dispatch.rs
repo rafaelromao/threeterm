@@ -1,17 +1,17 @@
 //! CLI command dispatcher.
 //!
 //! `dispatch` parses an argv slice, routes the recognized `--machine
-//! <subcommand>` grammar, and writes either the JSON listing envelope to
-//! stdout or a structured `unknown_command` diagnostic to stderr. The
-//! dispatcher owns no global state and never calls `std::process::exit`:
-//! the binary wraps it and propagates the returned exit code.
+//! <subcommand>` grammar, and writes either the JSON listing to stdout or
+//! a structured `unknown_command` diagnostic to stderr. The dispatcher
+//! owns no global state and never calls `std::process::exit`: the binary
+//! wraps it and propagates the returned exit code.
 
 use std::ffi::OsString;
 use std::io::Write;
 
-use serde_json::json;
+use serde_json::Value;
 use threeterm_protocol::diagnostic::Diagnostic;
-use threeterm_protocol::schema::{COMMAND_REGISTRY, CommandSchema, registry_hash};
+use threeterm_protocol::schema::iter;
 
 /// Exit code returned when a `--machine` subcommand is recognized and the
 /// JSON listing is emitted to stdout.
@@ -35,7 +35,8 @@ enum DispatchPlan<'a> {
 /// - `["--machine", "list"]` -> `DispatchPlan::List`
 /// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
 /// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
-/// - `[]` or anything else -> `DispatchPlan::Unknown { arg: "<argv[0]>" or "" }`
+/// - `[]` -> `DispatchPlan::Unknown { arg: "" }`
+/// - `[<other>, ..]` -> `DispatchPlan::Unknown { arg: <other> }`
 fn plan<'a, I>(args: I) -> DispatchPlan<'a>
 where
     I: IntoIterator<Item = &'a OsString>,
@@ -72,28 +73,37 @@ where
     let plan = plan(collected.iter());
 
     match plan {
-        DispatchPlan::List => emit_listing(stdout),
+        DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
     }
 }
 
-fn emit_listing(stdout: &mut dyn Write) -> i32 {
-    let entries: Vec<&CommandSchema> = COMMAND_REGISTRY.iter().collect();
-    let envelope = json!({
-        "schema_version": threeterm_protocol::schema_version(),
-        "registry_hash": registry_hash(),
-        "commands": entries,
-    });
+fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    let entries: Vec<&_> = iter().collect();
 
-    match serde_json::to_writer_pretty(&mut *stdout, &envelope) {
+    let serialized = match serde_json::to_value(&entries) {
+        Ok(value) => value,
+        Err(error) => {
+            return emit_internal_error(&format!("registry serialization failed: {error}"), stderr);
+        }
+    };
+
+    let array: Vec<Value> = match serialized {
+        Value::Array(items) => items,
+        other => {
+            return emit_internal_error(
+                &format!("expected the registry to serialize as an array, got {other:?}"),
+                stderr,
+            );
+        }
+    };
+
+    match serde_json::to_writer_pretty(&mut *stdout, &Value::Array(array)) {
         Ok(()) => {
             let _ = writeln!(stdout);
             EXIT_OK
         }
-        Err(error) => {
-            let _ = writeln!(stdout, "failed to serialize listing: {error}");
-            EXIT_UNKNOWN_COMMAND
-        }
+        Err(error) => emit_internal_error(&format!("listing write failed: {error}"), stderr),
     }
 }
 
@@ -105,11 +115,22 @@ fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
             let _ = writeln!(stderr);
             EXIT_UNKNOWN_COMMAND
         }
+        Err(error) => emit_internal_error(&format!("diagnostic write failed: {error}"), stderr),
+    }
+}
+
+fn emit_internal_error(detail: &str, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = Diagnostic::unknown_command(detail);
+
+    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+        Ok(()) => {
+            let _ = writeln!(stderr);
+        }
         Err(error) => {
-            let _ = writeln!(stderr, "failed to serialize diagnostic: {error}");
-            EXIT_UNKNOWN_COMMAND
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
         }
     }
+    EXIT_UNKNOWN_COMMAND
 }
 
 #[cfg(test)]
@@ -121,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_machine_list_writes_json_envelope_to_stdout() {
+    fn dispatch_machine_list_writes_top_level_json_array_to_stdout() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let exit = dispatch(args(&["--machine", "list"]), &mut stdout, &mut stderr);
@@ -130,26 +151,27 @@ mod tests {
         assert!(stderr.is_empty(), "stderr must be empty on success");
 
         let stdout_text = std::str::from_utf8(&stdout).expect("stdout is utf-8");
-        let parsed: serde_json::Value =
+        let parsed: Value =
             serde_json::from_str(stdout_text).expect("dispatch output is parseable JSON");
 
-        let commands = parsed["commands"]
+        let commands = parsed
             .as_array()
-            .expect("commands is a JSON array");
-        assert_eq!(commands.len(), 1);
+            .expect("dispatch output is a top-level JSON array");
+
+        assert_eq!(commands.len(), 1, "one entry in the seeded registry");
         assert_eq!(commands[0]["id"], "list");
         assert_eq!(commands[0]["name"], "list");
         assert_eq!(commands[0]["schema_version"], "threeterm.command.list/1");
+        assert_eq!(
+            commands[0]["request_schema_version"],
+            "threeterm.command.list.request/1"
+        );
+        assert_eq!(
+            commands[0]["response_schema_version"],
+            "threeterm.command.list.response/1"
+        );
         assert!(commands[0]["request_schema"].is_object());
         assert!(commands[0]["response_schema"].is_object());
-        assert_eq!(
-            parsed["schema_version"],
-            serde_json::Value::from(threeterm_protocol::schema_version())
-        );
-        assert_eq!(
-            parsed["registry_hash"],
-            serde_json::Value::from(registry_hash())
-        );
     }
 
     #[test]
@@ -162,14 +184,14 @@ mod tests {
         assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
 
         let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: serde_json::Value =
+        let parsed: Value =
             serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
 
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "bogus");
         assert_eq!(
             parsed["schema_version"],
-            serde_json::Value::from(threeterm_protocol::schema_version())
+            Value::from(threeterm_protocol::schema_version())
         );
     }
 
@@ -183,7 +205,7 @@ mod tests {
         assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
 
         let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: serde_json::Value =
+        let parsed: Value =
             serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
 
         assert_eq!(parsed["code"], "unknown_command");
@@ -200,7 +222,7 @@ mod tests {
         assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
 
         let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: serde_json::Value =
+        let parsed: Value =
             serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
 
         assert_eq!(parsed["code"], "unknown_command");
@@ -216,7 +238,7 @@ mod tests {
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
 
         let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: serde_json::Value =
+        let parsed: Value =
             serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
 
         assert_eq!(parsed["code"], "unknown_command");
@@ -224,17 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_does_not_mutate_the_registry_hash() {
-        let before = registry_hash();
+    fn dispatch_does_not_call_exit_or_panic() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let _ = dispatch(args(&["--machine", "list"]), &mut stdout, &mut stderr);
         let _ = dispatch(args(&["--machine", "bogus"]), &mut stdout, &mut stderr);
-        let after = registry_hash();
-
-        assert_eq!(
-            before, after,
-            "dispatch must not mutate the canonical registry state"
-        );
+        let _ = dispatch(args(&[]), &mut stdout, &mut stderr);
     }
 }

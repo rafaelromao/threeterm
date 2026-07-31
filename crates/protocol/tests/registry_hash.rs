@@ -1,11 +1,12 @@
 //! Asserts the registry's published schema hash is stable across builds.
 //!
 //! The hash is computed from the canonical JSON encoding of the registry
-//! (sorted object keys, no whitespace). The constant is recorded once via
+//! (sorted object keys via `serde_json::Value::Object`'s default
+//! `BTreeMap` backing, no whitespace). The constant is recorded once via
 //! the first-run commit pattern; if the registry changes unintentionally
 //! the test fails with both the actual and the expected hash.
 
-use threeterm_protocol::schema::{COMMAND_REGISTRY, LIST_COMMAND_ID, registry_hash};
+use threeterm_protocol::schema::{LIST_COMMAND_ID, find, registry_hash};
 
 #[test]
 fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
@@ -27,7 +28,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "13ce09a166bb001959e9d15a50c92187e81e2d06804480625b1a67523ff057ec",
+        "912be60e0eb483ff4d00895be1b544462b55b68575ce9c1862a47dc725ee9cff",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -44,15 +45,8 @@ fn registry_hash_is_deterministic() {
 }
 
 #[test]
-fn registry_contains_the_list_command() {
-    let list_entries: Vec<_> = COMMAND_REGISTRY
-        .iter()
-        .filter(|entry| entry.id == LIST_COMMAND_ID)
-        .collect();
-
-    assert_eq!(
-        list_entries.len(),
-        1,
-        "the registry must contain exactly one entry with id == `list`"
-    );
+fn registry_resolves_list_by_command_id() {
+    let entry = find(LIST_COMMAND_ID).expect("`list` is the seeded entry");
+    assert_eq!(entry.id, LIST_COMMAND_ID);
+    assert_eq!(entry.name, "list");
 }

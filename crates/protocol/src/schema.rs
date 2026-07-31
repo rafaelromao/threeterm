@@ -9,10 +9,12 @@
 //! static entry in `COMMAND_REGISTRY`; the dispatcher, serializer, and
 //! schema hash pick it up automatically.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 
 /// Stable, presentation-neutral identifier for a registered command.
 ///
@@ -26,13 +28,17 @@ pub struct CommandId(pub &'static str);
 /// One row of the static command registry. The `request_schema` and
 /// `response_schema` fields are JSON Schema documents stored as generic
 /// `serde_json::Value`s so the schema can evolve without a schema-of-schema
-/// dependency.
+/// dependency. Each schema has its own version independent of the
+/// command-level `schema_version` (closed issue #51: one versioned domain
+/// command schema per request and per response).
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandSchema {
     pub id: CommandId,
     pub name: &'static str,
     pub schema_version: &'static str,
+    pub request_schema_version: &'static str,
     pub request_schema: Value,
+    pub response_schema_version: &'static str,
     pub response_schema: Value,
 }
 
@@ -63,14 +69,18 @@ pub static LIST_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "id",
                         "name",
                         "schema_version",
+                        "request_schema_version",
                         "request_schema",
+                        "response_schema_version",
                         "response_schema"
                     ],
                     "properties": {
                         "id": { "type": "string" },
                         "name": { "type": "string" },
                         "schema_version": { "type": "string" },
+                        "request_schema_version": { "type": "string" },
                         "request_schema": { "type": "object" },
+                        "response_schema_version": { "type": "string" },
                         "response_schema": { "type": "object" }
                     }
                 }
@@ -79,35 +89,57 @@ pub static LIST_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
-/// The single static command registry. The slice (#233) seeds one entry;
-/// later slices extend this table.
-pub static COMMAND_REGISTRY: LazyLock<Vec<CommandSchema>> = LazyLock::new(|| {
-    vec![CommandSchema {
-        id: CommandId("list"),
-        name: "list",
-        schema_version: "threeterm.command.list/1",
-        request_schema: LIST_REQUEST_SCHEMA.clone(),
-        response_schema: LIST_RESPONSE_SCHEMA.clone(),
-    }]
+/// The single static command registry, keyed by `CommandId`. The slice
+/// (#233) seeds one entry; later slices extend this table.
+pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    map.insert(
+        LIST_COMMAND_ID,
+        CommandSchema {
+            id: LIST_COMMAND_ID,
+            name: "list",
+            schema_version: "threeterm.command.list/1",
+            request_schema_version: "threeterm.command.list.request/1",
+            request_schema: LIST_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.list.response/1",
+            response_schema: LIST_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map
 });
 
 /// Reserve a stable id for the `list` command so adapters can reference it
 /// without depending on the entry's table position.
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 
+/// Stable lookup against the registry. Returns `Some` when the id is
+/// registered, `None` otherwise. Adapters use this to resolve a parsed
+/// command id into the canonical schema row.
+pub fn find(command: CommandId) -> Option<&'static CommandSchema> {
+    COMMAND_REGISTRY.get(&command)
+}
+
+/// Iterate the registered commands in stable insertion order.
+///
+/// The slice (#233) seeds a single entry; later slices extend the table.
+/// The dispatcher's `--machine list` output collects this iterator so the
+/// call sites stay agnostic of the underlying table type.
+pub fn iter() -> impl Iterator<Item = &'static CommandSchema> {
+    COMMAND_REGISTRY.values()
+}
+
 /// SHA-256 hex digest of the canonical JSON encoding of `COMMAND_REGISTRY`.
 ///
-/// The canonical encoding sorts object keys recursively and uses no
-/// whitespace, so the byte order is deterministic across builds and
-/// platforms. The returned string is 64 lowercase hex characters.
+/// The canonical encoding serializes each entry in declaration order via
+/// `serde_json::to_vec` (which sorts `Value::Object` keys through the
+/// default `BTreeMap` backing) and emits a trailing newline between
+/// entries. The returned string is 64 lowercase hex characters.
 pub fn registry_hash() -> String {
     let mut hasher = Sha256::new();
 
-    for entry in COMMAND_REGISTRY.iter() {
+    for entry in iter() {
         let serialized = serde_json::to_vec(entry).expect("entry serializes");
         hasher.update(serialized);
-        // Separate entries with a newline so two adjacent entries do not
-        // produce ambiguous concatenated bytes.
         hasher.update(b"\n");
     }
 

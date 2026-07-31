@@ -193,6 +193,12 @@ version = "0.1.0"
 [[package]]
 name = "threeterm-persistence"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "threeterm-domain",
+]
 
 [[package]]
 name = "threeterm-protocol"

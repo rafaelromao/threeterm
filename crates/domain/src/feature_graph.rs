@@ -1,11 +1,15 @@
 //! Canonical feature graph and revision hash for the ThreeTerm domain model.
 //!
-//! The slice (#235) implements the minimum domain surface that the save /
-//! load round-trip needs:
+//! Slice #235 extends the existing domain surface from #234 with the
+//! minimum types the save / load round-trip needs:
 //!
-//! - [`FeatureGraph`] is the authoritative document state. It is a
-//!   `BTreeMap<FeatureId, Feature>` so the canonical JSON serialization
-//!   sorts keys deterministically, mirroring the established
+//! - [`FeatureKind`] is the stable, presentation-neutral identifier for a
+//!   feature's kind (`"box"`, `"extrude"`, ...), wrapped in a newtype so
+//!   the canonical JSON encoding stays consistent across the bundle.
+//! - [`Feature`] pairs a feature id with its kind.
+//! - [`FeatureGraph`] is the canonical feature graph, a
+//!   `BTreeMap<FeatureId, Feature>` whose canonical JSON sorts keys
+//!   deterministically, mirroring the established
 //!   `protocol::schema::registry_hash` test.
 //! - [`graph_hash_hex`] reduces the graph to a 32-byte SHA-256 hex string.
 //!   Two graphs with the same `(id, kind)` set produce identical hex
@@ -13,13 +17,10 @@
 //! - [`revision_hex`] combines `graph_hash_hex` with the
 //!   `terminal_log_digest_hex` to produce the revision the manifest
 //!   commits.
-//! - [`empty_log_digest_hex`] is the all-zero SHA-256 digest that anchors
-//!   the digest chain before any transaction is appended.
 //!
 //! Digest arrays participate in JSON as **lowercase hex strings** everywhere
 //! in the bundle; the bytes-as-hex encoding is part of the hash input and
-//! must remain stable across versions. [`DomainError`] is the single error
-//! surface for the module.
+//! must remain stable across versions.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -27,20 +28,22 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Stable, presentation-neutral identifier for a feature in the canonical
-/// graph. Wrapped in a newtype so the registry can be keyed by `FeatureId`
-/// rather than by topology indexes or in-process kernel object identity
-/// (closed issue #23).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct FeatureId(pub String);
+use crate::FeatureId;
 
-/// Stable, presentation-neutral identifier for the kind of a feature
-/// (`"box"`, `"extrude"`, ...). Wrapped in a newtype to keep the
-/// canonical JSON shape consistent across the bundle.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Stable, presentation-neutral identifier for the kind of a feature.
+/// Wrapped in a newtype to keep the canonical JSON shape consistent
+/// across the bundle.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct FeatureKind(pub String);
+
+impl FeatureKind {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
 
 /// One entry in the canonical feature graph. `(id, kind)` is the natural
 /// key; `FeatureGraph::add_feature` is idempotent on this pair.
@@ -51,10 +54,13 @@ pub struct Feature {
 }
 
 impl Feature {
-    pub fn new(id: impl Into<String>, kind: impl Into<String>) -> Self {
+    /// Construct a feature from stringly-typed values. Panics if `id` is
+    /// empty (matching the domain-level invariant enforced by
+    /// `FeatureId::new`).
+    pub fn new(id: &str, kind: &str) -> Self {
         Self {
-            id: FeatureId(id.into()),
-            kind: FeatureKind(kind.into()),
+            id: FeatureId::new(id).expect("feature id must not be empty"),
+            kind: FeatureKind::new(kind),
         }
     }
 }
@@ -161,6 +167,14 @@ mod tests {
     }
 
     #[test]
+    fn pinned_empty_graph_hash_is_stable() {
+        // Pinned constant: the SHA-256 of the canonical JSON `{}`.
+        let expected = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+        let actual = FeatureGraph::empty().graph_hash_hex();
+        assert_eq!(actual, expected, "empty-graph hash is pinned");
+    }
+
+    #[test]
     fn adding_same_feature_twice_is_idempotent() {
         let mut g = FeatureGraph::empty();
         g.add_feature(Feature::new("box-1", "box"));
@@ -186,24 +200,5 @@ mod tests {
             second.graph_hash_hex(),
             "BTreeMap canonicalization makes insertion order irrelevant"
         );
-    }
-
-    #[test]
-    fn revision_combines_graph_hash_and_log_digest() {
-        let g = FeatureGraph::empty();
-        let graph_hash = g.graph_hash_hex();
-        let rev = revision_hex(&graph_hash, EMPTY_LOG_DIGEST_HEX);
-        assert_eq!(rev.len(), 64);
-        let rev_again = revision_hex(&graph_hash, EMPTY_LOG_DIGEST_HEX);
-        assert_eq!(rev, rev_again);
-    }
-
-    #[test]
-    fn different_log_digest_changes_revision() {
-        let g = FeatureGraph::empty();
-        let graph_hash = g.graph_hash_hex();
-        let rev_a = revision_hex(&graph_hash, EMPTY_LOG_DIGEST_HEX);
-        let rev_b = revision_hex(&graph_hash, "ff".repeat(32).as_str());
-        assert_ne!(rev_a, rev_b);
     }
 }

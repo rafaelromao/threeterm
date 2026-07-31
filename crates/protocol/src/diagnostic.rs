@@ -4,15 +4,13 @@
 //! protocol's current `schema_version`. The taxonomy starts with a single
 //! entry point — `unknown_command` — that every adapter (CLI, TUI, MCP)
 //! emits verbatim so callers can switch on `code` without parsing free-form
-//! text. Slice (#235) adds `integrity_failure` for the save / load
-//! round-trip.
+//! text.
 
 use serde::Serialize;
 
 /// The full set of diagnostic codes emitted by the versioned command
-/// protocol. This slice (#233) ships `unknown_command`; slice (#235)
-/// adds `integrity_failure`. Later slices add codes here as new failure
-/// modes are introduced.
+/// protocol. This slice (#233) ships exactly one entry; later slices add
+/// codes here as new failure modes are introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
@@ -21,11 +19,7 @@ pub enum DiagnosticCode {
     /// arg after `--machine` is not a known subcommand, and when `--machine`
     /// is supplied without a value.
     UnknownCommand,
-    /// The save / load round-trip detected a persistence-layer integrity
-    /// violation: missing manifest, missing log, broken chain link,
-    /// manifest-declared digest mismatch with the recomputed chain, or
-    /// an unsupported schema generation.
-    IntegrityFailure,
+    PersistenceFailure,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -38,8 +32,6 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Emit a structured diagnostic for a command id that is not registered
-    /// in the static command registry.
     pub fn unknown_command(arg: &str) -> Self {
         Self {
             code: DiagnosticCode::UnknownCommand,
@@ -48,12 +40,9 @@ impl Diagnostic {
         }
     }
 
-    /// Emit a structured diagnostic for a persistence-layer integrity
-    /// failure. `detail` is a stable lowercase string the CLI uses to
-    /// switch on the failure mode (e.g. `"log_digest_mismatch"`).
-    pub fn integrity_failure(detail: &str) -> Self {
+    pub fn persistence_failure(detail: &str) -> Self {
         Self {
-            code: DiagnosticCode::IntegrityFailure,
+            code: DiagnosticCode::PersistenceFailure,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

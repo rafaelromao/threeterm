@@ -39,15 +39,15 @@ impl FrameParser {
     /// `FrameError`; the buffered bytes are then dropped, so the caller
     /// can resync on the next chunk via `push`.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Envelope>, FrameError> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > MAX_FRAME_BUFFER {
-            let size = self.buffer.len();
+        let size = self.buffer.len().saturating_add(bytes.len());
+        if size > MAX_FRAME_BUFFER {
             self.buffer.clear();
             return Err(FrameError::PayloadTooLarge {
                 size,
                 max: MAX_FRAME_BUFFER,
             });
         }
+        self.buffer.extend_from_slice(bytes);
 
         let mut envelopes = Vec::new();
         while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {

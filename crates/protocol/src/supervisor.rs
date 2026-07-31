@@ -355,6 +355,7 @@ impl Supervisor {
             Some(detail) => format!("{stage}:{detail}"),
             None => stage.to_string(),
         };
+        let _ = self.host.terminate();
         SupervisorOutcome::ForceTerminated {
             record: TerminationRecord {
                 request_id: request_id.to_string(),

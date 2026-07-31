@@ -77,6 +77,16 @@ impl Stage {
             return Err(ArtifactError::InvalidName(staging_name.to_string()));
         }
 
+        let max_encoded = MAX_ARTIFACT_BYTES
+            .saturating_add(2)
+            .saturating_mul(4)
+            .div_ceil(3);
+        if bytes_b64.len() > max_encoded {
+            return Err(ArtifactError::PayloadTooLarge {
+                size: bytes_b64.len(),
+                max: max_encoded,
+            });
+        }
         let bytes = BASE64
             .decode(bytes_b64)
             .map_err(|error| ArtifactError::Decode(error.to_string()))?;

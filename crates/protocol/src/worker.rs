@@ -182,6 +182,11 @@ pub trait WorkerHost {
     /// supervisor's grace period; if it doesn't, the supervisor force-
     /// terminates the worker.
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError>;
+
+    /// Force-terminate and reap the disposable worker after grace expires.
+    fn terminate(&mut self) -> Result<(), WorkerError> {
+        Ok(())
+    }
 }
 
 /// Production wiring of `WorkerHost` over a real subprocess. The

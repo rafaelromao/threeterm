@@ -80,8 +80,29 @@ pub static LIST_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
-/// The single static command registry, keyed by `CommandId`. The slice
-/// (#233) seeds one entry; later slices extend this table.
+/// Canonical request schema document for the `new-project` command.
+pub static NEW_PROJECT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["destination"],
+        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `new-project` command.
+pub static NEW_PROJECT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["generation_id", "manifest"],
+        "properties": {
+            "generation_id": { "type": "string" },
+            "manifest": { "type": "object" }
+        },
+        "additionalProperties": false
+    })
+});
+/// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = HashMap::new();
     map.insert(
@@ -99,11 +120,9 @@ pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyL
     map
 });
 
-/// Reserve a stable id for the `list` command so adapters can reference it
-/// without depending on the entry's table position.
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
+pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 
-/// Stable lookup against the registry. Returns `Some` when the id is
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.
 pub fn find(command: CommandId) -> Option<&'static CommandSchema> {

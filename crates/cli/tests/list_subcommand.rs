@@ -36,22 +36,21 @@ fn threeterm_machine_list_prints_top_level_json_array_to_stdout() {
     let commands = parsed
         .as_array()
         .expect("dispatch output is a top-level JSON array");
+    assert_eq!(commands.len(), 1, "one entry in the seeded registry");
+    let list = commands
+        .iter()
+        .find(|command| command["id"] == "list")
+        .expect("list command is registered");
+    assert_eq!(list["name"], "list");
+    assert_eq!(list["schema_version"], "threeterm.command.list/1");
     assert_eq!(
-        commands.len(),
-        1,
-        "exactly one entry in the seeded registry"
-    );
-    assert_eq!(commands[0]["id"], "list");
-    assert_eq!(commands[0]["name"], "list");
-    assert_eq!(commands[0]["schema_version"], "threeterm.command.list/1");
-    assert_eq!(
-        commands[0]["request_schema_version"],
+        list["request_schema_version"],
         "threeterm.command.list.request/1"
     );
     assert_eq!(
-        commands[0]["response_schema_version"],
+        list["response_schema_version"],
         "threeterm.command.list.response/1"
     );
-    assert!(commands[0]["request_schema"].is_object());
-    assert!(commands[0]["response_schema"].is_object());
+    assert!(list["request_schema"].is_object());
+    assert!(list["response_schema"].is_object());
 }

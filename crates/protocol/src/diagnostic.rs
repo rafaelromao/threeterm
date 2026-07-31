@@ -19,6 +19,7 @@ pub enum DiagnosticCode {
     /// arg after `--machine` is not a known subcommand, and when `--machine`
     /// is supplied without a value.
     UnknownCommand,
+    PersistenceFailure,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -31,12 +32,18 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Emit a structured diagnostic for a command id that is not registered
-    /// in the static command registry.
     pub fn unknown_command(arg: &str) -> Self {
         Self {
             code: DiagnosticCode::UnknownCommand,
             arg: arg.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn persistence_failure(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::PersistenceFailure,
+            arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }
     }

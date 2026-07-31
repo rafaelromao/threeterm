@@ -1,6 +1,10 @@
+pub mod artifact;
 pub mod diagnostic;
+pub mod frame;
 pub mod schema;
 pub mod schema_validator;
+pub mod supervisor;
+pub mod worker;
 
 pub fn schema_version() -> &'static str {
     "threeterm.protocol/1"

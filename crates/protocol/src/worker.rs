@@ -1,0 +1,359 @@
+//! Versioned worker protocol envelope and host trait.
+//!
+//! The host speaks the versioned protocol to a disposable worker over the
+//! newline-framed JSON envelope. The `Envelope` enum is the canonical wire
+//! shape: every variant carries the protocol's `schema_version` and uses
+//! `kind` as the externally-tagged discriminator so a single JSON line
+//! self-describes its shape.
+//!
+//! The `WorkerHost` trait is the host-side abstraction the supervisor and
+//! the fake test transport share. The production wiring (OCCT, libslvs)
+//! implements the trait over a real subprocess; the integration tests
+//! implement it over an `mpsc` channel. Both run the same supervisor.
+//!
+//! Staged binary artifacts travel inside the `Artifact` envelope as a
+//! base64-encoded payload (`bytes_b64`); the consumer side decodes and
+//! validates the SHA-256 against the decoded bytes, not the wire string
+//! (closed issue #49: one disposable worker per request).
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Maximum size of a decoded artifact payload, in bytes. The foundation
+/// slice keeps artifacts inside JSON; later slices may switch to
+/// length-prefixed frames. Frames exceeding this limit emit
+/// `ArtifactError::PayloadTooLarge` so a malicious or buggy worker cannot
+/// exhaust the host's memory.
+pub const MAX_ARTIFACT_BYTES: usize = 1 << 20;
+
+/// The versioned envelope exchanged between host and worker.
+///
+/// Every variant carries `schema_version` so the host can reject frames
+/// from a mismatched protocol version before parsing the payload. The
+/// `kind` field is the externally-tagged discriminator emitted by serde.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Envelope {
+    /// Emitted by the worker as soon as it has accepted the schema
+    /// version and is ready to receive a `Request`.
+    #[serde(rename = "worker_ready")]
+    WorkerReady {
+        schema_version: String,
+        worker_id: String,
+    },
+
+    /// The host's request to a worker. `command_id` is a registered
+    /// domain command; `args` is the schema-validated argument object;
+    /// `revision_id` is the authoritative Revision Snapshot the worker
+    /// must operate on.
+    #[serde(rename = "request")]
+    Request {
+        schema_version: String,
+        request_id: String,
+        command_id: String,
+        args: Value,
+        revision_id: String,
+    },
+
+    /// The host's cooperative cancellation request.
+    #[serde(rename = "cancel")]
+    Cancel {
+        schema_version: String,
+        request_id: String,
+        reason: String,
+    },
+
+    /// The worker's progress update. The host uses the most recent
+    /// `Progress` to populate `TerminationRecord.last_progress` when a
+    /// force-terminate fires.
+    #[serde(rename = "progress")]
+    Progress {
+        schema_version: String,
+        request_id: String,
+        stage: String,
+        percent: u8,
+    },
+
+    /// The worker's staged binary artifact. The host validates the
+    /// advertised `sha256` against the decoded bytes before promotion;
+    /// see `artifact::Stage`.
+    #[serde(rename = "artifact")]
+    Artifact {
+        schema_version: String,
+        request_id: String,
+        artifact_kind: String,
+        staging_name: String,
+        sha256: String,
+        bytes_b64: String,
+    },
+
+    /// The worker's terminal success envelope. `result` is the
+    /// command-typed response value.
+    #[serde(rename = "completed")]
+    Completed {
+        schema_version: String,
+        request_id: String,
+        result: Value,
+    },
+
+    /// The worker's terminal cooperative cancellation acknowledgement.
+    /// Emitted after a `Cancel` envelope; arrives inside the supervisor's
+    /// grace period on the cooperative path.
+    #[serde(rename = "cancelled")]
+    Cancelled {
+        schema_version: String,
+        request_id: String,
+        reason: String,
+    },
+
+    /// The worker's terminal failure envelope. `code` is a stable
+    /// diagnostic identifier; `detail` carries the offending argument.
+    #[serde(rename = "failed")]
+    Failed {
+        schema_version: String,
+        request_id: String,
+        code: String,
+        detail: String,
+    },
+}
+
+impl Envelope {
+    /// Returns the `schema_version` carried by this envelope. Used by the
+    /// frame parser to reject envelopes from a mismatched protocol version
+    /// before parsing the payload.
+    pub fn schema_version(&self) -> &str {
+        match self {
+            Self::WorkerReady { schema_version, .. }
+            | Self::Request { schema_version, .. }
+            | Self::Cancel { schema_version, .. }
+            | Self::Progress { schema_version, .. }
+            | Self::Artifact { schema_version, .. }
+            | Self::Completed { schema_version, .. }
+            | Self::Cancelled { schema_version, .. }
+            | Self::Failed { schema_version, .. } => schema_version,
+        }
+    }
+
+    /// Returns the request_id for envelope variants that carry one, or
+    /// `None` for `WorkerReady`. The supervisor uses this to thread the
+    /// per-request identity into `TerminationRecord` and the cooperative
+    /// ack.
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::WorkerReady { .. } => None,
+            Self::Request { request_id, .. }
+            | Self::Cancel { request_id, .. }
+            | Self::Progress { request_id, .. }
+            | Self::Artifact { request_id, .. }
+            | Self::Completed { request_id, .. }
+            | Self::Cancelled { request_id, .. }
+            | Self::Failed { request_id, .. } => Some(request_id),
+        }
+    }
+}
+
+/// The host-side abstraction of a single disposable worker.
+///
+/// `WorkerHost` is the boundary the supervisor and the fake test
+/// transport share. The production wiring (OCCT, libslvs) implements it
+/// over a real subprocess; the integration tests implement it over an
+/// in-process channel. Both run the same `Supervisor`.
+pub trait WorkerHost {
+    /// Send an envelope to the worker. Returns `Err(WorkerError::Closed)`
+    /// if the worker has already exited.
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError>;
+
+    /// Receive the next envelope from the worker. Returns
+    /// `Err(WorkerError::Closed)` when the worker has exited and no more
+    /// envelopes are pending.
+    fn recv(&mut self) -> Result<Envelope, WorkerError>;
+
+    /// Send a cooperative cancellation for `request_id`. The worker is
+    /// expected to acknowledge with a `Cancelled` envelope inside the
+    /// supervisor's grace period; if it doesn't, the supervisor force-
+    /// terminates the worker.
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError>;
+
+    /// Force-terminate and reap the disposable worker after grace expires.
+    fn terminate(&mut self) -> Result<(), WorkerError> {
+        Ok(())
+    }
+}
+
+/// Production wiring of `WorkerHost` over a real subprocess. The
+/// foundation slice does not implement this trait; it exists so the
+/// future OCCT/`libslvs` adapters have a seam.
+pub trait WorkerProcess {
+    /// Spawn a fresh disposable worker and return a boxed `WorkerHost`
+    /// bound to it. One spawn per `Request` (closed issue #49).
+    fn spawn(config: WorkerConfig) -> Result<Box<dyn WorkerHost>, WorkerError>;
+}
+
+/// Configuration handed to `WorkerProcess::spawn`.
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    pub worker_id: &'static str,
+    pub schema_version: &'static str,
+    pub command_line: Vec<String>,
+}
+
+/// Errors emitted by `WorkerHost` implementations. The supervisor maps
+/// every variant to a structured `WorkerError` diagnostic so callers
+/// never have to inspect free-form text.
+#[derive(Debug)]
+pub enum WorkerError {
+    /// The worker process exited or its channel closed before delivering
+    /// the requested envelope.
+    Closed,
+    /// The worker emitted a frame that the host could not parse.
+    Protocol(String),
+    /// The worker emitted an envelope with a schema_version the host
+    /// does not recognize.
+    SchemaMismatch { received: String, expected: String },
+    /// I/O error talking to the worker's stdin/stdout.
+    Io(std::io::Error),
+}
+
+impl fmt::Display for WorkerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed => formatter.write_str("worker closed before delivering envelope"),
+            Self::Protocol(detail) => write!(formatter, "worker protocol violation: {detail}"),
+            Self::SchemaMismatch { received, expected } => write!(
+                formatter,
+                "worker schema mismatch: received {received:?}, expected {expected:?}"
+            ),
+            Self::Io(error) => write!(formatter, "worker io error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkerError {}
+
+impl From<std::io::Error> for WorkerError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Returns the canonical JSON encoding of `envelope` followed by `\n`.
+/// The host and worker speak newline-framed JSON; every line carries one
+/// envelope (closed issue #49).
+pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
+    let mut bytes = serde_json::to_vec(envelope)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn schema() -> String {
+        crate::schema_version().to_string()
+    }
+
+    #[test]
+    fn cancelled_envelope_round_trips_with_kind_discriminator() {
+        let envelope = Envelope::Cancelled {
+            schema_version: schema(),
+            request_id: "req-7".to_string(),
+            reason: "user requested stop".to_string(),
+        };
+
+        let encoded = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(encoded["kind"], Value::from("cancelled"));
+        assert_eq!(encoded["schema_version"], Value::from(schema()));
+        assert_eq!(encoded["request_id"], Value::from("req-7"));
+        assert_eq!(encoded["reason"], Value::from("user requested stop"));
+
+        let decoded: Envelope = serde_json::from_value(encoded).expect("envelope deserializes");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn artifact_envelope_carries_base64_payload_and_advertised_hash() {
+        let envelope = Envelope::Artifact {
+            schema_version: schema(),
+            request_id: "req-7".to_string(),
+            artifact_kind: "brep".to_string(),
+            staging_name: "sketch-1.brep".to_string(),
+            sha256: "deadbeef".to_string(),
+            bytes_b64: "aGVsbG8=".to_string(),
+        };
+
+        let encoded = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(encoded["kind"], Value::from("artifact"));
+        assert_eq!(encoded["bytes_b64"], Value::from("aGVsbG8="));
+        assert_eq!(encoded["sha256"], Value::from("deadbeef"));
+
+        let decoded: Envelope = serde_json::from_value(encoded).expect("envelope deserializes");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn unknown_kind_discriminator_is_rejected_on_deserialize() {
+        let value = json!({
+            "kind": "not_a_real_envelope",
+            "schema_version": schema(),
+        });
+
+        let error = serde_json::from_value::<Envelope>(value)
+            .expect_err("unknown kind discriminator must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("not_a_real_envelope") || message.contains("unknown variant"),
+            "deserialization error should mention the offending kind, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_request_id_is_none_for_worker_ready() {
+        let envelope = Envelope::WorkerReady {
+            schema_version: schema(),
+            worker_id: "occt-worker".to_string(),
+        };
+        assert_eq!(envelope.request_id(), None);
+        assert_eq!(envelope.schema_version(), schema());
+    }
+
+    #[test]
+    fn envelope_request_id_is_some_for_progress_and_terminal_variants() {
+        let progress = Envelope::Progress {
+            schema_version: schema(),
+            request_id: "req-1".to_string(),
+            stage: "tessellating".to_string(),
+            percent: 42,
+        };
+        assert_eq!(progress.request_id(), Some("req-1"));
+
+        let completed = Envelope::Completed {
+            schema_version: schema(),
+            request_id: "req-1".to_string(),
+            result: json!({ "ok": true }),
+        };
+        assert_eq!(completed.request_id(), Some("req-1"));
+    }
+
+    #[test]
+    fn encode_frame_emits_one_json_object_terminated_with_newline() {
+        let envelope = Envelope::WorkerReady {
+            schema_version: schema(),
+            worker_id: "occt-worker".to_string(),
+        };
+        let frame = encode_frame(&envelope).expect("frame encodes");
+
+        assert!(
+            frame.ends_with(b"\n"),
+            "frame must end with a newline; got {:?}",
+            std::str::from_utf8(&frame)
+        );
+        let body = &frame[..frame.len() - 1];
+        let parsed: Envelope =
+            serde_json::from_slice(body).expect("frame body is a valid envelope");
+        assert_eq!(parsed, envelope);
+    }
+}

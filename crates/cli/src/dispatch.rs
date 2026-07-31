@@ -34,12 +34,16 @@ use threeterm_protocol::schema::iter;
 pub const EXIT_OK: i32 = 0;
 
 /// Exit code returned when the dispatcher rejects the argv (unknown
-/// subcommand, missing value, or no `--machine` flag) or when the host
-/// surfaces an integrity failure. The same code is used for every
-/// diagnostic so the caller's switch on `Diagnostic.code` is the single
-/// parsing surface.
+/// subcommand, missing value, or no `--machine` flag). Callers can
+/// switch on `Diagnostic.code` for the structured detail.
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
-pub const EXIT_INTEGRITY_FAILURE: i32 = 2;
+
+/// Exit code returned when the host surfaces an integrity failure
+/// (sealed manifest missing, log missing, log digest mismatch, chain
+/// link broken, schema generation unsupported, bundle path missing).
+/// Distinct from `EXIT_UNKNOWN_COMMAND` so shell-level callers can
+/// short-circuit without parsing the diagnostic envelope.
+pub const EXIT_INTEGRITY_FAILURE: i32 = 3;
 
 /// Stable schema pins for the response JSON shape produced by save /
 /// load. They must mirror the values registered in

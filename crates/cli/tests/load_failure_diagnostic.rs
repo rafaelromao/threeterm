@@ -62,8 +62,9 @@ fn parse_success_json(output: &std::process::Output, what: &str) -> Value {
 fn assert_integrity_failure(output: &std::process::Output, expected_detail: &str, what: &str) {
     assert_eq!(
         output.status.code(),
-        Some(2),
-        "{what} should exit 2 on integrity failure, got {:?}; stderr={}",
+        Some(threeterm_cli::dispatch::EXIT_INTEGRITY_FAILURE as u32 as i32),
+        "{what} should exit {} on integrity failure, got {:?}; stderr={}",
+        threeterm_cli::dispatch::EXIT_INTEGRITY_FAILURE,
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );

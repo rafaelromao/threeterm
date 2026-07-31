@@ -333,10 +333,17 @@ mod tests {
             "threeterm-235-persist-{}-{}-{}",
             std::process::id(),
             label,
-            std::sync::atomic::AtomicU64::new(0).fetch_add(0, std::sync::atomic::Ordering::SeqCst)
+            counter().fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&dir).expect("temp_root create");
         dir
+    }
+
+    fn counter() -> &'static std::sync::atomic::AtomicU64 {
+        use std::sync::OnceLock;
+        use std::sync::atomic::AtomicU64;
+        static COUNTER: OnceLock<AtomicU64> = OnceLock::new();
+        COUNTER.get_or_init(|| AtomicU64::new(0))
     }
 
     #[test]

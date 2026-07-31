@@ -86,7 +86,10 @@ impl Host {
 
     /// Open or create the bundle at `root`, append the feature, and
     /// replace the host's `current` snapshot. Returns the new
-    /// [`SnapshotView`] for the CLI to print.
+    /// [`SnapshotView`] for the CLI to print. If the path does not yet
+    /// exist as a directory, the bundle writers create it (and any
+    /// missing parents) via `Bundle::create`. If the path exists but is
+    /// not a directory, returns `BundlePathMissing`.
     pub fn save(
         &self,
         root: impl AsRef<Path>,
@@ -94,7 +97,7 @@ impl Host {
         kind: &str,
     ) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
-        if !root.exists() || !root.is_dir() {
+        if root.exists() && !root.is_dir() {
             return Err(HostError::BundlePathMissing {
                 path: root.to_path_buf(),
             });
@@ -281,10 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn host_save_missing_path_returns_bundle_path_missing() {
-        let root = temp_root("missing_path").join("does-not-exist");
+    fn host_save_creates_missing_parent_directory() {
+        let root = temp_root("missing_path").join("does-not-yet-exist");
         let host = Host::new();
-        let err = host.save(&root, "box-1", "box").expect_err("path missing");
+        let view = host
+            .save(&root, "box-1", "box")
+            .expect("save creates the missing parent dir");
+        assert_eq!(view.feature_graph_hash_hex.len(), 64);
+        assert!(root.join("manifest.json").exists());
+        assert!(root.join("transactions.log").exists());
+    }
+
+    #[test]
+    fn host_save_path_is_a_file_returns_bundle_path_missing() {
+        let root_file = temp_root("is_a_file").join("not-a-dir.txt");
+        std::fs::write(&root_file, b"blocker").expect("blocker written");
+        let host = Host::new();
+        let err = host
+            .save(&root_file, "box-1", "box")
+            .expect_err("path is a file");
         match err {
             HostError::BundlePathMissing { .. } => {}
             other => panic!("expected BundlePathMissing, got {other:?}"),

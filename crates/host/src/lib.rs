@@ -18,7 +18,7 @@ impl From<&LoadedBundle> for SnapshotView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum HostError {
     BundlePathMissing { path: PathBuf },
     BundlePathNotDirectory { path: PathBuf },
@@ -157,10 +157,10 @@ mod tests {
         let host = Host::new();
         let loaded = host.load(&valid_root).expect("valid bundle loads");
         assert_eq!(host.current(), Some(loaded.clone()));
-        assert_eq!(
+        assert!(matches!(
             host.load(&tampered_root),
             Err(HostError::Persistence(BundleError::LogDigestMismatch))
-        );
+        ));
         assert_eq!(host.current(), Some(loaded));
 
         let _ = std::fs::remove_dir_all(valid_root);

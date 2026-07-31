@@ -31,18 +31,14 @@ use sha2::{Digest, Sha256};
 /// graph. Wrapped in a newtype so the registry can be keyed by `FeatureId`
 /// rather than by topology indexes or in-process kernel object identity
 /// (closed issue #23).
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FeatureId(pub String);
 
 /// Stable, presentation-neutral identifier for the kind of a feature
 /// (`"box"`, `"extrude"`, ...). Wrapped in a newtype to keep the
 /// canonical JSON shape consistent across the bundle.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FeatureKind(pub String);
 
@@ -158,7 +154,10 @@ mod tests {
         let b = FeatureGraph::empty().graph_hash_hex();
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

@@ -92,17 +92,37 @@ fn save_and_load_round_trip_produces_identical_hashes() {
         .as_str()
         .expect("load.revision_hash is a string");
 
-    assert_eq!(save_graph.len(), 64, "feature_graph_hash is 64 lowercase hex chars");
-    assert_eq!(load_graph.len(), 64, "feature_graph_hash is 64 lowercase hex chars");
-    assert_eq!(save_rev.len(), 64, "revision_hash is 64 lowercase hex chars");
-    assert_eq!(load_rev.len(), 64, "revision_hash is 64 lowercase hex chars");
+    assert_eq!(
+        save_graph.len(),
+        64,
+        "feature_graph_hash is 64 lowercase hex chars"
+    );
+    assert_eq!(
+        load_graph.len(),
+        64,
+        "feature_graph_hash is 64 lowercase hex chars"
+    );
+    assert_eq!(
+        save_rev.len(),
+        64,
+        "revision_hash is 64 lowercase hex chars"
+    );
+    assert_eq!(
+        load_rev.len(),
+        64,
+        "revision_hash is 64 lowercase hex chars"
+    );
 
     assert!(
-        save_graph.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        save_graph
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "feature_graph_hash is lowercase hex, got {save_graph}"
     );
     assert!(
-        save_rev.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        save_rev
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "revision_hash is lowercase hex, got {save_rev}"
     );
 

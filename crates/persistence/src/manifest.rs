@@ -174,9 +174,7 @@ pub fn append_line(target: &Path, payload: &[u8]) -> std::io::Result<()> {
         let file_name = tmp_path
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name")
-            })?;
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
         tmp_path.set_file_name(format!("{file_name}.tmp"));
         {
             let mut f = std::fs::File::create(&tmp_path)?;
@@ -201,10 +199,7 @@ mod tests {
 
     #[test]
     fn hex_lower_is_lowercase_and_correct_length() {
-        assert_eq!(
-            hex_lower(&[0xde, 0xad, 0xbe, 0xef]),
-            "deadbeef"
-        );
+        assert_eq!(hex_lower(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     #[test]

@@ -81,10 +81,7 @@ fn assert_integrity_failure(output: &std::process::Output, expected_detail: &str
         parsed["code"], "integrity_failure",
         "{what} diagnostic code"
     );
-    assert_eq!(
-        parsed["arg"], expected_detail,
-        "{what} diagnostic detail"
-    );
+    assert_eq!(parsed["arg"], expected_detail, "{what} diagnostic detail");
     assert_eq!(
         parsed["schema_version"],
         Value::from(threeterm_protocol::schema_version())
@@ -96,16 +93,13 @@ fn flip_terminal_log_digest(bundle: &Path) -> (String, String) {
     let raw = std::fs::read_to_string(&manifest_path).expect("manifest.json readable");
     let mut value: Value = serde_json::from_str(&raw).expect("manifest.json is parseable JSON");
 
-    let original = value["terminal_log_digest"]
+    let original = value["terminal_log_digest_hex"]
         .as_str()
-        .expect("terminal_log_digest is a string")
+        .expect("terminal_log_digest_hex is a string")
         .to_string();
 
     let mut chars: Vec<char> = original.chars().collect();
-    let target_idx = chars
-        .iter()
-        .position(|c| *c != '0')
-        .unwrap_or(0);
+    let target_idx = chars.iter().position(|c| *c != '0').unwrap_or(0);
     let replacement = match chars[target_idx] {
         '0' => '1',
         '1' => '2',
@@ -120,7 +114,7 @@ fn flip_terminal_log_digest(bundle: &Path) -> (String, String) {
     chars[target_idx] = replacement;
     let tampered: String = chars.into_iter().collect();
 
-    *value.get_mut("terminal_log_digest").unwrap() = Value::from(tampered.clone());
+    *value.get_mut("terminal_log_digest_hex").unwrap() = Value::from(tampered.clone());
 
     let rewritten =
         serde_json::to_string_pretty(&value).expect("manifest.json re-serializes as JSON");
@@ -133,7 +127,7 @@ fn restore_terminal_log_digest(bundle: &Path, original: &str) {
     let manifest_path = bundle.join("manifest.json");
     let raw = std::fs::read_to_string(&manifest_path).expect("manifest.json readable");
     let mut value: Value = serde_json::from_str(&raw).expect("manifest.json is parseable JSON");
-    *value.get_mut("terminal_log_digest").unwrap() = Value::from(original);
+    *value.get_mut("terminal_log_digest_hex").unwrap() = Value::from(original);
     let rewritten =
         serde_json::to_string_pretty(&value).expect("manifest.json re-serializes as JSON");
     std::fs::write(&manifest_path, rewritten).expect("manifest.json restored");

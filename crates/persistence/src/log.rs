@@ -76,10 +76,7 @@ pub fn verify_chain(entries: &[LogEntry]) -> Result<String, LogError> {
         if entry.previous_digest_hex != prior_terminal {
             return Err(LogError::LogBrokenLink {
                 log_index: entry.log_index,
-                detail: format!(
-                    "previous_digest_hex mismatch at entry {}",
-                    entry.log_index
-                ),
+                detail: format!("previous_digest_hex mismatch at entry {}", entry.log_index),
             });
         }
         let recomputed = compute_terminal(entry);

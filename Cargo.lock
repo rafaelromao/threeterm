@@ -162,6 +162,8 @@ name = "threeterm-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "threeterm-host",
+ "threeterm-persistence",
  "threeterm-protocol",
 ]
 

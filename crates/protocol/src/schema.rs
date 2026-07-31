@@ -130,47 +130,46 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 
 /// The single static command registry, keyed by `CommandId`. The slice
 /// (#233) seeds one entry; later slices extend this table.
-pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> =
-    LazyLock::new(|| {
-        let mut map = BTreeMap::new();
-        map.insert(
-            LIST_COMMAND_ID,
-            CommandSchema {
-                id: LIST_COMMAND_ID,
-                name: "list",
-                schema_version: "threeterm.command.list/1",
-                request_schema_version: "threeterm.command.list.request/1",
-                request_schema: LIST_REQUEST_SCHEMA.clone(),
-                response_schema_version: "threeterm.command.list.response/1",
-                response_schema: LIST_RESPONSE_SCHEMA.clone(),
-            },
-        );
-        map.insert(
-            SAVE_COMMAND_ID,
-            CommandSchema {
-                id: SAVE_COMMAND_ID,
-                name: "save",
-                schema_version: "threeterm.command.save/1",
-                request_schema_version: "threeterm.command.save.request/1",
-                request_schema: SAVE_REQUEST_SCHEMA.clone(),
-                response_schema_version: "threeterm.command.save.response/1",
-                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
-            },
-        );
-        map.insert(
-            LOAD_COMMAND_ID,
-            CommandSchema {
-                id: LOAD_COMMAND_ID,
-                name: "load",
-                schema_version: "threeterm.command.load/1",
-                request_schema_version: "threeterm.command.load.request/1",
-                request_schema: LOAD_REQUEST_SCHEMA.clone(),
-                response_schema_version: "threeterm.command.load.response/1",
-                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
-            },
-        );
-        map
-    });
+pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
+    let mut map = BTreeMap::new();
+    map.insert(
+        LIST_COMMAND_ID,
+        CommandSchema {
+            id: LIST_COMMAND_ID,
+            name: "list",
+            schema_version: "threeterm.command.list/1",
+            request_schema_version: "threeterm.command.list.request/1",
+            request_schema: LIST_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.list.response/1",
+            response_schema: LIST_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        SAVE_COMMAND_ID,
+        CommandSchema {
+            id: SAVE_COMMAND_ID,
+            name: "save",
+            schema_version: "threeterm.command.save/1",
+            request_schema_version: "threeterm.command.save.request/1",
+            request_schema: SAVE_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.save.response/1",
+            response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        LOAD_COMMAND_ID,
+        CommandSchema {
+            id: LOAD_COMMAND_ID,
+            name: "load",
+            schema_version: "threeterm.command.load/1",
+            request_schema_version: "threeterm.command.load.request/1",
+            request_schema: LOAD_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.load.response/1",
+            response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map
+});
 
 /// Reserve a stable id for the `list` command so adapters can reference it
 /// without depending on the entry's table position.

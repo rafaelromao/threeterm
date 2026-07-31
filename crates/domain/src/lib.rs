@@ -8,8 +8,7 @@
 pub mod graph;
 
 pub use graph::{
-    EMPTY_LOG_DIGEST_HEX, Feature, FeatureGraph, FeatureId, FeatureKind,
-    revision_hex,
+    EMPTY_LOG_DIGEST_HEX, Feature, FeatureGraph, FeatureId, FeatureKind, revision_hex,
 };
 
 pub fn schema_version() -> &'static str {

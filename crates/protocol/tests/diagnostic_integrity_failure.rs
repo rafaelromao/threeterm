@@ -14,10 +14,7 @@ fn integrity_failure_diagnostic_reports_the_integrity_failure_code() {
 
     assert_eq!(diag.code, DiagnosticCode::IntegrityFailure);
     assert_eq!(diag.arg, "log_digest_mismatch");
-    assert_eq!(
-        diag.schema_version,
-        threeterm_protocol::schema_version()
-    );
+    assert_eq!(diag.schema_version, threeterm_protocol::schema_version());
 }
 
 #[test]

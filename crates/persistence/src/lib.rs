@@ -21,13 +21,11 @@ use threeterm_domain::graph::{Feature, FeatureGraph};
 pub mod log;
 pub mod manifest;
 
-pub use log::{
-    DIGEST_HEX_LEN, EMPTY_LOG_DIGEST_HEX, LogEntry, LogError, TransactionLog,
-};
+pub use log::{DIGEST_HEX_LEN, EMPTY_LOG_DIGEST_HEX, LogEntry, LogError, TransactionLog};
 pub use manifest::{
-    DIGEST_HEX_LEN as MANIFEST_DIGEST_HEX_LEN, MANIFEST_SCHEMA_GENERATION,
-    MANIFEST_SCHEMA_VERSION, PROJECT_GENERATION_HEX_LEN, Manifest, append_line,
-    atomic_write, hex_lower, random_project_generation_hex, sha256_hex,
+    DIGEST_HEX_LEN as MANIFEST_DIGEST_HEX_LEN, MANIFEST_SCHEMA_GENERATION, MANIFEST_SCHEMA_VERSION,
+    Manifest, PROJECT_GENERATION_HEX_LEN, append_line, atomic_write, hex_lower,
+    random_project_generation_hex, sha256_hex,
 };
 
 /// Filename of the sealed manifest inside a bundle.
@@ -42,12 +40,18 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub enum BundleError {
     ManifestMissing,
     LogMissing,
-    SchemaGenerationUnsupported { detail: String },
+    SchemaGenerationUnsupported {
+        detail: String,
+    },
     LogDigestMismatch,
     /// Convenience wrapper that carries the [`LogError`] detail.
     LogFailure(LogError),
-    IoFailure { detail: String },
-    ProjectGenerationUnavailable { detail: String },
+    IoFailure {
+        detail: String,
+    },
+    ProjectGenerationUnavailable {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for BundleError {
@@ -139,18 +143,13 @@ impl Bundle {
         project_generation_hex: &str,
     ) -> Result<Self, BundleError> {
         let bundle = Self::at(root);
-        std::fs::create_dir_all(bundle.root())
-            .map_err(|err| BundleError::IoFailure {
-                detail: err.to_string(),
-            })?;
+        std::fs::create_dir_all(bundle.root()).map_err(|err| BundleError::IoFailure {
+            detail: err.to_string(),
+        })?;
 
         let graph = FeatureGraph::empty();
 
-        let manifest = Manifest::seal(
-            project_generation_hex,
-            EMPTY_LOG_DIGEST_HEX,
-            &graph,
-        );
+        let manifest = Manifest::seal(project_generation_hex, EMPTY_LOG_DIGEST_HEX, &graph);
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|err| BundleError::IoFailure {
                 detail: err.to_string(),
@@ -189,11 +188,10 @@ impl Bundle {
             }
         };
 
-        let manifest: Manifest = serde_json::from_slice(&manifest_raw).map_err(|err| {
-            BundleError::IoFailure {
+        let manifest: Manifest =
+            serde_json::from_slice(&manifest_raw).map_err(|err| BundleError::IoFailure {
                 detail: format!("manifest parse failed: {err}"),
-            }
-        })?;
+            })?;
 
         if manifest.schema_generation != MANIFEST_SCHEMA_GENERATION {
             return Err(BundleError::SchemaGenerationUnsupported {
@@ -279,18 +277,13 @@ impl Bundle {
         };
 
         let terminal = log.terminal_digest_hex()?;
-        let manifest = Manifest::seal(
-            &loaded.manifest.project_generation_hex,
-            &terminal,
-            graph,
-        );
+        let manifest = Manifest::seal(&loaded.manifest.project_generation_hex, &terminal, graph);
         loaded.manifest = manifest.clone();
 
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|err| {
-            BundleError::IoFailure {
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(|err| BundleError::IoFailure {
                 detail: err.to_string(),
-            }
-        })?;
+            })?;
         atomic_write(&self.manifest_path(), &manifest_bytes).map_err(|err| {
             BundleError::IoFailure {
                 detail: err.to_string(),
@@ -349,11 +342,14 @@ mod tests {
     #[test]
     fn create_then_open_yields_empty_graph_and_zero_digest_log() {
         let root = temp_root("create_open");
-        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str())
-            .expect("bundle creates");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
         let loaded = bundle.open().expect("bundle opens");
         assert_eq!(loaded.manifest.project_generation_hex, "00".repeat(16));
-        assert_eq!(loaded.manifest.terminal_log_digest_hex, EMPTY_LOG_DIGEST_HEX);
+        assert_eq!(
+            loaded.manifest.terminal_log_digest_hex,
+            EMPTY_LOG_DIGEST_HEX
+        );
         assert!(loaded.log.is_empty());
         assert!(loaded.graph.is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -362,11 +358,13 @@ mod tests {
     #[test]
     fn append_feature_is_idempotent_on_same_input() {
         let root = temp_root("idempotent");
-        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str())
-            .expect("bundle creates");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
 
         let first = bundle.append_feature("box-1", "box").expect("first append");
-        let second = bundle.append_feature("box-1", "box").expect("second append");
+        let second = bundle
+            .append_feature("box-1", "box")
+            .expect("second append");
 
         assert_eq!(first.manifest, second.manifest);
         assert_eq!(first.log, second.log);
@@ -380,13 +378,12 @@ mod tests {
     #[test]
     fn tampering_manifest_terminal_log_digest_triggers_log_digest_mismatch() {
         let root = temp_root("tamper_log_digest");
-        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str())
-            .expect("bundle creates");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
         let _loaded = bundle.append_feature("box-1", "box").expect("append");
 
         let manifest_path = root.join(MANIFEST_FILENAME);
-        let manifest_raw =
-            std::fs::read_to_string(&manifest_path).expect("manifest readable");
+        let manifest_raw = std::fs::read_to_string(&manifest_path).expect("manifest readable");
         let mut value: serde_json::Value =
             serde_json::from_str(&manifest_raw).expect("manifest is parseable JSON");
         let original_terminal = value["terminal_log_digest_hex"]
@@ -399,8 +396,7 @@ mod tests {
             Some(_) => format!("2{}", &original_terminal[1..]),
             None => "1".repeat(64),
         };
-        *value.get_mut("terminal_log_digest_hex").unwrap() =
-            serde_json::Value::from(flipped_first);
+        *value.get_mut("terminal_log_digest_hex").unwrap() = serde_json::Value::from(flipped_first);
         std::fs::write(
             &manifest_path,
             serde_json::to_string_pretty(&value).expect("manifest re-serializes"),

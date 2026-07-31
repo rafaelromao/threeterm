@@ -171,11 +171,9 @@ impl Default for Host {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
-    use threeterm_persistence::{
-        Bundle, LoadedBundle, PROJECT_GENERATION_HEX_LEN,
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use threeterm_persistence::{Bundle, LoadedBundle, PROJECT_GENERATION_HEX_LEN};
 
     fn counter() -> &'static AtomicU64 {
         static COUNTER: OnceLock<AtomicU64> = OnceLock::new();
@@ -195,8 +193,9 @@ mod tests {
 
     fn empty_loaded() -> LoadedBundle {
         let root = temp_root("empty_loaded");
-        let bundle = Bundle::create_for_test(&root, "00".repeat(PROJECT_GENERATION_HEX_LEN / 2).as_str())
-            .expect("create_for_test");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(PROJECT_GENERATION_HEX_LEN / 2).as_str())
+                .expect("create_for_test");
         let loaded = bundle.open().expect("open");
         let _ = std::fs::remove_dir_all(&root);
         loaded
@@ -211,8 +210,7 @@ mod tests {
     #[test]
     fn failed_load_does_not_mutate_current() {
         let root = temp_root("failed_load");
-        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str())
-            .expect("create");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("create");
         let loaded = bundle.append_feature("box-1", "box").expect("append");
         let prior_view = SnapshotView::from_loaded(&loaded);
 
@@ -230,8 +228,7 @@ mod tests {
             Some(_) => format!("2{}", &terminal[1..]),
             None => "1".repeat(64),
         };
-        *value.get_mut("terminal_log_digest_hex").unwrap() =
-            serde_json::Value::from(flipped);
+        *value.get_mut("terminal_log_digest_hex").unwrap() = serde_json::Value::from(flipped);
         std::fs::write(
             &manifest_path,
             serde_json::to_string_pretty(&value).expect("re-serialize"),
@@ -274,9 +271,7 @@ mod tests {
     fn host_save_then_load_round_trip_yields_same_view() {
         let root = temp_root("save_load");
         let host = Host::new();
-        let saved = host
-            .save(&root, "box-1", "box")
-            .expect("save");
+        let saved = host.save(&root, "box-1", "box").expect("save");
         let loaded = host.load(&root).expect("load");
         assert_eq!(
             saved, loaded,

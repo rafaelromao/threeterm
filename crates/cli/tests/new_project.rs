@@ -31,7 +31,7 @@ fn new_project_creates_and_reloads_one_empty_revision_bundle() {
     assert_eq!(loaded.manifest.transaction_count, 0);
     assert!(loaded.transactions.is_empty());
     assert!(root.join("manifest.json").is_file());
-    assert!(root.join("canonical/transactions.ndjson").is_file());
+    assert!(root.join("transactions.log").is_file());
 
     let _ = fs::remove_dir_all(root);
 }

@@ -7,5 +7,11 @@ license.workspace = true
 publish.workspace = true
 description = "Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries."
 
+[dependencies]
+threeterm-persistence = { path = "../persistence" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

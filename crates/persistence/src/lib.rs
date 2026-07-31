@@ -104,12 +104,12 @@ impl Manifest {
             schema_version: schema_epoch().to_string(),
             schema_generation: MANIFEST_SCHEMA_GENERATION,
             // The Project Generation identity is the canonical log
-            // digest. For new bundles and append operations, the
+            // digest: for new bundles and append operations the
             // chain head is the identity. The v0 → v1 migration
             // path constructs the manifest directly (without going
             // through this seal) so the prior identity is preserved.
-            // The `generation_id` parameter is retained as the
-            // revision-level id used in error messages.
+            // The `generation_id` parameter is retained for API
+            // shape but is not consulted here.
             generation_id: terminal_log_digest.clone(),
             revision_id: revision_id.to_string(),
             revision_count: 1,

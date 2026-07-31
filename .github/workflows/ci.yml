@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace-build:
+    name: Workspace build on rootless-Podman Arch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PODMAN_ROOTLESS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Podman (rootless)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              podman uidmap fuse-overlayfs slirp4netns
+          podman --version
+
+      - name: Verify Podman is configured for rootless
+        run: |
+          set -euo pipefail
+          if ! podman info --format '{{.Host.Security.Rootless}}' | grep -qi '^true$'; then
+              echo "ERROR: podman is not running rootless" >&2
+              podman info >&2
+              exit 1
+          fi
+
+      - name: Run canonical CI script in archlinux container
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.cargo"
+          podman run --rm \
+              --security-opt label=disable \
+              -v "${PWD}:/workspace" \
+              -v "${HOME}/.cargo:/root/.cargo" \
+              -w /workspace \
+              docker.io/archlinux:latest \
+              bash /workspace/.github/scripts/ci.sh

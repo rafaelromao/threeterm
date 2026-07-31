@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/host",
+    "crates/workers/occt",
+    "crates/workers/slvs",
+    "crates/tui",
+    "crates/cli",
+    "crates/mcp",
+    "crates/viewport",
+    "crates/persistence",
+    "crates/theme",
+    "crates/lua-bridge",
+    "crates/domain",
+    "crates/protocol",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }

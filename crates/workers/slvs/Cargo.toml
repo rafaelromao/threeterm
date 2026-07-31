@@ -1,0 +1,11 @@
+[package]
+name = "threeterm-slvs-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rust skeleton crate for the disposable libslvs worker boundary. C++ worker code lives outside the workspace."
+
+[lints]
+workspace = true

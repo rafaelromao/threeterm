@@ -1,5 +1,5 @@
-//! Asserts that the production `--machine list` output validates against
-//! the versioned response schema registered in `protocol::schema`.
+//! Asserts that the production `list` output validates against the
+//! versioned response schema registered in `protocol::schema`.
 
 use std::process::Command;
 
@@ -8,11 +8,10 @@ use threeterm_protocol::schema::{LIST_COMMAND_ID, LIST_RESPONSE_SCHEMA, find};
 use threeterm_protocol::schema_validator::validate;
 
 #[test]
-fn threeterm_machine_list_output_validates_against_registered_response_schema() {
+fn threeterm_list_output_validates_against_registered_response_schema() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
 
     let output = Command::new(bin)
-        .arg("--machine")
         .arg("list")
         .output()
         .expect("threeterm binary runs");

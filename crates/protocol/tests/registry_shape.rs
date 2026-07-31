@@ -69,3 +69,25 @@ fn unknown_command_id_returns_none() {
     use threeterm_protocol::schema::CommandId;
     assert!(find(CommandId("does-not-exist")).is_none());
 }
+
+#[test]
+fn identity_command_is_registered() {
+    let entry =
+        find(threeterm_protocol::schema::IDENTITY_COMMAND_ID).expect("`identity` is registered");
+    assert_eq!(entry.name, "identity");
+    assert_eq!(entry.schema_version, "threeterm.command.identity/1");
+}
+
+#[test]
+fn load_command_is_registered() {
+    let entry = find(threeterm_protocol::schema::LOAD_COMMAND_ID).expect("`load` is registered");
+    assert_eq!(entry.name, "load");
+    assert_eq!(entry.schema_version, "threeterm.command.load/1");
+}
+
+#[test]
+fn apply_command_is_registered() {
+    let entry = find(threeterm_protocol::schema::APPLY_COMMAND_ID).expect("`apply` is registered");
+    assert_eq!(entry.name, "apply");
+    assert_eq!(entry.schema_version, "threeterm.command.apply/1");
+}

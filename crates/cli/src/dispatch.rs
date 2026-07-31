@@ -1,86 +1,97 @@
 //! CLI command dispatcher.
 //!
-//! `dispatch` parses an argv slice, routes the recognized `--machine
-//! <subcommand>` grammar, and writes either the JSON listing to stdout or
-//! a structured `unknown_command` diagnostic to stderr. The dispatcher
-//! owns no global state and never calls `std::process::exit`: the binary
-//! wraps it and propagates the returned exit code.
+//! `dispatch` parses an argv slice, routes the recognized subcommand
+//! grammar (every command is a positional verb: `list`, `new-project`,
+//! `identity`, `load`, `apply`), and writes either JSON to stdout or a
+//! structured diagnostic to stderr. The dispatcher owns no global state
+//! and never calls `std::process::exit`: the binary wraps it and
+//! propagates the returned exit code.
 
 use std::ffi::OsString;
 use std::io::Write;
-
 use std::path::Path;
 
 use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
+use threeterm_persistence::{TransactionIntent, append, current_identity, load, write_fresh};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 
-/// Exit code returned when a `--machine` subcommand is recognized and the
-/// JSON listing is emitted to stdout.
+/// Exit code returned when a subcommand is recognized and the JSON
+/// listing is emitted to stdout.
 pub const EXIT_OK: i32 = 0;
 
 /// Exit code returned when the dispatcher rejects the argv (unknown
-/// subcommand, missing value, or no `--machine` flag). The same code is
-/// used for every `unknown_command` failure so the caller's switch on
-/// `Diagnostic.code` is the single parsing surface.
+/// subcommand, missing value, or no positional verb).
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
+pub const EXIT_COMMAND_REJECTED: i32 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DispatchPlan<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchPlan {
     List,
-    NewProject { path: &'a str },
-    Unknown { arg: &'a str },
+    NewProject { path: String },
+    Identity { path: String },
+    Load { path: String },
+    Apply { path: String, intent_json: String },
+    Unknown { arg: String },
 }
 
 /// Inspect the argv slice and decide which dispatch plan to execute.
 ///
-/// The grammar is:
-/// - `["--machine", "list"]` -> `DispatchPlan::List`
-/// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
-/// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
-/// - `[]` -> `DispatchPlan::Unknown { arg: "" }`
-/// - `[<other>, ..]` -> `DispatchPlan::Unknown { arg: <other> }`
-fn plan<'a, I>(args: I) -> DispatchPlan<'a>
-where
-    I: IntoIterator<Item = &'a OsString>,
-{
-    let values: Vec<&OsString> = args.into_iter().collect();
+/// The grammar is one positional verb followed by arguments:
+/// - `list` -> `List`
+/// - `new-project <path>` -> `NewProject`
+/// - `identity <path>` -> `Identity`
+/// - `load <path>` -> `Load`
+/// - `apply <path> <intent-json>` -> `Apply`
+/// - otherwise -> `Unknown`
+fn plan(args: &[OsString]) -> DispatchPlan {
+    let values: Vec<&OsString> = args.iter().collect();
     match values.as_slice() {
-        [command, path] if *command == "new-project" => DispatchPlan::NewProject {
-            path: path.to_str().unwrap_or(""),
+        [verb] if os_str(verb) == "list" => DispatchPlan::List,
+        [verb, path] if os_str(verb) == "new-project" => DispatchPlan::NewProject {
+            path: path.to_string_lossy().into_owned(),
         },
-        [machine, command, path] if *machine == "--machine" && *command == "new-project" => {
-            DispatchPlan::NewProject {
-                path: path.to_str().unwrap_or(""),
-            }
-        }
-        [machine, command] if *machine == "--machine" && *command == "list" => DispatchPlan::List,
-        [machine, argument, ..] if *machine == "--machine" => DispatchPlan::Unknown {
-            arg: argument.to_str().unwrap_or(""),
+        [verb, path] if os_str(verb) == "identity" => DispatchPlan::Identity {
+            path: path.to_string_lossy().into_owned(),
+        },
+        [verb, path] if os_str(verb) == "load" => DispatchPlan::Load {
+            path: path.to_string_lossy().into_owned(),
+        },
+        [verb, path, intent] if os_str(verb) == "apply" => DispatchPlan::Apply {
+            path: path.to_string_lossy().into_owned(),
+            intent_json: intent.to_string_lossy().into_owned(),
         },
         [first, ..] => DispatchPlan::Unknown {
-            arg: first.to_str().unwrap_or(""),
+            arg: first.to_string_lossy().into_owned(),
         },
-        [] => DispatchPlan::Unknown { arg: "" },
+        [] => DispatchPlan::Unknown { arg: String::new() },
     }
 }
 
-/// Dispatch the argv slice. Writes either the JSON listing to `stdout` or
-/// a structured `unknown_command` diagnostic to `stderr`, and returns the
-/// exit code.
+fn os_str(value: &OsString) -> String {
+    value.to_string_lossy().into_owned()
+}
+
+/// Dispatch the argv slice. Writes either JSON to `stdout` or a
+/// structured diagnostic to `stderr`, and returns the exit code.
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
 {
     let collected: Vec<OsString> = args.into_iter().collect();
-    let plan = plan(collected.iter());
+    let plan = plan(&collected);
 
     match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
-        DispatchPlan::NewProject { path } => emit_new_project(path, stdout, stderr),
-        DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
+        DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
+        DispatchPlan::Identity { path } => emit_identity(&path, stdout, stderr),
+        DispatchPlan::Load { path } => emit_load(&path, stdout, stderr),
+        DispatchPlan::Apply { path, intent_json } => {
+            emit_apply(&path, &intent_json, stdout, stderr)
+        }
+        DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
 }
 
@@ -118,7 +129,7 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
         return emit_persistence_error("destination must not be empty", stderr);
     }
     let generation = ProjectGeneration::fresh();
-    match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
+    match write_fresh(Path::new(path), generation.clone()) {
         Ok(manifest) => {
             let response = serde_json::json!({
                 "generation_id": generation.id,
@@ -137,6 +148,95 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
         Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
 }
+
+fn emit_identity(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    match current_identity(Path::new(path)) {
+        Ok(identity) => {
+            let loaded = load(Path::new(path)).expect("identity was just read");
+            let payload = serde_json::json!({
+                "identity": identity.0,
+                "transaction_count": loaded.manifest.transaction_count,
+                "schema_version": threeterm_persistence::schema_version(),
+            });
+            match serde_json::to_writer_pretty(&mut *stdout, &payload) {
+                Ok(()) => {
+                    let _ = writeln!(stdout);
+                    EXIT_OK
+                }
+                Err(error) => {
+                    emit_internal_error(&format!("identity write failed: {error}"), stderr)
+                }
+            }
+        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
+fn emit_load(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    match load(Path::new(path)) {
+        Ok(loaded) => {
+            let payload = serde_json::json!({
+                "manifest": loaded.manifest,
+                "generation": loaded.generation,
+                "transaction_count": loaded.manifest.transaction_count,
+                "schema_version": threeterm_persistence::schema_version(),
+            });
+            match serde_json::to_writer_pretty(&mut *stdout, &payload) {
+                Ok(()) => {
+                    let _ = writeln!(stdout);
+                    EXIT_OK
+                }
+                Err(error) => emit_internal_error(&format!("load write failed: {error}"), stderr),
+            }
+        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
+fn emit_apply(
+    path: &str,
+    intent_json: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if path.is_empty() {
+        return emit_persistence_error("destination must not be empty", stderr);
+    }
+    let intent: TransactionIntent = match serde_json::from_str(intent_json) {
+        Ok(value) => value,
+        Err(error) => {
+            return emit_command_rejected(&format!("invalid intent JSON: {error}"), stderr);
+        }
+    };
+    let identity = match current_identity(Path::new(path)) {
+        Ok(identity) => identity,
+        Err(error) => return emit_persistence_error(&error.to_string(), stderr),
+    };
+    match append(Path::new(path), &identity, &intent) {
+        Ok(result) => {
+            let payload = serde_json::json!({
+                "identity": result.manifest.transaction_sha256,
+                "transaction_count": result.manifest.transaction_count,
+                "schema_version": threeterm_persistence::schema_version(),
+            });
+            match serde_json::to_writer_pretty(&mut *stdout, &payload) {
+                Ok(()) => {
+                    let _ = writeln!(stdout);
+                    EXIT_OK
+                }
+                Err(error) => emit_internal_error(&format!("apply write failed: {error}"), stderr),
+            }
+        }
+        Err(error) => emit_persistence_error(&error.to_string(), stderr),
+    }
+}
+
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
     let diagnostic = Diagnostic::persistence_failure(detail);
     match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
@@ -148,6 +248,19 @@ fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
         }
     }
     EXIT_PERSISTENCE_FAILURE
+}
+
+fn emit_command_rejected(detail: &str, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = Diagnostic::persistence_failure(detail);
+    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+        Ok(()) => {
+            let _ = writeln!(stderr);
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+        }
+    }
+    EXIT_COMMAND_REJECTED
 }
 
 fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
@@ -185,10 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_machine_list_writes_top_level_json_array_to_stdout() {
+    fn dispatch_list_writes_top_level_json_array_to_stdout() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit = dispatch(args(&["--machine", "list"]), &mut stdout, &mut stderr);
+        let exit = dispatch(args(&["list"]), &mut stdout, &mut stderr);
 
         assert_eq!(exit, EXIT_OK);
         assert!(stderr.is_empty(), "stderr must be empty on success");
@@ -201,30 +314,23 @@ mod tests {
             .as_array()
             .expect("dispatch output is a top-level JSON array");
 
-        assert_eq!(commands.len(), 2, "two registered commands");
-        let list = commands
+        assert_eq!(commands.len(), 5, "five registered commands");
+        let ids: Vec<&str> = commands
             .iter()
-            .find(|command| command["id"] == "list")
-            .expect("list command is registered");
-        assert_eq!(list["name"], "list");
-        assert_eq!(list["schema_version"], "threeterm.command.list/1");
-        assert_eq!(
-            list["request_schema_version"],
-            "threeterm.command.list.request/1"
-        );
-        assert_eq!(
-            list["response_schema_version"],
-            "threeterm.command.list.response/1"
-        );
-        assert!(list["request_schema"].is_object());
-        assert!(list["response_schema"].is_object());
+            .map(|c| c["id"].as_str().unwrap_or(""))
+            .collect();
+        assert!(ids.contains(&"list"));
+        assert!(ids.contains(&"new-project"));
+        assert!(ids.contains(&"identity"));
+        assert!(ids.contains(&"load"));
+        assert!(ids.contains(&"apply"));
     }
 
     #[test]
-    fn dispatch_machine_unknown_writes_diagnostic_to_stderr() {
+    fn dispatch_unknown_writes_diagnostic_to_stderr() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit = dispatch(args(&["--machine", "bogus"]), &mut stdout, &mut stderr);
+        let exit = dispatch(args(&["bogus"]), &mut stdout, &mut stderr);
 
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
         assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
@@ -242,41 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_machine_without_value_writes_diagnostic_with_arg_machine() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let exit = dispatch(args(&["--machine"]), &mut stdout, &mut stderr);
-
-        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
-        assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
-        assert_eq!(parsed["code"], "unknown_command");
-        assert_eq!(parsed["arg"], "--machine");
-    }
-
-    #[test]
-    fn dispatch_without_machine_flag_writes_diagnostic_with_first_arg() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let exit = dispatch(args(&["--bogus"]), &mut stdout, &mut stderr);
-
-        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
-        assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
-        assert_eq!(parsed["code"], "unknown_command");
-        assert_eq!(parsed["arg"], "--bogus");
-    }
-
-    #[test]
-    fn dispatch_with_no_args_writes_diagnostic_with_empty_arg() {
+    fn dispatch_no_args_writes_diagnostic_with_empty_arg() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let exit = dispatch(args(&[]), &mut stdout, &mut stderr);
@@ -295,8 +367,38 @@ mod tests {
     fn dispatch_does_not_call_exit_or_panic() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let _ = dispatch(args(&["--machine", "list"]), &mut stdout, &mut stderr);
-        let _ = dispatch(args(&["--machine", "bogus"]), &mut stdout, &mut stderr);
+        let _ = dispatch(args(&["list"]), &mut stdout, &mut stderr);
+        let _ = dispatch(args(&["bogus"]), &mut stdout, &mut stderr);
         let _ = dispatch(args(&[]), &mut stdout, &mut stderr);
+    }
+
+    #[test]
+    fn plan_recognizes_each_verb() {
+        assert_eq!(plan(&args(&["list"])), DispatchPlan::List);
+        assert_eq!(
+            plan(&args(&["new-project", "/tmp/foo"])),
+            DispatchPlan::NewProject {
+                path: "/tmp/foo".to_string()
+            }
+        );
+        assert_eq!(
+            plan(&args(&["identity", "/tmp/foo"])),
+            DispatchPlan::Identity {
+                path: "/tmp/foo".to_string()
+            }
+        );
+        assert_eq!(
+            plan(&args(&["load", "/tmp/foo"])),
+            DispatchPlan::Load {
+                path: "/tmp/foo".to_string()
+            }
+        );
+        assert_eq!(
+            plan(&args(&["apply", "/tmp/foo", "{\"kind\":\"add-feature\"}"])),
+            DispatchPlan::Apply {
+                path: "/tmp/foo".to_string(),
+                intent_json: "{\"kind\":\"add-feature\"}".to_string(),
+            }
+        );
     }
 }

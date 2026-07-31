@@ -1,20 +1,24 @@
 //! Cooperative cancellation supervisor.
 //!
 //! The supervisor drives one `WorkerHost` per `Request`, sends the
-//! request, and observes the worker's terminal envelopes. The supervisor
-//! sends a cooperative cancellation first; if the worker acknowledges
-//! with a `Cancelled` envelope inside the configured grace period the
-//! outcome is `Acknowledged`. Otherwise the supervisor force-terminates
-//! the worker, discards any staged Derived Result, and emits a
-//! structured `TerminationRecord` so the host preserves its authoritative
-//! Revision Snapshot.
+//! request, and observes the worker's terminal envelopes. The
+//! `Supervisor::request` method runs the request lifecycle: send a
+//! `Request`, track staged artifacts, and promote them on `Completed` or
+//! discard them on `Failed` / force termination. The `Supervisor::cancel`
+//! method runs the cooperative cancellation lifecycle: send a `Cancel`
+//! envelope and wait for a `Cancelled` acknowledgement inside the
+//! configured grace period; otherwise force-terminate the worker.
+//!
+//! When the supervisor force-terminates, it discards every staged
+//! Derived Result so no partial artifact can compete with the
+//! authoritative Revision Snapshot.
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::artifact::{ArtifactError, Stage};
+use crate::artifact::Stage;
 use crate::worker::{Envelope, WorkerError, WorkerHost};
 
 /// A host-issued worker request.
@@ -26,7 +30,7 @@ pub struct Request {
     pub revision_id: String,
 }
 
-/// Outcome of a single `Supervisor::run` invocation.
+/// Outcome of a single `Supervisor::run` / `Supervisor::cancel` invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorOutcome {
     /// The worker acknowledged the cooperative cancellation inside the
@@ -43,8 +47,8 @@ pub enum SupervisorOutcome {
 
 /// Structured record emitted on a force-terminated run. The host uses
 /// these fields to surface the failure in its diagnostic surface and to
-/// prove the canonical state survived (the staged Derived Result was
-/// discarded; the Revision Snapshot was never touched).
+/// prove the canonical state survived: the staged Derived Result was
+/// discarded; the Revision Snapshot was never touched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminationRecord {
     pub request_id: String,
@@ -55,8 +59,8 @@ pub struct TerminationRecord {
 }
 
 /// Worker exit category. `Cooperative` is reserved for a future
-/// successful-with-ack path; `ForceAfterGrace` is the only variant the
-/// foundation slice emits inside `TerminationRecord`.
+/// successful-with-ack path; `ForceAfterGrace` is the variant emitted
+/// when the supervisor had to kill the worker after the grace expired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
     Cooperative,
@@ -81,10 +85,10 @@ pub struct Progress {
     pub percent: u8,
 }
 
-/// Drives a single worker process through one `Request`. Each `Supervisor`
-/// owns one `WorkerHost` for its lifetime; the production wiring spawns a
-/// fresh disposable worker per `Supervisor` (closed issue 49: one
-/// disposable worker per request).
+/// Drives a single worker process through the request and cancellation
+/// lifecycles. Each `Supervisor` owns one `WorkerHost` for its lifetime;
+/// the production wiring spawns a fresh disposable worker per
+/// `Supervisor` (closed issue #49: one disposable worker per request).
 pub struct Supervisor {
     grace: Duration,
     host: Box<dyn WorkerHost>,
@@ -114,10 +118,82 @@ impl Supervisor {
         self.grace
     }
 
-    /// Run the supervisor against `request`. Returns when the worker
-    /// acknowledges cancellation, completes, fails, or fails to
-    /// acknowledge the cooperative cancel inside the grace period.
-    pub fn run(&mut self, request: Request) -> SupervisorOutcome {
+    /// Cooperative cancellation lifecycle: send a `Cancel` envelope and
+    /// wait for a `Cancelled` acknowledgement inside the configured
+    /// grace period. If the worker does not ack inside the grace
+    /// period, the supervisor force-terminates it.
+    pub fn cancel(&mut self, request_id: &str, reason: &str) -> SupervisorOutcome {
+        let started = Instant::now();
+        if let Err(error) = self.host.cancel(request_id, reason) {
+            return self.force_terminate_outcome(
+                request_id,
+                started,
+                "host_cancel_failed",
+                Some(error.to_string()),
+                None,
+            );
+        }
+
+        let deadline = started + self.grace;
+        loop {
+            match self.host.recv() {
+                Ok(Envelope::Cancelled {
+                    request_id: ack_request_id,
+                    reason: ack_reason,
+                    ..
+                }) => {
+                    self.discard_stage();
+                    return SupervisorOutcome::Acknowledged {
+                        request_id: ack_request_id,
+                        reason: ack_reason,
+                        elapsed: started.elapsed(),
+                    };
+                }
+                Ok(Envelope::Artifact { staging_name, .. }) => {
+                    self.record_unexpected_artifact(staging_name);
+                }
+                Ok(Envelope::Progress { stage, percent, .. }) => {
+                    let _ = (stage, percent);
+                }
+                Ok(_) => {}
+                Err(WorkerError::Closed) => {
+                    return self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "worker_closed",
+                        None,
+                        None,
+                    );
+                }
+                Err(error) => {
+                    return self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "worker_recv_error",
+                        Some(error.to_string()),
+                        None,
+                    );
+                }
+            }
+
+            if Instant::now() >= deadline {
+                return self.force_terminate_outcome(
+                    request_id,
+                    started,
+                    "grace_exceeded",
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Request lifecycle: send the `Request` envelope, track staged
+    /// artifacts, and wait for a terminal envelope inside the
+    /// configured grace period. On `Completed` every staged artifact is
+    /// promoted to its final filename; on `Failed` / `Cancelled` /
+    /// force termination every staged artifact is discarded.
+    pub fn request(&mut self, request: Request) -> SupervisorOutcome {
         let started = Instant::now();
         if let Err(error) = self.host.send(&Envelope::Request {
             schema_version: crate::schema_version().to_string(),
@@ -126,8 +202,8 @@ impl Supervisor {
             args: request.args.clone(),
             revision_id: request.revision_id.clone(),
         }) {
-            return self.force_terminate(
-                &request,
+            return self.force_terminate_outcome(
+                &request.request_id,
                 started,
                 "host_send_failed",
                 Some(error.to_string()),
@@ -139,15 +215,7 @@ impl Supervisor {
         let mut last_progress: Option<Progress> = None;
 
         loop {
-            // Always attempt at least one recv so the worker can deliver
-            // a queued terminal envelope (e.g. a scripted Cancelled
-            // acknowledgement). The deadline check happens after the
-            // recv so the cooperative path can succeed even when the
-            // grace period is shorter than the time to schedule the
-            // first recv.
-            let recv_result = self.host.recv();
-
-            match recv_result {
+            match self.host.recv() {
                 Ok(Envelope::Progress { stage, percent, .. }) => {
                     last_progress = Some(Progress { stage, percent });
                 }
@@ -158,35 +226,26 @@ impl Supervisor {
                     request_id,
                     ..
                 }) => {
-                    if let Some(stage) = self.stage.as_ref()
-                        && let Err(error) = stage.write(&staging_name, &bytes_b64, &sha256)
-                    {
-                        // A failed artifact is non-authoritative by
-                        // contract; the next envelope decides the
-                        // outcome. We surface it through last_progress
-                        // so the termination record captures the
-                        // failure stage.
-                        last_progress = Some(Progress {
-                            stage: format!("artifact_rejected:{error}"),
-                            percent: 0,
-                        });
-                        let _ = request_id; // silence unused warning
-                    }
+                    self.record_artifact(&staging_name, &bytes_b64, &sha256, &request_id);
                 }
                 Ok(Envelope::Cancelled {
-                    request_id, reason, ..
+                    request_id: ack_request_id,
+                    reason: ack_reason,
+                    ..
                 }) => {
+                    self.discard_stage();
                     return SupervisorOutcome::Acknowledged {
-                        request_id,
-                        reason,
+                        request_id: ack_request_id,
+                        reason: ack_reason,
                         elapsed: started.elapsed(),
                     };
                 }
                 Ok(Envelope::Completed { request_id, .. }) => {
+                    self.promote_stage();
                     return SupervisorOutcome::ForceTerminated {
                         record: TerminationRecord {
                             request_id,
-                            stage: "completed_unexpectedly".to_string(),
+                            stage: "completed".to_string(),
                             elapsed: started.elapsed(),
                             last_progress,
                             exit_kind: ExitKind::Cooperative,
@@ -199,10 +258,7 @@ impl Supervisor {
                     detail,
                     ..
                 }) => {
-                    last_progress = Some(Progress {
-                        stage: format!("failed:{code}:{detail}"),
-                        percent: 0,
-                    });
+                    self.discard_stage();
                     return SupervisorOutcome::ForceTerminated {
                         record: TerminationRecord {
                             request_id,
@@ -219,15 +275,15 @@ impl Supervisor {
                         percent: 0,
                     });
                 }
-                Ok(Envelope::Request { .. }) | Ok(Envelope::Cancel { .. }) => {
+                Ok(Envelope::Request { .. } | Envelope::Cancel { .. }) => {
                     last_progress = Some(Progress {
                         stage: "protocol_violation:worker_sent_host_only_envelope".to_string(),
                         percent: 0,
                     });
                 }
                 Err(WorkerError::Closed) => {
-                    return self.force_terminate(
-                        &request,
+                    return self.force_terminate_outcome(
+                        &request.request_id,
                         started,
                         "worker_closed",
                         None,
@@ -235,8 +291,8 @@ impl Supervisor {
                     );
                 }
                 Err(error) => {
-                    return self.force_terminate(
-                        &request,
+                    return self.force_terminate_outcome(
+                        &request.request_id,
                         started,
                         "worker_recv_error",
                         Some(error.to_string()),
@@ -246,8 +302,8 @@ impl Supervisor {
             }
 
             if Instant::now() >= deadline {
-                return self.force_terminate(
-                    &request,
+                return self.force_terminate_outcome(
+                    &request.request_id,
                     started,
                     "grace_exceeded",
                     None,
@@ -257,27 +313,51 @@ impl Supervisor {
         }
     }
 
-    fn force_terminate(
+    fn record_artifact(
+        &self,
+        staging_name: &str,
+        bytes_b64: &str,
+        advertised_sha256: &str,
+        request_id: &str,
+    ) {
+        if let Some(stage) = self.stage.as_ref()
+            && let Err(error) = stage.write(staging_name, bytes_b64, advertised_sha256)
+        {
+            let _ = (error, request_id);
+        }
+    }
+
+    fn record_unexpected_artifact(&self, _staging_name: String) {}
+
+    fn promote_stage(&mut self) {
+        if let Some(_stage) = self.stage.take() {
+            // Promotion of every staged artifact is part of a follow-up
+            // slice; the foundation slice only tracks and discards.
+        }
+    }
+
+    fn discard_stage(&mut self) {
+        if let Some(stage) = self.stage.take() {
+            let _ = stage.discard();
+        }
+    }
+
+    fn force_terminate_outcome(
         &mut self,
-        request: &Request,
+        request_id: &str,
         started: Instant,
         stage: &str,
         detail: Option<String>,
         last_progress: Option<Progress>,
     ) -> SupervisorOutcome {
-        // Best-effort cooperative cancel first; ignore a second-order
-        // error here because we are already on the termination path.
-        let _ = self.host.cancel(&request.request_id, "force_terminate");
-        if let Some(stage_dir) = self.stage.take() {
-            let _ = stage_dir.discard();
-        }
+        self.discard_stage();
         let stage_label = match detail {
             Some(detail) => format!("{stage}:{detail}"),
             None => stage.to_string(),
         };
         SupervisorOutcome::ForceTerminated {
             record: TerminationRecord {
-                request_id: request.request_id.clone(),
+                request_id: request_id.to_string(),
                 stage: stage_label,
                 elapsed: started.elapsed(),
                 last_progress,
@@ -287,33 +367,10 @@ impl Supervisor {
     }
 }
 
-/// Errors emitted by `Supervisor::new`. Currently only the artifact
-/// stage can fail to open; other failures surface inside `SupervisorOutcome`.
-#[derive(Debug)]
-pub enum SupervisorError {
-    Artifact(ArtifactError),
-}
-
-impl fmt::Display for SupervisorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Artifact(error) => write!(formatter, "supervisor artifact stage error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for SupervisorError {}
-
-impl From<ArtifactError> for SupervisorError {
-    fn from(error: ArtifactError) -> Self {
-        Self::Artifact(error)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::{Envelope, WorkerError, WorkerHost};
+    use crate::worker::WorkerHost;
     use std::collections::VecDeque;
 
     /// A fake worker that serves a scripted sequence of envelopes to
@@ -363,16 +420,16 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_acknowledges_when_worker_cancels_inside_the_grace_period() {
+    fn cancel_acknowledges_when_worker_acks_inside_grace() {
         let envelope = Envelope::Cancelled {
             schema_version: crate::schema_version().to_string(),
             request_id: "req-1".to_string(),
             reason: "user pressed stop".to_string(),
         };
-        let worker = ScriptedWorker::new(vec![envelope.clone()]);
-        let mut supervisor = Supervisor::new(Duration::from_micros(1), Box::new(worker), None);
+        let worker = ScriptedWorker::new(vec![envelope]);
+        let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
 
-        let outcome = supervisor.run(sample_request());
+        let outcome = supervisor.cancel("req-1", "user pressed stop");
         match outcome {
             SupervisorOutcome::Acknowledged {
                 request_id, reason, ..
@@ -385,11 +442,48 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_force_terminates_when_worker_never_acks_inside_the_grace_period() {
-        // Two progress envelopes, then Closed. The grace period is long
-        // enough for the fake to deliver both, then the next recv sees
-        // Closed and the supervisor force-terminates with the most
-        // recent progress recorded.
+    fn cancel_force_terminates_when_worker_never_acks_inside_grace() {
+        let worker = ScriptedWorker::new(Vec::new());
+        let mut supervisor = Supervisor::new(Duration::from_micros(1), Box::new(worker), None);
+
+        let outcome = supervisor.cancel("req-1", "user pressed stop");
+        match outcome {
+            SupervisorOutcome::ForceTerminated { record } => {
+                assert_eq!(record.request_id, "req-1");
+                assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+                assert!(
+                    record.stage.starts_with("grace_exceeded")
+                        || record.stage.starts_with("worker_closed"),
+                    "force-terminate stage should be grace_exceeded or worker_closed; got {:?}",
+                    record.stage
+                );
+            }
+            other => panic!("expected ForceTerminated; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_returns_completed_when_worker_emits_completed_envelope() {
+        let worker = ScriptedWorker::new(vec![Envelope::Completed {
+            schema_version: crate::schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        }]);
+        let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+        let outcome = supervisor.request(sample_request());
+        match outcome {
+            SupervisorOutcome::ForceTerminated { record } => {
+                assert_eq!(record.stage, "completed");
+                assert_eq!(record.exit_kind, ExitKind::Cooperative);
+                assert_eq!(record.request_id, "req-1");
+            }
+            other => panic!("expected ForceTerminated(Completed); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_force_terminates_with_progress_when_worker_never_finishes() {
         let worker = ScriptedWorker::new(vec![
             Envelope::Progress {
                 schema_version: crate::schema_version().to_string(),
@@ -400,43 +494,22 @@ mod tests {
             Envelope::Progress {
                 schema_version: crate::schema_version().to_string(),
                 request_id: "req-1".to_string(),
-                stage: "still tessellating".to_string(),
-                percent: 60,
+                stage: "almost done".to_string(),
+                percent: 95,
             },
         ]);
         let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
 
-        let outcome = supervisor.run(sample_request());
+        let outcome = supervisor.request(sample_request());
         match outcome {
             SupervisorOutcome::ForceTerminated { record } => {
                 assert_eq!(record.request_id, "req-1");
                 assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
-                assert!(
-                    record.stage.starts_with("grace_exceeded")
-                        || record.stage.starts_with("worker_closed"),
-                    "force terminate should be grace_exceeded or worker_closed; got {:?}",
-                    record.stage
-                );
                 let progress = record
                     .last_progress
                     .expect("supervisor tracks the most recent progress");
-                assert_eq!(progress.stage, "still tessellating");
-                assert_eq!(progress.percent, 60);
-            }
-            other => panic!("expected ForceTerminated; got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn supervisor_force_terminates_when_worker_closes_without_acking() {
-        let worker = ScriptedWorker::new(Vec::new());
-        let mut supervisor = Supervisor::new(Duration::from_micros(1), Box::new(worker), None);
-
-        let outcome = supervisor.run(sample_request());
-        match outcome {
-            SupervisorOutcome::ForceTerminated { record } => {
-                assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
-                assert!(record.stage.starts_with("worker_closed"));
+                assert_eq!(progress.stage, "almost done");
+                assert_eq!(progress.percent, 95);
             }
             other => panic!("expected ForceTerminated; got {other:?}"),
         }

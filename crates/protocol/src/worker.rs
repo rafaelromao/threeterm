@@ -14,7 +14,7 @@
 //! Staged binary artifacts travel inside the `Artifact` envelope as a
 //! base64-encoded payload (`bytes_b64`); the consumer side decodes and
 //! validates the SHA-256 against the decoded bytes, not the wire string
-//! (closed issue 49: one disposable worker per request).
+//! (closed issue #49: one disposable worker per request).
 
 use std::fmt;
 
@@ -189,7 +189,7 @@ pub trait WorkerHost {
 /// future OCCT/`libslvs` adapters have a seam.
 pub trait WorkerProcess {
     /// Spawn a fresh disposable worker and return a boxed `WorkerHost`
-    /// bound to it. One spawn per `Request` (closed issue 49).
+    /// bound to it. One spawn per `Request` (closed issue #49).
     fn spawn(config: WorkerConfig) -> Result<Box<dyn WorkerHost>, WorkerError>;
 }
 
@@ -242,7 +242,7 @@ impl From<std::io::Error> for WorkerError {
 
 /// Returns the canonical JSON encoding of `envelope` followed by `\n`.
 /// The host and worker speak newline-framed JSON; every line carries one
-/// envelope (closed issue 49).
+/// envelope (closed issue #49).
 pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
     let mut bytes = serde_json::to_vec(envelope)?;
     bytes.push(b'\n');

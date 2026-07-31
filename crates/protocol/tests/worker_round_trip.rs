@@ -5,20 +5,26 @@
 //! `WorkerHost` (over the same trait the production `WorkerProcess`
 //! adapter will use) and asserts both the cooperative-cancel-acks path
 //! and the force-terminate-after-grace path produce structured records.
-//! The fake worker is fully synchronous so CI is deterministic.
+//! The fake worker is fully synchronous so CI is deterministic. The
+//! wire layer is exercised by piping the fake's `send`/`recv` traffic
+//! through `encode_frame` and `FrameParser` so the demoable behavior
+//! covers the same code path the production subprocess wiring will use.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use threeterm_protocol::frame::FrameParser;
 use threeterm_protocol::schema_version;
 use threeterm_protocol::supervisor::{
     ExitKind, Request, Supervisor, SupervisorOutcome, TerminationRecord,
 };
-use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost};
+use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
 
-/// In-process `WorkerHost` used by the integration tests. The fake serves
-/// envelopes from a scripted queue, records every envelope received from
-/// the host via `send`, and counts `cancel` calls.
+/// A fake worker that serves envelopes from a `mpsc`-style queue. `recv`
+/// returns the next envelope and `send` records what the host emitted.
+/// The fake never sleeps; the supervisor's grace period is exercised
+/// with a sub-millisecond `Duration`.
 struct FakeWorker {
     received: Vec<Envelope>,
     pending: VecDeque<Envelope>,
@@ -61,17 +67,113 @@ fn sample_request() -> Request {
     }
 }
 
+/// Decodes a single envelope through `FrameParser` so the wire layer is
+/// exercised end-to-end. Returns the parsed envelope.
+fn round_trip(envelope: &Envelope) -> Envelope {
+    let frame = encode_frame(envelope).expect("envelope encodes");
+    let mut parser = FrameParser::new();
+    let decoded = parser.push(&frame).expect("frame decodes");
+    decoded
+        .into_iter()
+        .next()
+        .expect("frame produced exactly one envelope")
+}
+
+/// `PipeHost` is the production-style wiring: it pipes the host's
+/// envelopes through `encode_frame` and the worker's envelopes through
+/// `FrameParser::push` so the wire format is exercised on every send and
+/// receive. This is the same code path a subprocess-backed `WorkerHost`
+/// implementation will follow.
+struct PipeHost {
+    parser: FrameParser,
+    /// Encoded frames from the host are appended here so a future test
+    /// can audit them; the immediate behavior just drives the parser.
+    received_frames: Arc<Mutex<Vec<u8>>>,
+    /// Pending encoded frames from the worker; each `recv` pops the
+    /// next frame, pushes it through the parser, and returns the
+    /// envelope. The parser drains the frame on each push, so this
+    /// round-trips the wire format end-to-end.
+    outbound: VecDeque<Vec<u8>>,
+    closed: bool,
+    cancel_calls: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl PipeHost {
+    fn new(script: Vec<Envelope>) -> Self {
+        let outbound = script
+            .into_iter()
+            .map(|envelope| encode_frame(&envelope).expect("script encodes"))
+            .collect::<VecDeque<_>>();
+        Self {
+            parser: FrameParser::new(),
+            received_frames: Arc::new(Mutex::new(Vec::new())),
+            outbound,
+            closed: false,
+            cancel_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl WorkerHost for PipeHost {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        let frame = encode_frame(envelope)
+            .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))?;
+        self.received_frames
+            .lock()
+            .expect("received frames mutex")
+            .extend_from_slice(&frame);
+        Ok(())
+    }
+
+    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+        if self.closed {
+            return Err(WorkerError::Closed);
+        }
+        let frame = self.outbound.pop_front().ok_or(WorkerError::Closed)?;
+        let envelopes = self
+            .parser
+            .push(&frame)
+            .map_err(|error| WorkerError::Protocol(format!("{error}")))?;
+        envelope_or_closed(envelopes)
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.cancel_calls
+            .lock()
+            .expect("cancel calls mutex")
+            .push((request_id.to_string(), reason.to_string()));
+        Ok(())
+    }
+}
+
+fn envelope_or_closed(envelopes: Vec<Envelope>) -> Result<Envelope, WorkerError> {
+    envelopes.into_iter().next().ok_or(WorkerError::Closed)
+}
+
 #[test]
-fn cooperative_cancellation_returns_structured_acknowledgement() {
+fn envelope_round_trip_through_frame_parser() {
     let envelope = Envelope::Cancelled {
         schema_version: schema_version().to_string(),
         request_id: "req-1".to_string(),
         reason: "user pressed stop".to_string(),
     };
-    let worker = FakeWorker::new(vec![envelope.clone()]);
+    assert_eq!(round_trip(&envelope), envelope);
+}
+
+#[test]
+fn cooperative_cancellation_returns_structured_acknowledgement() {
+    // The fake serves exactly one Cancelled envelope; the supervisor
+    // sends a cooperative Cancel and observes the Cancelled ack inside
+    // the grace period.
+    let cancelled = Envelope::Cancelled {
+        schema_version: schema_version().to_string(),
+        request_id: "req-1".to_string(),
+        reason: "user pressed stop".to_string(),
+    };
+    let worker = PipeHost::new(vec![cancelled]);
     let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
 
-    let outcome = supervisor.run(sample_request());
+    let outcome = supervisor.cancel("req-1", "user pressed stop");
 
     let SupervisorOutcome::Acknowledged {
         request_id,
@@ -86,14 +188,8 @@ fn cooperative_cancellation_returns_structured_acknowledgement() {
 }
 
 #[test]
-fn force_terminate_after_grace_emits_structured_termination_record() {
-    // The fake serves two progress envelopes, then Closed. The grace
-    // period is long enough to consume both Progress envelopes; once
-    // the script is exhausted the supervisor records `worker_closed`
-    // (or `grace_exceeded`, depending on the order of the deadline
-    // check) and emits a structured `TerminationRecord` carrying the
-    // most recent progress.
-    let worker = FakeWorker::new(vec![
+fn request_force_terminate_after_grace_emits_structured_termination_record() {
+    let worker = PipeHost::new(vec![
         Envelope::Progress {
             schema_version: schema_version().to_string(),
             request_id: "req-1".to_string(),
@@ -109,7 +205,7 @@ fn force_terminate_after_grace_emits_structured_termination_record() {
     ]);
     let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
 
-    let outcome = supervisor.run(sample_request());
+    let outcome = supervisor.request(sample_request());
 
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
@@ -121,7 +217,6 @@ fn force_terminate_after_grace_emits_structured_termination_record() {
         "force-terminate stage should be grace_exceeded or worker_closed; got {:?}",
         record.stage
     );
-
     let progress = record
         .last_progress
         .expect("supervisor tracks the most recent progress before force-terminate");
@@ -130,11 +225,11 @@ fn force_terminate_after_grace_emits_structured_termination_record() {
 }
 
 #[test]
-fn force_terminate_emits_record_with_no_progress_when_worker_closes_immediately() {
-    let worker = FakeWorker::new(Vec::new());
+fn request_force_terminates_with_no_progress_when_worker_closes_immediately() {
+    let worker = PipeHost::new(Vec::new());
     let mut supervisor = Supervisor::new(Duration::from_millis(1), Box::new(worker), None);
 
-    let outcome = supervisor.run(sample_request());
+    let outcome = supervisor.request(sample_request());
 
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
@@ -154,10 +249,10 @@ fn force_terminate_emits_record_with_no_progress_when_worker_closes_immediately(
 
 #[test]
 fn termination_record_carries_elapsed_duration_and_request_id() {
-    let worker = FakeWorker::new(Vec::new());
+    let worker = PipeHost::new(Vec::new());
     let mut supervisor = Supervisor::new(Duration::from_millis(1), Box::new(worker), None);
 
-    let outcome = supervisor.run(sample_request());
+    let outcome = supervisor.request(sample_request());
     let TerminationRecord {
         request_id,
         stage,
@@ -176,7 +271,6 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
         !stage.is_empty(),
         "termination stage label must not be empty"
     );
-    // Duration is monotonic; allow zero for very fast test runs.
     assert!(
         elapsed <= Duration::from_secs(5),
         "elapsed must not exceed a sane upper bound; got {elapsed:?}"
@@ -184,59 +278,28 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
 }
 
 #[test]
-fn supervisor_records_every_envelope_the_host_emitted() {
-    // After the supervisor finishes, the fake's `received` log should
-    // contain the Request envelope the supervisor forwarded to the
-    // worker. We capture it by having the fake capture every envelope
-    // it sees on its `send` side.
-    struct CapturingFake {
-        captured: std::sync::Arc<std::sync::Mutex<Vec<Envelope>>>,
-        cancel_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
-        script: VecDeque<Envelope>,
-    }
-    impl WorkerHost for CapturingFake {
-        fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
-            self.captured
-                .lock()
-                .expect("capture mutex")
-                .push(envelope.clone());
-            Ok(())
-        }
-        fn recv(&mut self) -> Result<Envelope, WorkerError> {
-            self.script.pop_front().ok_or(WorkerError::Closed)
-        }
-        fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
-            self.cancel_calls
-                .lock()
-                .expect("cancel mutex")
-                .push((request_id.to_string(), reason.to_string()));
-            Ok(())
-        }
-    }
-
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let cancels = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let script = vec![Envelope::Cancelled {
-        schema_version: schema_version().to_string(),
-        request_id: "req-1".to_string(),
-        reason: "ok".to_string(),
-    }];
-    let worker = CapturingFake {
-        captured: std::sync::Arc::clone(&captured),
-        cancel_calls: std::sync::Arc::clone(&cancels),
-        script: script.into(),
+fn request_sends_a_well_formed_request_envelope() {
+    // Captures the bytes the supervisor emitted via `send` so the test
+    // asserts the wire format matches the canonical envelope.
+    let received = Arc::new(Mutex::new(Vec::<Envelope>::new()));
+    let captured = Arc::clone(&received);
+    let worker = FakeWorker::new(Vec::new());
+    let capturing_worker = CapturingFake {
+        inner: worker,
+        captured,
     };
-    let mut supervisor = Supervisor::new(Duration::from_millis(50), Box::new(worker), None);
+    let mut supervisor =
+        Supervisor::new(Duration::from_millis(50), Box::new(capturing_worker), None);
 
-    let outcome = supervisor.run(sample_request());
+    let outcome = supervisor.request(sample_request());
     assert!(
-        matches!(outcome, SupervisorOutcome::Acknowledged { .. }),
-        "expected Acknowledged; got {outcome:?}"
+        matches!(outcome, SupervisorOutcome::ForceTerminated { .. }),
+        "expected ForceTerminated; got {outcome:?}"
     );
 
-    let sent = captured.lock().expect("capture mutex");
-    assert_eq!(sent.len(), 1, "host emitted exactly one envelope");
-    match &sent[0] {
+    let captured = received.lock().expect("capture mutex");
+    assert_eq!(captured.len(), 1, "host emitted exactly one envelope");
+    match &captured[0] {
         Envelope::Request {
             request_id,
             command_id,
@@ -251,11 +314,87 @@ fn supervisor_records_every_envelope_the_host_emitted() {
         }
         other => panic!("expected Request envelope; got {other:?}"),
     }
-    drop(sent);
+}
 
-    let cancel_log = cancels.lock().expect("cancel mutex");
+struct CapturingFake {
+    inner: FakeWorker,
+    captured: Arc<Mutex<Vec<Envelope>>>,
+}
+
+impl WorkerHost for CapturingFake {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.captured
+            .lock()
+            .expect("capture mutex")
+            .push(envelope.clone());
+        self.inner.send(envelope)
+    }
+
+    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+        self.inner.recv()
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.inner.cancel(request_id, reason)
+    }
+}
+
+#[test]
+fn cancel_invokes_worker_cancel_exactly_once_on_the_cooperative_ack_path() {
+    // On the cooperative ack path the supervisor sends the cooperative
+    // `Cancel` envelope once and observes the `Cancelled` ack inside the
+    // grace period. The fake's `cancel` log therefore records exactly
+    // one entry — the cooperative cancel — with no follow-up force
+    // terminate cancel.
+    let cancel_log: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let cancelled = Envelope::Cancelled {
+        schema_version: schema_version().to_string(),
+        request_id: "req-1".to_string(),
+        reason: "ok".to_string(),
+    };
+    let inner = FakeWorker::new(vec![cancelled]);
+    let worker = CancelLoggingWorker {
+        inner,
+        log: Arc::clone(&cancel_log),
+    };
+    let mut supervisor = Supervisor::new(Duration::from_millis(50), Box::new(worker), None);
+
+    let outcome = supervisor.cancel("req-1", "user requested stop");
     assert!(
-        cancel_log.is_empty(),
-        "cooperative ack path must not call cancel; got {cancel_log:?}"
+        matches!(outcome, SupervisorOutcome::Acknowledged { .. }),
+        "expected Acknowledged; got {outcome:?}"
     );
+    let log = cancel_log.lock().expect("cancel log mutex");
+    assert_eq!(
+        log.len(),
+        1,
+        "cooperative ack path must call worker.cancel exactly once; got {log:?}"
+    );
+    assert_eq!(log[0].0, "req-1");
+    assert_eq!(log[0].1, "user requested stop");
+}
+
+/// Wraps a `FakeWorker` and forwards `cancel` calls into a shared log so
+/// the test can inspect them after the supervisor returns.
+struct CancelLoggingWorker {
+    inner: FakeWorker,
+    log: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl WorkerHost for CancelLoggingWorker {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.inner.send(envelope)
+    }
+
+    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+        self.inner.recv()
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.log
+            .lock()
+            .expect("cancel log mutex")
+            .push((request_id.to_string(), reason.to_string()));
+        self.inner.cancel(request_id, reason)
+    }
 }

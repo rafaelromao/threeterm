@@ -21,7 +21,7 @@ pub const MAX_FRAME_BUFFER: usize = 4 * 1024 * 1024;
 /// parser buffers any incomplete trailing line so the next `push` can
 /// finish it. A single malformed frame aborts the current chunk with a
 /// structured `FrameError` so the caller can route it into the
-/// supervisor's diagnostic surface (closed issue 49: newline-framed JSON
+/// supervisor's diagnostic surface (closed issue #49: newline-framed JSON
 /// control plane).
 #[derive(Debug)]
 pub struct FrameParser {
@@ -36,8 +36,8 @@ impl FrameParser {
     /// Feed `bytes` into the parser. Returns every complete envelope
     /// found in `bytes` (joined with any carry-over from prior calls).
     /// A malformed frame aborts the current chunk with a structured
-    /// `FrameError`; the offending bytes remain in the buffer so the
-    /// caller can inspect or drop them via `reset`.
+    /// `FrameError`; the buffered bytes are then dropped, so the caller
+    /// can resync on the next chunk via `push`.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Envelope>, FrameError> {
         self.buffer.extend_from_slice(bytes);
         if self.buffer.len() > MAX_FRAME_BUFFER {

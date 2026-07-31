@@ -9,7 +9,7 @@
 //! static entry in `COMMAND_REGISTRY`; the dispatcher, serializer, and
 //! schema hash pick it up automatically.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use serde::Serialize;
@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 /// Wrapped in a newtype so the registry can be keyed by `CommandId` rather
 /// than by topology indexes or in-process kernel object identity (closed
 /// issue #23).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CommandId(pub &'static str);
 
@@ -80,28 +80,107 @@ pub static LIST_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+/// Canonical request schema document for the `save` command.
+pub static SAVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "description": "Save a one-feature transaction to a sealed bundle.",
+        "required": ["bundle_path", "feature_id", "kind"],
+        "additionalProperties": false,
+        "properties": {
+            "bundle_path": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "kind": { "type": "string" }
+        }
+    })
+});
+
+/// Canonical response schema document for the `save` and `load` commands.
+pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "description": "Canonical feature-graph hash and revision hash with the response's own schema version.",
+        "required": ["feature_graph_hash", "revision_hash", "schema_version"],
+        "properties": {
+            "feature_graph_hash": {
+                "type": "string",
+                "description": "Lowercase-hex SHA-256 of the canonical feature graph."
+            },
+            "revision_hash": {
+                "type": "string",
+                "description": "Lowercase-hex SHA-256 of feature_graph_hash || terminal_log_digest_hex."
+            },
+            "schema_version": { "type": "string" }
+        }
+    })
+});
+
+/// Canonical request schema document for the `load` command.
+pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "description": "Integrity-verify a bundle and emit its canonical snapshot.",
+        "required": ["bundle_path"],
+        "additionalProperties": false,
+        "properties": {
+            "bundle_path": { "type": "string" }
+        }
+    })
+});
+
 /// The single static command registry, keyed by `CommandId`. The slice
 /// (#233) seeds one entry; later slices extend this table.
-pub static COMMAND_REGISTRY: LazyLock<HashMap<CommandId, CommandSchema>> = LazyLock::new(|| {
-    let mut map = HashMap::new();
-    map.insert(
-        LIST_COMMAND_ID,
-        CommandSchema {
-            id: LIST_COMMAND_ID,
-            name: "list",
-            schema_version: "threeterm.command.list/1",
-            request_schema_version: "threeterm.command.list.request/1",
-            request_schema: LIST_REQUEST_SCHEMA.clone(),
-            response_schema_version: "threeterm.command.list.response/1",
-            response_schema: LIST_RESPONSE_SCHEMA.clone(),
-        },
-    );
-    map
-});
+pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> =
+    LazyLock::new(|| {
+        let mut map = BTreeMap::new();
+        map.insert(
+            LIST_COMMAND_ID,
+            CommandSchema {
+                id: LIST_COMMAND_ID,
+                name: "list",
+                schema_version: "threeterm.command.list/1",
+                request_schema_version: "threeterm.command.list.request/1",
+                request_schema: LIST_REQUEST_SCHEMA.clone(),
+                response_schema_version: "threeterm.command.list.response/1",
+                response_schema: LIST_RESPONSE_SCHEMA.clone(),
+            },
+        );
+        map.insert(
+            SAVE_COMMAND_ID,
+            CommandSchema {
+                id: SAVE_COMMAND_ID,
+                name: "save",
+                schema_version: "threeterm.command.save/1",
+                request_schema_version: "threeterm.command.save.request/1",
+                request_schema: SAVE_REQUEST_SCHEMA.clone(),
+                response_schema_version: "threeterm.command.save.response/1",
+                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+            },
+        );
+        map.insert(
+            LOAD_COMMAND_ID,
+            CommandSchema {
+                id: LOAD_COMMAND_ID,
+                name: "load",
+                schema_version: "threeterm.command.load/1",
+                request_schema_version: "threeterm.command.load.request/1",
+                request_schema: LOAD_REQUEST_SCHEMA.clone(),
+                response_schema_version: "threeterm.command.load.response/1",
+                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+            },
+        );
+        map
+    });
 
 /// Reserve a stable id for the `list` command so adapters can reference it
 /// without depending on the entry's table position.
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
+
+/// Stable id for the `save` command.
+pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
+
+/// Stable id for the `load` command.
+pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 
 /// Stable lookup against the registry. Returns `Some` when the id is
 /// registered, `None` otherwise. Adapters use this to resolve a parsed

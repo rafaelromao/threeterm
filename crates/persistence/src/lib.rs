@@ -3,11 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use threeterm_domain::ProjectGeneration;
+use threeterm_domain::{ProjectGeneration, Revision};
 
 pub mod bundle {
-    pub use super::{BundleError, LoadedBundle, Manifest, load, schema_version, write_fresh};
+    pub use super::{
+        BundleError, LoadedBundle, Manifest, append_feature_to_features, load, schema_version,
+        write_fresh,
+    };
 }
 
 pub fn schema_version() -> &'static str {
@@ -111,6 +115,83 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
     Ok(manifest)
 }
 
+/// Append `(feature_id, kind)` to the canonical feature set of the
+/// project bundle at `path`, atomically re-seal the manifest, and return
+/// the new manifest. Idempotent on `(feature_id, kind)` — calling with a
+/// feature already present does not append a new transaction and the
+/// manifest is rewritten with identical values, so the seal and the
+/// hashes are unchanged.
+pub fn append_feature_to_features(
+    path: &Path,
+    feature_id: &str,
+    kind: &str,
+) -> Result<Manifest, BundleError> {
+    let loaded = load(path)?;
+    let mut generation = loaded.generation;
+
+    let feature_id_typed = threeterm_domain::FeatureId::new(feature_id)
+        .map_err(|err| BundleError::Invalid(err.to_string()))?;
+
+    let already_present = generation
+        .revisions
+        .iter()
+        .any(|r| r.features.iter().any(|f| f == &feature_id_typed));
+
+    if !already_present {
+        let mut found = false;
+        for revision in &mut generation.revisions {
+            if !revision.features.iter().any(|f| f == &feature_id_typed) {
+                revision.features.push(feature_id_typed.clone());
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let next_revision_id = format!("revision-{}", generation.revisions.len());
+            let mut revision = Revision::empty();
+            revision.id = next_revision_id;
+            revision.features.push(feature_id_typed);
+            generation.revisions.push(revision);
+        }
+
+        let txn = serde_json::json!({
+            "kind": "append_feature",
+            "feature_id": feature_id,
+            "feature_kind": kind,
+        });
+        let mut transactions = loaded.transactions;
+        transactions.push_str(&serde_json::to_string(&txn)?);
+        transactions.push('\n');
+
+        let transaction_count = loaded.manifest.transaction_count + 1;
+        let transaction_bytes = transactions.len();
+        let transaction_sha256 = hash(transactions.as_bytes());
+
+        let mut manifest = Manifest {
+            schema_version: schema_version().to_string(),
+            generation_id: generation.id.clone(),
+            revision_id: generation.revisions.last().expect("non-empty").id.clone(),
+            revision_count: generation.revisions.len(),
+            transaction_count,
+            transaction_bytes,
+            transaction_sha256,
+            canonical_root_sha256: String::new(),
+            seal_sha256: String::new(),
+        };
+        manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
+        manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
+
+        fs::write(
+            path.join(MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        fs::write(path.join(TRANSACTIONS_FILE), transactions.as_bytes())?;
+        Ok(manifest)
+    } else {
+        Ok(loaded.manifest)
+    }
+}
+
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(path.join(MANIFEST_FILE))?)?;
     if manifest.schema_version != schema_version() {
@@ -130,16 +211,54 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
         .map_err(|_| BundleError::Invalid("transactions are not UTF-8".into()))?;
     if manifest.transaction_bytes != transactions.len()
         || manifest.transaction_sha256 != hash(transactions.as_bytes())
-        || manifest.transaction_count != 0
-        || !transactions.is_empty()
     {
         return Err(BundleError::Invalid(
             "canonical transaction log integrity mismatch".into(),
         ));
     }
-    let generation = ProjectGeneration::with_id(manifest.generation_id.clone());
+    let mut generation = ProjectGeneration::with_id(manifest.generation_id.clone());
     if generation.revisions[0].id != manifest.revision_id {
         return Err(BundleError::Invalid("revision identity mismatch".into()));
+    }
+    // Reconstruct the canonical feature set by replaying the
+    // `append_feature` transactions in the order they were recorded.
+    // This keeps `feature_graph_hash_hex` deterministic across save and
+    // load, which the slice's AC requires.
+    for line in transactions.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("kind").and_then(Value::as_str) != Some("append_feature") {
+            continue;
+        }
+        let feature_id_str = match value.get("feature_id").and_then(Value::as_str) {
+            Some(id) => id,
+            None => continue,
+        };
+        let feature_id = match threeterm_domain::FeatureId::new(feature_id_str) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let mut placed = false;
+        for revision in &mut generation.revisions {
+            if !revision.features.iter().any(|f| f == &feature_id) {
+                revision.features.push(feature_id.clone());
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            let next_revision_id = format!("revision-{}", generation.revisions.len());
+            let mut revision = Revision::empty();
+            revision.id = next_revision_id;
+            revision.features.push(feature_id);
+            generation.revisions.push(revision);
+        }
     }
     Ok(LoadedBundle {
         manifest,

@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
-use threeterm_domain::ProjectGeneration;
+use threeterm_domain::{ProjectGeneration, feature_graph_hash_hex, revision_hex};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 
@@ -27,44 +27,134 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DispatchPlan<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchPlan {
     List,
-    NewProject { path: &'a str },
-    Unknown { arg: &'a str },
+    NewProject {
+        path: String,
+    },
+    Save {
+        path: String,
+        feature_id: String,
+        kind: String,
+    },
+    Load {
+        path: String,
+    },
+    Unknown {
+        arg: String,
+    },
 }
 
 /// Inspect the argv slice and decide which dispatch plan to execute.
-///
-/// The grammar is:
-/// - `["--machine", "list"]` -> `DispatchPlan::List`
-/// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
-/// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
-/// - `[]` -> `DispatchPlan::Unknown { arg: "" }`
-/// - `[<other>, ..]` -> `DispatchPlan::Unknown { arg: <other> }`
-fn plan<'a, I>(args: I) -> DispatchPlan<'a>
-where
-    I: IntoIterator<Item = &'a OsString>,
-{
-    let values: Vec<&OsString> = args.into_iter().collect();
-    match values.as_slice() {
-        [command, path] if *command == "new-project" => DispatchPlan::NewProject {
-            path: path.to_str().unwrap_or(""),
-        },
-        [machine, command, path] if *machine == "--machine" && *command == "new-project" => {
+fn plan(args: &[OsString]) -> DispatchPlan {
+    if args.len() < 2 || args[0] != "--machine" {
+        let arg = args.first().map_or("", |s| s.to_str().unwrap_or(""));
+        return DispatchPlan::Unknown {
+            arg: arg.to_string(),
+        };
+    }
+
+    let subcommand = args[1].to_str().unwrap_or("");
+    match subcommand {
+        "list" => {
+            if args.len() != 2 {
+                return DispatchPlan::Unknown {
+                    arg: args
+                        .get(2)
+                        .map(|s| s.to_str().unwrap_or("").to_string())
+                        .unwrap_or_default(),
+                };
+            }
+            DispatchPlan::List
+        }
+        "new-project" => {
+            if args.len() != 3 {
+                let arg = args
+                    .get(2)
+                    .map(|s| s.to_str().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                return DispatchPlan::Unknown { arg };
+            }
             DispatchPlan::NewProject {
-                path: path.to_str().unwrap_or(""),
+                path: args[2].to_str().unwrap_or("").to_string(),
             }
         }
-        [machine, command] if *machine == "--machine" && *command == "list" => DispatchPlan::List,
-        [machine, argument, ..] if *machine == "--machine" => DispatchPlan::Unknown {
-            arg: argument.to_str().unwrap_or(""),
+        "save" => parse_save(&args[2..]),
+        "load" => parse_load(&args[2..]),
+        _ => DispatchPlan::Unknown {
+            arg: subcommand.to_string(),
         },
-        [first, ..] => DispatchPlan::Unknown {
-            arg: first.to_str().unwrap_or(""),
-        },
-        [] => DispatchPlan::Unknown { arg: "" },
     }
+}
+
+fn parse_save(rest: &[OsString]) -> DispatchPlan {
+    if rest.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "save".to_string(),
+        };
+    }
+    let path = rest[0].to_str().unwrap_or("").to_string();
+    if path.starts_with("--") {
+        return DispatchPlan::Unknown { arg: path.clone() };
+    }
+    let mut feature_id: Option<String> = None;
+    let mut kind: Option<String> = None;
+    let mut i = 1;
+    while i < rest.len() {
+        let flag = rest[i].to_str().unwrap_or("");
+        let Some(value) = rest
+            .get(i + 1)
+            .map(|s| s.to_str().unwrap_or("").to_string())
+        else {
+            return DispatchPlan::Unknown {
+                arg: flag.to_string(),
+            };
+        };
+        match flag {
+            "--feature-id" => feature_id = Some(value),
+            "--kind" => kind = Some(value),
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: flag.to_string(),
+                };
+            }
+        }
+        i += 2;
+    }
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(kind) = kind else {
+        return DispatchPlan::Unknown {
+            arg: "--kind".to_string(),
+        };
+    };
+    DispatchPlan::Save {
+        path,
+        feature_id,
+        kind,
+    }
+}
+
+fn parse_load(rest: &[OsString]) -> DispatchPlan {
+    if rest.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "load".to_string(),
+        };
+    }
+    let path = rest[0].to_str().unwrap_or("").to_string();
+    if path.starts_with("--") {
+        return DispatchPlan::Unknown { arg: path.clone() };
+    }
+    if rest.len() > 1 {
+        return DispatchPlan::Unknown {
+            arg: rest[1].to_str().unwrap_or("").to_string(),
+        };
+    }
+    DispatchPlan::Load { path }
 }
 
 /// Dispatch the argv slice. Writes either the JSON listing to `stdout` or
@@ -75,12 +165,116 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let collected: Vec<OsString> = args.into_iter().collect();
-    let plan = plan(collected.iter());
+    let plan = plan(&collected);
 
     match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
-        DispatchPlan::NewProject { path } => emit_new_project(path, stdout, stderr),
-        DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
+        DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
+        DispatchPlan::Save {
+            path,
+            feature_id,
+            kind,
+        } => emit_save(&path, &feature_id, &kind, stdout, stderr),
+        DispatchPlan::Load { path } => emit_load(&path, stdout, stderr),
+        DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
+    }
+}
+
+fn emit_snapshot_for_loaded(
+    generation: &ProjectGeneration,
+    transaction_sha256: &str,
+    stdout: &mut dyn Write,
+) -> i32 {
+    let graph_hash = feature_graph_hash_hex(generation);
+    let terminal_log_digest = if transaction_sha256.is_empty() {
+        threeterm_domain::EMPTY_LOG_DIGEST_HEX
+    } else {
+        transaction_sha256
+    };
+    let revision = revision_hex(&graph_hash, terminal_log_digest);
+    let response = serde_json::json!({
+        "feature_graph_hash": graph_hash,
+        "revision_hash": revision,
+    });
+    let serialize_result = serde_json::to_writer_pretty(&mut *stdout, &response);
+    let _ = writeln!(stdout);
+    match serialize_result {
+        Ok(()) => EXIT_OK,
+        Err(_) => EXIT_PERSISTENCE_FAILURE,
+    }
+}
+
+fn emit_save(
+    path: &str,
+    feature_id: &str,
+    kind: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let bundle_path = Path::new(path);
+    let manifest_present = bundle_path.is_dir() && bundle_path.join("manifest.json").exists();
+    let result = if !manifest_present {
+        // Either the path is missing entirely, or the path is an empty
+        // directory with no manifest yet. Remove it so write_fresh can
+        // take ownership of the path without colliding with an existing
+        // entry.
+        if bundle_path.exists() {
+            let _ = std::fs::remove_dir_all(bundle_path);
+        }
+        threeterm_persistence::write_fresh(bundle_path, ProjectGeneration::fresh())
+            .and_then(|_| {
+                threeterm_persistence::append_feature_to_features(bundle_path, feature_id, kind)
+            })
+            .and_then(|manifest| {
+                threeterm_persistence::load(bundle_path).map(|loaded| (loaded.generation, manifest))
+            })
+    } else {
+        threeterm_persistence::load(bundle_path).and_then(|loaded| {
+            let generation = loaded.generation;
+            threeterm_persistence::append_feature_to_features(bundle_path, feature_id, kind)
+                .map(|manifest| (generation, manifest))
+        })
+    };
+
+    match result {
+        Ok((generation, manifest)) => {
+            let transaction_sha256 = manifest.transaction_sha256.clone();
+            emit_snapshot_for_loaded(&generation, &transaction_sha256, stdout)
+        }
+        Err(err) => {
+            let diagnostic = Diagnostic::persistence_failure(&err.to_string());
+            match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+                Ok(()) => {
+                    let _ = writeln!(stderr);
+                }
+                Err(error) => {
+                    let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+                }
+            }
+            EXIT_PERSISTENCE_FAILURE
+        }
+    }
+}
+
+fn emit_load(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    match threeterm_persistence::load(Path::new(path)) {
+        Ok(loaded) => emit_snapshot_for_loaded(
+            &loaded.generation,
+            &loaded.manifest.transaction_sha256,
+            stdout,
+        ),
+        Err(err) => {
+            let diagnostic = Diagnostic::persistence_failure(&err.to_string());
+            match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
+                Ok(()) => {
+                    let _ = writeln!(stderr);
+                }
+                Err(error) => {
+                    let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+                }
+            }
+            EXIT_PERSISTENCE_FAILURE
+        }
     }
 }
 

@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/host",
     "crates/workers/occt",
     "crates/workers/slvs",
     "crates/tui",
@@ -13,7 +12,7 @@ members = [
     "crates/lua-bridge",
     "crates/domain",
     "crates/protocol",
-]
+]   
 
 [workspace.package]
 version = "0.1.0"

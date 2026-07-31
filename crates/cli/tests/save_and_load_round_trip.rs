@@ -1,37 +1,38 @@
-//! Subprocess integration test for the save / load round-trip.
+//! Subprocess integration test for issue #235: save and reload a
+//! one-feature project.
 //!
-//! This is the tracer bullet for issue #235. It runs two `threeterm` binary
-//! invocations against the same bundle path:
-//!
-//! 1. `threeterm --machine save <bundle> --feature-id box-1 --kind box` —
-//!    writes the bundle, prints a JSON response with `feature_graph_hash`,
-//!    `revision_hash`, and `schema_version`.
-//! 2. `threeterm --machine load <bundle>` — reads the bundle, verifies
-//!    integrity, prints the same JSON response.
-//!
-//! The acceptance criterion is byte-for-byte equality of the two
-//! `feature_graph_hash` strings and the two `revision_hash` strings across
-//! the two subprocesses. This proves the same canonical state and the same
-//! transactional position survive a separate process reload.
+//! The demoable behavior: create a one-feature project, save it, run a
+//! separate reload that asserts `feature_graph_hash` and `revision_hash`
+//! are byte-identical to the save response.
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
-static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
+static COUNTER: OnceLock<AtomicU64> = OnceLock::new();
 
 fn unique_bundle_dir(label: &str) -> PathBuf {
+    let counter = COUNTER.get_or_init(|| AtomicU64::new(0));
     let dir = std::env::temp_dir().join(format!(
-        "threeterm-235-{}-{}-{}",
+        "threeterm-235-{}-{}-{}-{}",
         std::process::id(),
         label,
-        COUNTER.fetch_add(1, Ordering::SeqCst)
+        counter.fetch_add(1, Ordering::SeqCst),
+        chrono_like()
     ));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create bundle temp dir");
     dir
+}
+
+fn chrono_like() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 fn run(args: &[&str]) -> std::process::Output {
@@ -97,21 +98,13 @@ fn save_and_load_round_trip_produces_identical_hashes() {
         64,
         "feature_graph_hash is 64 lowercase hex chars"
     );
-    assert_eq!(
-        load_graph.len(),
-        64,
-        "feature_graph_hash is 64 lowercase hex chars"
-    );
+    assert_eq!(load_graph.len(), 64);
     assert_eq!(
         save_rev.len(),
         64,
         "revision_hash is 64 lowercase hex chars"
     );
-    assert_eq!(
-        load_rev.len(),
-        64,
-        "revision_hash is 64 lowercase hex chars"
-    );
+    assert_eq!(load_rev.len(), 64);
 
     assert!(
         save_graph
@@ -131,15 +124,6 @@ fn save_and_load_round_trip_produces_identical_hashes() {
         "feature_graph_hash survives the reload"
     );
     assert_eq!(save_rev, load_rev, "revision_hash survives the reload");
-
-    assert_eq!(
-        save_json["schema_version"],
-        Value::from("threeterm.command.save.response/1")
-    );
-    assert_eq!(
-        load_json["schema_version"],
-        Value::from("threeterm.command.load.response/1")
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

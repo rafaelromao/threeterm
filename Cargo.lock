@@ -162,7 +162,7 @@ name = "threeterm-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "threeterm-host",
+ "threeterm-domain",
  "threeterm-persistence",
  "threeterm-protocol",
 ]
@@ -174,17 +174,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "threeterm-host"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "threeterm-domain",
- "threeterm-persistence",
 ]
 
 [[package]]

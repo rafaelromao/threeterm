@@ -1,24 +1,22 @@
 //! Canonical ThreeTerm feature graph and domain model.
 //!
 //! The slice (#235) extends the existing domain surface from #234 with
-//! the deterministic `graph_hash_hex` of the canonical JSON encoding
-//! and a `revision_hex` that combines the graph hash with the
-//! transactional log's terminal digest.
+//! the deterministic `feature_graph_hash_hex` over the canonical
+//! `(revision_id, features)` encoding and a `revision_hash_hex` that
+//! combines the graph hash with the transactional log's terminal
+//! digest.
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-
-pub mod feature_graph;
-
-pub use feature_graph::{EMPTY_LOG_DIGEST_HEX, revision_hex};
+use sha2::{Digest, Sha256};
 
 pub fn schema_version() -> &'static str {
     "threeterm.domain/1"
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FeatureId(String);
 
@@ -74,6 +72,48 @@ impl ProjectGeneration {
     }
 }
 
+/// SHA-256 hex of the canonical JSON encoding of the
+/// `ProjectGeneration` (the `(revision_id, features)` tuples in
+/// canonical BTreeMap-backed object order). Two projects with the same
+/// feature set produce the same hex regardless of insertion order. This
+/// is the `feature_graph_hash` the slice's save/load round-trip emits.
+pub fn feature_graph_hash_hex(generation: &ProjectGeneration) -> String {
+    let mut ordered: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for revision in &generation.revisions {
+        let features: Vec<String> = revision
+            .features
+            .iter()
+            .map(|f| f.as_str().to_string())
+            .collect();
+        ordered.insert(revision.id.clone(), features);
+    }
+    let bytes = serde_json::to_vec(&ordered).expect("canonical JSON serializes");
+    hex_sha256(&bytes)
+}
+
+/// SHA-256 hex of `feature_graph_hash_hex || terminal_log_digest_hex`.
+/// This is the `revision_hash` the slice's save/load round-trip emits; it
+/// rebinds when EITHER the feature graph changes OR the canonical
+/// transaction log's terminal digest changes.
+pub fn revision_hex(graph_hash_hex: &str, terminal_log_digest_hex: &str) -> String {
+    let mut bytes = Vec::with_capacity(graph_hash_hex.len() + terminal_log_digest_hex.len());
+    bytes.extend_from_slice(graph_hash_hex.as_bytes());
+    bytes.extend_from_slice(terminal_log_digest_hex.as_bytes());
+    hex_sha256(&bytes)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The all-zero SHA-256 digest used as the chain's anchor before any
+/// transaction is appended. Mirrors the persistence layer's empty-log
+/// terminal digest.
+pub const EMPTY_LOG_DIGEST_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainError {
     EmptyId,
@@ -108,5 +148,34 @@ mod tests {
     #[test]
     fn feature_id_rejects_empty_values() {
         assert_eq!(FeatureId::new(""), Err(DomainError::EmptyId));
+    }
+
+    #[test]
+    fn feature_graph_hash_is_deterministic_for_empty_project() {
+        let generation = ProjectGeneration::with_id("generation-test");
+        let first = feature_graph_hash_hex(&generation);
+        let second = feature_graph_hash_hex(&generation);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(
+            first
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex; got {first}"
+        );
+    }
+
+    #[test]
+    fn revision_combines_graph_hash_and_log_digest() {
+        let rev_a = revision_hex(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            EMPTY_LOG_DIGEST_HEX,
+        );
+        assert_eq!(rev_a.len(), 64);
+        let rev_b = revision_hex(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "ff".repeat(32).as_str(),
+        );
+        assert_ne!(rev_a, rev_b);
     }
 }

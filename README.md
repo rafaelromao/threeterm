@@ -14,14 +14,14 @@ owns its own per-crate `schema_version()` constant under the spec's
 
 | Member crate                  | Package name               | Responsibility |
 | ----------------------------- | -------------------------- | -------------- |
-| `crates/host`                 | `threeterm-host`           | Rust host that owns the canonical ThreeTerm document, versioned command API, lifecycle, and worker process boundaries. |
+| `crates/host`                 | `threeterm-host`           | Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries. |
 | `crates/workers/occt`         | `threeterm-occt-worker`    | Rust skeleton crate for the disposable OCCT geometry worker boundary. C++ worker code lives outside the workspace. |
 | `crates/workers/slvs`         | `threeterm-slvs-worker`    | Rust skeleton crate for the disposable `libslvs` sketch-solver worker boundary. C++ worker code lives outside the workspace. |
 | `crates/tui`                  | `threeterm-tui`            | Keyboard-first TUI adapter for the versioned domain command API. |
-| `crates/cli`                  | `threeterm-cli`            | Headless automation CLI adapter for the versioned domain command API. |
+| `crates/cli`                  | `threeterm-cli`            | Headless Automation CLI adapter for the versioned domain command API. |
 | `crates/mcp`                  | `threeterm-mcp`            | MCP adapter exposing the versioned domain command API as agent tools. |
-| `crates/viewport`             | `threeterm-viewport`       | Protocol-neutral viewport renderer and projection boundary. |
-| `crates/persistence`          | `threeterm-persistence`    | Canonical NDJSON transaction log and sealed `.threeterm/` project bundle. |
+| `crates/viewport`             | `threeterm-viewport`       | Protocol-Neutral Viewport renderer and projection boundary. |
+| `crates/persistence`          | `threeterm-persistence`    | Canonical Transaction Log (NDJSON-encoded) and sealed `.threeterm/` project bundle. |
 | `crates/theme`                | `threeterm-theme`          | Embedded palette resolution for the five theme families. |
 | `crates/lua-bridge`           | `threeterm-lua-bridge`     | Restricted Lua bridge for keymaps and registered-command automation. |
 | `crates/domain`               | `threeterm-domain`         | Canonical ThreeTerm feature graph and domain model. |

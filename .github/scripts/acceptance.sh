@@ -38,8 +38,16 @@ if [ "${ACTUAL_CHANNEL}" != "${EXPECTED_CHANNEL}" ]; then
 fi
 
 echo "==> Verifying cargo metadata reports the 12 expected member packages"
-ACTUAL_MEMBERS="$(cargo metadata --no-deps --format-version 1 \
+ACTUAL_MEMBERS_RAW="$(cargo metadata --no-deps --format-version 1 \
     | jq -r '.packages[].name' | sort)"
+ACTUAL_MEMBERS_COUNT="$(wc -l <<<"${ACTUAL_MEMBERS_RAW}" | tr -d ' ')"
+ACTUAL_MEMBERS="$(grep -v '^$' <<<"${ACTUAL_MEMBERS_RAW}")"
+if [ "${ACTUAL_MEMBERS_COUNT}" -ne "${#EXPECTED_MEMBERS[@]}" ]; then
+    echo "FAIL: expected exactly ${#EXPECTED_MEMBERS[@]} workspace members, got ${ACTUAL_MEMBERS_COUNT}" >&2
+    echo "---" >&2
+    echo "${ACTUAL_MEMBERS}" >&2
+    exit 1
+fi
 for member in "${EXPECTED_MEMBERS[@]}"; do
     if ! grep -Fxq "${member}" <<<"${ACTUAL_MEMBERS}"; then
         echo "FAIL: missing workspace member ${member}" >&2

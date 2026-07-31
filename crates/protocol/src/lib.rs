@@ -1,3 +1,7 @@
+pub mod diagnostic;
+pub mod schema;
+pub mod schema_validator;
+
 pub fn schema_version() -> &'static str {
     "threeterm.protocol/1"
 }

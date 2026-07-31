@@ -7,5 +7,13 @@ license.workspace = true
 publish.workspace = true
 description = "Headless Automation CLI adapter for the ThreeTerm domain command API."
 
+[dependencies]
+serde_json = { workspace = true }
+threeterm-protocol = { path = "../protocol" }
+
+[[bin]]
+name = "threeterm"
+path = "src/main.rs"
+
 [lints]
 workspace = true

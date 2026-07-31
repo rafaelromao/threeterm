@@ -17,3 +17,6 @@ Thumbs.db
 # Rust build output (introduced if/when implementation begins).
 target/
 **/target/
+
+# Sandman runtime state (per-run task document, config, reviews).
+.sandman/

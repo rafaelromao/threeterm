@@ -54,36 +54,27 @@ pub static LIST_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 /// Canonical response schema document for the `list` command.
 pub static LIST_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
-        "type": "object",
-        "required": ["schema_version", "commands"],
-        "properties": {
-            "schema_version": {
-                "type": "string",
-                "description": "Version of the listing envelope itself."
-            },
-            "commands": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": [
-                        "id",
-                        "name",
-                        "schema_version",
-                        "request_schema_version",
-                        "request_schema",
-                        "response_schema_version",
-                        "response_schema"
-                    ],
-                    "properties": {
-                        "id": { "type": "string" },
-                        "name": { "type": "string" },
-                        "schema_version": { "type": "string" },
-                        "request_schema_version": { "type": "string" },
-                        "request_schema": { "type": "object" },
-                        "response_schema_version": { "type": "string" },
-                        "response_schema": { "type": "object" }
-                    }
-                }
+        "type": "array",
+        "description": "Array of every registered command with its schema version.",
+        "items": {
+            "type": "object",
+            "required": [
+                "id",
+                "name",
+                "schema_version",
+                "request_schema_version",
+                "request_schema",
+                "response_schema_version",
+                "response_schema"
+            ],
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "schema_version": { "type": "string" },
+                "request_schema_version": { "type": "string" },
+                "request_schema": { "type": "object" },
+                "response_schema_version": { "type": "string" },
+                "response_schema": { "type": "object" }
             }
         }
     })

@@ -1,0 +1,11 @@
+[package]
+name = "threeterm-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rust host that owns the ThreeTerm document, command API, lifecycle, and worker process boundaries."
+
+[lints]
+workspace = true

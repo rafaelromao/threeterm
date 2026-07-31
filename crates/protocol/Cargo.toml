@@ -1,0 +1,11 @@
+[package]
+name = "threeterm-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Versioned newline-framed worker protocol shared by host and disposable workers."
+
+[lints]
+workspace = true

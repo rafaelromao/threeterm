@@ -1,0 +1,280 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use threeterm_domain::ProjectGeneration;
+use threeterm_persistence::bundle::{
+    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, SchemaStatus, V0Manifest,
+    detect_schema, load, migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh,
+    write_v0_fixture,
+};
+
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "threeterm-mig-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+fn read_dir_recursive(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).expect("read_dir") {
+            let entry = entry.expect("entry");
+            let file_type = entry.file_type().expect("file_type");
+            let entry_path = entry.path();
+            if file_type.is_dir() {
+                stack.push(entry_path);
+            } else {
+                let bytes = fs::read(&entry_path).expect("read file");
+                entries.push((entry_path, bytes));
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+fn fingerprint(path: &Path) -> Vec<(PathBuf, String)> {
+    read_dir_recursive(path)
+        .into_iter()
+        .map(|(p, bytes)| {
+            let digest = Sha256::digest(&bytes);
+            let hex = digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            (p, hex)
+        })
+        .collect()
+}
+
+#[test]
+fn v0_fixture_loads_on_v1_reader_with_sealed_backup() {
+    let root = unique_temp_dir("happy");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-happy"))
+        .expect("v0 fixture writes");
+
+    let pre_fingerprint = fingerprint(&root);
+    let backup_path = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+
+    let loaded = load(&root).expect("v0 migrates to v1");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+    assert!(loaded.transactions.is_empty());
+    assert!(loaded.manifest.canonical_root_sha256.len() == 64);
+    assert!(loaded.manifest.seal_sha256.len() == 64);
+
+    let post_v1 = read_dir_recursive(&root);
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).expect("manifest reads"))
+            .expect("v1 manifest parses");
+    assert_eq!(manifest.schema_version, schema_epoch());
+
+    let backup_manifest_raw =
+        fs::read(backup_path.join("manifest.json")).expect("backup manifest reads");
+    let backup_manifest: V0Manifest =
+        serde_json::from_slice(&backup_manifest_raw).expect("v0 manifest parses");
+    assert_eq!(backup_manifest.schema_version, prior_schema_epoch());
+    assert_eq!(backup_manifest.generation_id, loaded.manifest.generation_id);
+    assert_eq!(backup_manifest.revision_id, loaded.manifest.revision_id);
+
+    let pre_set: std::collections::BTreeSet<_> = pre_fingerprint
+        .iter()
+        .map(|(p, h)| (p.strip_prefix(&root).unwrap().to_path_buf(), h.clone()))
+        .collect();
+    let post_v1_set: std::collections::BTreeSet<_> = post_v1
+        .iter()
+        .filter(|(p, _)| !p.starts_with(&backup_path))
+        .map(|(p, b)| (p.strip_prefix(&root).unwrap().to_path_buf(), b.clone()))
+        .collect();
+    let backup_set: std::collections::BTreeSet<_> = read_dir_recursive(&backup_path)
+        .iter()
+        .map(|(p, b)| {
+            let digest = Sha256::digest(b);
+            let hex = digest
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<String>();
+            (p.strip_prefix(&backup_path).unwrap().to_path_buf(), hex)
+        })
+        .collect();
+    assert_eq!(
+        pre_set, backup_set,
+        "backup must be a byte-for-byte copy of the source"
+    );
+    assert_eq!(
+        post_v1_set.len(),
+        pre_set.len(),
+        "post-migration bundle has different file count than source"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn migration_is_deterministic_across_invocations() {
+    let root = unique_temp_dir("determinism");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-det"))
+        .expect("v0 fixture writes");
+    let v0 = read_v0(&root).expect("v0 reads");
+    let (a_manifest, a_generation) = migrate_v0_to_v1(&v0);
+    let (b_manifest, b_generation) = migrate_v0_to_v1(&v0);
+    assert_eq!(a_manifest, b_manifest);
+    assert_eq!(a_generation, b_generation);
+    assert_eq!(
+        a_manifest.canonical_root_sha256,
+        b_manifest.canonical_root_sha256
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repeat_migration_idempotent_for_a_clean_v0_source() {
+    let root = unique_temp_dir("repeat");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-repeat")).expect("v0 writes");
+    let v0 = read_v0(&root).expect("v0 reads");
+    let (m1, _) = migrate_v0_to_v1(&v0);
+    let v0_again = read_v0(&root).expect("v0 re-reads");
+    let (m2, _) = migrate_v0_to_v1(&v0_again);
+    assert_eq!(m1, m2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn detect_schema_classifies_prior_and_unknown() {
+    let v0_root = unique_temp_dir("detect-prior");
+    let v1_root = unique_temp_dir("detect-current");
+    let bad_root = unique_temp_dir("detect-unknown");
+    write_v0_fixture(&v0_root, ProjectGeneration::with_id("g-prior")).expect("v0");
+    write_fresh(&v1_root, ProjectGeneration::with_id("g-current")).expect("v1");
+    fs::create_dir_all(&bad_root).expect("dir");
+    fs::write(
+        bad_root.join("manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "threeterm.persistence/99",
+            "generation_id": "g-bad",
+            "revision_id": "r-bad"
+        }))
+        .unwrap(),
+    )
+    .expect("manifest");
+
+    assert_eq!(detect_schema(&v0_root).expect("prior"), SchemaStatus::Prior);
+    assert_eq!(
+        detect_schema(&v1_root).expect("current"),
+        SchemaStatus::Current
+    );
+    assert_eq!(
+        detect_schema(&bad_root).expect("unknown"),
+        SchemaStatus::Unknown
+    );
+
+    let _ = fs::remove_dir_all(v0_root);
+    let _ = fs::remove_dir_all(v1_root);
+    let _ = fs::remove_dir_all(bad_root);
+}
+
+#[test]
+fn migration_failure_leaves_source_unchanged() {
+    let root = unique_temp_dir("failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-fail")).expect("v0 writes");
+    let pre = fingerprint(&root);
+
+    fs::write(root.join("canonical/transactions.ndjson"), b"tampered\n").expect("tamper");
+    let pre_tamper = fingerprint(&root);
+    assert_ne!(pre, pre_tamper);
+
+    let _ = load(&root).expect_err("tampered v0 fails to migrate");
+
+    let post = fingerprint(&root);
+    let pre_tamper_set: std::collections::BTreeSet<_> = pre_tamper.into_iter().collect();
+    let post_set: std::collections::BTreeSet<_> = post.into_iter().collect();
+    assert_eq!(
+        pre_tamper_set, post_set,
+        "source must remain byte-for-byte unchanged after a failed migration"
+    );
+
+    let backup_path = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        !backup_path.exists(),
+        "no sealed backup may be left behind after a failed migration"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_manifest_field_fails_closed_with_structured_error() {
+    let root = unique_temp_dir("unknown-field");
+    let generation = ProjectGeneration::with_id("g-unknown");
+    write_fresh(&root, generation).expect("v1 writes");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).expect("manifest"))
+            .expect("value");
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("future_field".to_string(), serde_json::Value::Bool(true));
+    fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .expect("rewrite");
+
+    let err = load(&root).expect_err("v1 with unknown field is rejected");
+    match err {
+        BundleError::ManifestFieldUnknown { kind, field } => {
+            assert_eq!(kind, "v1");
+            assert_eq!(field, "future_field");
+        }
+        other => panic!("expected ManifestFieldUnknown, got {other:?}"),
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn v2_reader_boundary_refuses_unbacked_v0_layout() {
+    // A v2 reader is expressed today as `detect_schema` against a directory
+    // whose manifest says `schema_version == "0"` but which is the
+    // pre-migration backup sibling — i.e., a v2 reader opens the v0 layout
+    // that a migration left behind and sees it as `Unknown` because the
+    // canonical v2 layout requires the prior-epoch backup to live in a
+    // sibling, not at the canonical path.
+    let root = unique_temp_dir("v2-refusal");
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-v0")).expect("v0");
+    let _: LoadedBundle = load(&root).expect("v0 migrates");
+    let backup_path = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(backup_path.exists());
+    let backup_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(backup_path.join("manifest.json")).expect("backup manifest"),
+    )
+    .expect("backup value");
+    assert_eq!(
+        backup_manifest["schema_version"],
+        json!(prior_schema_epoch())
+    );
+    assert_eq!(
+        detect_schema(&backup_path).expect("v2 boundary classifies backup"),
+        SchemaStatus::Unknown,
+        "a v2 reader must refuse a directory that is the pre-migration backup sibling"
+    );
+    let _ = fs::remove_dir_all(root);
+}

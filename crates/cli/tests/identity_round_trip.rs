@@ -53,7 +53,7 @@ fn full_mvp_operation_set_round_trips_identity_through_reload() {
     let root_str = root.to_str().expect("path is utf-8");
 
     // 1. Create the bundle.
-    let (exit, stdout, stderr) = run_threeterm(&["new-project", root_str]);
+    let (exit, stdout, stderr) = run_threeterm(&["--machine", "new-project", root_str]);
     assert_eq!(exit, 0, "new-project must succeed; stderr={stderr}");
     assert!(stderr.is_empty(), "stderr must be empty on success");
     let created: Value = serde_json::from_str(&stdout).expect("new-project response is JSON");
@@ -101,7 +101,7 @@ fn full_mvp_operation_set_round_trips_identity_through_reload() {
     let mut last_apply_identity = initial_identity.clone();
     for intent in &intents {
         let intent_json = intent.to_string();
-        let (exit, stdout, stderr) = run_threeterm(&["apply", root_str, &intent_json]);
+        let (exit, stdout, stderr) = run_threeterm(&["--machine", "apply", root_str, &intent_json]);
         assert_eq!(exit, 0, "apply must succeed; stderr={stderr}");
         assert!(stderr.is_empty(), "stderr must be empty on success");
         let applied: Value = serde_json::from_str(&stdout).expect("apply response is JSON");
@@ -117,7 +117,7 @@ fn full_mvp_operation_set_round_trips_identity_through_reload() {
     }
 
     // 2. Surface the identity through the dedicated CLI command.
-    let (exit, stdout, stderr) = run_threeterm(&["identity", root_str]);
+    let (exit, stdout, stderr) = run_threeterm(&["--machine", "identity", root_str]);
     assert_eq!(exit, 0, "identity must succeed; stderr={stderr}");
     assert!(stderr.is_empty(), "stderr must be empty on success");
     let identity: Value = serde_json::from_str(&stdout).expect("identity response is JSON");
@@ -135,25 +135,44 @@ fn full_mvp_operation_set_round_trips_identity_through_reload() {
         "identity command must surface log_identity alongside generation_id"
     );
 
-    // 3. Reload from disk directly through the persistence layer.
+    // 3. Reload through the production CLI's load command (NOT a direct
+    // persistence call) so the byte-equality assertion exercises the same
+    // production code path the rest of the tool uses.
+    let (exit, stdout, stderr) = run_threeterm(&["--machine", "load", root_str]);
+    assert_eq!(exit, 0, "load must succeed; stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr must be empty on success");
+    let loaded: Value = serde_json::from_str(&stdout).expect("load response is JSON");
+    assert_eq!(
+        loaded["generation_id"].as_str(),
+        Some(last_apply_identity.as_str()),
+        "load response generation_id must equal the post-apply identity"
+    );
+    assert_eq!(
+        loaded["manifest"]["log_identity"].as_str(),
+        Some(last_apply_identity.as_str()),
+        "loaded manifest.log_identity must equal the canonical log digest"
+    );
+    assert_eq!(
+        loaded["manifest"]["transaction_count"].as_u64(),
+        Some(intents.len() as u64),
+        "all accepted transactions must be persisted"
+    );
+    assert_eq!(
+        loaded["transactions"]
+            .as_str()
+            .unwrap_or("")
+            .lines()
+            .count(),
+        intents.len(),
+        "the canonical log must contain every accepted transaction"
+    );
+
+    // 4. Cross-check: persistence::bundle::load computes the same identity
+    // the production CLI surfaced.
     let bundle = load(&root).expect("reload from disk");
     assert_eq!(
         bundle.manifest.log_identity, last_apply_identity,
         "persistence::bundle::load must compute the byte-equal identity"
-    );
-    assert_eq!(
-        bundle.manifest.generation_id, last_apply_identity,
-        "manifest.generation_id must equal the canonical log digest"
-    );
-    assert_eq!(
-        bundle.manifest.transaction_count,
-        intents.len(),
-        "all accepted transactions must be persisted"
-    );
-    assert_eq!(
-        bundle.transactions.lines().count(),
-        intents.len(),
-        "the canonical log must contain every accepted transaction"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -163,14 +182,14 @@ fn full_mvp_operation_set_round_trips_identity_through_reload() {
 fn apply_rejects_unknown_intent_kind_with_structured_diagnostic() {
     let root = fresh_root("invalid-intent");
     let root_str = root.to_str().expect("path is utf-8");
-    run_threeterm(&["new-project", root_str]);
+    run_threeterm(&["--machine", "new-project", root_str]);
 
     let bogus = json!({ "kind": "nope", "feature_id": "x" }).to_string();
-    let (exit, stdout, stderr) = run_threeterm(&["apply", root_str, &bogus]);
+    let (exit, stdout, stderr) = run_threeterm(&["--machine", "apply", root_str, &bogus]);
     assert_ne!(exit, 0, "unknown intent kind must be rejected");
     assert!(stdout.is_empty(), "stdout must be empty on rejection");
     let parsed: Value = serde_json::from_str(&stderr).expect("stderr is JSON diagnostic");
-    assert_eq!(parsed["code"], "persistence_failure");
+    assert_eq!(parsed["code"], "invalid_request");
     assert!(
         parsed["arg"]
             .as_str()
@@ -198,7 +217,7 @@ fn apply_to_missing_bundle_preserves_filesystem() {
         "parameters": {}
     })
     .to_string();
-    let (exit, _stdout, stderr) = run_threeterm(&["apply", root_str, &intent]);
+    let (exit, _stdout, stderr) = run_threeterm(&["--machine", "apply", root_str, &intent]);
     assert_ne!(exit, 0, "apply to missing bundle must fail");
     assert!(
         !root.exists(),

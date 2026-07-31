@@ -39,18 +39,13 @@ enum DispatchPlan<'a> {
     Apply { path: &'a str, intent: &'a str },
     Unknown { arg: &'a str },
 }
-
 /// Inspect the argv slice and decide which dispatch plan to execute.
 ///
 /// The grammar is:
 /// - `["--machine", "list"]` -> `DispatchPlan::List`
-/// - `["new-project", <path>]` -> `DispatchPlan::NewProject`
 /// - `["--machine", "new-project", <path>]` -> `DispatchPlan::NewProject`
-/// - `["identity", <path>]` -> `DispatchPlan::Identity`
 /// - `["--machine", "identity", <path>]` -> `DispatchPlan::Identity`
-/// - `["load", <path>]` -> `DispatchPlan::Load`
 /// - `["--machine", "load", <path>]` -> `DispatchPlan::Load`
-/// - `["apply", <path>, <intent-json>]` -> `DispatchPlan::Apply`
 /// - `["--machine", "apply", <path>, <intent-json>]` -> `DispatchPlan::Apply`
 /// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
 /// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
@@ -65,19 +60,6 @@ where
         slice.get(index).and_then(|s| s.to_str()).unwrap_or("")
     };
     match values.as_slice() {
-        [command, path] if *command == "new-project" => DispatchPlan::NewProject {
-            path: at(values.as_slice(), 1),
-        },
-        [command, path] if *command == "identity" => DispatchPlan::Identity {
-            path: at(values.as_slice(), 1),
-        },
-        [command, path] if *command == "load" => DispatchPlan::Load {
-            path: at(values.as_slice(), 1),
-        },
-        [command, path, intent] if *command == "apply" => DispatchPlan::Apply {
-            path: at(values.as_slice(), 1),
-            intent: at(values.as_slice(), 2),
-        },
         [machine, command, path] if *machine == "--machine" && *command == "new-project" => {
             DispatchPlan::NewProject {
                 path: at(values.as_slice(), 2),
@@ -109,7 +91,6 @@ where
         [] => DispatchPlan::Unknown { arg: "" },
     }
 }
-
 /// Dispatch the argv slice. Writes either the JSON listing to `stdout` or
 /// a structured `unknown_command` diagnostic to `stderr`, and returns the
 /// exit code.
@@ -281,7 +262,7 @@ fn write_json(stdout: &mut dyn Write, stderr: &mut dyn Write, value: &Value) -> 
 }
 
 fn emit_invalid_request(detail: &str, stderr: &mut dyn Write) -> i32 {
-    let diagnostic = Diagnostic::persistence_failure(detail);
+    let diagnostic = Diagnostic::invalid_request(detail);
     match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
         Ok(()) => {
             let _ = writeln!(stderr);

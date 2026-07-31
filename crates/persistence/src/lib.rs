@@ -1,5 +1,6 @@
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,14 @@ pub enum BundleError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Invalid(String),
+    /// The manifest was found but failed the manifest-layer seal check
+    /// (schema version mismatch, canonical root hash mismatch, manifest
+    /// seal mismatch). Distinct from `IdentityMismatch` so the structured
+    /// diagnostic can name the manifest layer.
+    ManifestInvalid(String),
+    /// The manifest's `log_identity` did not match the identity freshly
+    /// computed from the loaded canonical log content.
+    IdentityMismatch(String),
 }
 
 impl fmt::Display for BundleError {
@@ -53,6 +62,12 @@ impl fmt::Display for BundleError {
             Self::Io(error) => write!(formatter, "filesystem error: {error}"),
             Self::Json(error) => write!(formatter, "invalid JSON: {error}"),
             Self::Invalid(detail) => formatter.write_str(detail),
+            Self::ManifestInvalid(detail) => {
+                write!(formatter, "manifest_invalid: {detail}")
+            }
+            Self::IdentityMismatch(detail) => {
+                write!(formatter, "identity_mismatch: {detail}")
+            }
         }
     }
 }
@@ -108,37 +123,42 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 
     let staging = staging_path(path);
     fs::create_dir_all(staging.join("canonical"))?;
-    fs::write(staging.join(TRANSACTIONS_FILE), transactions.as_bytes())?;
-    fs::write(
-        staging.join(MANIFEST_FILE),
-        serde_json::to_vec_pretty(&manifest)?,
+    write_atomic(&staging.join(TRANSACTIONS_FILE), transactions.as_bytes())?;
+    write_atomic(
+        &staging.join(MANIFEST_FILE),
+        &serde_json::to_vec_pretty(&manifest)?,
     )?;
     fs::rename(&staging, path)?;
     Ok(manifest)
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
-    let manifest: Manifest = serde_json::from_slice(&fs::read(path.join(MANIFEST_FILE))?)?;
+    let manifest_bytes = fs::read(path.join(MANIFEST_FILE))?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| BundleError::ManifestInvalid(format!("manifest JSON: {error}")))?;
     if manifest.schema_version != schema_version() {
-        return Err(BundleError::Invalid(
-            "unsupported persistence schema".into(),
-        ));
+        return Err(BundleError::ManifestInvalid(format!(
+            "unsupported persistence schema: {}",
+            manifest.schema_version
+        )));
     }
     if manifest.canonical_root_sha256 != hash(&canonical_manifest_bytes(&manifest)) {
-        return Err(BundleError::Invalid(
+        return Err(BundleError::ManifestInvalid(
             "canonical manifest seal mismatch".into(),
         ));
     }
     if manifest.seal_sha256 != hash(&sealed_manifest_bytes(&manifest)) {
-        return Err(BundleError::Invalid("manifest seal mismatch".into()));
+        return Err(BundleError::ManifestInvalid(
+            "manifest seal mismatch".into(),
+        ));
     }
     let transactions = String::from_utf8(fs::read(path.join(TRANSACTIONS_FILE))?)
-        .map_err(|_| BundleError::Invalid("transactions are not UTF-8".into()))?;
+        .map_err(|_| BundleError::ManifestInvalid("transactions are not UTF-8".into()))?;
     if manifest.transaction_bytes != transactions.len()
         || manifest.log_identity != log_identity_hex(transactions.as_bytes())
     {
-        return Err(BundleError::Invalid(
-            "canonical log identity mismatch".into(),
+        return Err(BundleError::IdentityMismatch(
+            "manifest log_identity does not match the freshly computed canonical log digest".into(),
         ));
     }
     let generation = ProjectGeneration::with_id(manifest.generation_id.clone());
@@ -168,12 +188,13 @@ fn staging_path(path: &Path) -> PathBuf {
 /// The current bundle is loaded first; if `load` fails (no bundle, tampered
 /// manifest, ...) the call returns the error without touching any files.
 /// After a successful append, both `canonical/transactions.ndjson` and
-/// `manifest.json` are updated via per-file atomic rename so each file is
-/// either the prior state or the new state — never partial.
+/// `manifest.json` are updated via per-file atomic write-then-rename with
+/// fsync so each file is either the prior state or the new state — never
+/// partial — and a power-loss leaves the prior bundle intact on disk.
 ///
 /// On success the new sealed `Manifest` is returned. The `log_identity`
 /// reflects the canonical log content including the appended transaction;
-/// `generation_id`, `schema_version`, and `revision_id` are preserved.
+/// `schema_version` and `revision_id` are preserved.
 pub fn append_transaction(path: &Path, intent: &CommandIntent) -> Result<Manifest, BundleError> {
     let bundle = load(path)?;
     let transaction = threeterm_domain::CommandTransaction::new(intent.clone());
@@ -194,15 +215,31 @@ pub fn append_transaction(path: &Path, intent: &CommandIntent) -> Result<Manifes
     new_manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&new_manifest));
     new_manifest.seal_sha256 = hash(&sealed_manifest_bytes(&new_manifest));
 
-    let manifest_tmp = path.join(format!("{MANIFEST_FILE}.tmp"));
-    fs::write(&manifest_tmp, serde_json::to_vec_pretty(&new_manifest)?)?;
-    fs::rename(&manifest_tmp, path.join(MANIFEST_FILE))?;
-
-    let tx_tmp = path.join(format!("{TRANSACTIONS_FILE}.tmp"));
-    fs::write(&tx_tmp, new_transactions.as_bytes())?;
-    fs::rename(&tx_tmp, path.join(TRANSACTIONS_FILE))?;
+    write_atomic(&path.join(TRANSACTIONS_FILE), new_transactions.as_bytes())?;
+    write_atomic(
+        &path.join(MANIFEST_FILE),
+        &serde_json::to_vec_pretty(&new_manifest)?,
+    )?;
 
     Ok(new_manifest)
+}
+
+/// Write `bytes` to `path` atomically: write to `<path>.tmp`, fsync the
+/// file, then rename over `path`. The rename is the commit point — on
+/// POSIX it is atomic against concurrent readers, and on a power-loss
+/// either the prior content or the new content is visible, never a
+/// partial write.
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("dat")
+    ));
+    {
+        let mut file = fs::File::create(&tmp)?;
+        io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)
 }
 
 fn canonical_manifest_bytes(manifest: &Manifest) -> Vec<u8> {
@@ -355,22 +392,37 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         write_fresh(&root, ProjectGeneration::with_id("generation-test")).expect("bundle writes");
 
+        // Read the manifest, change only `log_identity` (NOT the seal hashes),
+        // so the manifest-seal check still passes and the identity check is
+        // the failure mode that surfaces.
         let manifest_path = root.join(MANIFEST_FILE);
         let raw = fs::read_to_string(&manifest_path).expect("manifest readable");
         let mut value: serde_json::Value = serde_json::from_str(&raw).expect("manifest is json");
+        let original_identity = value["log_identity"].as_str().unwrap().to_string();
         value["log_identity"] = serde_json::Value::String("0".repeat(64));
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap())
-            .expect("manifest rewritten");
+        assert_ne!(value["log_identity"].as_str().unwrap(), original_identity);
+        // Re-seal the manifest so the seal checks still pass and the
+        // IdentityMismatch path is what surfaces.
+        let tampered_manifest: Manifest =
+            serde_json::from_value(value.clone()).expect("manifest decodes");
+        let mut re_sealed = tampered_manifest;
+        re_sealed.canonical_root_sha256 = hash(&canonical_manifest_bytes(&re_sealed));
+        re_sealed.seal_sha256 = hash(&sealed_manifest_bytes(&re_sealed));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&re_sealed).unwrap(),
+        )
+        .expect("manifest rewritten");
 
         let error = load(&root).expect_err("tampered log_identity must be rejected");
         match error {
-            BundleError::Invalid(detail) => {
+            BundleError::IdentityMismatch(detail) => {
                 assert!(
-                    detail.contains("log_identity") || detail.contains("canonical"),
+                    detail.contains("log_identity"),
                     "diagnostic must name the failing field; got {detail:?}"
                 );
             }
-            other => panic!("expected BundleError::Invalid, got {other:?}"),
+            other => panic!("expected BundleError::IdentityMismatch, got {other:?}"),
         }
         let _ = fs::remove_dir_all(root);
     }

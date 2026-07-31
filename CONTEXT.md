@@ -67,3 +67,9 @@ The non-durable focus, selection, gesture, command, preview, and recovery status
 
 **Gesture Acknowledgement**:
 A visible indication of a pending target, active tool or drag, selected result, cancellation, focus/resize recovery, or readiness. It makes transient input state observable without requiring hover, release, or pixel-coordinate events for correctness.
+
+**Command Intent**:
+A versioned, explicit-semantic-input description of one accepted command operation. Each intent carries a stable `kind` (`add-feature`, `set-parameter`, `remove-feature`, …) and the parameter set the host requires to evaluate it; the headless surface and the interactive surface submit the same intent shape through the versioned command schema.
+
+**Command Transaction**:
+One accepted Command Intent sealed as a UTF-8 NDJSON line and appended to the Canonical Transaction Log. The transaction record carries no worker artifacts or transient UI state; its identity is the canonical log digest it appends to, and its presence is the durable evidence that the operation was accepted.

@@ -85,7 +85,7 @@ pub static NEW_PROJECT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": ["destination"],
-        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "properties": { "destination": { "type": "string" } },
         "additionalProperties": false
     })
 });
@@ -116,7 +116,7 @@ pub static APPLY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "type": "object",
         "required": ["destination", "intent"],
         "properties": {
-            "destination": { "type": "string", "minLength": 1 },
+            "destination": { "type": "string" },
             "intent": { "type": "object" }
         },
         "additionalProperties": false
@@ -141,7 +141,7 @@ pub static IDENTITY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": ["destination"],
-        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "properties": { "destination": { "type": "string" } },
         "additionalProperties": false
     })
 });
@@ -164,7 +164,7 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": ["destination"],
-        "properties": { "destination": { "type": "string", "minLength": 1 } },
+        "properties": { "destination": { "type": "string" } },
         "additionalProperties": false
     })
 });

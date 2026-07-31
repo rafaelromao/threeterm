@@ -20,6 +20,10 @@ pub enum DiagnosticCode {
     /// is supplied without a value.
     UnknownCommand,
     PersistenceFailure,
+    /// The caller supplied an argument that the dispatcher could parse
+    /// as a command but whose request payload failed schema validation
+    /// (missing required field, malformed JSON, unknown enum variant).
+    InvalidRequest,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -43,6 +47,14 @@ impl Diagnostic {
     pub fn persistence_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::PersistenceFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn invalid_request(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::InvalidRequest,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

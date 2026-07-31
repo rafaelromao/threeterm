@@ -13,6 +13,7 @@ fn new_project_creates_and_reloads_one_empty_revision_bundle() {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("threeterm-new-project-{suffix}"));
     let output = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .arg("--machine")
         .arg("new-project")
         .arg(&root)
         .output()

@@ -189,6 +189,7 @@ fn check_occt(root: &Path) -> Result<OcctInstall, String> {
         "TKShHealing".to_string(),
         "TKMesh".to_string(),
         "TKXSBase".to_string(),
+        "TKOffset".to_string(),
     ];
     if !opencascade_include.is_dir() {
         return Err(format!(

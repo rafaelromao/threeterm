@@ -8,8 +8,8 @@
 
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, find,
-    registry_hash,
+    HOLE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
+    SAVE_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -32,7 +32,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "f6d42604eb9ecbfd6e71e54c67d18f4fcbccb95c7359ff6f6d07e83e79c446ed",
+        "1b0606449c6c4df966575448f9755269cdaffc3d56204c685408bce57042f412",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -191,4 +191,31 @@ fn registry_contains_versioned_revolve_contract() {
         ])
     );
     assert_eq!(revolve.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_mirror_contract() {
+    let mirror = find(MIRROR_COMMAND_ID).expect("mirror is registered");
+    assert_eq!(mirror.id, MIRROR_COMMAND_ID);
+    assert_eq!(mirror.name, "mirror");
+    assert_eq!(mirror.schema_version, "threeterm.command.mirror/1");
+    assert_eq!(
+        mirror.request_schema_version,
+        "threeterm.command.mirror.request/1"
+    );
+    assert_eq!(
+        mirror.response_schema_version,
+        "threeterm.command.mirror.response/1"
+    );
+    assert_eq!(
+        mirror.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "plane_point",
+            "plane_normal"
+        ])
+    );
+    assert_eq!(mirror.request_schema["additionalProperties"], false);
 }

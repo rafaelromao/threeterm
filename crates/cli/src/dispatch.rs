@@ -6,15 +6,16 @@ use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, Operation,
-    RevolveRequest,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, MirrorRequest,
+    Operation, RevolveRequest,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
+    LOAD_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -78,6 +79,13 @@ enum DispatchPlan {
         axis_direction: [f64; 3],
         angle: f64,
     },
+    Mirror {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        plane_point: [f64; 3],
+        plane_normal: [f64; 3],
+    },
     Unknown {
         arg: String,
     },
@@ -122,6 +130,7 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         "chamfer" => parse_chamfer(&args[2..]),
         "hole" => parse_hole(&args[2..]),
         "revolve" => parse_revolve(&args[2..]),
+        "mirror" => parse_mirror(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -766,6 +775,100 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_mirror(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "mirror".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut plane_point: Option<[f64; 3]> = None;
+    let mut plane_normal: Option<[f64; 3]> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--plane-point" => match parse_vec3(&value_str, "--plane-point") {
+                    Ok(parsed) => {
+                        plane_point = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(plan) => return plan,
+                },
+                "--plane-normal" => match parse_vec3(&value_str, "--plane-normal") {
+                    Ok(parsed) => {
+                        plane_normal = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(plan) => return plan,
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(plane_point) = plane_point else {
+        return DispatchPlan::Unknown {
+            arg: "--plane-point".to_string(),
+        };
+    };
+    let Some(plane_normal) = plane_normal else {
+        return DispatchPlan::Unknown {
+            arg: "--plane-normal".to_string(),
+        };
+    };
+    DispatchPlan::Mirror {
+        bundle,
+        feature_id,
+        base_feature_id,
+        plane_point,
+        plane_normal,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -856,6 +959,21 @@ where
             axis_point,
             axis_direction,
             angle,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Mirror {
+            bundle,
+            feature_id,
+            base_feature_id,
+            plane_point,
+            plane_normal,
+        } => emit_mirror(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            plane_point,
+            plane_normal,
             stdout,
             stderr,
         ),
@@ -1195,6 +1313,51 @@ fn emit_revolve(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_mirror(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = MirrorRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        plane_point,
+        plane_normal,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().mirror(bundle, request, &worker) {
+        Ok(view) => write_mirror_view(&view, MIRROR_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -1380,6 +1543,29 @@ fn write_revolve_view(
     )
 }
 
+fn write_mirror_view(
+    view: &threeterm_host::MirrorCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Mirror.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
@@ -1462,7 +1648,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 10);
+        assert_eq!(commands.len(), 11);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -1924,5 +2110,89 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "--axis-point 0,0.5");
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_mirror_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "mirror"], "mirror"),
+            (
+                vec!["--machine", "mirror", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "mirror",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "mirror-1",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "mirror",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "mirror-1",
+                    "--base",
+                    "box-1",
+                ],
+                "--plane-point",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "mirror",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "mirror-1",
+                    "--base",
+                    "box-1",
+                    "--plane-point",
+                    "0,0,0",
+                ],
+                "--plane-normal",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["code"], "unknown_command");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_mirror_with_malformed_plane_point() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "mirror",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "mirror-1",
+                "--base",
+                "box-1",
+                "--plane-point",
+                "0,0",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--plane-point 0,0");
     }
 }

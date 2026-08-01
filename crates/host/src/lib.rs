@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, OcctWorker,
-    RevolveRequest, RevolveResult, WorkerError,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, MirrorRequest,
+    MirrorResult, OcctWorker, RevolveRequest, RevolveResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
 use threeterm_protocol::artifact::{
@@ -80,6 +80,12 @@ pub struct HoleCommitView {
 pub struct RevolveCommitView {
     pub snapshot: SnapshotView,
     pub result: RevolveResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirrorCommitView {
+    pub snapshot: SnapshotView,
+    pub result: MirrorResult,
 }
 
 #[derive(Debug)]
@@ -633,6 +639,47 @@ impl Host {
         };
         let _ = prior_view;
         Ok(RevolveCommitView { snapshot, result })
+    }
+
+    /// Mirror `request` against the disposable OCCT worker and, on
+    /// success, commit the mirrored BREP into a new revision.
+    pub fn mirror(
+        &self,
+        root: impl AsRef<Path>,
+        request: MirrorRequest,
+        worker: &OcctWorker,
+    ) -> Result<MirrorCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.mirror(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "mirror returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(MirrorCommitView { snapshot, result })
     }
 }
 

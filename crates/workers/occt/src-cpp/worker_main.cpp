@@ -25,6 +25,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -956,6 +957,127 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
     }
 }
 
+bool handle_mirror(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    auto plane_point = get_vec3(request, "plane_point");
+    auto plane_normal = get_vec3(request, "plane_normal");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "mirror request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    for (double component : plane_point) {
+        if (!std::isfinite(component)) {
+            error = "mirror plane_point components must be finite";
+            return false;
+        }
+    }
+    for (double component : plane_normal) {
+        if (!std::isfinite(component)) {
+            error = "mirror plane_normal components must be finite";
+            return false;
+        }
+    }
+    double normal_norm_squared = plane_normal[0] * plane_normal[0] +
+                                  plane_normal[1] * plane_normal[1] +
+                                  plane_normal[2] * plane_normal[2];
+    if (normal_norm_squared == 0.0) {
+        error = "mirror plane_normal must be a non-zero vector";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        double norm = std::sqrt(normal_norm_squared);
+        gp_Pnt origin(plane_point[0], plane_point[1], plane_point[2]);
+        gp_Dir normal(plane_normal[0] / norm,
+                      plane_normal[1] / norm,
+                      plane_normal[2] / norm);
+        // gp_Ax2 requires a "X direction" reference axis orthogonal to
+        // the normal. Pick the first world axis not parallel to the
+        // plane normal so the coordinate system is unambiguously
+        // oriented (matches the hole path's reference-axis selection).
+        gp_Dir x_dir;
+        if (std::abs(normal.Z()) < 0.9) {
+            x_dir = gp::DX();
+        } else {
+            x_dir = gp::DY();
+        }
+        gp_Ax2 mirror_plane(origin, normal, x_dir);
+
+        gp_Trsf transform;
+        transform.SetMirror(mirror_plane);
+
+        BRepBuilderAPI_Transform mirror_op(base, transform, Standard_False, Standard_False);
+        mirror_op.Build();
+        if (!mirror_op.IsDone()) {
+            error = "BRepBuilderAPI_Transform did not complete";
+            return false;
+        }
+        TopoDS_Shape result = mirror_op.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"mirror\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during mirror: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during mirror: ";
+        error += e.what();
+        return false;
+    }
+}
+
 bool handle_revolve(const JsonParser::Value& request, std::string& error) {
     std::string request_id = get_string(request, "request_id");
     std::string feature_id = get_string(request, "feature_id");
@@ -1121,10 +1243,12 @@ int main() {
         success = handle_hole(envelope, error);
     } else if (operation == "revolve") {
         success = handle_revolve(envelope, error);
+    } else if (operation == "mirror") {
+        success = handle_mirror(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, or revolve");
+hole, revolve, or mirror");
         return 2;
     }
 

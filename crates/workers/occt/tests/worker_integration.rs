@@ -10,8 +10,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, OcctDiagnostic,
-    OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, MirrorRequest,
+    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -516,7 +516,102 @@ fn revolve_with_short_profile_returns_request_malformed() {
     match result {
         Err(WorkerError::Diagnostic(diag)) => {
             assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+fn mirror_request(label: &str, feature_id: &str, base_path: &std::path::Path) -> MirrorRequest {
+    MirrorRequest::new(
+        unique_request_id(label),
+        base_path,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    )
+    .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn mirror_extrude_across_plane_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-mirror-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let extrude_request =
+        triangle_extrude_request("mirror-base").with_output_path(&temp, "mirror-base.brep");
+    let base = worker.extrude(&extrude_request).expect("base extrude");
+    assert_eq!(base.status, "ok", "base extrude returned {:?}", base);
+    let base_path = base.brep_path.clone();
+
+    let request = mirror_request("mirror-1", "mirror-out-1", &base_path)
+        .with_output_path(&temp, "mirrored.brep");
+    let result = worker.mirror(&request).expect("mirror returns");
+    assert_eq!(result.status, "ok", "mirror returned {:?}", result);
+    assert_eq!(result.operation, Operation::Mirror);
+    assert_eq!(result.feature_id, "mirror-out-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "mirrored BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("mirrored BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "mirrored BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let base_bytes = std::fs::read(&base_path).expect("base BREP reads");
+    assert_ne!(
+        bytes, base_bytes,
+        "mirrored BREP must differ byte-for-byte from the source BREP"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn mirror_with_zero_plane_normal_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let mut request = mirror_request(
+        "mirror-no-normal",
+        "mirror-no-normal-1",
+        std::path::Path::new("/tmp/base.brep"),
+    );
+    request.plane_normal = [0.0, 0.0, 0.0];
+    let result = worker.mirror(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
             assert_eq!(diag.schema_version, schema_version());
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn mirror_with_non_finite_plane_normal_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let mut request = mirror_request(
+        "mirror-nan",
+        "mirror-nan-1",
+        std::path::Path::new("/tmp/base.brep"),
+    );
+    request.plane_normal = [f64::NAN, 0.0, 0.0];
+    let result = worker.mirror(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
     }

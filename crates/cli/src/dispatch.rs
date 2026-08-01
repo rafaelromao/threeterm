@@ -1386,7 +1386,12 @@ where
     emit_unknown_command(arg, stderr)
 }
 
-fn execute_handler(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+fn execute_handler(
+    plan: DispatchPlan,
+    request: &Value,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
     match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
@@ -1399,9 +1404,16 @@ fn execute_handler(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn 
         DispatchPlan::Extrude {
             bundle,
             feature_id,
-            profile_file,
             height,
-        } => emit_extrude(&bundle, &feature_id, &profile_file, height, stdout, stderr),
+            ..
+        } => emit_extrude(
+            &bundle,
+            &feature_id,
+            profile_from_request(request),
+            height,
+            stdout,
+            stderr,
+        ),
         DispatchPlan::BooleanFuse {
             bundle,
             feature_id,
@@ -1461,14 +1473,14 @@ fn execute_handler(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn 
         DispatchPlan::Revolve {
             bundle,
             feature_id,
-            profile_file,
             axis_point,
             axis_direction,
             angle,
+            ..
         } => emit_revolve(
             &bundle,
             &feature_id,
-            &profile_file,
+            profile_from_request(request),
             axis_point,
             axis_direction,
             angle,
@@ -1562,10 +1574,10 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     let Some((command, request)) = request_for(&plan) else {
         return emit_internal_error("parsed command has no registered schema", stderr);
     };
-    let result = execute(command, request, |_| {
+    let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
-        let exit = execute_handler(plan, &mut handler_stdout, &mut handler_stderr);
+        let exit = execute_handler(plan, &request, &mut handler_stdout, &mut handler_stderr);
         if exit != EXIT_OK {
             return Err((exit, handler_stderr));
         }
@@ -1800,21 +1812,19 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
     }
 }
 
+fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
+    serde_json::from_value(request["profile"].clone())
+        .expect("registered profile schema guarantees coordinate pairs")
+}
+
 fn emit_extrude(
     bundle: &str,
     feature_id: &str,
-    profile_file: &str,
+    profile: Vec<(f64, f64)>,
     height: f64,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let profile = match read_profile(profile_file) {
-        Ok(profile) => profile,
-        Err(error) => {
-            write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
-            return EXIT_PERSISTENCE_FAILURE;
-        }
-    };
     let worker = match threeterm_occt_worker::OcctWorker::locate() {
         Ok(worker) => worker,
         Err(error) => {
@@ -2020,20 +2030,13 @@ fn emit_hole(
 fn emit_revolve(
     bundle: &str,
     feature_id: &str,
-    profile_file: &str,
+    profile: Vec<(f64, f64)>,
     axis_point: [f64; 3],
     axis_direction: [f64; 3],
     angle: f64,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let profile = match read_profile(profile_file) {
-        Ok(profile) => profile,
-        Err(error) => {
-            write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
-            return EXIT_PERSISTENCE_FAILURE;
-        }
-    };
     let worker = match threeterm_occt_worker::OcctWorker::locate() {
         Ok(worker) => worker,
         Err(error) => {

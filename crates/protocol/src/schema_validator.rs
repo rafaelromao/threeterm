@@ -17,6 +17,7 @@
 //! Anything outside this subset is treated as "no constraint" so the
 //! validator can keep pace with the schema documents as the registry grows.
 
+use regex::Regex;
 use serde_json::Value;
 
 /// Validate `value` against the structural `schema`. Returns `Ok(())` on
@@ -44,19 +45,19 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
             "object" => validate_object_type(schema_object, value)?,
             "array" => validate_array_type(schema_object, value)?,
             "string" => {
-                if !value.is_string() {
-                    return Err(format!("expected string, got {value}"));
-                }
+                validate_string(schema_object, value)?;
             }
             "number" => {
                 if !value.is_number() {
                     return Err(format!("expected number, got {value}"));
                 }
+                validate_number(schema_object, value)?;
             }
             "integer" => {
                 if !value.is_i64() && !value.is_u64() {
                     return Err(format!("expected integer, got {value}"));
                 }
+                validate_number(schema_object, value)?;
             }
             "boolean" => {
                 if !value.is_boolean() {
@@ -72,6 +73,59 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {
+    let string = value
+        .as_str()
+        .ok_or_else(|| format!("expected string, got {value}"))?;
+    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+        && string.chars().count() < min_length as usize
+    {
+        return Err(format!("string must have at least {min_length} characters"));
+    }
+    if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+        let regex =
+            Regex::new(pattern).map_err(|error| format!("invalid pattern {pattern:?}: {error}"))?;
+        if !regex.is_match(string) {
+            return Err(format!(
+                "string {string:?} does not match pattern {pattern:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_number(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {
+    let number = value.as_f64().expect("number checked by caller");
+    for (keyword, valid) in [
+        (
+            "minimum",
+            schema
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .is_none_or(|minimum| number >= minimum),
+        ),
+        (
+            "maximum",
+            schema
+                .get("maximum")
+                .and_then(Value::as_f64)
+                .is_none_or(|maximum| number <= maximum),
+        ),
+        (
+            "exclusiveMinimum",
+            schema
+                .get("exclusiveMinimum")
+                .and_then(Value::as_f64)
+                .is_none_or(|minimum| number > minimum),
+        ),
+    ] {
+        if !valid {
+            return Err(format!("number {number} violates {keyword}"));
+        }
+    }
     Ok(())
 }
 
@@ -133,6 +187,17 @@ fn validate_array_type(
     let array = value
         .as_array()
         .ok_or_else(|| format!("expected array, got {value}"))?;
+
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
+        && array.len() < min_items as usize
+    {
+        return Err(format!("array must have at least {min_items} items"));
+    }
+    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64)
+        && array.len() > max_items as usize
+    {
+        return Err(format!("array must have at most {max_items} items"));
+    }
 
     if let Some(items) = schema.get("items") {
         for (index, item) in array.iter().enumerate() {

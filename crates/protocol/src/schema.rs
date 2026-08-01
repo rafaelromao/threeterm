@@ -1029,6 +1029,11 @@ pub fn find(command: CommandId) -> Option<&'static CommandSchema> {
     COMMAND_REGISTRY.get(&command)
 }
 
+/// Resolve a registered command from its presentation-neutral name.
+pub fn find_by_name(name: &str) -> Option<&'static CommandSchema> {
+    iter().find(|entry| entry.name == name)
+}
+
 /// Iterate the registered commands in stable insertion order.
 ///
 /// The slice (#233) seeds a single entry; later slices extend the table.

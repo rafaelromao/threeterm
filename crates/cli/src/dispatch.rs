@@ -2635,8 +2635,9 @@ fn response_schema_for(
             .ok_or_else(|| "missing new-project command schema".to_string());
     }
     if let Some(operation) = object.get("operation").and_then(Value::as_str) {
+        let command_id = operation.replace('_', "-");
         return iter()
-            .find(|entry| entry.id.0 == operation)
+            .find(|entry| entry.id.0 == command_id)
             .ok_or_else(|| format!("missing schema for operation {operation:?}"));
     }
     let schema_version = object

@@ -1708,6 +1708,34 @@ bool handle_draft(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
+        // `BRepOffsetAPI_DraftAngle` requires C1-continuous surfaces and
+        // refuses mixed-valence vertices. A BooleanFuse result typically
+        // carries internal seams and partial-merge edges that trip the
+        // draft algorithm (yielding a null shape or an OCCT exception).
+        // `ShapeUpgrade_UnifySameDomain` merges co-planar faces and
+        // smooth-continuous edges before the draft so the algorithm
+        // sees a clean shell.
+        Handle(ShapeUpgrade_UnifySameDomain) unifier =
+            new ShapeUpgrade_UnifySameDomain(base_solid);
+        unifier->AllowInternalEdges(Standard_False);
+        unifier->Build();
+        TopoDS_Shape unified = unifier->Shape();
+        if (unified.IsNull()) {
+            unified = base_solid;
+        }
+        if (unified.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(unified);
+        } else {
+            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More(); ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "draft base has no TopoDS_Solid after unification";
+            return false;
+        }
+
         gp_Dir pull_dir(pull_direction[0], pull_direction[1], pull_direction[2]);
         // `gp_Dir` normalizes a non-zero input vector; we already
         // rejected the zero vector above.

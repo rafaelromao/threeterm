@@ -50,7 +50,7 @@ impl WorkerHost for FakeWorker {
         Ok(())
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
         self.pending.pop_front().ok_or(WorkerError::Closed)
     }
 
@@ -157,7 +157,7 @@ impl WorkerHost for PipeHost {
             .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
         let frame = self.outbound.pop_front().ok_or(WorkerError::Closed)?;
         let envelopes = self
             .parser
@@ -549,8 +549,8 @@ impl WorkerHost for CapturingFake {
         self.inner.send(envelope)
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
-        self.inner.recv()
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -605,8 +605,8 @@ impl WorkerHost for CancelLoggingWorker {
         self.inner.send(envelope)
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
-        self.inner.recv()
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {

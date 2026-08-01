@@ -163,12 +163,15 @@ impl Supervisor {
 
         let deadline = started + self.grace;
         loop {
-            match self.host.recv() {
+            match self.host.recv(deadline) {
                 Ok(Envelope::Cancelled {
                     request_id: ack_request_id,
                     reason: ack_reason,
                     ..
                 }) => {
+                    if ack_request_id != request_id {
+                        continue;
+                    }
                     self.discard_stage();
                     return SupervisorOutcome::Acknowledged {
                         request_id: ack_request_id,
@@ -186,6 +189,15 @@ impl Supervisor {
                         request_id,
                         started,
                         "worker_closed",
+                        None,
+                        None,
+                    );
+                }
+                Err(WorkerError::TimedOut) => {
+                    return self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "cancel_grace_exceeded",
                         None,
                         None,
                     );
@@ -225,11 +237,10 @@ impl Supervisor {
         // Phase 1: consume one WorkerReady handshake. The worker must
         // advertise the canonical schema_version or the host fails
         // closed before sending any `Request`.
-        if let Some(outcome) = self.consume_worker_ready("<handshake>", started) {
+        let deadline = started + self.grace;
+        if let Some(outcome) = self.consume_worker_ready("<handshake>", started, deadline) {
             return outcome;
         }
-
-        let deadline = started + self.grace;
 
         // Phase 2: send the request envelope. Staged artifacts are
         // accumulated by `record_artifact`; the worker is expected to
@@ -254,7 +265,7 @@ impl Supervisor {
         let mut last_progress: Option<Progress> = None;
 
         loop {
-            match self.host.recv() {
+            match self.host.recv(deadline) {
                 Ok(Envelope::Progress { stage, percent, .. }) => {
                     last_progress = Some(Progress { stage, percent });
                 }
@@ -326,6 +337,15 @@ impl Supervisor {
                         last_progress.take(),
                     );
                 }
+                Err(WorkerError::TimedOut) => {
+                    return self.force_terminate_outcome(
+                        &request.request_id,
+                        started,
+                        "grace_exceeded",
+                        None,
+                        last_progress.take(),
+                    );
+                }
                 Err(error) => {
                     return self.force_terminate_outcome(
                         &request.request_id,
@@ -365,14 +385,24 @@ impl Supervisor {
         &mut self,
         request_id: &str,
         started: Instant,
+        deadline: Instant,
     ) -> Option<SupervisorOutcome> {
-        let envelope = match self.host.recv() {
+        let envelope = match self.host.recv(deadline) {
             Ok(envelope) => envelope,
             Err(WorkerError::Closed) => {
                 return Some(self.force_terminate_outcome(
                     request_id,
                     started,
                     "handshake_worker_closed",
+                    None,
+                    None,
+                ));
+            }
+            Err(WorkerError::TimedOut) => {
+                return Some(self.force_terminate_outcome(
+                    request_id,
+                    started,
+                    "handshake_grace_exceeded",
                     None,
                     None,
                 ));
@@ -581,6 +611,7 @@ mod tests {
     use super::*;
     use crate::worker::WorkerHost;
     use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     /// A fake worker that serves a scripted sequence of envelopes to
     /// `recv` and records every envelope it received via `send`. The
@@ -588,17 +619,32 @@ mod tests {
     /// with a sub-millisecond `Duration`.
     struct ScriptedWorker {
         received: Vec<Envelope>,
-        script: VecDeque<Envelope>,
+        script: VecDeque<Result<Envelope, WorkerError>>,
         cancel_calls: Vec<(String, String)>,
+        terminated: Arc<Mutex<usize>>,
     }
 
     impl ScriptedWorker {
         fn new(script: Vec<Envelope>) -> Self {
             Self {
                 received: Vec::new(),
-                script: script.into(),
+                script: script.into_iter().map(Ok).collect(),
                 cancel_calls: Vec::new(),
+                terminated: Arc::new(Mutex::new(0)),
             }
+        }
+
+        fn with_results(script: Vec<Result<Envelope, WorkerError>>) -> (Self, Arc<Mutex<usize>>) {
+            let terminated = Arc::new(Mutex::new(0));
+            (
+                Self {
+                    received: Vec::new(),
+                    script: script.into(),
+                    cancel_calls: Vec::new(),
+                    terminated: Arc::clone(&terminated),
+                },
+                terminated,
+            )
         }
     }
 
@@ -615,13 +661,18 @@ mod tests {
             Ok(())
         }
 
-        fn recv(&mut self) -> Result<Envelope, WorkerError> {
-            self.script.pop_front().ok_or(WorkerError::Closed)
+        fn recv(&mut self, _deadline: Instant) -> Result<Envelope, WorkerError> {
+            self.script.pop_front().unwrap_or(Err(WorkerError::Closed))
         }
 
         fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
             self.cancel_calls
                 .push((request_id.to_string(), reason.to_string()));
+            Ok(())
+        }
+
+        fn terminate(&mut self) -> Result<(), WorkerError> {
+            *self.terminated.lock().expect("termination log mutex") += 1;
             Ok(())
         }
     }
@@ -742,6 +793,61 @@ mod tests {
             }
             other => panic!("expected ForceTerminated; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_force_terminates_when_handshake_receive_times_out() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![Err(WorkerError::TimedOut)]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "handshake_grace_exceeded");
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn request_force_terminates_when_terminal_receive_times_out() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![
+            Ok(ready_envelope()),
+            Ok(Envelope::Progress {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                stage: "tessellating".to_string(),
+                percent: 50,
+            }),
+            Err(WorkerError::TimedOut),
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "grace_exceeded");
+        assert_eq!(
+            record.last_progress,
+            Some(Progress {
+                stage: "tessellating".to_string(),
+                percent: 50
+            })
+        );
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn cancel_force_terminates_when_acknowledgement_receive_times_out() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![Err(WorkerError::TimedOut)]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop")
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "cancel_grace_exceeded");
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }
 
     #[test]

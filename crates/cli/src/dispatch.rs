@@ -173,7 +173,7 @@ fn parse_bracket(args: &[OsString]) -> DispatchPlan {
                 arg: flag.into_owned(),
             };
         };
-        let parsed = match flag.as_ref() {
+        match flag.as_ref() {
             "--bracket-id" => bracket_id = Some(value.to_string_lossy().into_owned()),
             "--length" => match parse_dimension(&value.to_string_lossy()) {
                 Some(number) => length = Some(number),
@@ -212,8 +212,7 @@ fn parse_bracket(args: &[OsString]) -> DispatchPlan {
                     arg: flag.into_owned(),
                 };
             }
-        };
-        let _ = parsed;
+        }
         index += 2;
     }
 
@@ -278,7 +277,14 @@ where
             height,
             thickness,
         } => emit_bracket(
-            &bundle, &bracket_id, length, width, height, thickness, stdout, stderr,
+            &bundle,
+            &bracket_id,
+            length,
+            width,
+            height,
+            thickness,
+            stdout,
+            stderr,
         ),
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
@@ -407,6 +413,7 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_bracket(
     bundle: &str,
     bracket_id: &str,

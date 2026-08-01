@@ -1,3 +1,5 @@
+pub mod server;
+
 pub fn schema_version() -> &'static str {
     "threeterm.mcp/1"
 }

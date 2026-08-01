@@ -63,7 +63,10 @@ fn machine_bracket_appends_two_plate_features_and_load_returns_identical_hashes(
     for key in ["feature_graph_hash", "revision_hash"] {
         let hash = saved[key].as_str().expect("hash is a string");
         assert_eq!(hash.len(), 64);
-        assert!(hash.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        );
     }
 
     let transactions =
@@ -131,8 +134,7 @@ fn machine_bracket_on_tampered_bundle_returns_integrity_diagnostic_and_preserves
     )
     .expect("manifest writes");
 
-    let manifest_before_failure =
-        fs::read(&manifest_path).expect("manifest reads after tampering");
+    let manifest_before_failure = fs::read(&manifest_path).expect("manifest reads after tampering");
     let transactions_before =
         fs::read(root.join("transactions.log")).expect("transactions log after tampering");
 
@@ -153,8 +155,15 @@ fn machine_bracket_on_tampered_bundle_returns_integrity_diagnostic_and_preserves
         ])
         .output()
         .expect("bracket process runs");
-    assert_eq!(failed.status.code(), Some(2), "bracket on tampered bundle exits 2");
-    assert!(failed.stdout.is_empty(), "stdout must be empty on integrity failure");
+    assert_eq!(
+        failed.status.code(),
+        Some(2),
+        "bracket on tampered bundle exits 2"
+    );
+    assert!(
+        failed.stdout.is_empty(),
+        "stdout must be empty on integrity failure"
+    );
     let diagnostic: Value = serde_json::from_slice(&failed.stderr).expect("diagnostic is JSON");
     assert_eq!(diagnostic["code"], "integrity_failure");
     assert_eq!(diagnostic["arg"], "log_digest_mismatch");

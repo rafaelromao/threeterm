@@ -421,6 +421,13 @@ impl Host {
         }
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
+        if !root.exists() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepIo {
+                detail: "cannot commit a BREP while recovering a sealed previous generation"
+                    .to_string(),
+            });
+        }
         let prior_view = SnapshotView::from(&loaded);
         let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
         let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
@@ -457,6 +464,16 @@ impl Host {
         let updated = match bundle.append_feature(feature_id, &kind) {
             Ok(loaded) => loaded,
             Err(error) => {
+                if let (Ok(manifest), Ok(log)) = (
+                    read_bundle_file(&bundle_root(root), "manifest.json"),
+                    read_bundle_file(&bundle_root(root), "transactions.log"),
+                ) && (manifest != prior_manifest || log != prior_log)
+                {
+                    if let Ok(committed) = bundle.open() {
+                        self.current.replace(Some(committed));
+                    }
+                    return Err(HostError::from(error));
+                }
                 // Restore the prior BREP bytes (or remove the new file if
                 // there was no prior) and verify the canonical state
                 // survived. The prior manifest and log are untouched
@@ -465,13 +482,6 @@ impl Host {
                 // Fail-closed: if the canonical state was not preserved
                 // by the append, surface the persistence error so the
                 // diagnostic taxonomy sees the failure.
-                if let (Ok(m), Ok(l)) = (
-                    read_bundle_file(&bundle_root(root), "manifest.json"),
-                    read_bundle_file(&bundle_root(root), "transactions.log"),
-                ) && (m != prior_manifest || l != prior_log)
-                {
-                    return Err(HostError::from(error));
-                }
                 self.current.replace(Some(loaded));
                 return Err(HostError::from(error));
             }

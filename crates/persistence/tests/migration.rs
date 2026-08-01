@@ -263,6 +263,8 @@ fn interrupted_migration_promotion_restores_the_v0_source_and_retains_staging() 
         std::process::id()
     ));
     assert!(staging.exists(), "sealed replacement remains available");
+    let retried = load(&root).expect("retained backup permits migration retry");
+    assert_eq!(retried.manifest.schema_version, schema_epoch());
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(staging);
 }

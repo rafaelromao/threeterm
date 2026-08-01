@@ -734,8 +734,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     if !destination.exists() {
         fs::rename(staging, destination)?;
         if let Some(parent) = destination.parent() {
-            let _ = fail_if_injected(PublicationFailurePoint::ParentSync);
-            let _ = File::open(parent).and_then(|parent| parent.sync_all());
+            fail_if_injected(PublicationFailurePoint::ParentSync)?;
+            File::open(parent)?.sync_all()?;
         }
         return Ok(());
     }
@@ -761,10 +761,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         return Err(error);
     }
     if let Some(parent) = destination.parent() {
-        // Promotion is already visible. Reporting a late parent-sync error as
-        // an uncommitted append would desynchronise host-managed BREP data.
-        let _ = fail_if_injected(PublicationFailurePoint::ParentSync);
-        let _ = File::open(parent).and_then(|parent| parent.sync_all());
+        fail_if_injected(PublicationFailurePoint::ParentSync)?;
+        File::open(parent)?.sync_all()?;
     }
     if retired.exists() {
         let _ = fs::remove_dir_all(retired);
@@ -774,10 +772,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
 
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
     if backup.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("backup path already exists: {}", backup.display()),
-        ));
+        return Ok(());
     }
     copy_dir_recursive(source, backup)
 }

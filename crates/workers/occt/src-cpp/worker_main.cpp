@@ -382,37 +382,53 @@ std::array<double, 3> get_vec3(const JsonParser::Value& object, const std::strin
     return result;
 }
 
-bool get_bool(const JsonParser::Value& object, const std::string& key, bool default_value) {
+bool get_bool(const JsonParser::Value& object, const std::string& key, bool default_value,
+              std::string& error) {
     const auto* value = find_field(object, key);
     if (value == nullptr) return default_value;
     if (value->kind == JsonParser::ValueKind::Bool) return value->bool_value;
-    if (value->kind == JsonParser::ValueKind::Number) return value->number_value != 0.0;
+    error = key + " must be a boolean";
     return default_value;
 }
 
-std::vector<std::vector<std::array<double, 3>>> get_profiles(const JsonParser::Value& object,
-                                                              const std::string& key) {
-    std::vector<std::vector<std::array<double, 3>>> result;
+bool get_profiles(const JsonParser::Value& object, const std::string& key,
+                  std::vector<std::vector<std::array<double, 3>>>& result, std::string& error) {
+    result.clear();
     const auto* value = find_field(object, key);
-    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) return result;
+    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) {
+        error = "loft profiles must be an array";
+        return false;
+    }
     result.reserve(value->array_value.size());
-    for (const auto& profile_value : value->array_value) {
-        if (profile_value.kind != JsonParser::ValueKind::Array) continue;
+    for (std::size_t profile_index = 0; profile_index < value->array_value.size(); ++profile_index) {
+        const auto& profile_value = value->array_value[profile_index];
+        if (profile_value.kind != JsonParser::ValueKind::Array) {
+            error = "loft profile " + std::to_string(profile_index) + " must be an array";
+            return false;
+        }
         std::vector<std::array<double, 3>> profile;
         profile.reserve(profile_value.array_value.size());
-        for (const auto& vertex : profile_value.array_value) {
-            if (vertex.kind != JsonParser::ValueKind::Array) continue;
-            if (vertex.array_value.size() != 3) continue;
-            if (vertex.array_value[0].kind != JsonParser::ValueKind::Number) continue;
-            if (vertex.array_value[1].kind != JsonParser::ValueKind::Number) continue;
-            if (vertex.array_value[2].kind != JsonParser::ValueKind::Number) continue;
+        for (std::size_t vertex_index = 0; vertex_index < profile_value.array_value.size(); ++vertex_index) {
+            const auto& vertex = profile_value.array_value[vertex_index];
+            if (vertex.kind != JsonParser::ValueKind::Array || vertex.array_value.size() != 3) {
+                error = "loft profile " + std::to_string(profile_index) + " vertex " +
+                        std::to_string(vertex_index) + " must be an array of exactly 3 numbers";
+                return false;
+            }
+            for (const auto& coordinate : vertex.array_value) {
+                if (coordinate.kind != JsonParser::ValueKind::Number) {
+                    error = "loft profile " + std::to_string(profile_index) + " vertex " +
+                            std::to_string(vertex_index) + " must contain only numbers";
+                    return false;
+                }
+            }
             profile.push_back({vertex.array_value[0].number_value,
                                vertex.array_value[1].number_value,
                                vertex.array_value[2].number_value});
         }
         result.push_back(std::move(profile));
     }
-    return result;
+    return true;
 }
 
 std::string sha256_hex(const std::string& bytes) {
@@ -1925,10 +1941,12 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
     std::string feature_id = get_string(request, "feature_id");
     std::string output_dir = get_string(request, "output_dir");
     std::string output_filename = get_string(request, "output_filename");
-    std::vector<std::vector<std::array<double, 3>>> profiles =
-        get_profiles(request, "profiles");
-    bool is_solid = get_bool(request, "is_solid", true);
-    bool ruled = get_bool(request, "ruled", false);
+    std::vector<std::vector<std::array<double, 3>>> profiles;
+    if (!get_profiles(request, "profiles", profiles, error)) return false;
+    bool is_solid = get_bool(request, "is_solid", true, error);
+    if (!error.empty()) return false;
+    bool ruled = get_bool(request, "ruled", false, error);
+    if (!error.empty()) return false;
 
     if (request_id.empty() || feature_id.empty() || output_dir.empty() || output_filename.empty()) {
         error = "loft request is missing required string fields";

@@ -1491,9 +1491,11 @@ pub struct LoftRequest {
     pub profiles: Vec<Vec<[f64; 3]>>,
     /// Build a closed solid (default `true`). When `false` the result
     /// is an open shell.
+    #[serde(default = "loft_default_is_solid")]
     pub is_solid: bool,
     /// Use ruled (flat) faces between consecutive profiles (default
     /// `false`, smooth interpolation).
+    #[serde(default = "loft_default_ruled")]
     pub ruled: bool,
     /// Output directory where the worker writes the BREP file.
     pub output_dir: PathBuf,
@@ -1503,6 +1505,14 @@ pub struct LoftRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+}
+
+fn loft_default_is_solid() -> bool {
+    true
+}
+
+fn loft_default_ruled() -> bool {
+    false
 }
 
 impl LoftRequest {
@@ -3005,6 +3015,26 @@ mod tests {
             "rogue_key": true
         }"#;
         assert!(serde_json::from_str::<LoftRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn loft_envelope_defaults_omitted_flag_fields() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "loft",
+            "profiles": [
+                [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
+                [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]
+            ],
+            "output_dir": "/tmp",
+            "output_filename": "loft.brep",
+            "feature_id": "loft-1"
+        }"#;
+        let request: LoftRequest =
+            serde_json::from_str(raw).expect("minimal loft request deserializes");
+        assert!(request.is_solid);
+        assert!(!request.ruled);
     }
 
     #[test]

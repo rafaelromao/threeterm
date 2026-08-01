@@ -122,7 +122,6 @@ enum DispatchPlan {
     Loft {
         bundle: String,
         feature_id: String,
-        base_feature_id: String,
         profile_files: Vec<String>,
         is_solid: bool,
         ruled: bool,
@@ -1384,7 +1383,6 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
     }
     let mut bundle: Option<String> = None;
     let mut feature_id: Option<String> = None;
-    let mut base_feature_id: Option<String> = None;
     let mut profile_files: Vec<String> = Vec::new();
     let mut is_solid = true;
     let mut ruled = false;
@@ -1401,11 +1399,6 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
-                    index += 2;
-                    continue;
-                }
-                "--base" => {
-                    base_feature_id = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -1468,7 +1461,6 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
     DispatchPlan::Loft {
         bundle,
         feature_id,
-        base_feature_id: base_feature_id.unwrap_or_default(),
         profile_files,
         is_solid,
         ruled,
@@ -1650,14 +1642,12 @@ where
         DispatchPlan::Loft {
             bundle,
             feature_id,
-            base_feature_id,
             profile_files,
             is_solid,
             ruled,
         } => emit_loft(
             &bundle,
             &feature_id,
-            &base_feature_id,
             &profile_files,
             is_solid,
             ruled,
@@ -2243,7 +2233,6 @@ fn emit_draft(
 fn emit_loft(
     bundle: &str,
     feature_id: &str,
-    _base_feature_id: &str,
     profile_files: &[String],
     is_solid: bool,
     ruled: bool,

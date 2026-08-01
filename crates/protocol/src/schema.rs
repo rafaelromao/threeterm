@@ -731,7 +731,6 @@ pub static LOFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
-            "base_feature_id": { "type": "string" },
             "profiles": {
                 "type": "array",
                 "minItems": 2,

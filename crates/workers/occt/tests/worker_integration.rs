@@ -7,7 +7,11 @@
 //! installs `opencascade` via `pacman` so the binary is built and the
 //! tests exercise the production code path end-to-end.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::Write,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
@@ -1140,6 +1144,29 @@ fn canonical_loft_request() -> LoftRequest {
     .with_feature_id("loft-1")
 }
 
+fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str) {
+    let mut child = Command::new(worker.binary_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("worker spawns");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin open")
+        .write_all(request.as_bytes())
+        .expect("stdin writes");
+    let output = child.wait_with_output().expect("worker waits");
+    assert!(
+        !output.status.success(),
+        "worker must reject malformed loft requests"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("request_malformed"), "got {stderr}");
+    assert!(stderr.contains(detail), "got {stderr}");
+}
+
 #[test]
 fn loft_two_rectangles_returns_ok_with_real_brep() {
     let Some(worker) = locate_worker() else {
@@ -1199,4 +1226,51 @@ fn loft_with_single_profile_returns_request_malformed() {
     }
 
     let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn loft_with_malformed_profile_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_raw_loft_is_malformed(
+        &worker,
+        r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-malformed-profile",
+            "operation": "loft",
+            "feature_id": "loft-1",
+            "output_dir": "/tmp",
+            "output_filename": "loft.brep",
+            "profiles": [
+                [[0.0, 0.0, 0.0], "invalid", [10.0, 10.0, 0.0]],
+                [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]
+            ]
+        }"#,
+        "vertex 1",
+    );
+}
+
+#[test]
+fn loft_with_non_boolean_flag_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_raw_loft_is_malformed(
+        &worker,
+        r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-malformed-flag",
+            "operation": "loft",
+            "feature_id": "loft-1",
+            "output_dir": "/tmp",
+            "output_filename": "loft.brep",
+            "is_solid": 1,
+            "profiles": [
+                [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]],
+                [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]
+            ]
+        }"#,
+        "is_solid must be a boolean",
+    );
 }

@@ -29,10 +29,7 @@ use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 #[allow(unused_imports)]
 use threeterm_protocol::schema::find as _find;
-use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, CommandSchema, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID,
-    iter,
-};
+use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandSchema, iter};
 use threeterm_protocol::schema_validator::validate;
 
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -205,20 +202,11 @@ impl McpServer {
 
         let result = match schema_entry.id {
             BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
-            SAVE_COMMAND_ID | LOAD_COMMAND_ID | NEW_PROJECT_COMMAND_ID => {
-                Err(DispatchError::Host(threeterm_host::HostError::Persistence(
-                    threeterm_persistence::BundleError::Invalid(
-                        "this tool is reserved for a future slice; use --machine on the CLI for now"
-                            .to_string(),
-                    ),
-                )))
-            }
-            _ => Err(DispatchError::Host(threeterm_host::HostError::Persistence(
-                threeterm_persistence::BundleError::Invalid(format!(
-                    "unhandled tool: {:?}",
-                    schema_entry.id
-                )),
-            ))),
+            other => Err(DispatchError::UnsupportedTool {
+                wire_name: name.to_string(),
+                schema_version: schema_entry.schema_version.to_string(),
+                _command: other,
+            }),
         };
 
         match result {
@@ -241,11 +229,18 @@ impl McpServer {
                 });
                 JsonRpcResponse::success(request.id.clone(), envelope)
             }
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ERROR_INTERNAL,
-                format!("host dispatch failed: {}", error),
-            ),
+            Err(error) => match error {
+                DispatchError::UnsupportedTool { .. } => JsonRpcResponse::error(
+                    request.id.clone(),
+                    ERROR_METHOD_NOT_FOUND,
+                    format!("{error}"),
+                ),
+                DispatchError::Host(_) | DispatchError::Validation(_) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    ERROR_INTERNAL,
+                    format!("host dispatch failed: {error}"),
+                ),
+            },
         }
     }
 

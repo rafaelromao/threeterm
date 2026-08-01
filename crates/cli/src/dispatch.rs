@@ -317,6 +317,16 @@ pub fn dispatch_bracket(
 pub enum DispatchError {
     Host(HostError),
     Validation(String),
+    /// The transport cannot dispatch this registered tool in the current
+    /// slice (e.g. the MCP transport advertises every registry command but
+    /// only dispatches `bracket` here). The CLI never emits this variant
+    /// because the CLI's argv parser rejects unknown commands before the
+    /// dispatcher runs.
+    UnsupportedTool {
+        wire_name: String,
+        schema_version: String,
+        _command: threeterm_protocol::schema::CommandId,
+    },
 }
 
 impl From<HostError> for DispatchError {
@@ -335,6 +345,13 @@ impl DispatchError {
                 HostError::Persistence(error) => error.diagnostic_detail().to_string(),
             },
             Self::Validation(detail) => format!("dispatch_validation: {detail}"),
+            Self::UnsupportedTool {
+                wire_name,
+                schema_version,
+                ..
+            } => format!(
+                "tool {wire_name:?} (schema_version {schema_version:?}) is not dispatched by this transport in the current slice"
+            ),
         }
     }
 }
@@ -344,6 +361,14 @@ impl std::fmt::Display for DispatchError {
         match self {
             Self::Host(error) => write!(formatter, "{error}"),
             Self::Validation(detail) => write!(formatter, "dispatch.validation: {detail}"),
+            Self::UnsupportedTool {
+                wire_name,
+                schema_version,
+                ..
+            } => write!(
+                formatter,
+                "tool {wire_name:?} (schema_version {schema_version:?}) is not dispatched by this transport in the current slice"
+            ),
         }
     }
 }
@@ -447,6 +472,9 @@ fn emit_bracket(
             DispatchError::Validation(detail) => {
                 emit_internal_error(&format!("bracket validation: {detail}"), stderr)
             }
+            DispatchError::UnsupportedTool { .. } => unreachable!(
+                "CLI dispatch_bracket never emits UnsupportedTool; the argv parser rejects unknown commands first"
+            ),
         },
     }
 }

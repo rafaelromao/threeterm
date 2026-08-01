@@ -977,13 +977,6 @@ fn read_required(path: &Path, missing: BundleError) -> Result<Vec<u8>, BundleErr
     }
 }
 
-fn append_and_sync(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
     let file_name = path
         .file_name()

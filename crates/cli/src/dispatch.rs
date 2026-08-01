@@ -12,12 +12,6 @@ use threeterm_occt_worker::{
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
-use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, MIRROR_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
-    REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, iter,
-};
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
@@ -26,7 +20,7 @@ pub use threeterm_protocol::schema::{
     MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
     SHELL_RESPONSE_SCHEMA_VERSION,
 };
-use threeterm_protocol::schema_validator::validate;
+use threeterm_protocol::schema::{CommandId, find_by_name, iter};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
@@ -157,7 +151,7 @@ fn plan(args: &[OsString]) -> DispatchPlan {
             arg: "--machine".to_string(),
         };
     };
-    match command {
+    let parsed = match command {
         "list" if args.len() == 2 => DispatchPlan::List,
         "new-project" if args.len() == 3 => DispatchPlan::NewProject {
             path: args[2].to_string_lossy().into_owned(),
@@ -178,6 +172,81 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
+    };
+    reject_non_finite(parsed)
+}
+
+fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
+    let finite = match &plan {
+        DispatchPlan::Extrude { height, .. }
+        | DispatchPlan::Fillet { radius: height, .. }
+        | DispatchPlan::Chamfer {
+            distance: height, ..
+        }
+        | DispatchPlan::Shell {
+            thickness: height, ..
+        }
+        | DispatchPlan::Draft { angle: height, .. } => height.is_finite(),
+        DispatchPlan::Hole {
+            position,
+            direction,
+            diameter,
+            ..
+        } => {
+            position
+                .iter()
+                .chain(direction)
+                .all(|value| value.is_finite())
+                && diameter.is_finite()
+        }
+        DispatchPlan::Revolve {
+            axis_point,
+            axis_direction,
+            angle,
+            ..
+        } => {
+            axis_point
+                .iter()
+                .chain(axis_direction)
+                .all(|value| value.is_finite())
+                && angle.is_finite()
+        }
+        DispatchPlan::Mirror {
+            plane_point,
+            plane_normal,
+            ..
+        } => plane_point
+            .iter()
+            .chain(plane_normal)
+            .all(|value| value.is_finite()),
+        DispatchPlan::LinearPattern {
+            direction, spacing, ..
+        } => direction.iter().all(|value| value.is_finite()) && spacing.is_finite(),
+        DispatchPlan::CircularPattern {
+            axis_point,
+            axis_normal,
+            angle_step,
+            ..
+        } => {
+            axis_point
+                .iter()
+                .chain(axis_normal)
+                .all(|value| value.is_finite())
+                && angle_step.is_finite()
+        }
+        DispatchPlan::List
+        | DispatchPlan::NewProject { .. }
+        | DispatchPlan::Save { .. }
+        | DispatchPlan::Load { .. }
+        | DispatchPlan::BooleanFuse { .. }
+        | DispatchPlan::Unknown { .. } => true,
+    };
+    if finite {
+        plan
+    } else {
+        DispatchPlan::Unknown {
+            arg: "non-finite numeric value".to_string(),
+        }
     }
 }
 
@@ -1606,30 +1675,26 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     }
 }
 
-fn request_for(
-    plan: &DispatchPlan,
-) -> Result<Option<(threeterm_protocol::schema::CommandId, Value)>, String> {
-    Ok(Some(match plan {
-        DispatchPlan::List => (LIST_COMMAND_ID, json!({})),
-        DispatchPlan::NewProject { path } => {
-            (NEW_PROJECT_COMMAND_ID, json!({ "destination": path }))
-        }
+fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String> {
+    let (name, request) = match plan {
+        DispatchPlan::List => ("list", json!({})),
+        DispatchPlan::NewProject { path } => ("new-project", json!({ "destination": path })),
         DispatchPlan::Save {
             bundle,
             feature_id,
             kind,
         } => (
-            SAVE_COMMAND_ID,
+            "save",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
         ),
-        DispatchPlan::Load { bundle } => (LOAD_COMMAND_ID, json!({ "bundle_path": bundle })),
+        DispatchPlan::Load { bundle } => ("load", json!({ "bundle_path": bundle })),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
             profile_file,
             height,
         } => (
-            EXTRUDE_COMMAND_ID,
+            "extrude",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height }),
         ),
         DispatchPlan::BooleanFuse {
@@ -1638,7 +1703,7 @@ fn request_for(
             base_feature_id,
             tool_feature_id,
         } => (
-            BOOLEAN_FUSE_COMMAND_ID,
+            "boolean-fuse",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id }),
         ),
         DispatchPlan::Fillet {
@@ -1647,7 +1712,7 @@ fn request_for(
             base_feature_id,
             radius,
         } => (
-            FILLET_COMMAND_ID,
+            "fillet",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius }),
         ),
         DispatchPlan::Chamfer {
@@ -1656,7 +1721,7 @@ fn request_for(
             base_feature_id,
             distance,
         } => (
-            CHAMFER_COMMAND_ID,
+            "chamfer",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance }),
         ),
         DispatchPlan::Hole {
@@ -1667,7 +1732,7 @@ fn request_for(
             direction,
             diameter,
         } => (
-            HOLE_COMMAND_ID,
+            "hole",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter }),
         ),
         DispatchPlan::Revolve {
@@ -1678,7 +1743,7 @@ fn request_for(
             axis_direction,
             angle,
         } => (
-            REVOLVE_COMMAND_ID,
+            "revolve",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle }),
         ),
         DispatchPlan::Mirror {
@@ -1688,7 +1753,7 @@ fn request_for(
             plane_point,
             plane_normal,
         } => (
-            MIRROR_COMMAND_ID,
+            "mirror",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal }),
         ),
         DispatchPlan::LinearPattern {
@@ -1699,7 +1764,7 @@ fn request_for(
             count,
             spacing,
         } => (
-            LINEAR_PATTERN_COMMAND_ID,
+            "linear-pattern",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing }),
         ),
         DispatchPlan::CircularPattern {
@@ -1711,7 +1776,7 @@ fn request_for(
             angle_step,
             count,
         } => (
-            CIRCULAR_PATTERN_COMMAND_ID,
+            "circular-pattern",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count }),
         ),
         DispatchPlan::Shell {
@@ -1720,7 +1785,7 @@ fn request_for(
             base_feature_id,
             thickness,
         } => (
-            SHELL_COMMAND_ID,
+            "shell",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness }),
         ),
         DispatchPlan::Draft {
@@ -1730,11 +1795,15 @@ fn request_for(
             angle,
             pull_direction,
         } => (
-            DRAFT_COMMAND_ID,
+            "draft",
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
         ),
         DispatchPlan::Unknown { .. } => return Ok(None),
-    }))
+    };
+    let command = find_by_name(name)
+        .map(|schema| schema.id)
+        .ok_or_else(|| format!("registered command {name:?} is missing"))?;
+    Ok(Some((command, request)))
 }
 
 fn profile_json(profile_file: &str) -> Result<Value, String> {
@@ -2605,16 +2674,6 @@ fn write_draft_view(
 }
 
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
-    let response_schema = match response_schema_for(value) {
-        Ok(schema) => schema,
-        Err(error) => return emit_internal_error(&error, stderr),
-    };
-    if let Err(error) = validate(&response_schema.response_schema, value) {
-        return emit_internal_error(
-            &format!("response violates registered schema: {error}"),
-            stderr,
-        );
-    }
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
             let _ = writeln!(stdout);
@@ -2622,34 +2681,6 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
         }
         Err(error) => emit_internal_error(&format!("response write failed: {error}"), stderr),
     }
-}
-
-fn response_schema_for(
-    value: &Value,
-) -> Result<&'static threeterm_protocol::schema::CommandSchema, String> {
-    if value.is_array() {
-        return find(LIST_COMMAND_ID).ok_or_else(|| "missing list command schema".to_string());
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| "successful response must be an object or array".to_string())?;
-    if object.contains_key("generation_id") {
-        return find(NEW_PROJECT_COMMAND_ID)
-            .ok_or_else(|| "missing new-project command schema".to_string());
-    }
-    if let Some(operation) = object.get("operation").and_then(Value::as_str) {
-        let command_id = operation.replace('_', "-");
-        return iter()
-            .find(|entry| entry.id.0 == command_id)
-            .ok_or_else(|| format!("missing schema for operation {operation:?}"));
-    }
-    let schema_version = object
-        .get("schema_version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "successful response has no schema discriminator".to_string())?;
-    iter()
-        .find(|entry| entry.response_schema_version == schema_version)
-        .ok_or_else(|| format!("missing response schema {schema_version:?}"))
 }
 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
@@ -3780,6 +3811,48 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "--angle inf");
+    }
+
+    #[test]
+    fn dispatch_rejects_non_finite_values_before_serializing_requests() {
+        for arguments in [
+            vec![
+                "--machine",
+                "extrude",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "extrude-1",
+                "--profile-file",
+                "missing.json",
+                "--height",
+                "inf",
+            ],
+            vec![
+                "--machine",
+                "hole",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "hole-1",
+                "--base",
+                "box-1",
+                "--position",
+                "inf,0,0",
+                "--direction",
+                "0,0,1",
+                "--diameter",
+                "1",
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["code"], "unknown_command");
+            assert_eq!(parsed["arg"], "non-finite numeric value");
+        }
     }
 
     #[test]

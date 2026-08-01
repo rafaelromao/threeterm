@@ -10,9 +10,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest,
-    LinearPatternRequest, MirrorRequest, OcctDiagnostic, OcctWorker, Operation, RevolveRequest,
-    WorkerError, schema_version,
+    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
+    HoleRequest, LinearPatternRequest, MirrorRequest, OcctDiagnostic, OcctWorker, Operation,
+    RevolveRequest, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -866,6 +866,249 @@ fn linear_pattern_with_zero_spacing_returns_request_malformed() {
     );
     request.spacing = 0.0;
     let result = worker.linear_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+fn circular_pattern_request(
+    label: &str,
+    feature_id: &str,
+    base_path: &std::path::Path,
+) -> CircularPatternRequest {
+    CircularPatternRequest::new(
+        unique_request_id(label),
+        base_path,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        std::f64::consts::FRAC_PI_2,
+        4,
+    )
+    .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn circular_pattern_of_extruded_box_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-circular-pattern-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "circular-pattern-base.brep")
+        .with_feature_id("circular-pattern-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = circular_pattern_request(
+        "circular-pattern-1",
+        "circular-pattern-out-1",
+        &base_result.brep_path,
+    )
+    .with_output_path(&temp, "circular-pattern-out.brep");
+    let result = worker
+        .circular_pattern(&request)
+        .expect("circular_pattern returns");
+    assert_eq!(
+        result.status, "ok",
+        "circular_pattern returned {:?}",
+        result
+    );
+    assert_eq!(result.operation, Operation::CircularPattern);
+    assert_eq!(result.feature_id, "circular-pattern-out-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "circular-pattern BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("circular-pattern BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "circular-pattern BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let base_bytes = std::fs::read(&base_result.brep_path).expect("base BREP reads");
+    assert_ne!(
+        bytes, base_bytes,
+        "circular-pattern BREP must differ byte-for-byte from the source BREP"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn circular_pattern_with_count_one_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-circular-pattern-single-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "circular-pattern-single-base.brep")
+        .with_feature_id("circular-pattern-single-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = CircularPatternRequest::new(
+        unique_request_id("circular-pattern-single"),
+        &base_result.brep_path,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        std::f64::consts::FRAC_PI_2,
+        1,
+    )
+    .with_output_path(&temp, "circular-pattern-single-out.brep")
+    .with_feature_id("circular-pattern-single-out-1");
+    let result = worker
+        .circular_pattern(&request)
+        .expect("circular_pattern returns");
+    assert_eq!(
+        result.status, "ok",
+        "circular_pattern returned {:?}",
+        result
+    );
+    assert_eq!(result.operation, Operation::CircularPattern);
+    let bytes = std::fs::read(&result.brep_path).expect("BREP reads");
+    let base_bytes = std::fs::read(&base_result.brep_path).expect("base BREP reads");
+    assert_eq!(
+        bytes, base_bytes,
+        "count == 1 must produce a BREP identical to the source"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn circular_pattern_with_missing_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = circular_pattern_request(
+        "circular-pattern-missing",
+        "circular-pattern-missing-1",
+        std::path::Path::new("/no/such/base.brep"),
+    );
+    let result = worker.circular_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn circular_pattern_with_zero_count_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-circular-pattern-zero-count-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "circular-pattern-zero-count-base.brep")
+        .with_feature_id("circular-pattern-zero-count-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = CircularPatternRequest::new(
+        unique_request_id("circular-pattern-zero-count"),
+        &base_result.brep_path,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        std::f64::consts::FRAC_PI_2,
+        4,
+    )
+    .with_output_path(&temp, "circular-pattern-zero-count-out.brep")
+    .with_feature_id("circular-pattern-zero-count-out-1");
+    request.count = 0;
+    let result = worker.circular_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn circular_pattern_with_zero_axis_normal_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-circular-pattern-zero-axis-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "circular-pattern-zero-axis-base.brep")
+        .with_feature_id("circular-pattern-zero-axis-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = circular_pattern_request(
+        "circular-pattern-zero-axis",
+        "circular-pattern-zero-axis-1",
+        &base_result.brep_path,
+    );
+    request.axis_normal = [0.0, 0.0, 0.0];
+    let result = worker.circular_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn circular_pattern_with_zero_angle_step_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-circular-pattern-zero-angle-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "circular-pattern-zero-angle-base.brep")
+        .with_feature_id("circular-pattern-zero-angle-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = circular_pattern_request(
+        "circular-pattern-zero-angle",
+        "circular-pattern-zero-angle-1",
+        &base_result.brep_path,
+    );
+    request.angle_step = 0.0;
+    let result = worker.circular_pattern(&request);
     match result {
         Err(WorkerError::Diagnostic(diag)) => {
             assert_eq!(diag.code, "request_malformed");

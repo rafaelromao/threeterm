@@ -7,9 +7,9 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID,
-    MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID,
+    LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -32,7 +32,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "455ae1bae537299e11a2c6024fa655f173ddd90e52a9a06125819e3af80e4686",
+        "a24b888aa438d913934358922697c7f8f138d6002edb07f3e3cec6aac491331f",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -243,6 +243,38 @@ fn registry_contains_versioned_linear_pattern_contract() {
             "direction",
             "count",
             "spacing"
+        ])
+    );
+    assert_eq!(pattern.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_circular_pattern_contract() {
+    let pattern = find(CIRCULAR_PATTERN_COMMAND_ID).expect("circular-pattern is registered");
+    assert_eq!(pattern.id, CIRCULAR_PATTERN_COMMAND_ID);
+    assert_eq!(pattern.name, "circular-pattern");
+    assert_eq!(
+        pattern.schema_version,
+        "threeterm.command.circular-pattern/1"
+    );
+    assert_eq!(
+        pattern.request_schema_version,
+        "threeterm.command.circular-pattern.request/1"
+    );
+    assert_eq!(
+        pattern.response_schema_version,
+        "threeterm.command.circular-pattern.response/1"
+    );
+    assert_eq!(
+        pattern.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "axis_point",
+            "axis_normal",
+            "angle_step",
+            "count"
         ])
     );
     assert_eq!(pattern.request_schema["additionalProperties"], false);

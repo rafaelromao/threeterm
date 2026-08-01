@@ -30,10 +30,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod envelope;
 pub use envelope::{
-    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult,
-    SCHEMA_VERSION,
+    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
+    CircularPatternResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
+    HoleResult, LinearPatternRequest, LinearPatternResult, MirrorRequest, MirrorResult, Operation,
+    RevolveRequest, RevolveResult, SCHEMA_VERSION,
 };
 
 pub fn schema_version() -> &'static str {
@@ -243,6 +243,18 @@ impl OcctWorker {
         self.invoke(&bytes)?.into_linear_pattern()
     }
 
+    /// Circular pattern `request` by spawning the worker process. See
+    /// module docs for the disposable-worker contract.
+    pub fn circular_pattern(
+        &self,
+        request: &CircularPatternRequest,
+    ) -> Result<CircularPatternResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("circular_pattern request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_circular_pattern()
+    }
+
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
         let mut child = Command::new(&self.binary_path)
             .stdin(Stdio::piped())
@@ -429,6 +441,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_circular_pattern(self) -> Result<CircularPatternResult, WorkerError> {
+        match serde_json::from_str::<CircularPatternResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "circular_pattern response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -472,6 +499,12 @@ pub fn parse_mirror_request(raw: &str) -> Result<MirrorRequest, serde_json::Erro
 }
 
 pub fn parse_linear_pattern_request(raw: &str) -> Result<LinearPatternRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_circular_pattern_request(
+    raw: &str,
+) -> Result<CircularPatternRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -700,5 +733,45 @@ mod tests {
         assert_eq!(value["count"], 3);
         assert_eq!(value["spacing"], 2.0);
         assert_eq!(value["feature_id"], "lin-1");
+    }
+
+    #[test]
+    fn circular_pattern_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "circular_pattern",
+            "base_path": "/tmp/base.brep",
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_normal": [0.0, 0.0, 1.0],
+            "angle_step": 1.5707963267948966,
+            "count": 4,
+            "output_filename": "out.brep",
+            "feature_id": "cir-1",
+            "rogue_key": true
+        }"#;
+        assert!(parse_circular_pattern_request(raw).is_err());
+    }
+
+    #[test]
+    fn circular_pattern_envelope_accepts_canonical_shape() {
+        let request = CircularPatternRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            std::f64::consts::FRAC_PI_2,
+            4,
+        )
+        .with_feature_id("cir-1");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "circular_pattern");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["axis_point"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(value["axis_normal"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(value["angle_step"], std::f64::consts::FRAC_PI_2);
+        assert_eq!(value["count"], 4);
+        assert_eq!(value["feature_id"], "cir-1");
     }
 }

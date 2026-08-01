@@ -46,6 +46,7 @@ pub enum Operation {
     Revolve,
     Mirror,
     LinearPattern,
+    CircularPattern,
 }
 
 impl Operation {
@@ -59,6 +60,7 @@ impl Operation {
             Self::Revolve => "revolve",
             Self::Mirror => "mirror",
             Self::LinearPattern => "linear_pattern",
+            Self::CircularPattern => "circular_pattern",
         }
     }
 }
@@ -1046,6 +1048,169 @@ impl LinearPatternResult {
     }
 }
 
+/// Circular pattern request: rotate the BREP at `base_path` around
+/// the axis defined by `(axis_point, axis_normal)` by
+/// `angle_step * (index - 1)` radians (CCW around the axis) for
+/// `index` in `1..count` and fuse the rotated copies into one
+/// solid. The OCCT worker constructs a `gp_Ax1` from
+/// `(axis_point, axis_normal)`, configures a
+/// `gp_Trsf::SetRotation(gp_Ax1, angle)`, applies it through
+/// `BRepBuilderAPI_Transform` for each copy, fuses every copy with
+/// `BRepAlgoAPI_Fuse`, and writes the patterned solid to
+/// `<output_dir>/<output_filename>`. `count == 1` is valid and
+/// returns a single unrotated copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircularPatternRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    /// Path to the BREP file the worker reads as the input solid.
+    pub base_path: PathBuf,
+    /// A point on the rotation axis, in world coordinates.
+    pub axis_point: [f64; 3],
+    /// Rotation axis unit direction. The worker rejects zero
+    /// vectors because they would not define a valid axis.
+    pub axis_normal: [f64; 3],
+    /// Rotation step in radians applied to each successive copy.
+    /// Must be positive, finite, and at most 2π so the worker can
+    /// reason about a single closed turn.
+    pub angle_step: f64,
+    /// Number of copies including the original. Must be at least 1.
+    pub count: u32,
+    /// Output directory where the worker writes the BREP file.
+    pub output_dir: PathBuf,
+    /// Output file name (no path separators; the worker appends
+    /// `.brep`).
+    pub output_filename: String,
+    /// Stable ThreeTerm feature id the host will commit.
+    pub feature_id: String,
+}
+
+impl CircularPatternRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        axis_point: [f64; 3],
+        axis_normal: [f64; 3],
+        angle_step: f64,
+        count: u32,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::CircularPattern,
+            base_path: base_path.into(),
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::CircularPattern {
+            return Err(format!(
+                "operation must be circular_pattern for CircularPatternRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self
+            .axis_point
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err("circular_pattern axis_point components must be finite".to_string());
+        }
+        if !self
+            .axis_normal
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err("circular_pattern axis_normal components must be finite".to_string());
+        }
+        let normal_norm_squared: f64 = self
+            .axis_normal
+            .iter()
+            .map(|component| component * component)
+            .sum();
+        if normal_norm_squared == 0.0 {
+            return Err("circular_pattern axis_normal must be a non-zero vector".to_string());
+        }
+        if !self.angle_step.is_finite()
+            || self
+                .angle_step
+                .partial_cmp(&0.0)
+                .map(|ordering| ordering.is_le())
+                .unwrap_or(true)
+            || self.angle_step > std::f64::consts::TAU
+        {
+            return Err(
+                "circular_pattern angle_step must be a positive finite number <= 2π".to_string(),
+            );
+        }
+        if self.count < 1 {
+            return Err("circular_pattern count must be at least 1".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircularPatternResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl CircularPatternResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1853,6 +2018,202 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "lin-1".to_string(),
+        };
+        assert!(result.is_success());
+
+        result.status = "brep_invalid".to_string();
+        assert!(!result.is_success());
+    }
+
+    fn canonical_circular_pattern_request() -> CircularPatternRequest {
+        CircularPatternRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            std::f64::consts::FRAC_PI_2,
+            4,
+        )
+        .with_output_path("/tmp", "patterned.brep")
+        .with_feature_id("cir-1")
+    }
+
+    #[test]
+    fn operation_as_str_returns_snake_case_for_circular_pattern() {
+        assert_eq!(Operation::CircularPattern.as_str(), "circular_pattern");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_circular_pattern() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request
+            .validate()
+            .expect("circular_pattern envelope is valid");
+    }
+
+    #[test]
+    fn validate_accepts_circular_pattern_with_count_one() {
+        let mut request = CircularPatternRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            std::f64::consts::FRAC_PI_2,
+            1,
+        )
+        .with_output_path("/tmp", "patterned.brep")
+        .with_feature_id("cir-single-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request
+            .validate()
+            .expect("count == 1 must be accepted (a single copy is a valid pattern)");
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_with_zero_count() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.count = 0;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_with_non_positive_angle_step() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.angle_step = 0.0;
+        assert!(request.validate().is_err());
+
+        request.angle_step = -1.0;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_circular_pattern_angle_step() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.angle_step = f64::NAN;
+        assert!(request.validate().is_err());
+        request.angle_step = f64::INFINITY;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_angle_step_above_two_pi() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.angle_step = std::f64::consts::TAU + 1.0e-3;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_circular_pattern_axis_point_component() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.axis_point = [f64::NAN, 0.0, 0.0];
+        assert!(request.validate().is_err());
+        request.axis_point = [0.0, f64::INFINITY, 0.0];
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_circular_pattern_axis_normal_component() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.axis_normal = [f64::NAN, 0.0, 0.0];
+        assert!(request.validate().is_err());
+        request.axis_normal = [0.0, f64::INFINITY, 0.0];
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_vector_circular_pattern_axis_normal() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.axis_normal = [0.0, 0.0, 0.0];
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_with_wrong_operation() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::LinearPattern;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_output_filename_with_path_separator() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.output_filename = "sub/out.brep".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_with_unknown_schema_version() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = "threeterm.workers.occt/0".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_circular_pattern_with_empty_base_path() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.base_path = PathBuf::new();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn circular_pattern_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "circular_pattern",
+            "base_path": "/tmp/base.brep",
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_normal": [0.0, 0.0, 1.0],
+            "angle_step": 1.5707963267948966,
+            "count": 4,
+            "output_filename": "out.brep",
+            "feature_id": "cir-1",
+            "rogue_key": true
+        }"#;
+        assert!(serde_json::from_str::<CircularPatternRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn circular_pattern_envelope_round_trips_through_canonical_json() {
+        let mut request = canonical_circular_pattern_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        let value = serde_json::to_value(&request).expect("circular pattern request serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["request_id"], "req-1");
+        assert_eq!(value["operation"], "circular_pattern");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["axis_point"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(value["axis_normal"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(value["angle_step"], std::f64::consts::FRAC_PI_2);
+        assert_eq!(value["count"], 4);
+        assert_eq!(value["feature_id"], "cir-1");
+        let decoded: CircularPatternRequest =
+            serde_json::from_value(value).expect("circular pattern request deserializes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn circular_pattern_result_is_success_predicate() {
+        let mut result = CircularPatternResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::CircularPattern,
+            status: "ok".to_string(),
+            brep_path: PathBuf::from("/tmp/out.brep"),
+            brep_sha256: "deadbeef".to_string(),
+            brep_bytes: 42,
+            feature_id: "cir-1".to_string(),
         };
         assert!(result.is_success());
 

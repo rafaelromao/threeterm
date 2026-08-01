@@ -320,16 +320,14 @@ impl Supervisor {
                     ..
                 }) => {
                     self.discard_stage();
-                    return SupervisorOutcome::ForceTerminated {
-                        record: TerminationRecord {
-                            request_id,
-                            stage: format!("failed:{code}:{detail}"),
-                            elapsed: started.elapsed(),
-                            last_progress,
-                            last_artifact_error: self.last_artifact_error.take(),
-                            exit_kind: ExitKind::Cooperative,
-                        },
-                    };
+                    let artifact_error = self.last_artifact_error.take();
+                    return self.cooperative_termination_outcome(
+                        request_id,
+                        format!("failed:{code}:{detail}"),
+                        started,
+                        last_progress,
+                        artifact_error,
+                    );
                 }
                 Ok(Envelope::WorkerReady { worker_id, .. }) => {
                     last_progress = Some(Progress {
@@ -506,29 +504,25 @@ impl Supervisor {
         if request_id != request.request_id {
             self.last_artifact_error = Some("completed_request_id_mismatch".to_string());
             self.discard_stage();
-            return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
-                    request_id,
-                    stage: "protocol_violation:completed_request_id_mismatch".to_string(),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: self.last_artifact_error.take(),
-                    exit_kind: ExitKind::Cooperative,
-                },
-            };
+            let artifact_error = self.last_artifact_error.take();
+            return self.cooperative_termination_outcome(
+                request_id,
+                "protocol_violation:completed_request_id_mismatch".to_string(),
+                started,
+                last_progress,
+                artifact_error,
+            );
         }
         if self.last_artifact_error.is_some() {
             self.discard_stage();
-            return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
-                    request_id,
-                    stage: "artifact_rejected".to_string(),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: self.last_artifact_error.take(),
-                    exit_kind: ExitKind::Cooperative,
-                },
-            };
+            let artifact_error = self.last_artifact_error.take();
+            return self.cooperative_termination_outcome(
+                request_id,
+                "artifact_rejected".to_string(),
+                started,
+                last_progress,
+                artifact_error,
+            );
         }
         let mut first_error: Option<String> = None;
         if let Some(stage) = self.stage.as_ref() {
@@ -545,39 +539,51 @@ impl Supervisor {
         if let Some(error) = first_error {
             let _ = self.stage.take().map(|stage| stage.discard());
             let artifact_error = self.last_artifact_error.take().or(Some(error.clone()));
-            return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
-                    request_id,
-                    stage: format!("promotion_failed:{error}"),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: artifact_error,
-                    exit_kind: ExitKind::Cooperative,
-                },
-            };
+            return self.cooperative_termination_outcome(
+                request_id,
+                format!("promotion_failed:{error}"),
+                started,
+                last_progress,
+                artifact_error,
+            );
         }
 
         let _ = self.stage.take();
-        if let Err(error) = self.host.terminate() {
-            return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
-                    request_id,
-                    stage: format!("completed_reap_failed:{error}"),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: self.last_artifact_error.take(),
-                    exit_kind: ExitKind::ForceAfterGrace,
-                },
-            };
-        }
+        let artifact_error = self.last_artifact_error.take();
+        self.cooperative_termination_outcome(
+            request_id,
+            "completed".to_string(),
+            started,
+            last_progress,
+            artifact_error,
+        )
+    }
+
+    fn cooperative_termination_outcome(
+        &mut self,
+        request_id: String,
+        stage: String,
+        started: Instant,
+        last_progress: Option<Progress>,
+        last_artifact_error: Option<String>,
+    ) -> SupervisorOutcome {
+        let termination_error = self.host.terminate().err();
+        let reaped = termination_error.is_none();
         SupervisorOutcome::ForceTerminated {
             record: TerminationRecord {
                 request_id,
-                stage: "completed".to_string(),
+                stage: match termination_error {
+                    Some(error) => format!("{stage}_reap_failed:{error}"),
+                    None => stage,
+                },
                 elapsed: started.elapsed(),
                 last_progress,
-                last_artifact_error: self.last_artifact_error.take(),
-                exit_kind: ExitKind::Cooperative,
+                last_artifact_error,
+                exit_kind: if reaped {
+                    ExitKind::Cooperative
+                } else {
+                    ExitKind::ForceAfterGrace
+                },
             },
         }
     }
@@ -832,6 +838,51 @@ mod tests {
     }
 
     #[test]
+    fn request_failure_reaps_the_worker() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![
+            Ok(ready_envelope()),
+            Ok(Envelope::Failed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                code: "worker_failed".to_string(),
+                detail: "unrecoverable".to_string(),
+            }),
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected failed worker outcome");
+        };
+        assert_eq!(record.stage, "failed:worker_failed:unrecoverable");
+        assert_eq!(record.exit_kind, ExitKind::Cooperative);
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn completed_request_id_mismatch_reaps_the_worker() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![
+            Ok(ready_envelope()),
+            Ok(Envelope::Completed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "wrong-request".to_string(),
+                result: serde_json::json!({}),
+            }),
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected mismatched completion outcome");
+        };
+        assert_eq!(
+            record.stage,
+            "protocol_violation:completed_request_id_mismatch"
+        );
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
     fn request_rejects_handshake_with_mismatched_schema_version() {
         let worker = ScriptedWorker::new(vec![Envelope::WorkerReady {
             schema_version: "threeterm.protocol/0".to_string(),
@@ -929,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn framed_transport_timeout_force_terminates_request_after_handshake() {
+    fn framed_transport_does_not_consume_a_buffered_handshake_after_grace() {
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let (outbound_tx, _outbound_rx) = mpsc::channel();
         inbound_tx
@@ -945,7 +996,7 @@ mod tests {
         else {
             panic!("expected force termination");
         };
-        assert_eq!(record.stage, "grace_exceeded");
+        assert_eq!(record.stage, "handshake_grace_exceeded");
     }
 
     #[test]

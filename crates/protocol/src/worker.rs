@@ -217,6 +217,10 @@ impl WorkerHost for FramedWorkerHost {
 
     fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
         loop {
+            if Instant::now() >= deadline {
+                return Err(WorkerError::TimedOut);
+            }
+
             if let Some(envelope) = self.pending.pop_front() {
                 return Ok(envelope);
             }
@@ -584,17 +588,16 @@ mod tests {
         chunk.extend(encode_frame(&progress).expect("progress frame encodes"));
         inbound_tx.send(chunk).expect("worker chunk queues");
 
-        let deadline = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(1);
         assert_eq!(
             transport.recv(deadline).expect("ready frame decodes"),
             ready
         );
-        assert_eq!(
-            transport
-                .recv(Instant::now())
-                .expect("buffered progress returns"),
-            progress
-        );
+        assert!(matches!(
+            transport.recv(Instant::now() - Duration::from_nanos(1)),
+            Err(WorkerError::TimedOut)
+        ));
+        assert_eq!(transport.pending.pop_front(), Some(progress));
     }
 
     #[test]

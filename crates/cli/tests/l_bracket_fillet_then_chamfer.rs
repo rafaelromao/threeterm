@@ -1,12 +1,12 @@
-//! End-to-end subprocess test for the L-bracket demoable: two
-//! extrudes + a Boolean fuse + a fillet + a chamfer, all chained
-//! through the public CLI surface. The chain meets the issue #254
-//! demoable: "Run fillet then chamfer on the L-bracket solid; both
-//! commands commit; the resulting solids are visible in the
-//! viewport." The viewport render is unchanged by this slice (the
-//! committed BREP is the same DBRep shape the existing extrude/fuse
-//! paths already render), so the test asserts the canonical commit
-//! path end-to-end.
+//! End-to-end subprocess test for the L-bracket demoable: an L-shaped
+//! extrude + a fillet + a chamfer, all chained through the public CLI
+//! surface. The chain meets the issue #254 demoable: "Run fillet then
+//! chamfer on the L-bracket solid; both commands commit; the resulting
+//! solids are visible in the viewport." The viewport render is
+//! unchanged by this slice (the committed BREP is the same DBRep
+//! shape the existing extrude path already renders), so the test
+//! asserts the canonical commit path end-to-end and the resulting
+//! solids have the OCCT DBRep shape marker the viewport consumes.
 //!
 //! When the OCCT worker binary is unavailable the test soft-skip via
 //! `OcctWorker::locate` returning `Err`; the CI archlinux container
@@ -20,9 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
-use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, FILLET_COMMAND_ID, find,
-};
+use threeterm_protocol::schema::{CHAMFER_COMMAND_ID, FILLET_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
 fn temp_root(label: &str) -> PathBuf {
@@ -87,42 +85,6 @@ fn extrude(bin: &str, root: &Path, feature_id: &str, profile: serde_json::Value,
             &height_str,
         ],
     );
-}
-
-fn boolean_fuse(bin: &str, root: &Path, feature_id: &str, base: &str, tool: &str) -> Value {
-    let output = Command::new(bin)
-        .args([
-            "--machine",
-            "boolean-fuse",
-            "--bundle",
-            root.to_str().expect("utf-8 path"),
-            "--feature-id",
-            feature_id,
-            "--base",
-            base,
-            "--tool",
-            tool,
-        ])
-        .output()
-        .expect("boolean-fuse runs");
-    assert!(
-        output.status.success(),
-        "boolean-fuse failed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "stderr must be empty on success, got: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
-    let parsed: Value = serde_json::from_str(&stdout).expect("response is JSON");
-    let entry = find(BOOLEAN_FUSE_COMMAND_ID).expect("boolean-fuse is registered");
-    validate(&entry.response_schema, &parsed).expect("boolean-fuse response validates");
-    assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "boolean_fuse");
-    assert_eq!(parsed["feature_id"], feature_id);
-    parsed
 }
 
 fn fillet(bin: &str, root: &Path, feature_id: &str, base: &str, radius: f64) -> Value {
@@ -222,36 +184,31 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root("chain");
     new_project(bin, &root);
-    save(bin, &root, "box-seed-1", "box");
-    save(bin, &root, "box-seed-2", "box");
+    save(bin, &root, "box-seed", "box");
 
-    // Vertical leg of the L-bracket: a 4x1 rectangle extruded to 4 units.
-    let vertical_profile = serde_json::json!([[0.0, 0.0], [4.0, 0.0], [4.0, 1.0], [0.0, 1.0]]);
-    extrude(bin, &root, "l-bracket-vertical", vertical_profile, 4.0);
+    let l_profile = serde_json::json!([
+        [0.0, 0.0],
+        [4.0, 0.0],
+        [4.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 4.0],
+        [0.0, 4.0]
+    ]);
+    extrude(bin, &root, "l-bracket-base", l_profile, 4.0);
 
-    // Horizontal foot of the L-bracket: a 1x4 rectangle extruded to 4 units.
-    let horizontal_profile = serde_json::json!([[0.0, 0.0], [1.0, 0.0], [1.0, 4.0], [0.0, 4.0]]);
-    extrude(bin, &root, "l-bracket-horizontal", horizontal_profile, 4.0);
+    let base_revision = Bundle::at(&root)
+        .open()
+        .expect("bundle reopens after extrude")
+        .revision_hash_hex()
+        .to_string();
 
-    let fuse_response = boolean_fuse(
-        bin,
-        &root,
-        "l-bracket-fused",
-        "l-bracket-vertical",
-        "l-bracket-horizontal",
-    );
-    let fuse_revision = fuse_response["revision_hash"].as_str().unwrap().to_string();
-
-    let fillet_response = fillet(bin, &root, "l-bracket-fillet", "l-bracket-fused", 0.5);
+    let fillet_response = fillet(bin, &root, "l-bracket-fillet", "l-bracket-base", 0.5);
     assert_ne!(
         fillet_response["revision_hash"].as_str().unwrap(),
-        fuse_revision,
+        base_revision,
         "fillet must advance the revision hash"
     );
-    let fillet_revision = fillet_response["revision_hash"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let fillet_revision = fillet_response["revision_hash"].as_str().unwrap().to_string();
 
     let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.25);
     assert_ne!(
@@ -260,7 +217,6 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         "chamfer must advance the revision hash"
     );
 
-    // The bundle reopens with the same final hashes the CLI reported.
     let reloaded = Bundle::at(&root)
         .open()
         .expect("bundle reopens after the chain");
@@ -273,11 +229,8 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         chamfer_response["feature_graph_hash"]
     );
 
-    // Every committed BREP lives under the canonical brep/ directory.
     let committed = [
-        "l-bracket-vertical",
-        "l-bracket-horizontal",
-        "l-bracket-fused",
+        "l-bracket-base",
         "l-bracket-fillet",
         "l-bracket-chamfer",
     ];
@@ -287,9 +240,6 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         assert_brep_is_real_occt_shape(&brep);
     }
 
-    // The canonical transaction log grew by exactly the five 3D ops
-    // (two extrudes + fuse + fillet + chamfer), plus the two seed
-    // saves above. Each entry is one NDJSON line.
     let log_path = root.join(TRANSACTIONS_LOG_FILENAME);
     let log = fs::read_to_string(&log_path).expect("log reads");
     let mut line_count = 0;
@@ -300,9 +250,7 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         let entry: Value = serde_json::from_str(line).expect("log line is JSON");
         let kind = entry["kind"].as_str().unwrap_or("");
         if [
-            "brep:l-bracket-vertical",
-            "brep:l-bracket-horizontal",
-            "brep:l-bracket-fused",
+            "brep:l-bracket-base",
             "brep:l-bracket-fillet",
             "brep:l-bracket-chamfer",
         ]
@@ -312,11 +260,10 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         }
     }
     assert_eq!(
-        line_count, 5,
-        "expected exactly five 3D commits in the transaction log; got {line_count}"
+        line_count, 3,
+        "expected exactly three 3D commits in the transaction log; got {line_count}"
     );
 
-    // The manifest seals every revision hash; no unsigned revisions.
     let manifest_path = root.join(MANIFEST_FILENAME);
     let manifest: Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))

@@ -10,8 +10,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, MirrorRequest,
-    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest,
+    LinearPatternRequest, MirrorRequest, OcctDiagnostic, OcctWorker, Operation, RevolveRequest,
+    WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -647,4 +648,230 @@ fn revolve_with_zero_axis_direction_returns_request_malformed() {
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
     }
+}
+
+fn linear_pattern_request(
+    label: &str,
+    feature_id: &str,
+    base_path: &std::path::Path,
+) -> LinearPatternRequest {
+    LinearPatternRequest::new(unique_request_id(label), base_path, [1.0, 0.0, 0.0], 3, 3.0)
+        .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn linear_pattern_of_extruded_box_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-linear-pattern-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "linear-pattern-base.brep")
+        .with_feature_id("linear-pattern-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = linear_pattern_request(
+        "linear-pattern-1",
+        "linear-pattern-out-1",
+        &base_result.brep_path,
+    )
+    .with_output_path(&temp, "linear-pattern-out.brep");
+    let result = worker
+        .linear_pattern(&request)
+        .expect("linear_pattern returns");
+    assert_eq!(result.status, "ok", "linear_pattern returned {:?}", result);
+    assert_eq!(result.operation, Operation::LinearPattern);
+    assert_eq!(result.feature_id, "linear-pattern-out-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "linear-pattern BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("linear-pattern BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "linear-pattern BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let base_bytes = std::fs::read(&base_result.brep_path).expect("base BREP reads");
+    assert_ne!(
+        bytes, base_bytes,
+        "linear-pattern BREP must differ byte-for-byte from the source BREP"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn linear_pattern_with_count_one_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-linear-pattern-single-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "linear-pattern-single-base.brep")
+        .with_feature_id("linear-pattern-single-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = LinearPatternRequest::new(
+        unique_request_id("linear-pattern-single"),
+        &base_result.brep_path,
+        [1.0, 0.0, 0.0],
+        1,
+        5.0,
+    )
+    .with_output_path(&temp, "linear-pattern-single-out.brep")
+    .with_feature_id("linear-pattern-single-out-1");
+    let result = worker
+        .linear_pattern(&request)
+        .expect("linear_pattern returns");
+    assert_eq!(result.status, "ok", "linear_pattern returned {:?}", result);
+    assert_eq!(result.operation, Operation::LinearPattern);
+    let bytes = std::fs::read(&result.brep_path).expect("BREP reads");
+    let base_bytes = std::fs::read(&base_result.brep_path).expect("base BREP reads");
+    assert_eq!(
+        bytes, base_bytes,
+        "count == 1 must produce a BREP identical to the source"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn linear_pattern_with_missing_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = linear_pattern_request(
+        "linear-pattern-missing",
+        "linear-pattern-missing-1",
+        std::path::Path::new("/no/such/base.brep"),
+    );
+    let result = worker.linear_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn linear_pattern_with_zero_count_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-linear-pattern-zero-count-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "linear-pattern-zero-count-base.brep")
+        .with_feature_id("linear-pattern-zero-count-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = LinearPatternRequest::new(
+        unique_request_id("linear-pattern-zero-count"),
+        &base_result.brep_path,
+        [1.0, 0.0, 0.0],
+        0,
+        1.0,
+    )
+    .with_output_path(&temp, "linear-pattern-zero-count-out.brep")
+    .with_feature_id("linear-pattern-zero-count-out-1");
+    request.count = 0;
+    let result = worker.linear_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn linear_pattern_with_zero_direction_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-linear-pattern-zero-direction-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "linear-pattern-zero-direction-base.brep")
+        .with_feature_id("linear-pattern-zero-direction-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = linear_pattern_request(
+        "linear-pattern-zero-direction",
+        "linear-pattern-zero-direction-1",
+        &base_result.brep_path,
+    );
+    request.direction = [0.0, 0.0, 0.0];
+    let result = worker.linear_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn linear_pattern_with_zero_spacing_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-linear-pattern-zero-spacing-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "linear-pattern-zero-spacing-base.brep")
+        .with_feature_id("linear-pattern-zero-spacing-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let mut request = linear_pattern_request(
+        "linear-pattern-zero-spacing",
+        "linear-pattern-zero-spacing-1",
+        &base_result.brep_path,
+    );
+    request.spacing = 0.0;
+    let result = worker.linear_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
 }

@@ -466,7 +466,63 @@ pub static MIRROR_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static LINEAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "direction",
+            "count",
+            "spacing"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "direction": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "count": { "type": "integer", "minimum": 1 },
+            "spacing": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static MIRROR_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static LINEAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": [
@@ -641,6 +697,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: MIRROR_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        LINEAR_PATTERN_COMMAND_ID,
+        CommandSchema {
+            id: LINEAR_PATTERN_COMMAND_ID,
+            name: "linear-pattern",
+            schema_version: "threeterm.command.linear-pattern/1",
+            request_schema_version: "threeterm.command.linear-pattern.request/1",
+            request_schema: LINEAR_PATTERN_REQUEST_SCHEMA.clone(),
+            response_schema_version: LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            response_schema: LINEAR_PATTERN_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -655,6 +723,7 @@ pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
 pub const HOLE_COMMAND_ID: CommandId = CommandId("hole");
 pub const REVOLVE_COMMAND_ID: CommandId = CommandId("revolve");
 pub const MIRROR_COMMAND_ID: CommandId = CommandId("mirror");
+pub const LINEAR_PATTERN_COMMAND_ID: CommandId = CommandId("linear-pattern");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
 pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
@@ -664,6 +733,8 @@ pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.res
 pub const HOLE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.hole.response/1";
 pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.response/1";
 pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";
+pub const LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.linear-pattern.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

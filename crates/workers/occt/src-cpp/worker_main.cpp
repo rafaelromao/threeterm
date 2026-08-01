@@ -31,6 +31,7 @@
 #include <Bnd_Box.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Standard_IStream.hxx>
+#include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
@@ -633,62 +634,72 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    TopoDS_Shape base;
-    TopoDS_Shape result;
-    BRep_Builder builder;
-    if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
-        error = "could not read base BREP at " + base_path_str;
+    try {
+        TopoDS_Shape base;
+        TopoDS_Shape result;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        BRepFilletAPI_MakeFillet fillet(base);
+        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+            TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+            fillet.Add(radius, edge);
+        }
+        fillet.Build();
+        if (!fillet.IsDone()) {
+            error = "BRepFilletAPI_MakeFillet did not complete";
+            return false;
+        }
+        result = fillet.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"fillet\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during fillet: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during fillet: ";
+        error += e.what();
         return false;
     }
-    if (base.IsNull()) {
-        error = "BREP file produced a null TopoDS_Shape";
-        return false;
-    }
-
-    BRepFilletAPI_MakeFillet fillet(base);
-    for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-        TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-        fillet.Add(radius, edge);
-    }
-    fillet.Build();
-    if (!fillet.IsDone()) {
-        error = "BRepFilletAPI_MakeFillet did not complete";
-        return false;
-    }
-    result = fillet.Shape();
-
-    std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
-    if (output_path.has_parent_path()) {
-        std::error_code ec;
-        std::filesystem::create_directories(output_path.parent_path(), ec);
-    }
-    if (!write_brep(result, output_path, error)) {
-        return false;
-    }
-    std::ifstream stream(output_path, std::ios::binary);
-    std::ostringstream bytes;
-    bytes << stream.rdbuf();
-    std::string sha = sha256_hex(bytes.str());
-
-    std::string status = "ok";
-    if (!analyze_brep(result)) {
-        error = "brep_invalid: BRepCheck_Analyzer failed";
-        status = "brep_invalid";
-    }
-
-    std::ostringstream out;
-    out << "{"
-        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
-        << "\"request_id\":\"" << json_escape(request_id) << "\","
-        << "\"operation\":\"fillet\","
-        << "\"status\":\"" << json_escape(status) << "\","
-        << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
-        << "\"brep_sha256\":\"" << json_escape(sha) << "\","
-        << "\"brep_bytes\":" << bytes.str().size() << ","
-        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
-        << "}";
-    write_stdout_line(out.str());
-    return status == "ok";
 }
 
 bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
@@ -713,62 +724,72 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    TopoDS_Shape base;
-    TopoDS_Shape result;
-    BRep_Builder builder;
-    if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
-        error = "could not read base BREP at " + base_path_str;
+    try {
+        TopoDS_Shape base;
+        TopoDS_Shape result;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        BRepFilletAPI_MakeChamfer chamfer(base);
+        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+            TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+            chamfer.Add(distance, edge);
+        }
+        chamfer.Build();
+        if (!chamfer.IsDone()) {
+            error = "BRepFilletAPI_MakeChamfer did not complete";
+            return false;
+        }
+        result = chamfer.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"chamfer\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during chamfer: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during chamfer: ";
+        error += e.what();
         return false;
     }
-    if (base.IsNull()) {
-        error = "BREP file produced a null TopoDS_Shape";
-        return false;
-    }
-
-    BRepFilletAPI_MakeChamfer chamfer(base);
-    for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-        TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-        chamfer.Add(distance, edge);
-    }
-    chamfer.Build();
-    if (!chamfer.IsDone()) {
-        error = "BRepFilletAPI_MakeChamfer did not complete";
-        return false;
-    }
-    result = chamfer.Shape();
-
-    std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
-    if (output_path.has_parent_path()) {
-        std::error_code ec;
-        std::filesystem::create_directories(output_path.parent_path(), ec);
-    }
-    if (!write_brep(result, output_path, error)) {
-        return false;
-    }
-    std::ifstream stream(output_path, std::ios::binary);
-    std::ostringstream bytes;
-    bytes << stream.rdbuf();
-    std::string sha = sha256_hex(bytes.str());
-
-    std::string status = "ok";
-    if (!analyze_brep(result)) {
-        error = "brep_invalid: BRepCheck_Analyzer failed";
-        status = "brep_invalid";
-    }
-
-    std::ostringstream out;
-    out << "{"
-        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
-        << "\"request_id\":\"" << json_escape(request_id) << "\","
-        << "\"operation\":\"chamfer\","
-        << "\"status\":\"" << json_escape(status) << "\","
-        << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
-        << "\"brep_sha256\":\"" << json_escape(sha) << "\","
-        << "\"brep_bytes\":" << bytes.str().size() << ","
-        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
-        << "}";
-    write_stdout_line(out.str());
-    return status == "ok";
 }
 
 }  // namespace

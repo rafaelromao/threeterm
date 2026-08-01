@@ -31,6 +31,7 @@ pub struct Layer1DerivedResult {
     pub cache_key: Layer1CacheKey,
     pub worker_fingerprint: WorkerFingerprint,
     pub artifact_kind: String,
+    pub artifact_name: String,
     pub byte_count: u64,
     pub sha256: String,
     pub path: PathBuf,
@@ -187,18 +188,16 @@ impl Host {
 
         let stage = Stage::open(root)
             .map_err(|error| reject(Diagnostic::artifact_promotion_failure(&error.to_string())))?;
-        let staged = stage
-            .validate(&header)
-            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
         let path = stage
-            .promote(staged)
-            .map_err(|error| reject(Diagnostic::artifact_promotion_failure(&error.to_string())))?;
+            .validate_and_promote(&header)
+            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
         let result = Layer1DerivedResult {
             request_id: header.request_id,
             source_revision_id: header.source_revision_id,
             cache_key: header.cache_key,
             worker_fingerprint: header.worker_fingerprint,
             artifact_kind: header.artifact_kind,
+            artifact_name: header.staging_name,
             byte_count: header.byte_count,
             sha256: header.sha256,
             path,

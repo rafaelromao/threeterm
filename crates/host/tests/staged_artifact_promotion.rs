@@ -61,6 +61,7 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
     assert_eq!(result.source_revision_id, request.source_revision_id);
     assert_eq!(result.request_id, request.request_id);
     assert_eq!(result.artifact_kind, request.artifact_kind);
+    assert_eq!(result.artifact_name, request.staging_name);
     assert_eq!(result.byte_count, bytes.len() as u64);
     assert_eq!(result.worker_fingerprint, worker_fingerprint());
     assert_eq!(host.layer1_result(&result.cache_key), Some(result.clone()));

@@ -14,7 +14,9 @@
 
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -72,12 +74,10 @@ pub struct ArtifactHeader {
     pub sha256: String,
 }
 
-/// Handle returned by staging or validating artifact bytes. Holds the final
-/// destination, SHA-256, and byte count.
+/// Metadata returned after worker bytes are staged.
 #[derive(Debug, Clone)]
 pub struct StagedArtifact {
     pub staging_name: String,
-    pub final_path: PathBuf,
     pub sha256: String,
     pub byte_count: u64,
 }
@@ -96,7 +96,21 @@ impl Stage {
     /// accumulates `.partial` files until `promote` or `discard`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(ArtifactError::Io)?;
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(ArtifactError::InvalidRoot(root));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&root).map_err(ArtifactError::Io)?;
+            }
+            Err(error) => return Err(ArtifactError::Io(error)),
+        }
+        let metadata = fs::symlink_metadata(&root).map_err(ArtifactError::Io)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ArtifactError::InvalidRoot(root));
+        }
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(ArtifactError::Io)?;
         Ok(Self { root })
     }
 
@@ -124,20 +138,25 @@ impl Stage {
             });
         }
         let sha256 = sha256_hex(bytes);
-        let final_path = self.root.join(staging_name);
         let staging_path = self.root.join(format!("{staging_name}.partial"));
-        let mut file = fs::File::create(&staging_path).map_err(ArtifactError::Io)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(0o400000)
+            .open(&staging_path)
+            .map_err(ArtifactError::Io)?;
         file.write_all(bytes).map_err(ArtifactError::Io)?;
         file.sync_all().map_err(ArtifactError::Io)?;
         Ok(StagedArtifact {
             staging_name: staging_name.to_string(),
-            final_path,
             sha256,
             byte_count: bytes.len() as u64,
         })
     }
 
-    pub fn validate(&self, header: &ArtifactHeader) -> Result<StagedArtifact, ArtifactError> {
+    pub fn validate_and_promote(&self, header: &ArtifactHeader) -> Result<PathBuf, ArtifactError> {
         if header.staging_name.is_empty()
             || header.staging_name.contains('/')
             || header.staging_name.contains('\\')
@@ -146,48 +165,76 @@ impl Stage {
             return Err(ArtifactError::InvalidName(header.staging_name.clone()));
         }
         let staging_path = self.root.join(format!("{}.partial", header.staging_name));
-        let bytes = fs::read(&staging_path).map_err(ArtifactError::Io)?;
-        if bytes.len() > MAX_ARTIFACT_BYTES {
+        let verified_path = self.root.join(format!(".{}.verified", header.staging_name));
+        let final_path = self.root.join(&header.staging_name);
+        let result = (|| {
+            let metadata = fs::symlink_metadata(&staging_path).map_err(ArtifactError::Io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
+            }
+            if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+                return Err(ArtifactError::PayloadTooLarge {
+                    size: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+                    max: MAX_ARTIFACT_BYTES,
+                });
+            }
+            let mut source = OpenOptions::new()
+                .read(true)
+                .custom_flags(0o400000)
+                .open(&staging_path)
+                .map_err(ArtifactError::Io)?;
+            let mut verified = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(0o400000)
+                .open(&verified_path)
+                .map_err(ArtifactError::Io)?;
+            let mut digest = Sha256::new();
+            let mut byte_count = 0u64;
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = source.read(&mut buffer).map_err(ArtifactError::Io)?;
+                if read == 0 {
+                    break;
+                }
+                byte_count = byte_count.saturating_add(read as u64);
+                if byte_count > MAX_ARTIFACT_BYTES as u64 {
+                    return Err(ArtifactError::PayloadTooLarge {
+                        size: usize::try_from(byte_count).unwrap_or(usize::MAX),
+                        max: MAX_ARTIFACT_BYTES,
+                    });
+                }
+                digest.update(&buffer[..read]);
+                verified
+                    .write_all(&buffer[..read])
+                    .map_err(ArtifactError::Io)?;
+            }
+            verified.sync_all().map_err(ArtifactError::Io)?;
+            if byte_count != header.byte_count {
+                return Err(ArtifactError::ByteCountMismatch {
+                    expected: header.byte_count,
+                    actual: byte_count,
+                });
+            }
+            let digest = digest.finalize();
+            let sha256 = hex_digest(&digest);
+            if sha256 != header.sha256 {
+                return Err(ArtifactError::HashMismatch {
+                    expected: header.sha256.clone(),
+                    actual: sha256,
+                });
+            }
+            fs::remove_file(&staging_path).map_err(ArtifactError::Io)?;
+            fs::rename(&verified_path, &final_path).map_err(ArtifactError::Rename)?;
+            Ok(final_path.clone())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&verified_path);
             let _ = fs::remove_file(&staging_path);
-            return Err(ArtifactError::PayloadTooLarge {
-                size: bytes.len(),
-                max: MAX_ARTIFACT_BYTES,
-            });
         }
-        let byte_count = bytes.len() as u64;
-        if byte_count != header.byte_count {
-            let _ = fs::remove_file(&staging_path);
-            return Err(ArtifactError::ByteCountMismatch {
-                expected: header.byte_count,
-                actual: byte_count,
-            });
-        }
-        let sha256 = sha256_hex(&bytes);
-        if sha256 != header.sha256 {
-            let _ = fs::remove_file(&staging_path);
-            return Err(ArtifactError::HashMismatch {
-                expected: header.sha256.clone(),
-                actual: sha256,
-            });
-        }
-        Ok(StagedArtifact {
-            staging_name: header.staging_name.clone(),
-            final_path: self.root.join(&header.staging_name),
-            sha256,
-            byte_count,
-        })
-    }
-
-    /// Atomically rename `<root>/<staging_name>.partial` to
-    /// `<root>/<staging_name>`. After `promote` returns, the partial is
-    /// gone and the final path exists with the validated bytes.
-    pub fn promote(&self, artifact: StagedArtifact) -> Result<PathBuf, ArtifactError> {
-        let staging_path = self.root.join(format!("{}.partial", artifact.staging_name));
-        if !staging_path.exists() {
-            return Err(ArtifactError::NotStaged(artifact.staging_name));
-        }
-        fs::rename(&staging_path, &artifact.final_path).map_err(ArtifactError::Rename)?;
-        Ok(artifact.final_path)
+        result
     }
 
     /// Remove the staging directory and every `.partial` file it
@@ -203,6 +250,10 @@ impl Stage {
 /// SHA-256 hex digest of `bytes`, lowercase, 64 characters.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
+    hex_digest(&digest)
+}
+
+fn hex_digest(digest: &[u8]) -> String {
     let mut hex = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
@@ -231,9 +282,8 @@ pub enum ArtifactError {
     },
     /// The staging name was empty or contained a path separator.
     InvalidName(String),
-    /// `promote` was called for an artifact whose `.partial` file no
-    /// longer exists (e.g. after `discard`).
-    NotStaged(String),
+    InvalidRoot(PathBuf),
+    NotRegularFile(String),
     /// Filesystem error during write or discard.
     Io(std::io::Error),
     /// Filesystem error during the atomic rename.
@@ -258,7 +308,16 @@ impl fmt::Display for ArtifactError {
             Self::InvalidName(name) => {
                 write!(formatter, "staged artifact name is invalid: {name:?}")
             }
-            Self::NotStaged(name) => write!(formatter, "no staged artifact named {name:?}"),
+            Self::InvalidRoot(path) => {
+                write!(
+                    formatter,
+                    "staged artifact root is not private: {}",
+                    path.display()
+                )
+            }
+            Self::NotRegularFile(name) => {
+                write!(formatter, "staged artifact is not a regular file: {name:?}")
+            }
             Self::Io(error) => write!(formatter, "staged artifact io error: {error}"),
             Self::Rename(error) => write!(formatter, "staged artifact rename error: {error}"),
         }
@@ -274,6 +333,7 @@ mod tests {
     fn temp_root(tag: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("threeterm-stage-{tag}-{}", std::process::id()));
+        let _ = fs::remove_file(&root);
         let _ = fs::remove_dir_all(&root);
         root
     }
@@ -310,10 +370,9 @@ mod tests {
         let staged = stage
             .stage_bytes("sketch-1.brep", bytes)
             .expect("artifact stages");
-        let artifact = stage
-            .validate(&header(&staged, staged.sha256.clone()))
-            .expect("artifact validates");
-        let final_path = stage.promote(artifact).expect("artifact promotes");
+        let final_path = stage
+            .validate_and_promote(&header(&staged, staged.sha256.clone()))
+            .expect("artifact validates and promotes");
 
         assert_eq!(final_path, root.join("sketch-1.brep"));
         let promoted = fs::read(&final_path).expect("promoted file reads");
@@ -336,7 +395,7 @@ mod tests {
             .expect("artifact stages");
 
         let error = stage
-            .validate(&header(&staged, "deadbeef".to_string()))
+            .validate_and_promote(&header(&staged, "deadbeef".to_string()))
             .expect_err("hash mismatch must reject the artifact");
         match error {
             ArtifactError::HashMismatch { expected, actual } => {
@@ -389,6 +448,68 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_rejects_a_symlinked_staging_root() {
+        let target = temp_root("root-target");
+        let link = temp_root("root-link");
+        fs::create_dir_all(&target).expect("target creates");
+        std::os::unix::fs::symlink(&target, &link).expect("root symlink creates");
+
+        let error = Stage::open(&link).expect_err("symlinked root is rejected");
+
+        assert!(matches!(error, ArtifactError::InvalidRoot(path) if path == link));
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn promotion_rejects_a_symlinked_staged_file() {
+        let root = temp_root("file-symlink");
+        let target = temp_root("file-target");
+        let stage = Stage::open(&root).expect("stage opens");
+        let bytes = b"outside bytes";
+        fs::write(&target, bytes).expect("target writes");
+        std::os::unix::fs::symlink(&target, root.join("sketch-1.brep.partial"))
+            .expect("artifact symlink creates");
+        let staged = StagedArtifact {
+            staging_name: "sketch-1.brep".to_string(),
+            sha256: sha256_hex(bytes),
+            byte_count: bytes.len() as u64,
+        };
+
+        let error = stage
+            .validate_and_promote(&header(&staged, staged.sha256.clone()))
+            .expect_err("symlinked artifact is rejected");
+
+        assert!(matches!(error, ArtifactError::NotRegularFile(_)));
+        assert_eq!(fs::read(&target).expect("target reads"), bytes);
+        assert!(!root.join("sketch-1.brep.partial").exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn promotion_rejects_an_oversized_worker_file_before_reading_it() {
+        let root = temp_root("worker-oversize");
+        let stage = Stage::open(&root).expect("stage opens");
+        let bytes = vec![0u8; MAX_ARTIFACT_BYTES + 1];
+        fs::write(root.join("sketch-1.brep.partial"), &bytes).expect("worker file writes");
+        let staged = StagedArtifact {
+            staging_name: "sketch-1.brep".to_string(),
+            sha256: sha256_hex(&bytes),
+            byte_count: bytes.len() as u64,
+        };
+
+        let error = stage
+            .validate_and_promote(&header(&staged, staged.sha256.clone()))
+            .expect_err("oversized worker file is rejected");
+
+        assert!(matches!(error, ArtifactError::PayloadTooLarge { .. }));
+        assert!(!root.join("sketch-1.brep.partial").exists());
+        assert!(!root.join("sketch-1.brep").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

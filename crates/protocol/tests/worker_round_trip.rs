@@ -617,3 +617,44 @@ impl WorkerHost for CancelLoggingWorker {
         self.inner.cancel(request_id, reason)
     }
 }
+
+#[test]
+fn request_rejects_an_artifact_bound_to_another_revision() {
+    let staging_root = std::env::temp_dir().join(format!(
+        "threeterm-pipe-stage-stale-revision-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging_root);
+    let stage = Stage::open(&staging_root).expect("stage opens");
+    let bytes = b"stale worker bytes";
+    let mut header = artifact_header(&staging_root, bytes, sha256_hex(bytes));
+    header.source_revision_id = "rev-stale".to_string();
+    header.cache_key.source_revision_id = "rev-stale".to_string();
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Artifact {
+            schema_version: schema_version().to_string(),
+            header,
+        },
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), Some(stage));
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected terminal record");
+    };
+
+    assert!(
+        record
+            .last_artifact_error
+            .as_deref()
+            .is_some_and(|error| error.contains("revision"))
+    );
+    assert!(!staging_root.join("sketch-1.brep.partial").exists());
+    assert!(!staging_root.join("sketch-1.brep").exists());
+    let _ = std::fs::remove_dir_all(staging_root);
+}

@@ -284,25 +284,25 @@ fn extrude_brep_invalid_preserves_canonical_state() {
 #[test]
 fn extrude_persistence_append_failure_preserves_canonical_state() {
     use std::os::unix::fs::PermissionsExt;
-    if fs::metadata("/proc/self/status").ok().is_none() {
-        let probe = std::env::temp_dir().join(format!(
-            "threeterm-host-occt-probe-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+    // The chmod 0o500 trick cannot deny writes when running as root.
+    // Probe by creating a temp dir, chmod'ing it 0o500, attempting a
+    // write, and skipping the test if the write succeeds (i.e. we are
+    // root and the chmod cannot deny the write).
+    {
+        let probe_parent = std::env::temp_dir().join(format!(
+            "threeterm-host-occt-persist-probe-{}",
+            std::process::id()
         ));
-        fs::create_dir(&probe).expect("probe dir creates");
-        fs::write(probe.join("read_only"), b"seed").expect("seed");
-        let mut perms = fs::metadata(&probe).expect("stat").permissions();
+        fs::create_dir(&probe_parent).expect("probe parent creates");
+        let mut perms = fs::metadata(&probe_parent).expect("stat").permissions();
         perms.set_mode(0o500);
-        fs::set_permissions(&probe, perms).expect("chmod");
-        let write = fs::write(probe.join("attempt"), b"x");
-        let mut perms = fs::metadata(&probe).expect("stat").permissions();
-        perms.set_mode(0o700);
-        fs::set_permissions(&probe, perms).expect("restore perms");
-        let _ = fs::remove_dir_all(&probe);
+        fs::set_permissions(&probe_parent, perms).expect("chmod");
+        let probe = probe_parent.join("attempt");
+        let write = fs::write(&probe, b"x");
+        let mut restore = fs::metadata(&probe_parent).expect("stat").permissions();
+        restore.set_mode(0o700);
+        fs::set_permissions(&probe_parent, restore).expect("restore perms");
+        let _ = fs::remove_dir_all(&probe_parent);
         if write.is_ok() {
             eprintln!("persistence_append_failure_preserves_canonical_state: skipping under root");
             return;

@@ -3,9 +3,16 @@ name = "threeterm-slvs-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
 publish.workspace = true
-description = "Rust skeleton crate for the disposable libslvs worker boundary. C++ worker code lives outside the workspace."
+description = "Disposable sketch-constraint solver worker (libslvs, GPLv3 — see NOTICE for upstream provenance, modifications, and build steps)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
 
 [lints]
 workspace = true

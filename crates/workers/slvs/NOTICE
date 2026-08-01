@@ -1,0 +1,52 @@
+ThreeTerm sketch-solver worker (libslvs) — provenance, modifications, and build
+
+Upstream
+- Project: SolveSpace
+- URL: https://github.com/solvespace/solvespace
+- Pinned tag: v3.2
+- Pinned commit: 27b6a080c8b669421bd4d444650c3b8eddec5687
+- License: GPL-3.0-or-later (see upstream COPYING.txt)
+
+Vendored files
+- src/slvs/lib.cpp (the public C API entry points)
+- src/slvs/CMakeLists.txt
+- The remainder of the SolveSpace tree is fetched at build time by
+  crates/workers/slvs/build.rs into OUT_DIR/vendor/solvespace/ to keep the
+  worktree small. The build is reproducible from the pinned tag above.
+
+ThreeTerm additions (NOT derived from upstream)
+- src-cpp/worker_main.cpp — ThreeTerm-only sketch envelope (stdin/stdout JSON),
+  ThreeTerm-only diagnostics on stderr, mapping from caller-supplied stable
+  identifiers to libslvs numeric handles. This file is the disposable worker
+  binary's main entry point and is owned by ThreeTerm.
+- build.rs — ThreeTerm-only cargo build glue that vendors upstream at the
+  pinned commit, builds libslvs via CMake, and compiles worker_main.cpp into
+  target/<profile>/build/.../out/bin/threeterm-slvs-worker.
+
+Build
+- Prerequisites: cmake, a C++17 compiler (g++ or clang++), git.
+- `cargo build -p threeterm-slvs-worker` runs build.rs which:
+    1. clones the upstream pinned commit into OUT_DIR/vendor/solvespace/
+       (skipped if a previous vendored tree exists);
+    2. configures with
+       `cmake -S . -B build -DENABLE_GUI=OFF -DENABLE_CLI=OFF \
+              -DENABLE_TESTS=OFF -DENABLE_PYTHON_LIB=OFF \
+              -DENABLE_EMSCRIPTEN=OFF`;
+    3. builds the `slvs` shared library target;
+    4. compiles worker_main.cpp against libslvs.so and writes the worker
+       binary to OUT_DIR/bin/threeterm-slvs-worker.
+- THREETERM_SLVSBUILD_DIR=<dir> overrides the vendored build by pointing at a
+  pre-built libslvs.so. THREETERM_SKIP_SLVSBUILD=1 disables the build (test
+  harnesses set this when they provide their own worker binary).
+
+Distribution obligations (GPL-3.0-or-later)
+- This crate's worker binary is a derivative work of libslvs and must be
+  distributed under GPLv3-or-later terms. Corresponding source for the
+  upstream portions (the pinned commit above) is the SolveSpace repository.
+- The worker binary embeds the upstream COPYING.txt; the build also writes
+  worker-metadata.txt under OUT_DIR that records the pinned commit and tag.
+
+Schema
+- worker_main.cpp exchanges envelopes at schema_version "threeterm.workers.slvs/1".
+  The host (ThreeTerm) is the sole owner of stable caller IDs; libslvs numeric
+  handles are private to the worker.

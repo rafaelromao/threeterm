@@ -724,11 +724,9 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         return Err(error);
     }
     fail_if_injected(PublicationFailurePoint::PromoteStaging)?;
-    if let Err(error) = fs::rename(staging, destination) {
-        // The previous generation is deliberately left in place. `Bundle::open`
-        // recognizes this interrupted replacement and opens it explicitly.
-        return Err(error);
-    }
+    // The previous generation is deliberately left in place. `Bundle::open`
+    // recognizes an interrupted replacement and opens it explicitly.
+    fs::rename(staging, destination)?;
     if let Some(parent) = destination.parent() {
         File::open(parent)?.sync_all()?;
     }

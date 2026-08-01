@@ -24,6 +24,7 @@ pub const BREP_SUBDIR: &str = "brep";
 pub struct SnapshotView {
     pub feature_graph_hash: String,
     pub revision_hash: String,
+    pub recovered_from_previous: bool,
 }
 
 impl From<&LoadedBundle> for SnapshotView {
@@ -31,6 +32,7 @@ impl From<&LoadedBundle> for SnapshotView {
         Self {
             feature_graph_hash: bundle.feature_graph_hash_hex().to_string(),
             revision_hash: bundle.revision_hash_hex().to_string(),
+            recovered_from_previous: bundle.recovered_from_previous,
         }
     }
 }
@@ -230,12 +232,7 @@ impl Host {
 
     pub fn load(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
-        if !root.exists() {
-            return Err(HostError::BundlePathMissing {
-                path: root.to_path_buf(),
-            });
-        }
-        if !root.is_dir() {
+        if root.exists() && !root.is_dir() {
             return Err(HostError::BundlePathNotDirectory {
                 path: root.to_path_buf(),
             });

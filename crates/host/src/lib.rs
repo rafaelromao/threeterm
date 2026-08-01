@@ -17,7 +17,6 @@ use threeterm_protocol::artifact::{
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::supervisor::SupervisorOutcome;
-use threeterm_protocol::worker::Envelope;
 
 pub const BREP_SUBDIR: &str = "brep";
 
@@ -298,35 +297,6 @@ impl Host {
                 .pop()
                 .expect("checked exactly one artifact"),
         )
-    }
-
-    /// Accept one artifact envelope directly. Worker lifecycle callers should
-    /// use `accept_derived_result` so completion and publication stay explicit.
-    pub fn promote_staged_artifact(
-        &self,
-        artifact_root: impl AsRef<Path>,
-        request: &Layer1ArtifactRequest,
-        expected_worker: &WorkerFingerprint,
-        envelope: Envelope,
-    ) -> Result<Layer1DerivedResult, Diagnostic> {
-        let root = artifact_root.as_ref();
-        let Envelope::Artifact {
-            schema_version,
-            header,
-        } = envelope
-        else {
-            cleanup_staged_artifact(root, &request.staging_name);
-            return Err(Diagnostic::artifact_promotion_failure(
-                "artifact_envelope_expected",
-            ));
-        };
-        if schema_version != threeterm_protocol::schema_version() {
-            cleanup_staged_artifact(root, &request.staging_name);
-            return Err(Diagnostic::artifact_promotion_failure(
-                "artifact_schema_mismatch",
-            ));
-        }
-        self.accept_staged_artifact(root, request, expected_worker, *header)
     }
 
     fn accept_staged_artifact(

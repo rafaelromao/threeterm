@@ -54,18 +54,19 @@ fn completed_outcome(
     request: &Layer1ArtifactRequest,
     artifact: Envelope,
 ) -> SupervisorOutcome {
+    let completed = Envelope::Completed {
+        schema_version: threeterm_protocol::schema_version().to_string(),
+        request_id: request.request_id.clone(),
+        result: serde_json::json!({ "ok": true }),
+    };
     let worker = CompletedWorker {
         pending: VecDeque::from([
-            Envelope::WorkerReady {
+            wire_round_trip(&Envelope::WorkerReady {
                 schema_version: threeterm_protocol::schema_version().to_string(),
                 worker_id: "fake".to_string(),
-            },
-            artifact,
-            Envelope::Completed {
-                schema_version: threeterm_protocol::schema_version().to_string(),
-                request_id: request.request_id.clone(),
-                result: serde_json::json!({ "ok": true }),
-            },
+            }),
+            wire_round_trip(&artifact),
+            wire_round_trip(&completed),
         ]),
     };
     let stage = threeterm_protocol::artifact::Stage::open(artifact_root).expect("stage opens");
@@ -107,7 +108,12 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
     let parsed = wire_round_trip(&emitted);
 
     let result = host
-        .promote_staged_artifact(&artifact_root, &request, &worker_fingerprint(), parsed)
+        .accept_derived_result(
+            &artifact_root,
+            &request,
+            &worker_fingerprint(),
+            completed_outcome(&artifact_root, &request, parsed),
+        )
         .expect("valid artifact promotes");
 
     assert_eq!(std::fs::read(&result.path).expect("artifact reads"), bytes);
@@ -241,13 +247,17 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
     };
     let original_bytes = b"current valid artifact";
     let original = host
-        .promote_staged_artifact(
+        .accept_derived_result(
             &artifact_root,
             &request,
             &worker_fingerprint(),
-            wire_round_trip(
+            completed_outcome(
+                &artifact_root,
+                &request,
+                wire_round_trip(
                 &emit_staged_artifact(&artifact_root, &request, original_bytes)
                     .expect("worker stages initial artifact"),
+                ),
             ),
         )
         .expect("initial artifact promotes");
@@ -260,11 +270,11 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
     std::fs::write(&partial_path, decoded).expect("staged payload is tampered");
 
     let diagnostic = host
-        .promote_staged_artifact(
+        .accept_derived_result(
             &artifact_root,
             &request,
             &worker_fingerprint(),
-            wire_round_trip(&tampered),
+            completed_outcome(&artifact_root, &request, wire_round_trip(&tampered)),
         )
         .expect_err("tampered artifact is rejected");
 
@@ -331,11 +341,11 @@ fn misbound_artifact_headers_are_rejected_without_host_mutation() {
         }
 
         let diagnostic = host
-            .promote_staged_artifact(
+            .accept_derived_result(
                 &artifact_root,
                 &request,
                 &worker_fingerprint(),
-                wire_round_trip(&emitted),
+                completed_outcome(&artifact_root, &request, wire_round_trip(&emitted)),
             )
             .expect_err("misbound artifact is rejected");
 

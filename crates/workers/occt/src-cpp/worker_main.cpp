@@ -1513,28 +1513,35 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
 
         // Hollow the solid by carving an inward-offset copy out of it:
         // 1. Offset every face inward by `thickness` to construct the
-        //    inner shell.
-        // 2. Wrap the inner shell in a solid.
+        //    inner shell (the parametric constructor runs Initialize
+        //    + Perform; the protected methods are not callable from
+        //    user code).
+        // 2. Wrap the resulting shell in a solid.
         // 3. Boolean-cut the inner solid from the base — the
         //    remainder is a hollow shell with `thickness`-wide walls.
-        BRepOffsetAPI_MakeOffset inner_offset;
-        inner_offset.Initialize(base, -thickness, 1.0e-6, Standard_True);
-        inner_offset.MakeOffset();
+        BRepOffsetAPI_MakeOffset inner_offset(base, -thickness, 1.0e-6,
+                                              Standard_True);
         if (!inner_offset.IsDone()) {
             error = "BRepOffsetAPI_MakeOffset did not complete";
             return false;
         }
-        TopTools_ListOfShape inner_shells;
-        for (TopExp_Explorer shell_explorer(inner_offset.Shape(), TopAbs_SHELL);
+        TopoDS_Shape offset_shape = inner_offset.Shape();
+        if (offset_shape.IsNull()) {
+            error = "BRepOffsetAPI_MakeOffset returned a null shape";
+            return false;
+        }
+        TopoDS_Shell inner_shell;
+        for (TopExp_Explorer shell_explorer(offset_shape, TopAbs_SHELL);
              shell_explorer.More();
              shell_explorer.Next()) {
-            inner_shells.Append(shell_explorer.Current());
+            inner_shell = TopoDS::Shell(shell_explorer.Current());
+            break;
         }
-        if (inner_shells.IsEmpty()) {
+        if (inner_shell.IsNull()) {
             error = "shell offset did not produce an inner shell";
             return false;
         }
-        BRepBuilderAPI_MakeSolid inner_solid_maker(inner_shells);
+        BRepBuilderAPI_MakeSolid inner_solid_maker(inner_shell);
         if (!inner_solid_maker.IsDone()) {
             error = "BRepBuilderAPI_MakeSolid did not complete";
             return false;

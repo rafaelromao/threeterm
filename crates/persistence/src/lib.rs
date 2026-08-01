@@ -73,8 +73,9 @@ pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// A deterministic test hook for the durability boundaries in generation
-/// publication. The hook fails once, then clears itself.
+/// A deterministic filesystem boundary for generation publication tests. The
+/// hook fails the operation before it reaches the filesystem, then clears
+/// itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationFailurePoint {
     StagingSync,
@@ -582,8 +583,7 @@ impl Bundle {
             &serde_json::to_vec_pretty(&loaded.manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
         )?;
-        File::open(&staging)?.sync_all()?;
-        fail_if_injected(PublicationFailurePoint::StagingSync)?;
+        sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
         Bundle::at(&staging).open_sealed(false)?;
         publish_staged(&staging, &self.root)?;
         self.open()
@@ -732,42 +732,61 @@ fn loaded_with(
 fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     let previous = previous_generation_path(destination);
     if !destination.exists() {
-        fs::rename(staging, destination)?;
+        rename_generation(
+            staging,
+            destination,
+            PublicationFailurePoint::PromoteStaging,
+        )?;
         if let Some(parent) = destination.parent() {
-            fail_if_injected(PublicationFailurePoint::ParentSync)?;
-            File::open(parent)?.sync_all()?;
+            sync_directory(parent, PublicationFailurePoint::ParentSync)?;
         }
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
-    fail_if_injected(PublicationFailurePoint::ReplaceCurrent)?;
     if previous.exists() {
         fs::rename(&previous, &retired)?;
     }
-    if let Err(error) = fs::rename(destination, &previous) {
+    if let Err(error) = rename_generation(
+        destination,
+        &previous,
+        PublicationFailurePoint::ReplaceCurrent,
+    ) {
         if retired.exists() {
             let _ = fs::rename(&retired, &previous);
         }
         return Err(error);
     }
-    if let Err(error) = fail_if_injected(PublicationFailurePoint::PromoteStaging) {
-        let _ = fs::rename(&previous, destination);
-        return Err(error);
-    }
     // The previous generation is deliberately left in place. `Bundle::open`
     // recognizes an interrupted replacement and opens it explicitly.
-    if let Err(error) = fs::rename(staging, destination) {
+    if let Err(error) = rename_generation(
+        staging,
+        destination,
+        PublicationFailurePoint::PromoteStaging,
+    ) {
         let _ = fs::rename(&previous, destination);
         return Err(error);
     }
     if let Some(parent) = destination.parent() {
-        fail_if_injected(PublicationFailurePoint::ParentSync)?;
-        File::open(parent)?.sync_all()?;
+        sync_directory(parent, PublicationFailurePoint::ParentSync)?;
     }
     if retired.exists() {
         let _ = fs::remove_dir_all(retired);
     }
     Ok(())
+}
+
+fn rename_generation(
+    source: &Path,
+    destination: &Path,
+    point: PublicationFailurePoint,
+) -> std::io::Result<()> {
+    fail_if_injected(point)?;
+    fs::rename(source, destination)
+}
+
+fn sync_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
+    fail_if_injected(point)?;
+    File::open(path)?.sync_all()
 }
 
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
@@ -849,7 +868,7 @@ fn write_v1_into(
         &staging.join(MANIFEST_FILENAME),
         &serde_json::to_vec_pretty(manifest)?,
     )?;
-    File::open(staging)?.sync_all()?;
+    sync_directory(staging, PublicationFailurePoint::StagingSync)?;
     Ok(())
 }
 
@@ -1225,11 +1244,12 @@ mod tests {
     }
 
     #[test]
-    fn publication_sync_and_replacement_failures_preserve_current_generation_bytes() {
+    fn publication_filesystem_failures_preserve_a_loadable_generation() {
         for point in [
             PublicationFailurePoint::StagingSync,
             PublicationFailurePoint::ReplaceCurrent,
             PublicationFailurePoint::PromoteStaging,
+            PublicationFailurePoint::ParentSync,
         ] {
             let root = temp_root("publication-failure");
             let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
@@ -1241,9 +1261,24 @@ mod tests {
 
             fail_next_publication_at(point);
             assert!(bundle.append_feature("box-2", "box").is_err());
-            assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
-            assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
-            assert_eq!(bundle.open().unwrap().log.len(), 1);
+            if point == PublicationFailurePoint::ParentSync {
+                // Parent sync happens after promotion. The new generation is
+                // selected, while the predecessor remains byte-preserved.
+                assert_eq!(bundle.open().unwrap().log.len(), 2);
+                let previous = previous_generation_path(&root);
+                assert_eq!(
+                    fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+                    manifest
+                );
+                assert_eq!(
+                    fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+                    log
+                );
+            } else {
+                assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
+                assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
+                assert_eq!(bundle.open().unwrap().log.len(), 1);
+            }
 
             let _ = fs::remove_dir_all(&root);
             let _ = fs::remove_dir_all(previous_generation_path(&root));

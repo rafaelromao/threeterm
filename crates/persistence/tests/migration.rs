@@ -240,6 +240,27 @@ fn interrupted_migration_replacement_preserves_the_only_canonical_generation() {
 }
 
 #[test]
+fn interrupted_migration_staging_sync_preserves_the_only_canonical_generation() {
+    let root = unique_temp_dir("sync-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-sync")).expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::StagingSync);
+    assert!(load(&root).is_err(), "staging sync failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source remains byte-identical when staging cannot be synced"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn interrupted_migration_promotion_restores_the_v0_source_and_retains_staging() {
     let root = unique_temp_dir("promotion-failure");
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-promotion")).expect("v0 writes");

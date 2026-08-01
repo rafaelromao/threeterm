@@ -86,7 +86,8 @@ fn extrude_commits_brep_into_a_new_revision() {
     let root = fresh_bundle_with_feature("commit", "box-seed", "box");
     let prior = Host::new().load(&root).expect("host loads prior");
 
-    let request = rectangle_extrude_request("commit").with_output_path(root.join("stage"), "extrude.brep");
+    let request =
+        rectangle_extrude_request("commit").with_output_path(root.join("stage"), "extrude.brep");
     let view = Host::new()
         .extrude(&root, request, &worker)
         .expect("extrude commits");
@@ -113,8 +114,8 @@ fn worker_spawn_failure_preserves_canonical_state() {
 
     let bad_worker =
         threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
-    let request =
-        rectangle_extrude_request("spawn-fail").with_output_path(root.join("stage"), "extrude.brep");
+    let request = rectangle_extrude_request("spawn-fail")
+        .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &bad_worker);
     assert!(
         matches!(result, Err(HostError::WorkerFailure { .. })),
@@ -263,8 +264,8 @@ fn extrude_brep_invalid_preserves_canonical_state() {
     fs::set_permissions(&script, perms).expect("chmod");
 
     let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
-    let request =
-        rectangle_extrude_request("brep-invalid").with_output_path(root.join("stage"), "extrude.brep");
+    let request = rectangle_extrude_request("brep-invalid")
+        .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::BrepInvalid { .. })),
@@ -320,8 +321,8 @@ fn extrude_persistence_append_failure_preserves_canonical_state() {
     perms.set_mode(0o500);
     fs::set_permissions(&root, perms).expect("chmod");
 
-    let request =
-        rectangle_extrude_request("persist-fail").with_output_path(root.join("stage"), "extrude.brep");
+    let request = rectangle_extrude_request("persist-fail")
+        .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &worker);
     // The read-only permission kills the BREP-directory creation step
     // before the append_feature call, so the error is `HostError::BrepIo`.

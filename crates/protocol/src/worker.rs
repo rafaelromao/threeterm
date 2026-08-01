@@ -601,17 +601,17 @@ mod tests {
     #[test]
     fn subprocess_transport_honors_an_expired_receive_deadline() {
         let child = Command::new("sh")
-            .args(["-c", "exec sleep 60"])
+            .args(["-c", "exec cat >/dev/null"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("sleeping worker starts");
+            .expect("blocked worker starts");
         let mut transport = SubprocessWorkerHost::new(child).expect("subprocess transport starts");
 
         assert!(matches!(
             transport.recv(Instant::now()),
             Err(WorkerError::TimedOut)
         ));
-        transport.terminate().expect("sleeping worker terminates");
+        transport.terminate().expect("blocked worker terminates");
     }
 }

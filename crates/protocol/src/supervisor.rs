@@ -256,6 +256,15 @@ impl Supervisor {
         if let Some(outcome) = self.consume_worker_ready("<handshake>", started, deadline) {
             return outcome;
         }
+        if Instant::now() >= deadline {
+            return self.force_terminate_outcome(
+                &request.request_id,
+                started,
+                "handshake_grace_exceeded",
+                None,
+                None,
+            );
+        }
 
         // Phase 2: send the request envelope. Staged artifacts are
         // accumulated by `record_artifact`; the worker is expected to
@@ -935,6 +944,50 @@ mod tests {
             panic!("expected force termination");
         };
         assert_eq!(record.stage, "handshake_grace_exceeded");
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn request_does_not_dispatch_after_a_late_handshake() {
+        struct LateHandshakeWorker {
+            sent: Arc<Mutex<usize>>,
+            terminated: Arc<Mutex<usize>>,
+        }
+
+        impl WorkerHost for LateHandshakeWorker {
+            fn send(&mut self, _: &Envelope) -> Result<(), WorkerError> {
+                *self.sent.lock().expect("send count mutex") += 1;
+                Ok(())
+            }
+
+            fn recv(&mut self, _: Instant) -> Result<Envelope, WorkerError> {
+                Ok(ready_envelope())
+            }
+
+            fn cancel(&mut self, _: &str, _: &str) -> Result<(), WorkerError> {
+                Ok(())
+            }
+
+            fn terminate(&mut self) -> Result<(), WorkerError> {
+                *self.terminated.lock().expect("termination log mutex") += 1;
+                Ok(())
+            }
+        }
+
+        let sent = Arc::new(Mutex::new(0));
+        let terminated = Arc::new(Mutex::new(0));
+        let worker = LateHandshakeWorker {
+            sent: Arc::clone(&sent),
+            terminated: Arc::clone(&terminated),
+        };
+        let mut supervisor = Supervisor::new(Duration::ZERO, Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "handshake_grace_exceeded");
+        assert_eq!(*sent.lock().expect("send count mutex"), 0);
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }
 

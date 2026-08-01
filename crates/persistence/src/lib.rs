@@ -82,6 +82,7 @@ pub enum PublicationFailurePoint {
     ReplaceCurrent,
     PromoteStaging,
     ParentSync,
+    RetiredCleanup,
 }
 
 thread_local! {
@@ -743,6 +744,12 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
+    // An interrupted cleanup leaves a generation that is older than the two
+    // recovery generations. Reconcile it before rotating again so a retry is
+    // not blocked by the deterministic retired path.
+    if retired.exists() {
+        fs::remove_dir_all(&retired)?;
+    }
     if previous.exists() {
         fs::rename(&previous, &retired)?;
     }
@@ -770,6 +777,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // longer part of recovery, so its cleanup must not block a later publish
     // if the post-promotion durability sync reports an error.
     if retired.exists() {
+        fail_if_injected(PublicationFailurePoint::RetiredCleanup)?;
         let _ = fs::remove_dir_all(&retired);
     }
     if let Some(parent) = destination.parent() {
@@ -1306,6 +1314,29 @@ mod tests {
         bundle
             .append_feature("box-4", "box")
             .expect("next publication recovers");
+        assert_eq!(bundle.open().unwrap().log.len(), 4);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(previous_generation_path(&root));
+    }
+
+    #[test]
+    fn interrupted_retired_cleanup_is_reconciled_before_the_next_publication() {
+        let root = temp_root("retired-cleanup-retry");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first publish");
+        bundle
+            .append_feature("box-2", "box")
+            .expect("second publish");
+
+        fail_next_publication_at(PublicationFailurePoint::RetiredCleanup);
+        assert!(bundle.append_feature("box-3", "box").is_err());
+
+        bundle
+            .append_feature("box-4", "box")
+            .expect("next publication reconciles stale retired generation");
         assert_eq!(bundle.open().unwrap().log.len(), 4);
 
         let _ = fs::remove_dir_all(&root);

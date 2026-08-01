@@ -233,7 +233,18 @@ impl Host {
                 Bundle::create(root)?
             }
         };
-        let loaded = bundle.append_feature(feature_id, kind)?;
+        let loaded = match bundle.append_feature(feature_id, kind) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Publication can promote before its final parent sync
+                // reports an error. Re-open so in-memory state never lags
+                // the selected generation on disk.
+                if let Ok(loaded) = bundle.open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -1092,8 +1103,9 @@ mod tests {
     use super::*;
     use threeterm_domain::ProjectGeneration;
     use threeterm_persistence::{
-        Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX, schema_epoch,
-        write_fresh, write_v0_fixture,
+        Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX,
+        PublicationFailurePoint, fail_next_publication_at, schema_epoch, write_fresh,
+        write_v0_fixture,
     };
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -1145,6 +1157,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(valid_root);
         let _ = std::fs::remove_dir_all(tampered_root);
+    }
+
+    #[test]
+    fn save_reconciles_current_snapshot_after_post_promotion_sync_failure() {
+        let root = temp_root("save-parent-sync");
+        let host = Host::new();
+        host.save(&root, "box-1", "box").expect("first save");
+
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.save(&root, "box-2", "box").is_err());
+
+        let on_disk = Bundle::at(&root).open().expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&on_disk)));
+        assert_eq!(on_disk.log.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root.with_file_name(format!(
+            "{}.previous-generation",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        )));
     }
 
     #[test]

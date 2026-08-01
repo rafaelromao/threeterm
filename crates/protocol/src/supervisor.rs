@@ -38,7 +38,7 @@ pub enum SupervisorOutcome {
     /// them against its current Revision Snapshot.
     Completed {
         request_id: String,
-        artifact_headers: Vec<ArtifactHeader>,
+        artifact_headers: Vec<StagedArtifact>,
     },
     /// The worker acknowledged the cooperative cancellation inside the
     /// grace period and exited cleanly.

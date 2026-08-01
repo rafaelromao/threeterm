@@ -1073,6 +1073,7 @@ fn hole_on_l_bracket_shows_hole_in_viewport() {
     assert_eq!(fuse_view.result.status, "ok");
 
     let fused_brep = committed_brep_path(&root, "l-bracket-1");
+    let fused_bytes = fs::read(&fused_brep).expect("fused BREP reads");
     let hole_request = HoleRequest::new(
         unique_request_id("l-bracket-hole"),
         &fused_brep,
@@ -1105,6 +1106,16 @@ fn hole_on_l_bracket_shows_hole_in_viewport() {
     assert!(
         prefix_str.contains("DBRep_DrawableShape"),
         "holed L-bracket BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+    assert_ne!(
+        bytes, fused_bytes,
+        "holed L-bracket BREP must differ byte-for-byte from the fused BREP; \
+         an unchanged payload would mean the cut did not run"
+    );
+    assert_ne!(
+        hole_view.result.brep_sha256, fuse_view.result.brep_sha256,
+        "holed BREP sha256 must differ from the fused BREP sha256; \
+         identical hashes would mean the cut did not run"
     );
 
     let _ = fs::remove_dir_all(root);

@@ -54,8 +54,7 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 
-#include <BRepBuilderAPI_MakeSolid.hxx>
-#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
@@ -1511,52 +1510,28 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Hollow the solid by carving an inward-offset copy out of it:
-        // 1. Offset every face inward by `thickness` to construct the
-        //    inner shell (the parametric constructor runs Initialize
-        //    + Perform; the protected methods are not callable from
-        //    user code).
-        // 2. Wrap the resulting shell in a solid.
-        // 3. Boolean-cut the inner solid from the base — the
-        //    remainder is a hollow shell with `thickness`-wide walls.
-        BRepOffsetAPI_MakeOffset inner_offset(base, -thickness, 1.0e-6,
-                                              Standard_True);
-        if (!inner_offset.IsDone()) {
-            error = "BRepOffsetAPI_MakeOffset did not complete";
+        // Build a list of every face on the base solid. An empty
+        // Join/Del list lets `MakeThickSolidByJoin` treat every face
+        // in the context as part of the offset surface, so a
+        // negative offset shrinks every face inward uniformly into a
+        // hollow shell with `thickness`-wide walls.
+        TopTools_ListOfShape faces;
+        for (TopExp_Explorer explorer(base, TopAbs_FACE); explorer.More();
+             explorer.Next()) {
+            faces.Append(TopoDS::Face(explorer.Current()));
+        }
+        TopTools_ListOfShape empty;
+        BRepOffsetAPI_MakeThickSolid thickener;
+        thickener.MakeThickSolidByJoin(
+            empty, empty, faces, -thickness, 1.0e-6,
+            Standard_False, Standard_False);
+        if (!thickener.IsDone()) {
+            error = "BRepOffsetAPI_MakeThickSolid did not complete";
             return false;
         }
-        TopoDS_Shape offset_shape = inner_offset.Shape();
-        if (offset_shape.IsNull()) {
-            error = "BRepOffsetAPI_MakeOffset returned a null shape";
-            return false;
-        }
-        TopoDS_Shell inner_shell;
-        for (TopExp_Explorer shell_explorer(offset_shape, TopAbs_SHELL);
-             shell_explorer.More();
-             shell_explorer.Next()) {
-            inner_shell = TopoDS::Shell(shell_explorer.Current());
-            break;
-        }
-        if (inner_shell.IsNull()) {
-            error = "shell offset did not produce an inner shell";
-            return false;
-        }
-        BRepBuilderAPI_MakeSolid inner_solid_maker(inner_shell);
-        if (!inner_solid_maker.IsDone()) {
-            error = "BRepBuilderAPI_MakeSolid did not complete";
-            return false;
-        }
-        TopoDS_Solid inner_solid = inner_solid_maker.Solid();
-
-        BRepAlgoAPI_Cut cut(base, inner_solid);
-        cut.Build();
-        if (!cut.IsDone()) {
-            error = "BRepAlgoAPI_Cut did not complete during shell";
-            return false;
-        }
-        TopoDS_Shape result = cut.Shape();
+        TopoDS_Shape result = thickener.Shape();
         if (result.IsNull()) {
-            error = "BRepAlgoAPI_Cut returned a null shape";
+            error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
             return false;
         }
 

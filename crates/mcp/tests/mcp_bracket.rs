@@ -421,3 +421,141 @@ fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params() {
+    let root = fresh_bundle("empty-bracket-id");
+
+    let seeded = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(&root)
+        .args([
+            "--bracket-id",
+            "l-1",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("seed bracket process runs");
+    assert!(seeded.status.success());
+
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let transactions_before =
+        std::fs::read(root.join("transactions.log")).expect("transactions log reads");
+
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.bracket/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "bracket_id": "",
+                "length": 60.0,
+                "width": 30.0,
+                "height": 40.0,
+                "thickness": 3.0
+            }
+        }
+    })]);
+
+    assert_eq!(responses.len(), 1);
+    let response = &responses[0];
+    assert_eq!(response["error"]["code"], -32602);
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("error message is a string");
+    assert!(
+        message.contains("bracket_id"),
+        "error must name the offending field; got {message:?}"
+    );
+
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads after failure"),
+        manifest_before,
+        "canonical manifest must be unchanged after a rejected tools/call"
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transactions log after failure"),
+        transactions_before,
+        "canonical transaction log must be unchanged after a rejected tools/call"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params() {
+    let root = fresh_bundle("non-positive-length");
+
+    let seeded = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(&root)
+        .args([
+            "--bracket-id",
+            "l-1",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("seed bracket process runs");
+    assert!(seeded.status.success());
+
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let transactions_before =
+        std::fs::read(root.join("transactions.log")).expect("transactions log reads");
+
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.bracket/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "bracket_id": "l-2",
+                "length": 0.0,
+                "width": 30.0,
+                "height": 40.0,
+                "thickness": 3.0
+            }
+        }
+    })]);
+
+    assert_eq!(responses.len(), 1);
+    let response = &responses[0];
+    assert_eq!(response["error"]["code"], -32602);
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("error message is a string");
+    assert!(
+        message.contains("length"),
+        "error must name the offending field; got {message:?}"
+    );
+
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads after failure"),
+        manifest_before,
+        "canonical manifest must be unchanged after a rejected tools/call"
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transactions log after failure"),
+        transactions_before,
+        "canonical transaction log must be unchanged after a rejected tools/call"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

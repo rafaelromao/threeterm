@@ -96,6 +96,19 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
                         ));
                     }
                 }
+                if let Some(exclusive_minimum) = schema_object.get("exclusiveMinimum") {
+                    let exclusive_minimum = exclusive_minimum.as_f64().ok_or_else(|| {
+                        format!("`exclusiveMinimum` must be a number, got {exclusive_minimum}")
+                    })?;
+                    let actual = value
+                        .as_f64()
+                        .expect("value is a number after the type check");
+                    if actual <= exclusive_minimum {
+                        return Err(format!(
+                            "number is not greater than the schema's `exclusiveMinimum`: {actual} <= {exclusive_minimum}"
+                        ));
+                    }
+                }
             }
             "integer" => {
                 if !value.is_i64() && !value.is_u64() {
@@ -113,6 +126,21 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
                     if actual < minimum {
                         return Err(format!(
                             "integer is below the schema's `minimum`: {actual} < {minimum}"
+                        ));
+                    }
+                }
+                if let Some(exclusive_minimum) = schema_object.get("exclusiveMinimum") {
+                    let exclusive_minimum = exclusive_minimum.as_f64().ok_or_else(|| {
+                        format!("`exclusiveMinimum` must be a number, got {exclusive_minimum}")
+                    })?;
+                    let actual = if value.is_i64() {
+                        value.as_i64().expect("value is i64") as f64
+                    } else {
+                        value.as_u64().expect("value is u64") as f64
+                    };
+                    if actual <= exclusive_minimum {
+                        return Err(format!(
+                            "integer is not greater than the schema's `exclusiveMinimum`: {actual} <= {exclusive_minimum}"
                         ));
                     }
                 }

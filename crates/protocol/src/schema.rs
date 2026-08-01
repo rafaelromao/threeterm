@@ -143,7 +143,10 @@ pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 /// Canonical request schema document for the `bracket` command. The numeric
 /// dimensions are stored in the canonical transaction log but no OCCT
 /// geometry is computed in this slice — that is the responsibility of a
-/// future worker slice.
+/// future worker slice. The four dimensions must each be strictly positive
+/// (`minimum > 0`); zero, negative, NaN, or infinite values describe a
+/// degenerate solid and are rejected by the schema validator before they
+/// reach the host.
 pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -151,10 +154,10 @@ pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "bracket_id": { "type": "string", "minLength": 1 },
-            "length": { "type": "number", "minimum": 0 },
-            "width": { "type": "number", "minimum": 0 },
-            "height": { "type": "number", "minimum": 0 },
-            "thickness": { "type": "number", "minimum": 0 }
+            "length": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "width": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "height": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "thickness": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 }
         },
         "additionalProperties": false
     })

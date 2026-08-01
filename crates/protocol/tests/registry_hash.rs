@@ -30,7 +30,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "7a0f323642d4f69ce268155da94eeabd306e4457598e8583ec1615781dc040ef",
+        "b787e402464b293ac07ac01f368ace78ec75538076fe3d0efde850900cb58c99",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );

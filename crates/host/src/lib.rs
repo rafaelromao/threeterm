@@ -22,6 +22,7 @@ impl From<&LoadedBundle> for SnapshotView {
 pub enum HostError {
     BundlePathMissing { path: PathBuf },
     BundlePathNotDirectory { path: PathBuf },
+    Validation { detail: String },
     Persistence(BundleError),
 }
 
@@ -38,6 +39,7 @@ impl std::fmt::Display for HostError {
                     path.display()
                 )
             }
+            Self::Validation { detail } => write!(formatter, "host.validation: {detail}"),
             Self::Persistence(error) => error.fmt(formatter),
         }
     }
@@ -89,12 +91,17 @@ impl Host {
     /// atomically. Returns the post-write `SnapshotView` and updates the
     /// canonical current snapshot.
     ///
-    /// The dimensions are stored on the canonical transaction log but no
-    /// OCCT geometry is computed in this slice — that is the responsibility
-    /// of a future worker slice. If a prior bracket write under the same
-    /// `bracket_id` already exists in the bundle, the two new feature
-    /// entries are appended (canonical state preservation is inherited from
-    /// `Bundle::append_feature`).
+    /// The numeric dimensions are validated here so both the CLI and MCP
+    /// transports enforce the same contract end-to-end. The dimensions
+    /// themselves are not yet persisted on the canonical transaction log
+    /// in this slice — that is the responsibility of a future worker
+    /// slice that will round-trip dimensions through the geometric
+    /// kernel. The host intentionally records only the two plate features
+    /// so the canonical state stays stable until OCCT geometry is wired
+    /// in. The four dimensions must each be strictly positive finite
+    /// numbers; a zero, negative, NaN, or infinite value would describe a
+    /// degenerate solid or corrupt the canonical log, so the host rejects
+    /// those inputs up-front.
     pub fn save_bracket(
         &self,
         root: impl AsRef<Path>,
@@ -104,6 +111,26 @@ impl Host {
         height: f64,
         thickness: f64,
     ) -> Result<SnapshotView, HostError> {
+        if bracket_id.is_empty() {
+            return Err(HostError::Validation {
+                detail: "bracket_id must not be empty".to_string(),
+            });
+        }
+        for (name, value) in [
+            ("length", length),
+            ("width", width),
+            ("height", height),
+            ("thickness", thickness),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "{name} must be a strictly positive finite number, got {value}"
+                    ),
+                });
+            }
+        }
+
         let root = root.as_ref();
         let bundle = if root.exists() {
             if !root.is_dir() {
@@ -117,9 +144,11 @@ impl Host {
         };
         let vertical_id = format!("{bracket_id}-plate-vertical");
         let horizontal_id = format!("{bracket_id}-plate-horizontal");
-        let _ = (length, width, height, thickness);
-        let _ = bundle.append_feature(&vertical_id, "plate-vertical")?;
-        let loaded = bundle.append_feature(&horizontal_id, "plate-horizontal")?;
+        let entries = [
+            (vertical_id.as_str(), "plate-vertical"),
+            (horizontal_id.as_str(), "plate-horizontal"),
+        ];
+        let loaded = bundle.append_features(&entries)?;
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -221,9 +250,14 @@ mod tests {
             .save_bracket(&root, "l-1", 60.0, 30.0, 40.0, 3.0)
             .expect("save_bracket succeeds");
         assert_eq!(host.current(), Some(view.clone()));
+        let manifest_path = root.join(threeterm_persistence::MANIFEST_FILENAME);
+        let manifest_bytes = std::fs::read(&manifest_path).expect("manifest is readable");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes).expect("manifest parses");
+        assert!(manifest.is_object());
         assert_eq!(
-            root.join(threeterm_persistence::MANIFEST_FILENAME),
-            root.join(threeterm_persistence::MANIFEST_FILENAME)
+            manifest["transaction_count"], 2,
+            "save_bracket must record exactly two transactions"
         );
         let transactions =
             std::fs::read_to_string(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME))

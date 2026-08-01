@@ -26,7 +26,6 @@ use std::io::{BufRead, Write};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
-use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 #[allow(unused_imports)]
 use threeterm_protocol::schema::find as _find;
@@ -245,11 +244,7 @@ impl McpServer {
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ERROR_INTERNAL,
-                format!(
-                    "{}: {}",
-                    error.diagnostic_detail(),
-                    Diagnostic::integrity_failure(error.diagnostic_detail()).arg
-                ),
+                format!("host dispatch failed: {}", error),
             ),
         }
     }

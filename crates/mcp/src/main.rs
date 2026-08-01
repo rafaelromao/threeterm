@@ -17,14 +17,3 @@ fn main() -> io::Result<()> {
     let _handled = server.run(&mut reader, &mut writer)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn binary_has_a_run_loop_compile_time_wiring() {
-        // The real test is `cargo test --test mcp_bracket`, which drives
-        // the compiled binary via `CARGO_BIN_EXE_threeterm_mcp`. This
-        // placeholder keeps the unit-test target present so a `cargo test
-        // --bin threeterm-mcp` smoke run still finds something.
-    }
-}

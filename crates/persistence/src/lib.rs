@@ -490,23 +490,38 @@ impl Bundle {
         feature_id: &str,
         kind: &str,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_features(&[(feature_id, kind)])
+    }
+
+    /// Atomically append one or more `(feature_id, kind)` pairs to the
+    /// bundle's Canonical Transaction Log and revision graph. The bundle
+    /// is opened once, every entry is applied to the in-memory graph and
+    /// log, the transactions log is rewritten once, the manifest is
+    /// re-sealed once, and the bundle is reopened to return the
+    /// post-write `LoadedBundle`. Either every entry is accepted or none
+    /// is, so a crash between two writes cannot leave a half-bracket on
+    /// disk.
+    pub fn append_features(&self, entries: &[(&str, &str)]) -> Result<LoadedBundle, BundleError> {
+        if entries.is_empty() {
+            return self.open();
+        }
         let mut loaded = self.open()?;
-        let feature = Feature::new(feature_id, kind)
-            .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        if !loaded.graph.add_feature(feature) {
-            return Ok(loaded);
+        for (feature_id, kind) in entries {
+            let feature = Feature::new(*feature_id, *kind)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            if loaded.graph.add_feature(feature) {
+                loaded.log.append_feature(feature_id, kind);
+            }
         }
 
-        loaded.log.append_feature(feature_id, kind);
-        let last = loaded
-            .log
-            .entries()
-            .last()
-            .expect("appended log has an entry");
-        let mut line =
-            serde_json::to_vec(last).map_err(|error| BundleError::Invalid(error.to_string()))?;
-        line.push(b'\n');
-        append_and_sync(&self.transactions_path(), &line)?;
+        let mut encoded = Vec::new();
+        for entry in loaded.log.entries() {
+            let mut line = serde_json::to_vec(entry)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            line.push(b'\n');
+            encoded.extend_from_slice(&line);
+        }
+        atomic_write(&self.transactions_path(), &encoded)?;
 
         loaded.manifest = Manifest::seal(
             &loaded.manifest.generation_id,

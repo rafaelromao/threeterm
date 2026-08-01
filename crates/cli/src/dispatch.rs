@@ -316,6 +316,7 @@ pub fn dispatch_bracket(
 #[derive(Debug)]
 pub enum DispatchError {
     Host(HostError),
+    Validation(String),
 }
 
 impl From<HostError> for DispatchError {
@@ -325,13 +326,15 @@ impl From<HostError> for DispatchError {
 }
 
 impl DispatchError {
-    pub fn diagnostic_detail(&self) -> &'static str {
+    pub fn diagnostic_detail(&self) -> String {
         match self {
             Self::Host(error) => match error {
-                HostError::BundlePathMissing { .. } => "bundle_path_missing",
-                HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory",
-                HostError::Persistence(error) => error.diagnostic_detail(),
+                HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
+                HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
+                HostError::Validation { detail } => format!("host_validation: {detail}"),
+                HostError::Persistence(error) => error.diagnostic_detail().to_string(),
             },
+            Self::Validation(detail) => format!("dispatch_validation: {detail}"),
         }
     }
 }
@@ -340,6 +343,7 @@ impl std::fmt::Display for DispatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Host(error) => write!(formatter, "{error}"),
+            Self::Validation(detail) => write!(formatter, "dispatch.validation: {detail}"),
         }
     }
 }
@@ -434,6 +438,9 @@ fn emit_bracket(
         ),
         Err(error) => match error {
             DispatchError::Host(host_error) => emit_host_error(&host_error, stderr),
+            DispatchError::Validation(detail) => {
+                emit_internal_error(&format!("bracket validation: {detail}"), stderr)
+            }
         },
     }
 }
@@ -470,6 +477,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
     let detail = match error {
         HostError::BundlePathMissing { .. } => "bundle_path_missing",
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory",
+        HostError::Validation { detail } => detail,
         HostError::Persistence(error) => error.diagnostic_detail(),
     };
     let diagnostic = Diagnostic::integrity_failure(detail);

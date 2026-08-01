@@ -11,7 +11,6 @@ use threeterm_occt_worker::{
     ShellRequest,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
-use threeterm_protocol::schema::iter;
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
@@ -20,6 +19,8 @@ pub use threeterm_protocol::schema::{
     MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
     SHELL_RESPONSE_SCHEMA_VERSION,
 };
+use threeterm_protocol::schema::{LIST_COMMAND_ID, NEW_PROJECT_COMMAND_ID, find, iter};
+use threeterm_protocol::schema_validator::validate;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
@@ -2415,6 +2416,16 @@ fn write_draft_view(
 }
 
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
+    let response_schema = match response_schema_for(value) {
+        Ok(schema) => schema,
+        Err(error) => return emit_internal_error(&error, stderr),
+    };
+    if let Err(error) = validate(&response_schema.response_schema, value) {
+        return emit_internal_error(
+            &format!("response violates registered schema: {error}"),
+            stderr,
+        );
+    }
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
             let _ = writeln!(stdout);
@@ -2422,6 +2433,33 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
         }
         Err(error) => emit_internal_error(&format!("response write failed: {error}"), stderr),
     }
+}
+
+fn response_schema_for(
+    value: &Value,
+) -> Result<&'static threeterm_protocol::schema::CommandSchema, String> {
+    if value.is_array() {
+        return find(LIST_COMMAND_ID).ok_or_else(|| "missing list command schema".to_string());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| "successful response must be an object or array".to_string())?;
+    if object.contains_key("generation_id") {
+        return find(NEW_PROJECT_COMMAND_ID)
+            .ok_or_else(|| "missing new-project command schema".to_string());
+    }
+    if let Some(operation) = object.get("operation").and_then(Value::as_str) {
+        return iter()
+            .find(|entry| entry.id.0 == operation)
+            .ok_or_else(|| format!("missing schema for operation {operation:?}"));
+    }
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "successful response has no schema discriminator".to_string())?;
+    iter()
+        .find(|entry| entry.response_schema_version == schema_version)
+        .ok_or_else(|| format!("missing response schema {schema_version:?}"))
 }
 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {

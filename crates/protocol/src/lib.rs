@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod command_execution;
 pub mod diagnostic;
 pub mod frame;
 pub mod schema;

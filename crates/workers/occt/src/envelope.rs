@@ -42,6 +42,7 @@ pub enum Operation {
     BooleanFuse,
     Fillet,
     Chamfer,
+    Hole,
 }
 
 impl Operation {
@@ -51,6 +52,7 @@ impl Operation {
             Self::BooleanFuse => "boolean_fuse",
             Self::Fillet => "fillet",
             Self::Chamfer => "chamfer",
+            Self::Hole => "hole",
         }
     }
 }
@@ -484,6 +486,144 @@ impl ChamferResult {
     }
 }
 
+/// Hole request: subtract a through-cylinder from the BREP at
+/// `base_path`. The cylinder is centred at `position`, oriented along
+/// `direction`, and has `diameter` (the bore diameter; the C++ worker
+/// halves it to get the cylinder radius). The cylinder length is sized
+/// by the worker so it always reaches through the bounding box of the
+/// base solid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoleRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    /// Path to the BREP file the worker reads as the input solid.
+    pub base_path: PathBuf,
+    /// Cylinder centre in world coordinates.
+    pub position: [f64; 3],
+    /// Cylinder axis unit vector. Defaults to `[0, 0, 1]` (the +Z
+    /// axis the extrude prism uses); callers can override with any
+    /// non-zero, finite 3-vector.
+    pub direction: [f64; 3],
+    /// Bore diameter. Must be a positive finite number.
+    pub diameter: f64,
+    /// Output directory where the worker writes the BREP file.
+    pub output_dir: PathBuf,
+    /// Output file name (no path separators; the worker appends `.brep`).
+    pub output_filename: String,
+    /// Stable ThreeTerm feature id the host will commit.
+    pub feature_id: String,
+}
+
+impl HoleRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        position: [f64; 3],
+        direction: [f64; 3],
+        diameter: f64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Hole,
+            base_path: base_path.into(),
+            position,
+            direction,
+            diameter,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Hole {
+            return Err(format!(
+                "operation must be hole for HoleRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self.position.iter().all(|component| component.is_finite()) {
+            return Err("hole position components must be finite".to_string());
+        }
+        if !self.direction.iter().all(|component| component.is_finite()) {
+            return Err("hole direction components must be finite".to_string());
+        }
+        let direction_norm_squared: f64 = self
+            .direction
+            .iter()
+            .map(|component| component * component)
+            .sum();
+        if direction_norm_squared == 0.0 {
+            return Err("hole direction must be a non-zero vector".to_string());
+        }
+        if !self.diameter.is_finite()
+            || self
+                .diameter
+                .partial_cmp(&0.0)
+                .map(|ordering| ordering.is_le())
+                .unwrap_or(true)
+        {
+            return Err("hole diameter must be a positive finite number".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoleResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl HoleResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +834,145 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "chamfer-1".to_string(),
+        };
+        assert!(result.is_success());
+
+        result.status = "brep_invalid".to_string();
+        assert!(!result.is_success());
+    }
+
+    fn canonical_hole_request() -> HoleRequest {
+        HoleRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            [1.5, 1.5, 0.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        )
+        .with_output_path("/tmp", "hole.brep")
+        .with_feature_id("hole-1")
+    }
+
+    #[test]
+    fn operation_as_str_returns_snake_case_for_hole() {
+        assert_eq!(Operation::Hole.as_str(), "hole");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_hole() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("hole envelope is valid");
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_hole_diameter() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.diameter = 0.0;
+        assert!(request.validate().is_err());
+
+        request.diameter = -0.5;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_hole_diameter() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.diameter = f64::NAN;
+        assert!(request.validate().is_err());
+        request.diameter = f64::INFINITY;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_hole_position_component() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.position = [f64::NAN, 0.0, 0.0];
+        assert!(request.validate().is_err());
+        request.position = [0.0, f64::INFINITY, 0.0];
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_vector_hole_direction() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.direction = [0.0, 0.0, 0.0];
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hole_with_wrong_operation() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::Fillet;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hole_output_filename_with_path_separator() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.output_filename = "sub/out.brep".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hole_with_unknown_schema_version() {
+        let mut request = canonical_hole_request();
+        request.schema_version = "threeterm.workers.occt/0".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn hole_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "hole",
+            "base_path": "/tmp/base.brep",
+            "position": [1.5, 1.5, 0.0],
+            "direction": [0.0, 0.0, 1.0],
+            "diameter": 1.0,
+            "output_filename": "out.brep",
+            "feature_id": "hole-1",
+            "rogue_key": true
+        }"#;
+        assert!(serde_json::from_str::<HoleRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn hole_envelope_round_trips_through_canonical_json() {
+        let mut request = canonical_hole_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        let value = serde_json::to_value(&request).expect("hole request serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["request_id"], "req-1");
+        assert_eq!(value["operation"], "hole");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["position"], serde_json::json!([1.5, 1.5, 0.0]));
+        assert_eq!(value["direction"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(value["diameter"], 1.0);
+        assert_eq!(value["feature_id"], "hole-1");
+        let decoded: HoleRequest =
+            serde_json::from_value(value).expect("hole request deserializes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn hole_result_is_success_predicate() {
+        let mut result = HoleResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::Hole,
+            status: "ok".to_string(),
+            brep_path: PathBuf::from("/tmp/out.brep"),
+            brep_sha256: "deadbeef".to_string(),
+            brep_bytes: 42,
+            feature_id: "hole-1".to_string(),
         };
         assert!(result.is_success());
 

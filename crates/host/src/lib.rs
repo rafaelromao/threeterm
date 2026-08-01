@@ -1,7 +1,13 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
+use threeterm_protocol::artifact::{
+    ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
+};
+use threeterm_protocol::diagnostic::Diagnostic;
+use threeterm_protocol::worker::Envelope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
@@ -16,6 +22,19 @@ impl From<&LoadedBundle> for SnapshotView {
             revision_hash: bundle.revision_hash_hex().to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layer1DerivedResult {
+    pub request_id: String,
+    pub source_revision_id: String,
+    pub cache_key: Layer1CacheKey,
+    pub worker_fingerprint: WorkerFingerprint,
+    pub artifact_kind: String,
+    pub artifact_name: String,
+    pub byte_count: u64,
+    pub sha256: String,
+    pub path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -54,6 +73,7 @@ impl From<BundleError> for HostError {
 #[derive(Debug, Default)]
 pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
+    layer1_results: RefCell<HashMap<Layer1CacheKey, Layer1DerivedResult>>,
 }
 
 impl Host {
@@ -104,6 +124,101 @@ impl Host {
 
     pub fn current(&self) -> Option<SnapshotView> {
         self.current.borrow().as_ref().map(SnapshotView::from)
+    }
+
+    pub fn promote_staged_artifact(
+        &self,
+        artifact_root: impl AsRef<Path>,
+        request: &Layer1ArtifactRequest,
+        expected_worker: &WorkerFingerprint,
+        envelope: Envelope,
+    ) -> Result<Layer1DerivedResult, Diagnostic> {
+        let root = artifact_root.as_ref();
+        let reject = |diagnostic| {
+            let _ = std::fs::remove_file(root.join(format!("{}.partial", request.staging_name)));
+            diagnostic
+        };
+        let Envelope::Artifact {
+            schema_version,
+            header,
+        } = envelope
+        else {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_envelope_expected",
+            )));
+        };
+        let header = *header;
+        let current = self.current().ok_or_else(|| {
+            reject(Diagnostic::artifact_promotion_failure(
+                "canonical_snapshot_missing",
+            ))
+        })?;
+        let expected_cache_key = Layer1CacheKey::issue(request, expected_worker);
+        if schema_version != threeterm_protocol::schema_version() {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_schema_mismatch",
+            )));
+        }
+        if request.source_revision_id != current.revision_hash
+            || header.source_revision_id != request.source_revision_id
+            || header.cache_key.source_revision_id != request.source_revision_id
+        {
+            return Err(reject(Diagnostic::artifact_revision_mismatch(
+                "artifact_source_revision_mismatch",
+            )));
+        }
+        if header.request_id != request.request_id {
+            return Err(reject(Diagnostic::artifact_request_mismatch(
+                "artifact_request_id_mismatch",
+            )));
+        }
+        if header.cache_key != expected_cache_key {
+            return Err(reject(Diagnostic::artifact_cache_key_mismatch(
+                "artifact_cache_key_mismatch",
+            )));
+        }
+        if header.artifact_kind != request.artifact_kind
+            || header.staging_name != request.staging_name
+            || header.worker_fingerprint != *expected_worker
+        {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_header_mismatch",
+            )));
+        }
+
+        let stage = Stage::open(root)
+            .map_err(|error| reject(Diagnostic::artifact_promotion_failure(&error.to_string())))?;
+        let path = stage
+            .validate_and_promote(&header)
+            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+        let result = Layer1DerivedResult {
+            request_id: header.request_id,
+            source_revision_id: header.source_revision_id,
+            cache_key: header.cache_key,
+            worker_fingerprint: header.worker_fingerprint,
+            artifact_kind: header.artifact_kind,
+            artifact_name: header.staging_name,
+            byte_count: header.byte_count,
+            sha256: header.sha256,
+            path,
+        };
+        self.layer1_results
+            .borrow_mut()
+            .insert(result.cache_key.clone(), result.clone());
+        Ok(result)
+    }
+
+    pub fn layer1_result(&self, cache_key: &Layer1CacheKey) -> Option<Layer1DerivedResult> {
+        self.layer1_results.borrow().get(cache_key).cloned()
+    }
+}
+
+fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
+    match error {
+        ArtifactError::HashMismatch { expected, actual } => {
+            Diagnostic::artifact_hash_mismatch(expected, actual)
+        }
+        _ => Diagnostic::artifact_promotion_failure(&error.to_string()),
     }
 }
 

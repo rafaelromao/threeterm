@@ -11,21 +11,20 @@
 //! implements the trait over a real subprocess; the integration tests
 //! implement it over an `mpsc` channel. Both run the same supervisor.
 //!
-//! Staged binary artifacts travel inside the `Artifact` envelope as a
-//! base64-encoded payload (`bytes_b64`); the consumer side decodes and
-//! validates the SHA-256 against the decoded bytes, not the wire string
-//! (closed issue #49: one disposable worker per request).
+//! Staged binary artifact bytes remain in a host-chosen private staging
+//! directory. The `Artifact` envelope carries only the validated header;
+//! the host independently checks the staged file before promotion.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Maximum size of a decoded artifact payload, in bytes. The foundation
-/// slice keeps artifacts inside JSON; later slices may switch to
-/// length-prefixed frames. Frames exceeding this limit emit
-/// `ArtifactError::PayloadTooLarge` so a malicious or buggy worker cannot
-/// exhaust the host's memory.
+use crate::artifact::ArtifactHeader;
+
+/// Maximum size of a staged artifact payload, in bytes. Artifacts exceeding
+/// this limit emit `ArtifactError::PayloadTooLarge` so a malicious or buggy
+/// worker cannot exhaust the host's memory.
 pub const MAX_ARTIFACT_BYTES: usize = 1 << 20;
 
 /// The versioned envelope exchanged between host and worker.
@@ -82,11 +81,7 @@ pub enum Envelope {
     #[serde(rename = "artifact")]
     Artifact {
         schema_version: String,
-        request_id: String,
-        artifact_kind: String,
-        staging_name: String,
-        sha256: String,
-        bytes_b64: String,
+        header: Box<ArtifactHeader>,
     },
 
     /// The worker's terminal success envelope. `result` is the
@@ -146,10 +141,10 @@ impl Envelope {
             Self::Request { request_id, .. }
             | Self::Cancel { request_id, .. }
             | Self::Progress { request_id, .. }
-            | Self::Artifact { request_id, .. }
             | Self::Completed { request_id, .. }
             | Self::Cancelled { request_id, .. }
             | Self::Failed { request_id, .. } => Some(request_id),
+            Self::Artifact { header, .. } => Some(&header.request_id),
         }
     }
 }
@@ -250,6 +245,7 @@ pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{Layer1CacheKey, WorkerFingerprint};
     use serde_json::json;
 
     fn schema() -> String {
@@ -275,20 +271,36 @@ mod tests {
     }
 
     #[test]
-    fn artifact_envelope_carries_base64_payload_and_advertised_hash() {
+    fn artifact_envelope_carries_staged_artifact_header() {
+        let fingerprint = WorkerFingerprint {
+            worker_kind: "occt".to_string(),
+            worker_schema_version: "threeterm.workers.occt/1".to_string(),
+            protocol_schema_version: schema(),
+        };
         let envelope = Envelope::Artifact {
             schema_version: schema(),
-            request_id: "req-7".to_string(),
-            artifact_kind: "brep".to_string(),
-            staging_name: "sketch-1.brep".to_string(),
-            sha256: "deadbeef".to_string(),
-            bytes_b64: "aGVsbG8=".to_string(),
+            header: Box::new(ArtifactHeader {
+                request_id: "req-7".to_string(),
+                source_revision_id: "rev-1".to_string(),
+                cache_key: Layer1CacheKey {
+                    source_revision_id: "rev-1".to_string(),
+                    worker_fingerprint: fingerprint.clone(),
+                    artifact_kind: "brep".to_string(),
+                    semantic_input_sha256: "11".repeat(32),
+                    deterministic_settings_sha256: "22".repeat(32),
+                },
+                worker_fingerprint: fingerprint,
+                artifact_kind: "brep".to_string(),
+                staging_name: "sketch-1.brep".to_string(),
+                byte_count: 5,
+                sha256: "deadbeef".to_string(),
+            }),
         };
 
         let encoded = serde_json::to_value(&envelope).expect("envelope serializes");
         assert_eq!(encoded["kind"], Value::from("artifact"));
-        assert_eq!(encoded["bytes_b64"], Value::from("aGVsbG8="));
-        assert_eq!(encoded["sha256"], Value::from("deadbeef"));
+        assert!(encoded.get("bytes_b64").is_none());
+        assert_eq!(encoded["header"]["sha256"], Value::from("deadbeef"));
 
         let decoded: Envelope = serde_json::from_value(encoded).expect("envelope deserializes");
         assert_eq!(decoded, envelope);

@@ -14,9 +14,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use threeterm_protocol::artifact::{Stage, sha256_hex};
+use threeterm_protocol::artifact::{
+    ArtifactHeader, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
+};
 use threeterm_protocol::frame::FrameParser;
 use threeterm_protocol::schema_version;
 use threeterm_protocol::supervisor::{
@@ -89,6 +89,38 @@ fn ready_envelope() -> Envelope {
         schema_version: schema_version().to_string(),
         worker_id: "fake".to_string(),
     }
+}
+
+fn artifact_header(
+    staging_root: &std::path::Path,
+    bytes: &[u8],
+    sha256: String,
+) -> Box<ArtifactHeader> {
+    let staged = Stage::open(staging_root)
+        .expect("stage opens")
+        .stage_bytes("sketch-1.brep", bytes)
+        .expect("worker bytes stage");
+    let worker_fingerprint = WorkerFingerprint {
+        worker_kind: "occt".to_string(),
+        worker_schema_version: "threeterm.workers.occt/1".to_string(),
+        protocol_schema_version: schema_version().to_string(),
+    };
+    Box::new(ArtifactHeader {
+        request_id: "req-1".to_string(),
+        source_revision_id: "rev-0".to_string(),
+        cache_key: Layer1CacheKey {
+            source_revision_id: "rev-0".to_string(),
+            worker_fingerprint: worker_fingerprint.clone(),
+            artifact_kind: "brep".to_string(),
+            semantic_input_sha256: "11".repeat(32),
+            deterministic_settings_sha256: "22".repeat(32),
+        },
+        worker_fingerprint,
+        artifact_kind: "brep".to_string(),
+        staging_name: staged.staging_name,
+        byte_count: staged.byte_count,
+        sha256,
+    })
 }
 
 /// `PipeHost` is the production-style wiring: it pipes the host's
@@ -195,17 +227,12 @@ fn request_consumes_worker_ready_handshake_then_promotes_completed() {
 
     let bytes = b"hello, worker";
     let sha = sha256_hex(bytes);
-    let encoded = BASE64.encode(bytes);
 
     let worker = PipeHost::new(vec![
         ready_envelope(),
         Envelope::Artifact {
             schema_version: schema_version().to_string(),
-            request_id: "req-1".to_string(),
-            artifact_kind: "brep".to_string(),
-            staging_name: "sketch-1.brep".to_string(),
-            sha256: sha.clone(),
-            bytes_b64: encoded.clone(),
+            header: artifact_header(&staging_root, bytes, sha.clone()),
         },
         Envelope::Completed {
             schema_version: schema_version().to_string(),
@@ -396,17 +423,12 @@ fn request_surfaces_staging_failures_in_last_artifact_error() {
     let stage = Stage::open(&staging_root).expect("stage opens");
 
     let bytes = b"hello, worker";
-    let encoded = BASE64.encode(bytes);
 
     let worker = PipeHost::new(vec![
         ready_envelope(),
         Envelope::Artifact {
             schema_version: schema_version().to_string(),
-            request_id: "req-1".to_string(),
-            artifact_kind: "brep".to_string(),
-            staging_name: "sketch-1.brep".to_string(),
-            sha256: "deadbeef".to_string(),
-            bytes_b64: encoded,
+            header: artifact_header(&staging_root, bytes, "deadbeef".to_string()),
         },
         Envelope::Completed {
             schema_version: schema_version().to_string(),
@@ -594,4 +616,45 @@ impl WorkerHost for CancelLoggingWorker {
             .push((request_id.to_string(), reason.to_string()));
         self.inner.cancel(request_id, reason)
     }
+}
+
+#[test]
+fn request_rejects_an_artifact_bound_to_another_revision() {
+    let staging_root = std::env::temp_dir().join(format!(
+        "threeterm-pipe-stage-stale-revision-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging_root);
+    let stage = Stage::open(&staging_root).expect("stage opens");
+    let bytes = b"stale worker bytes";
+    let mut header = artifact_header(&staging_root, bytes, sha256_hex(bytes));
+    header.source_revision_id = "rev-stale".to_string();
+    header.cache_key.source_revision_id = "rev-stale".to_string();
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Artifact {
+            schema_version: schema_version().to_string(),
+            header,
+        },
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), Some(stage));
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected terminal record");
+    };
+
+    assert!(
+        record
+            .last_artifact_error
+            .as_deref()
+            .is_some_and(|error| error.contains("revision"))
+    );
+    assert!(!staging_root.join("sketch-1.brep.partial").exists());
+    assert!(!staging_root.join("sketch-1.brep").exists());
+    let _ = std::fs::remove_dir_all(staging_root);
 }

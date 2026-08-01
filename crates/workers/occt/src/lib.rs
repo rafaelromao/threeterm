@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, Operation,
-    RevolveRequest, RevolveResult, SCHEMA_VERSION,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, Operation, RevolveRequest,
+    RevolveResult, SCHEMA_VERSION,
 };
 
 pub fn schema_version() -> &'static str {

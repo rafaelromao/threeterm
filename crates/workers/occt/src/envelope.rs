@@ -716,10 +716,18 @@ impl RevolveRequest {
         if self.profile.len() < 3 {
             return Err("revolve profile must contain at least 3 vertices".to_string());
         }
-        if !self.axis_point.iter().all(|component| component.is_finite()) {
+        if !self
+            .axis_point
+            .iter()
+            .all(|component| component.is_finite())
+        {
             return Err("revolve axis_point components must be finite".to_string());
         }
-        if !self.axis_direction.iter().all(|component| component.is_finite()) {
+        if !self
+            .axis_direction
+            .iter()
+            .all(|component| component.is_finite())
+        {
             return Err("revolve axis_direction components must be finite".to_string());
         }
         let direction_norm_squared: f64 = self

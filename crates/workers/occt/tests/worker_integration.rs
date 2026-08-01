@@ -470,12 +470,11 @@ fn revolve_rectangle_around_axis_returns_ok_with_real_brep() {
     let Some(worker) = locate_worker() else {
         return;
     };
-    let temp =
-        std::env::temp_dir().join(format!("threeterm-occt-revolve-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-revolve-{}", std::process::id()));
     std::fs::create_dir_all(&temp).expect("temp dir creates");
 
-    let request = revolve_request("rev-1", "box-revolved-1")
-        .with_output_path(&temp, "revolved.brep");
+    let request =
+        revolve_request("rev-1", "box-revolved-1").with_output_path(&temp, "revolved.brep");
     let result = worker.revolve(&request).expect("revolve returns");
     assert_eq!(result.status, "ok", "revolve returned {:?}", result);
     assert_eq!(result.operation, Operation::Revolve);

@@ -500,6 +500,11 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
 
     std::string status = "ok";
     if (!analyze_brep(solid)) {
+        // Seed the error string with the brep_invalid marker so the
+        // main-loop exit-code classifier routes this through the
+        // brep_invalid diagnostic path (exit code 3) instead of
+        // request_malformed.
+        error = "brep_invalid: BRepCheck_Analyzer failed";
         status = "brep_invalid";
     }
 
@@ -575,6 +580,7 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
 
     std::string status = "ok";
     if (!analyze_brep(fused)) {
+        error = "brep_invalid: BRepCheck_Analyzer failed";
         status = "brep_invalid";
     }
 
@@ -637,10 +643,10 @@ int main() {
         if (error.empty()) {
             error = "operation returned a non-ok status";
         }
-        bool is_brep_invalid = error.find("brep_invalid") != std::string::npos ||
-                               (operation == "extrude" &&
-                                !error.empty() &&
-                                error.find("invalid") != std::string::npos);
+        // The handle_* functions seed `error` with the literal
+        // "brep_invalid:" prefix when the BREP fails BRepCheck_Analyzer.
+        // Everything else routes through request_malformed.
+        bool is_brep_invalid = error.find("brep_invalid:") == 0;
         std::string status = is_brep_invalid ? "brep_invalid" : "request_malformed";
         int exit_code = is_brep_invalid ? 3 : 2;
         write_stderr_line(error_response(request_id, operation, feature_id, status, error));

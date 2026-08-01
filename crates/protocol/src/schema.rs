@@ -169,6 +169,7 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "type": "object",
         "required": [
             "status",
+            "operation",
             "feature_id",
             "feature_graph_hash",
             "revision_hash",
@@ -178,6 +179,7 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -195,6 +197,7 @@ pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "type": "object",
         "required": [
             "status",
+            "operation",
             "feature_id",
             "feature_graph_hash",
             "revision_hash",
@@ -204,6 +207,7 @@ pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

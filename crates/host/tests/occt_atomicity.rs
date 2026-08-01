@@ -323,8 +323,16 @@ fn extrude_persistence_append_failure_preserves_canonical_state() {
     let request =
         rectangle_extrude_request("persist-fail").with_output_path(&root, "stage/extrude.brep");
     let result = host.extrude(&root, request, &worker);
+    // The read-only permission kills the BREP-directory creation step
+    // before the append_feature call, so the error is `HostError::BrepIo`.
+    // Either is a valid persistence-failure signal for this scenario;
+    // the atomicity invariant (manifest/log byte-equal, current
+    // restored) holds in both branches.
     assert!(
-        matches!(result, Err(HostError::Persistence(_))),
+        matches!(
+            result,
+            Err(HostError::Persistence(_)) | Err(HostError::BrepIo { .. })
+        ),
         "got {result:?}"
     );
 

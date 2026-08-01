@@ -121,9 +121,6 @@ fn main() {
         worker_bin.display()
     );
     emit_worker_path_rs(&out_dir, &worker_bin);
-
-    let _ = OCCT_PINNED_TAG; // referenced by NOTICE for the pinned tag.
-    let _ = OCCT_PINNED_SHA; // referenced by NOTICE for the pinned SHA.
 }
 
 #[derive(Debug)]
@@ -199,9 +196,16 @@ fn check_occt(root: &Path) -> Result<OcctInstall, String> {
             opencascade_include.display()
         ));
     }
-    if !opencascade_include.join("BRepPrimAPI.hxx").is_file() {
+    // OCCT 7.x ships specialised `BRepPrimAPI_Make{Box,Cone,…,Prism,…}.hxx`
+    // headers but no bare `BRepPrimAPI.hxx`. Probe for a header the worker
+    // actually consumes (`BRepPrimAPI_MakePrism.hxx`, included by
+    // `src-cpp/worker_main.cpp` for the extrude path).
+    if !opencascade_include
+        .join("BRepPrimAPI_MakePrism.hxx")
+        .is_file()
+    {
         return Err(format!(
-            "OCCT include at {} is missing BRepPrimAPI.hxx",
+            "OCCT include at {} is missing BRepPrimAPI_MakePrism.hxx",
             opencascade_include.display()
         ));
     }

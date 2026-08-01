@@ -332,7 +332,14 @@ impl Host {
         let updated = match bundle.append_feature(feature_id, &kind) {
             Ok(loaded) => loaded,
             Err(error) => {
+                // Restore the prior BREP bytes (or remove the new file if
+                // there was no prior) and verify the canonical state
+                // survived. The prior manifest and log are untouched
+                // because we never reached a successful append.
                 restore_brep(&target, prior_brep.as_deref());
+                // Fail-closed: if the canonical state was not preserved
+                // by the append, surface the persistence error so the
+                // diagnostic taxonomy sees the failure.
                 if let (Ok(m), Ok(l)) = (
                     read_bundle_file(&bundle_root(root), "manifest.json"),
                     read_bundle_file(&bundle_root(root), "transactions.log"),

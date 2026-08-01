@@ -8,8 +8,10 @@ publish.workspace = true
 description = "Headless Automation CLI adapter for the ThreeTerm domain command API."
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 threeterm-domain = { path = "../domain" }
+threeterm-host = { path = "../host" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 

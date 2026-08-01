@@ -161,8 +161,10 @@ dependencies = [
 name = "threeterm-cli"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "threeterm-domain",
+ "threeterm-host",
  "threeterm-persistence",
  "threeterm-protocol",
 ]
@@ -172,11 +174,15 @@ name = "threeterm-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "threeterm-host"
 version = "0.1.0"
+dependencies = [
+ "threeterm-domain",
+]
 
 [[package]]
 name = "threeterm-lua-bridge"

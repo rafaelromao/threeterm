@@ -102,6 +102,128 @@ pub static NEW_PROJECT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+pub static DEFINE_COMPONENT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["definition_id", "features"],
+        "properties": {
+            "definition_id": { "type": "string" },
+            "features": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "kind", "parameters", "references"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "kind": { "type": "string" },
+                        "parameters": { "type": "object" },
+                        "references": { "type": "array" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static PLACE_INSTANCE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["instance_id", "definition_id", "transform"],
+        "properties": {
+            "instance_id": { "type": "string" },
+            "definition_id": { "type": "string" },
+            "transform": {
+                "type": "object",
+                "required": ["translation_micrometers", "rotation_degrees"],
+                "properties": {
+                    "translation_micrometers": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                    },
+                    "rotation_degrees": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static COMPONENT_COMMAND_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["generation_id", "revision_id", "reattachment", "affected_ids"],
+        "properties": {
+            "generation_id": { "type": "string" },
+            "revision_id": { "type": "string" },
+            "reattachment": { "type": "string" },
+            "affected_ids": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static TRANSFORM_INSTANCE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["instance_id", "transform"],
+        "properties": {
+            "instance_id": { "type": "string" },
+            "transform": {
+                "type": "object",
+                "required": ["translation_micrometers", "rotation_degrees"],
+                "properties": {
+                    "translation_micrometers": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                    },
+                    "rotation_degrees": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static INDEPENDENT_COPY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["source_instance_id", "copy_suffix"],
+        "properties": {
+            "source_instance_id": { "type": "string" },
+            "copy_suffix": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static EDIT_PARAMETER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["definition_id", "feature_id", "parameter_name", "parameter_value"],
+        "properties": {
+            "definition_id": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "parameter_name": { "type": "string", "minLength": 1 },
+            "parameter_value": true
+        },
+        "additionalProperties": false
+    })
+});
+
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -129,11 +251,76 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: NEW_PROJECT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        DEFINE_COMPONENT_COMMAND_ID,
+        CommandSchema {
+            id: DEFINE_COMPONENT_COMMAND_ID,
+            name: "define-component",
+            schema_version: "threeterm.command.define-component/1",
+            request_schema_version: "threeterm.command.define-component.request/1",
+            request_schema: DEFINE_COMPONENT_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.define-component.response/1",
+            response_schema: COMPONENT_COMMAND_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        PLACE_INSTANCE_COMMAND_ID,
+        CommandSchema {
+            id: PLACE_INSTANCE_COMMAND_ID,
+            name: "place-instance",
+            schema_version: "threeterm.command.place-instance/1",
+            request_schema_version: "threeterm.command.place-instance.request/1",
+            request_schema: PLACE_INSTANCE_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.place-instance.response/1",
+            response_schema: COMPONENT_COMMAND_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        TRANSFORM_INSTANCE_COMMAND_ID,
+        CommandSchema {
+            id: TRANSFORM_INSTANCE_COMMAND_ID,
+            name: "transform-instance",
+            schema_version: "threeterm.command.transform-instance/1",
+            request_schema_version: "threeterm.command.transform-instance.request/1",
+            request_schema: TRANSFORM_INSTANCE_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.transform-instance.response/1",
+            response_schema: COMPONENT_COMMAND_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        INDEPENDENT_COPY_COMMAND_ID,
+        CommandSchema {
+            id: INDEPENDENT_COPY_COMMAND_ID,
+            name: "independent-copy",
+            schema_version: "threeterm.command.independent-copy/1",
+            request_schema_version: "threeterm.command.independent-copy.request/1",
+            request_schema: INDEPENDENT_COPY_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.independent-copy.response/1",
+            response_schema: COMPONENT_COMMAND_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        EDIT_PARAMETER_COMMAND_ID,
+        CommandSchema {
+            id: EDIT_PARAMETER_COMMAND_ID,
+            name: "edit-parameter",
+            schema_version: "threeterm.command.edit-parameter/1",
+            request_schema_version: "threeterm.command.edit-parameter.request/1",
+            request_schema: EDIT_PARAMETER_REQUEST_SCHEMA.clone(),
+            response_schema_version: "threeterm.command.edit-parameter.response/1",
+            response_schema: COMPONENT_COMMAND_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
+pub const DEFINE_COMPONENT_COMMAND_ID: CommandId = CommandId("define-component");
+pub const PLACE_INSTANCE_COMMAND_ID: CommandId = CommandId("place-instance");
+pub const TRANSFORM_INSTANCE_COMMAND_ID: CommandId = CommandId("transform-instance");
+pub const INDEPENDENT_COPY_COMMAND_ID: CommandId = CommandId("independent-copy");
+pub const EDIT_PARAMETER_COMMAND_ID: CommandId = CommandId("edit-parameter");
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

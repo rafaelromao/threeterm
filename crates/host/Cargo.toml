@@ -7,5 +7,8 @@ license.workspace = true
 publish.workspace = true
 description = "Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries."
 
+[dependencies]
+threeterm-domain = { path = "../domain" }
+
 [lints]
 workspace = true

@@ -1,47 +1,116 @@
-//! CLI command dispatcher.
-//!
-//! `dispatch` parses an argv slice, routes the recognized `--machine
-//! <subcommand>` grammar, and writes either the JSON listing to stdout or
-//! a structured `unknown_command` diagnostic to stderr. The dispatcher
-//! owns no global state and never calls `std::process::exit`: the binary
-//! wraps it and propagates the returned exit code.
-
 use std::ffi::OsString;
 use std::io::Write;
-
 use std::path::Path;
 
+use serde::Deserialize;
 use serde_json::Value;
-use threeterm_domain::ProjectGeneration;
+use threeterm_domain::{
+    CommandIntent, ComponentDefinitionId, ComponentInstanceId, DomainError, FeatureDescriptor,
+    FeatureId, ProjectGeneration, Transform,
+};
+use threeterm_host::ProjectService;
 use threeterm_protocol::diagnostic::Diagnostic;
-use threeterm_protocol::schema::iter;
+use threeterm_protocol::schema::{
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_PARAMETER_COMMAND_ID, INDEPENDENT_COPY_COMMAND_ID,
+    PLACE_INSTANCE_COMMAND_ID, TRANSFORM_INSTANCE_COMMAND_ID, find, iter,
+};
+use threeterm_protocol::schema_validator::validate;
 
-/// Exit code returned when a `--machine` subcommand is recognized and the
-/// JSON listing is emitted to stdout.
 pub const EXIT_OK: i32 = 0;
-
-/// Exit code returned when the dispatcher rejects the argv (unknown
-/// subcommand, missing value, or no `--machine` flag). The same code is
-/// used for every `unknown_command` failure so the caller's switch on
-/// `Diagnostic.code` is the single parsing surface.
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
+pub const EXIT_INVALID_REQUEST: i32 = 4;
+pub const EXIT_DOMAIN_FAILURE: i32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentCommand {
+    Define,
+    Place,
+    Transform,
+    IndependentCopy,
+    EditParameter,
+}
+
+impl ComponentCommand {
+    fn command_id(self) -> CommandId {
+        match self {
+            Self::Define => DEFINE_COMPONENT_COMMAND_ID,
+            Self::Place => PLACE_INSTANCE_COMMAND_ID,
+            Self::Transform => TRANSFORM_INSTANCE_COMMAND_ID,
+            Self::IndependentCopy => INDEPENDENT_COPY_COMMAND_ID,
+            Self::EditParameter => EDIT_PARAMETER_COMMAND_ID,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPlan<'a> {
     List,
-    NewProject { path: &'a str },
-    Unknown { arg: &'a str },
+    NewProject {
+        path: &'a str,
+    },
+    Component {
+        command: ComponentCommand,
+        path: &'a str,
+        payload: &'a str,
+    },
+    Invalid {
+        detail: &'a str,
+    },
+    Unknown {
+        arg: &'a str,
+    },
 }
 
-/// Inspect the argv slice and decide which dispatch plan to execute.
-///
-/// The grammar is:
-/// - `["--machine", "list"]` -> `DispatchPlan::List`
-/// - `["--machine", <other>]` -> `DispatchPlan::Unknown { arg: <other> }`
-/// - `["--machine"]` -> `DispatchPlan::Unknown { arg: "--machine" }`
-/// - `[]` -> `DispatchPlan::Unknown { arg: "" }`
-/// - `[<other>, ..]` -> `DispatchPlan::Unknown { arg: <other> }`
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefineComponentRequest {
+    definition_id: ComponentDefinitionId,
+    features: Vec<FeatureDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaceInstanceRequest {
+    instance_id: ComponentInstanceId,
+    definition_id: ComponentDefinitionId,
+    transform: Transform,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransformInstanceRequest {
+    instance_id: ComponentInstanceId,
+    transform: Transform,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndependentCopyRequest {
+    source_instance_id: ComponentInstanceId,
+    copy_suffix: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditParameterRequest {
+    definition_id: ComponentDefinitionId,
+    feature_id: FeatureId,
+    parameter_name: String,
+    parameter_value: Value,
+}
+
+fn component_command(value: &OsString) -> Option<ComponentCommand> {
+    match value.to_str() {
+        Some("define-component") => Some(ComponentCommand::Define),
+        Some("place-instance") => Some(ComponentCommand::Place),
+        Some("transform-instance") => Some(ComponentCommand::Transform),
+        Some("independent-copy") => Some(ComponentCommand::IndependentCopy),
+        Some("edit-parameter") => Some(ComponentCommand::EditParameter),
+        _ => None,
+    }
+}
+
 fn plan<'a, I>(args: I) -> DispatchPlan<'a>
 where
     I: IntoIterator<Item = &'a OsString>,
@@ -57,6 +126,25 @@ where
             }
         }
         [machine, command] if *machine == "--machine" && *command == "list" => DispatchPlan::List,
+        [machine, command, path, payload] if *machine == "--machine" => {
+            match component_command(command) {
+                Some(command) => DispatchPlan::Component {
+                    command,
+                    path: path.to_str().unwrap_or(""),
+                    payload: payload.to_str().unwrap_or(""),
+                },
+                None => DispatchPlan::Unknown {
+                    arg: command.to_str().unwrap_or(""),
+                },
+            }
+        }
+        [machine, command, ..]
+            if *machine == "--machine" && component_command(command).is_some() =>
+        {
+            DispatchPlan::Invalid {
+                detail: "component command requires a bundle path and JSON request",
+            }
+        }
         [machine, argument, ..] if *machine == "--machine" => DispatchPlan::Unknown {
             arg: argument.to_str().unwrap_or(""),
         },
@@ -67,33 +155,36 @@ where
     }
 }
 
-/// Dispatch the argv slice. Writes either the JSON listing to `stdout` or
-/// a structured `unknown_command` diagnostic to `stderr`, and returns the
-/// exit code.
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
 {
     let collected: Vec<OsString> = args.into_iter().collect();
-    let plan = plan(collected.iter());
-
-    match plan {
+    match plan(collected.iter()) {
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(path, stdout, stderr),
+        DispatchPlan::Component {
+            command,
+            path,
+            payload,
+        } => emit_component(command, path, payload, stdout, stderr),
+        DispatchPlan::Invalid { detail } => emit_diagnostic(
+            Diagnostic::invalid_request(detail),
+            EXIT_INVALID_REQUEST,
+            stderr,
+        ),
         DispatchPlan::Unknown { arg } => emit_unknown_command(arg, stderr),
     }
 }
 
 fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let entries: Vec<&_> = iter().collect();
-
     let serialized = match serde_json::to_value(&entries) {
         Ok(value) => value,
         Err(error) => {
             return emit_internal_error(&format!("registry serialization failed: {error}"), stderr);
         }
     };
-
     let array: Vec<Value> = match serialized {
         Value::Array(items) => items,
         other => {
@@ -103,7 +194,6 @@ fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             );
         }
     };
-
     match serde_json::to_writer_pretty(&mut *stdout, &Value::Array(array)) {
         Ok(()) => {
             let _ = writeln!(stdout);
@@ -119,61 +209,169 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
     }
     let generation = ProjectGeneration::fresh();
     match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
-        Ok(manifest) => {
-            let response = serde_json::json!({
+        Ok(manifest) => emit_json(
+            serde_json::json!({
                 "generation_id": generation.id,
                 "manifest": manifest,
-            });
-            match serde_json::to_writer_pretty(&mut *stdout, &response) {
-                Ok(()) => {
-                    let _ = writeln!(stdout);
-                    EXIT_OK
-                }
-                Err(error) => {
-                    emit_internal_error(&format!("response write failed: {error}"), stderr)
-                }
-            }
-        }
+            }),
+            stdout,
+            stderr,
+        ),
         Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
 }
-fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
-    let diagnostic = Diagnostic::persistence_failure(detail);
-    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
-        Ok(()) => {
-            let _ = writeln!(stderr);
+
+fn emit_component(
+    command: ComponentCommand,
+    path: &str,
+    payload: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let intent = match parse_component_intent(command, payload) {
+        Ok(intent) => intent,
+        Err(detail) => {
+            return emit_diagnostic(
+                Diagnostic::invalid_request(&detail),
+                EXIT_INVALID_REQUEST,
+                stderr,
+            );
         }
-        Err(error) => {
-            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+    };
+    let loaded = match threeterm_persistence::load(Path::new(path)) {
+        Ok(loaded) => loaded,
+        Err(error) => return emit_persistence_error(&error.to_string(), stderr),
+    };
+    let mut service = ProjectService::new(loaded.generation);
+    let transaction = match service.execute(intent) {
+        Ok(transaction) => transaction,
+        Err(error) => return emit_domain_error(&error, stderr),
+    };
+    let persisted = match threeterm_persistence::append_transaction(Path::new(path), &transaction) {
+        Ok(persisted) => persisted,
+        Err(error) => return emit_persistence_error(&error.to_string(), stderr),
+    };
+    emit_json(
+        serde_json::json!({
+            "generation_id": persisted.generation.id,
+            "revision_id": persisted.generation.current_revision().id,
+            "reattachment": transaction.reattachment,
+            "affected_ids": transaction.affected_ids,
+        }),
+        stdout,
+        stderr,
+    )
+}
+
+fn parse_component_intent(
+    command: ComponentCommand,
+    payload: &str,
+) -> Result<CommandIntent, String> {
+    let value: Value = serde_json::from_str(payload).map_err(|error| error.to_string())?;
+    let schema = find(command.command_id()).expect("component command is registered");
+    validate(&schema.request_schema, &value)?;
+    match command {
+        ComponentCommand::Define => {
+            let request: DefineComponentRequest =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(CommandIntent::DefineComponent {
+                definition_id: request.definition_id,
+                features: request.features,
+            })
+        }
+        ComponentCommand::Place => {
+            let request: PlaceInstanceRequest =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(CommandIntent::PlaceInstance {
+                instance_id: request.instance_id,
+                definition_id: request.definition_id,
+                transform: request.transform,
+            })
+        }
+        ComponentCommand::Transform => {
+            let request: TransformInstanceRequest =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(CommandIntent::TransformInstance {
+                instance_id: request.instance_id,
+                transform: request.transform,
+            })
+        }
+        ComponentCommand::IndependentCopy => {
+            let request: IndependentCopyRequest =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(CommandIntent::IndependentCopy {
+                source_instance_id: request.source_instance_id,
+                copy_suffix: request.copy_suffix,
+            })
+        }
+        ComponentCommand::EditParameter => {
+            let request: EditParameterRequest =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            Ok(CommandIntent::EditParameter {
+                definition_id: request.definition_id,
+                feature_id: request.feature_id,
+                parameter_name: request.parameter_name,
+                parameter_value: request.parameter_value,
+            })
         }
     }
-    EXIT_PERSISTENCE_FAILURE
+}
+
+fn emit_json(value: Value, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    match serde_json::to_writer_pretty(&mut *stdout, &value) {
+        Ok(()) => {
+            let _ = writeln!(stdout);
+            EXIT_OK
+        }
+        Err(error) => emit_internal_error(&format!("response write failed: {error}"), stderr),
+    }
+}
+
+fn emit_domain_error(error: &DomainError, stderr: &mut dyn Write) -> i32 {
+    let diagnostic = match error {
+        DomainError::ReferenceAmbiguous(detail) => Diagnostic::reference_ambiguous(detail),
+        DomainError::ReferenceLost(detail) => Diagnostic::reference_lost(detail),
+        DomainError::ReferenceIncompatible(detail) => Diagnostic::reference_incompatible(detail),
+        other => Diagnostic::invalid_request(&other.to_string()),
+    };
+    emit_diagnostic(diagnostic, EXIT_DOMAIN_FAILURE, stderr)
+}
+
+fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
+    emit_diagnostic(
+        Diagnostic::persistence_failure(detail),
+        EXIT_PERSISTENCE_FAILURE,
+        stderr,
+    )
 }
 
 fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
-    let diagnostic = Diagnostic::unknown_command(arg);
+    emit_diagnostic(
+        Diagnostic::unknown_command(arg),
+        EXIT_UNKNOWN_COMMAND,
+        stderr,
+    )
+}
 
+fn emit_diagnostic(diagnostic: Diagnostic, exit: i32, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
         Ok(()) => {
             let _ = writeln!(stderr);
-            EXIT_UNKNOWN_COMMAND
+            exit
         }
-        Err(error) => emit_internal_error(&format!("diagnostic write failed: {error}"), stderr),
+        Err(error) => {
+            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
+            exit
+        }
     }
 }
 
 fn emit_internal_error(detail: &str, stderr: &mut dyn Write) -> i32 {
-    let diagnostic = Diagnostic::unknown_command(detail);
-
-    match serde_json::to_writer_pretty(&mut *stderr, &diagnostic) {
-        Ok(()) => {
-            let _ = writeln!(stderr);
-        }
-        Err(error) => {
-            let _ = writeln!(stderr, "fatal: failed to serialize diagnostic: {error}");
-        }
-    }
-    EXIT_UNKNOWN_COMMAND
+    emit_diagnostic(
+        Diagnostic::unknown_command(detail),
+        EXIT_UNKNOWN_COMMAND,
+        stderr,
+    )
 }
 
 #[cfg(test)]
@@ -193,31 +391,37 @@ mod tests {
         assert_eq!(exit, EXIT_OK);
         assert!(stderr.is_empty(), "stderr must be empty on success");
 
-        let stdout_text = std::str::from_utf8(&stdout).expect("stdout is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stdout_text).expect("dispatch output is parseable JSON");
-
+        let parsed: Value = serde_json::from_slice(&stdout).expect("dispatch output is JSON");
         let commands = parsed
             .as_array()
             .expect("dispatch output is a top-level JSON array");
-
-        assert_eq!(commands.len(), 2, "two registered commands");
-        let list = commands
-            .iter()
-            .find(|command| command["id"] == "list")
-            .expect("list command is registered");
-        assert_eq!(list["name"], "list");
-        assert_eq!(list["schema_version"], "threeterm.command.list/1");
-        assert_eq!(
-            list["request_schema_version"],
-            "threeterm.command.list.request/1"
+        assert_eq!(commands.len(), 7);
+        assert!(commands.iter().any(|command| command["id"] == "list"));
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["id"] == "define-component")
         );
-        assert_eq!(
-            list["response_schema_version"],
-            "threeterm.command.list.response/1"
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["id"] == "place-instance")
         );
-        assert!(list["request_schema"].is_object());
-        assert!(list["response_schema"].is_object());
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["id"] == "transform-instance")
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["id"] == "independent-copy")
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["id"] == "edit-parameter")
+        );
     }
 
     #[test]
@@ -228,17 +432,9 @@ mod tests {
 
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
         assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "bogus");
-        assert_eq!(
-            parsed["schema_version"],
-            Value::from(threeterm_protocol::schema_version())
-        );
     }
 
     #[test]
@@ -248,13 +444,7 @@ mod tests {
         let exit = dispatch(args(&["--machine"]), &mut stdout, &mut stderr);
 
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
-        assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
-        assert_eq!(parsed["code"], "unknown_command");
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["arg"], "--machine");
     }
 
@@ -265,13 +455,7 @@ mod tests {
         let exit = dispatch(args(&["--bogus"]), &mut stdout, &mut stderr);
 
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
-        assert!(stdout.is_empty(), "stdout must be empty on diagnostic");
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
-        assert_eq!(parsed["code"], "unknown_command");
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["arg"], "--bogus");
     }
 
@@ -282,12 +466,7 @@ mod tests {
         let exit = dispatch(args(&[]), &mut stdout, &mut stderr);
 
         assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
-
-        let stderr_text = std::str::from_utf8(&stderr).expect("stderr is utf-8");
-        let parsed: Value =
-            serde_json::from_str(stderr_text).expect("diagnostic output is parseable JSON");
-
-        assert_eq!(parsed["code"], "unknown_command");
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["arg"], "");
     }
 

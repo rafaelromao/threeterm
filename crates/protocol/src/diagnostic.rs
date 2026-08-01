@@ -20,6 +20,10 @@ pub enum DiagnosticCode {
     /// is supplied without a value.
     UnknownCommand,
     PersistenceFailure,
+    InvalidRequest,
+    ReferenceAmbiguous,
+    ReferenceLost,
+    ReferenceIncompatible,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -43,6 +47,38 @@ impl Diagnostic {
     pub fn persistence_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::PersistenceFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn invalid_request(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::InvalidRequest,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn reference_ambiguous(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ReferenceAmbiguous,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn reference_lost(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ReferenceLost,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn reference_incompatible(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ReferenceIncompatible,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

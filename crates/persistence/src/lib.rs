@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use threeterm_domain::{ProjectGeneration, Revision};
+use threeterm_domain::{CommandTransaction, ProjectGeneration, Revision};
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +47,8 @@ pub struct V0Bundle {
 pub mod bundle {
     pub use super::{
         BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, SchemaStatus, V0Bundle,
-        V0Manifest, detect_schema, load, migrate_v0_to_v1, prior_schema_epoch, read_v0,
-        schema_epoch, write_fresh, write_v0_fixture,
+        V0Manifest, append_transaction, detect_schema, load, migrate_v0_to_v1, prior_schema_epoch,
+        read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -186,7 +186,7 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
         )));
     }
 
-    let revision = generation
+    generation
         .revisions
         .first()
         .filter(|revision| generation.revisions.len() == 1 && revision.features.is_empty())
@@ -194,14 +194,62 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
             BundleError::Invalid("fresh generation must contain one empty revision".into())
         })?;
     let transactions = String::new();
+    let manifest = manifest_for(&generation, &transactions);
+    let staging = staging_path(path);
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    write_v1_into(&staging, &manifest, transactions.as_bytes())?;
+    fs::rename(&staging, path)?;
+    Ok(manifest)
+}
+
+pub fn append_transaction(
+    path: &Path,
+    transaction: &CommandTransaction,
+) -> Result<LoadedBundle, BundleError> {
+    let loaded = load(path)?;
+    let mut generation = loaded.generation.clone();
+    generation
+        .replay(transaction)
+        .map_err(|error| BundleError::Invalid(error.to_string()))?;
+    let mut transactions = loaded.transactions;
+    transactions.push_str(&transaction.canonical_line());
+    let manifest = manifest_for(&generation, &transactions);
+    let staging = staging_path(path);
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    write_v1_into(&staging, &manifest, transactions.as_bytes())?;
+    let validated = match load_v1(&staging) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    let previous = previous_path(path);
+    if previous.exists() {
+        fs::remove_dir_all(&previous)?;
+    }
+    fs::rename(path, &previous)?;
+    if let Err(error) = fs::rename(&staging, path) {
+        let _ = fs::rename(&previous, path);
+        return Err(BundleError::Io(error));
+    }
+    Ok(validated)
+}
+
+fn manifest_for(generation: &ProjectGeneration, transactions: &str) -> Manifest {
+    let revision = generation.current_revision();
     let transaction_bytes = transactions.len();
     let transaction_sha256 = hash(transactions.as_bytes());
     let mut manifest = Manifest {
         schema_version: schema_epoch().to_string(),
         generation_id: generation.id.clone(),
         revision_id: revision.id.clone(),
-        revision_count: 1,
-        transaction_count: 0,
+        revision_count: generation.revisions.len(),
+        transaction_count: transactions.lines().count(),
         transaction_bytes,
         transaction_sha256,
         canonical_root_sha256: String::new(),
@@ -209,16 +257,7 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
     };
     manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
     manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
-
-    let staging = staging_path(path);
-    fs::create_dir_all(staging.join("canonical"))?;
-    fs::write(staging.join(TRANSACTIONS_FILE), transactions.as_bytes())?;
-    fs::write(
-        staging.join(MANIFEST_FILE),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    fs::rename(&staging, path)?;
-    Ok(manifest)
+    manifest
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
@@ -267,15 +306,22 @@ fn load_v1(path: &Path) -> Result<LoadedBundle, BundleError> {
         .map_err(|_| BundleError::Invalid("transactions are not UTF-8".into()))?;
     if manifest.transaction_bytes != transactions.len()
         || manifest.transaction_sha256 != hash(transactions.as_bytes())
-        || manifest.transaction_count != 0
-        || !transactions.is_empty()
+        || manifest.transaction_count != transactions.lines().count()
     {
         return Err(BundleError::Invalid(
             "canonical transaction log integrity mismatch".into(),
         ));
     }
-    let generation = ProjectGeneration::with_id(manifest.generation_id.clone());
-    if generation.revisions[0].id != manifest.revision_id {
+    let mut generation = ProjectGeneration::with_id(manifest.generation_id.clone());
+    for line in transactions.lines() {
+        let transaction: CommandTransaction = serde_json::from_str(line)?;
+        generation
+            .replay(&transaction)
+            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+    }
+    if generation.current_revision().id != manifest.revision_id
+        || generation.revisions.len() != manifest.revision_count
+    {
         return Err(BundleError::Invalid("revision identity mismatch".into()));
     }
     Ok(LoadedBundle {
@@ -612,6 +658,7 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
         revisions: vec![Revision {
             id: source.manifest.revision_id.clone(),
             features: source.generation.revisions[0].features.clone(),
+            component_graph: source.generation.revisions[0].component_graph.clone(),
         }],
     };
     let mut manifest = Manifest {
@@ -628,6 +675,15 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
     manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
     manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
     (manifest, generation)
+}
+
+fn previous_path(path: &Path) -> PathBuf {
+    let mut previous = path.to_path_buf();
+    previous.set_file_name(format!(
+        "{}.previous",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    previous
 }
 
 fn staging_path(path: &Path) -> PathBuf {

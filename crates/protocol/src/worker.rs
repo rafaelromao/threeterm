@@ -324,11 +324,21 @@ impl WorkerHost for SubprocessWorkerHost {
         match self.child.try_wait()? {
             Some(_) => Ok(()),
             None => {
-                self.child.kill()?;
+                if let Err(error) = self.child.kill() {
+                    if self.child.try_wait()?.is_none() {
+                        return Err(error.into());
+                    }
+                }
                 self.child.wait()?;
                 Ok(())
             }
         }
+    }
+}
+
+impl Drop for SubprocessWorkerHost {
+    fn drop(&mut self) {
+        let _ = self.terminate();
     }
 }
 

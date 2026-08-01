@@ -175,6 +175,18 @@ impl Supervisor {
                         // deadline.
                     } else {
                         self.discard_stage();
+                        if let Err(error) = self.host.terminate() {
+                            return SupervisorOutcome::ForceTerminated {
+                                record: TerminationRecord {
+                                    request_id: ack_request_id,
+                                    stage: format!("cancel_reap_failed:{error}"),
+                                    elapsed: started.elapsed(),
+                                    last_progress: None,
+                                    last_artifact_error: self.last_artifact_error.take(),
+                                    exit_kind: ExitKind::ForceAfterGrace,
+                                },
+                            };
+                        }
                         return SupervisorOutcome::Acknowledged {
                             request_id: ack_request_id,
                             reason: ack_reason,
@@ -546,6 +558,18 @@ impl Supervisor {
         }
 
         let _ = self.stage.take();
+        if let Err(error) = self.host.terminate() {
+            return SupervisorOutcome::ForceTerminated {
+                record: TerminationRecord {
+                    request_id,
+                    stage: format!("completed_reap_failed:{error}"),
+                    elapsed: started.elapsed(),
+                    last_progress,
+                    last_artifact_error: self.last_artifact_error.take(),
+                    exit_kind: ExitKind::ForceAfterGrace,
+                },
+            };
+        }
         SupervisorOutcome::ForceTerminated {
             record: TerminationRecord {
                 request_id,
@@ -578,11 +602,14 @@ impl Supervisor {
             Some(detail) => format!("{stage}:{detail}"),
             None => stage.to_string(),
         };
-        let _ = self.host.terminate();
+        let termination_error = self.host.terminate().err();
         SupervisorOutcome::ForceTerminated {
             record: TerminationRecord {
                 request_id: request_id.to_string(),
-                stage: stage_label,
+                stage: match termination_error {
+                    Some(error) => format!("{stage_label}:terminate_failed:{error}"),
+                    None => stage_label,
+                },
                 elapsed: started.elapsed(),
                 last_progress,
                 last_artifact_error: self.last_artifact_error.take(),
@@ -726,6 +753,22 @@ mod tests {
     }
 
     #[test]
+    fn cooperative_cancel_reaps_the_worker() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![Ok(Envelope::Cancelled {
+            schema_version: crate::schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            reason: "stopped".to_string(),
+        })]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        assert!(matches!(
+            supervisor.cancel("req-1", "stop"),
+            SupervisorOutcome::Acknowledged { .. }
+        ));
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
     fn cancel_force_terminates_when_worker_never_acks_inside_grace() {
         let worker = ScriptedWorker::new(Vec::new());
         let mut supervisor = Supervisor::new(Duration::from_micros(1), Box::new(worker), None);
@@ -767,6 +810,25 @@ mod tests {
             }
             other => panic!("expected ForceTerminated(Completed); got {other:?}"),
         }
+    }
+
+    #[test]
+    fn completed_request_reaps_the_worker() {
+        let (worker, terminated) = ScriptedWorker::with_results(vec![
+            Ok(ready_envelope()),
+            Ok(Envelope::Completed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                result: serde_json::json!({}),
+            }),
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        assert!(matches!(
+            supervisor.request(sample_request()),
+            SupervisorOutcome::ForceTerminated { .. }
+        ));
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }
 
     #[test]

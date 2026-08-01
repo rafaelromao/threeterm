@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
-    HoleResult, LinearPatternRequest, LinearPatternResult, MirrorRequest, MirrorResult, OcctWorker,
-    RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
+    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult,
+    MirrorRequest, MirrorResult, OcctWorker, RevolveRequest, RevolveResult, ShellRequest,
+    ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
 use threeterm_protocol::artifact::{
@@ -105,6 +106,12 @@ pub struct CircularPatternCommitView {
 pub struct ShellCommitView {
     pub snapshot: SnapshotView,
     pub result: ShellResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftCommitView {
+    pub snapshot: SnapshotView,
+    pub result: DraftResult,
 }
 
 #[derive(Debug)]
@@ -824,6 +831,47 @@ impl Host {
         };
         let _ = prior_view;
         Ok(ShellCommitView { snapshot, result })
+    }
+
+    /// Draft `request` against the disposable OCCT worker and, on
+    /// success, commit the drafted BREP into a new revision.
+    pub fn draft(
+        &self,
+        root: impl AsRef<Path>,
+        request: DraftRequest,
+        worker: &OcctWorker,
+    ) -> Result<DraftCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.draft(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "draft returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(DraftCommitView { snapshot, result })
     }
 }
 

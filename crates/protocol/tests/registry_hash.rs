@@ -7,10 +7,10 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID,
-    LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID,
-    find, registry_hash,
+    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID,
+    SHELL_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -33,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "ad5af8493ad06f418a4be6c202e090a62e0eddedbadf7269a5a3780969bebe53",
+        "8f4bd8f263d961bef116b15f0a9ac6bdefe18ff82b407528580895b5088eed82",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -300,4 +300,31 @@ fn registry_contains_versioned_shell_contract() {
         serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "thickness"])
     );
     assert_eq!(shell.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_draft_contract() {
+    let draft = find(DRAFT_COMMAND_ID).expect("draft is registered");
+    assert_eq!(draft.id, DRAFT_COMMAND_ID);
+    assert_eq!(draft.name, "draft");
+    assert_eq!(draft.schema_version, "threeterm.command.draft/1");
+    assert_eq!(
+        draft.request_schema_version,
+        "threeterm.command.draft.request/1"
+    );
+    assert_eq!(
+        draft.response_schema_version,
+        "threeterm.command.draft.response/1"
+    );
+    assert_eq!(
+        draft.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "angle",
+            "pull_direction"
+        ])
+    );
+    assert_eq!(draft.request_schema["additionalProperties"], false);
 }

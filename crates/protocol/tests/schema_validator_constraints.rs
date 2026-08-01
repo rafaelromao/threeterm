@@ -14,6 +14,7 @@ fn rejects_declared_string_constraints() {
 
     assert!(validate(&schema, &json!({ "name": "", "hash": "0".repeat(64) })).is_err());
     assert!(validate(&schema, &json!({ "name": "part", "hash": "x".repeat(64) })).is_err());
+    assert!(validate(&schema, &json!({ "name": 1, "hash": "0".repeat(64) })).is_err());
 }
 
 #[test]

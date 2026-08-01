@@ -77,7 +77,9 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
 }
 
 fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {
-    let string = value.as_str().expect("string checked by caller");
+    let string = value
+        .as_str()
+        .ok_or_else(|| format!("expected string, got {value}"))?;
     if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
         && string.chars().count() < min_length as usize
     {

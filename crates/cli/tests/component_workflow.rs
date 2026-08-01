@@ -530,6 +530,9 @@ fn duplicate_stable_ids_return_structured_reference_ambiguous_diagnostics() {
 fn incompatible_semantic_reference_returns_structured_reference_incompatible_diagnostic() {
     let root = unique_root();
     run_ok(&["new-project", path_text(&root)]);
+    let before_manifest = read_bytes(&manifest_path(&root));
+    let before_log = read_bytes(&transactions_path(&root));
+
     let diagnostic = run_diagnostic(&[
         "--machine",
         "define-component",
@@ -563,6 +566,16 @@ fn incompatible_semantic_reference_returns_structured_reference_incompatible_dia
             .definitions
             .len(),
         0
+    );
+    assert_eq!(
+        read_bytes(&manifest_path(&root)),
+        before_manifest,
+        "sealed manifest is byte-equal after the failed incompatible command"
+    );
+    assert_eq!(
+        read_bytes(&transactions_path(&root)),
+        before_log,
+        "canonical transaction log is byte-equal after the failed incompatible command"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -635,6 +648,152 @@ fn every_accepted_command_appends_one_transaction_and_one_revision() {
         after.transactions.lines().count(),
         "manifest transaction_count matches the NDJSON line count"
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn accepted_commands_persist_canonical_envelopes_with_command_schema_and_revision_parentage() {
+    let root = unique_root();
+    run_ok(&["new-project", path_text(&root)]);
+    run_ok(&[
+        "--machine",
+        "define-component",
+        path_text(&root),
+        &json!({
+            "definition_id": "definition-l-bracket",
+            "features": [{
+                "id": "feature-l-bracket",
+                "kind": "l-bracket",
+                "parameters": { "height_mm": 40, "thickness_mm": 4, "width_mm": 30 },
+                "references": []
+            }]
+        })
+        .to_string(),
+    ]);
+    run_ok(&[
+        "--machine",
+        "place-instance",
+        path_text(&root),
+        &json!({
+            "definition_id": "definition-l-bracket",
+            "instance_id": "instance-one",
+            "transform": {
+                "rotation_degrees": [0, 0, 0],
+                "translation_micrometers": [0, 0, 0]
+            }
+        })
+        .to_string(),
+    ]);
+
+    let loaded = load(&root).expect("bundle reopens");
+    let mut envelopes: Vec<Value> = loaded
+        .transactions
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("envelope is JSON"))
+        .collect();
+    assert_eq!(envelopes.len(), 2);
+
+    let define_envelope = envelopes.remove(0);
+    assert_eq!(
+        define_envelope["schema_version"],
+        "threeterm.transaction.component/1"
+    );
+    assert_eq!(define_envelope["sequence"], 1);
+    assert_eq!(define_envelope["parent_revision_id"], "revision-0");
+    assert_eq!(define_envelope["revision_id"], "revision-1");
+    assert_eq!(define_envelope["reattachment"], "resolved");
+    assert_eq!(
+        define_envelope["affected_ids"],
+        json!(["definition-l-bracket"])
+    );
+    assert_eq!(define_envelope["intent"]["kind"], "define-component");
+    assert_eq!(
+        define_envelope["intent"]["definition_id"],
+        "definition-l-bracket"
+    );
+
+    let place_envelope = envelopes.remove(0);
+    assert_eq!(
+        place_envelope["schema_version"],
+        "threeterm.transaction.component/1"
+    );
+    assert_eq!(place_envelope["sequence"], 2);
+    assert_eq!(place_envelope["parent_revision_id"], "revision-1");
+    assert_eq!(place_envelope["revision_id"], "revision-2");
+    assert_eq!(place_envelope["reattachment"], "resolved");
+    assert_eq!(
+        place_envelope["affected_ids"],
+        json!(["instance-one", "definition-l-bracket"])
+    );
+    assert_eq!(place_envelope["intent"]["kind"], "place-instance");
+    assert_eq!(place_envelope["intent"]["instance_id"], "instance-one");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_canonical_field_in_persisted_envelope_fails_closed_on_reload() {
+    let root = unique_root();
+    run_ok(&["new-project", path_text(&root)]);
+    run_ok(&[
+        "--machine",
+        "define-component",
+        path_text(&root),
+        &json!({
+            "definition_id": "definition-l-bracket",
+            "features": [{
+                "id": "feature-l-bracket",
+                "kind": "l-bracket",
+                "parameters": { "height_mm": 40, "thickness_mm": 4, "width_mm": 30 },
+                "references": []
+            }]
+        })
+        .to_string(),
+    ]);
+
+    let mut log = fs::read_to_string(transactions_path(&root)).expect("log reads");
+    let mut envelopes: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("envelope is JSON"))
+        .collect();
+    let mut tampered = envelopes.pop().expect("at least one envelope");
+    let object = tampered.as_object_mut().expect("envelope is a JSON object");
+    object.insert("future_field".to_string(), Value::Bool(true));
+    let mut rewritten = envelopes
+        .into_iter()
+        .map(|value| serde_json::to_string(&value).expect("envelope re-serializes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    rewritten.push('\n');
+    rewritten.push_str(&serde_json::to_string(&tampered).expect("envelope re-serializes"));
+    rewritten.push('\n');
+    log = rewritten;
+
+    let staging = root.with_file_name(format!(
+        "{}.staging",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(&staging, &log).expect("staging log writes");
+    let original_log = transactions_path(&root);
+    let backup_log = root.with_file_name(format!(
+        "{}.previous-log",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(&original_log, &backup_log).expect("log moved aside");
+    if let Err(error) = fs::rename(&staging, &original_log) {
+        let _ = fs::rename(&backup_log, &original_log);
+        panic!("staging rename failed: {error}");
+    }
+
+    let result = load(&root);
+    let _ = fs::remove_dir_all(&backup_log);
+    match result {
+        Err(threeterm_persistence::bundle::BundleError::Json(_))
+        | Err(threeterm_persistence::bundle::BundleError::Invalid(_)) => {}
+        Err(other) => panic!("expected Json/Invalid failure, got {other:?}"),
+        Ok(_) => panic!("tampered canonical envelope must not load"),
+    }
 
     let _ = fs::remove_dir_all(root);
 }

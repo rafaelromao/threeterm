@@ -176,8 +176,8 @@ pub static INDEPENDENT_COPY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "type": "object",
         "required": ["source_instance_id", "copy_suffix"],
         "properties": {
-            "source_instance_id": { "type": "string" },
-            "copy_suffix": { "type": "string" }
+            "source_instance_id": { "type": "string", "minLength": 1 },
+            "copy_suffix": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false
     })
@@ -193,9 +193,9 @@ pub static EDIT_PARAMETER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "parameter_value"
         ],
         "properties": {
-            "definition_id": { "type": "string" },
-            "feature_id": { "type": "string" },
-            "parameter_name": { "type": "string" },
+            "definition_id": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "parameter_name": { "type": "string", "minLength": 1 },
             "parameter_value": {}
         },
         "additionalProperties": false

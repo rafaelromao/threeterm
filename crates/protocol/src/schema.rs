@@ -494,6 +494,47 @@ pub static LINEAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+// `maximum: 6.283185307179586` is exactly 2π; the float literal
+// trips `clippy::approx_constant` so the constant is hoisted behind
+// an explicit allow.
+#[allow(clippy::approx_constant)]
+const CIRCULAR_PATTERN_ANGLE_STEP_MAX: f64 = 6.283185307179586;
+
+pub static CIRCULAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "axis_point",
+            "axis_normal",
+            "angle_step",
+            "count"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "axis_point": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "axis_normal": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "angle_step": { "type": "number", "exclusiveMinimum": 0, "maximum": CIRCULAR_PATTERN_ANGLE_STEP_MAX },
+            "count": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static MIRROR_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -523,6 +564,34 @@ pub static MIRROR_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 pub static LINEAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static CIRCULAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": [
@@ -709,6 +778,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: LINEAR_PATTERN_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        CIRCULAR_PATTERN_COMMAND_ID,
+        CommandSchema {
+            id: CIRCULAR_PATTERN_COMMAND_ID,
+            name: "circular-pattern",
+            schema_version: "threeterm.command.circular-pattern/1",
+            request_schema_version: "threeterm.command.circular-pattern.request/1",
+            request_schema: CIRCULAR_PATTERN_REQUEST_SCHEMA.clone(),
+            response_schema_version: CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            response_schema: CIRCULAR_PATTERN_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -724,6 +805,7 @@ pub const HOLE_COMMAND_ID: CommandId = CommandId("hole");
 pub const REVOLVE_COMMAND_ID: CommandId = CommandId("revolve");
 pub const MIRROR_COMMAND_ID: CommandId = CommandId("mirror");
 pub const LINEAR_PATTERN_COMMAND_ID: CommandId = CommandId("linear-pattern");
+pub const CIRCULAR_PATTERN_COMMAND_ID: CommandId = CommandId("circular-pattern");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
 pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
@@ -735,6 +817,8 @@ pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.res
 pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";
 pub const LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.linear-pattern.response/1";
+pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.circular-pattern.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

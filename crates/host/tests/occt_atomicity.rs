@@ -20,8 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest,
-    LinearPatternRequest, MirrorRequest, Operation, schema_version,
+    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
+    HoleRequest, LinearPatternRequest, MirrorRequest, Operation, schema_version,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -640,6 +640,23 @@ fn linear_pattern_request(label: &str, feature_id: &str, base_path: &Path) -> Li
     LinearPatternRequest::new(unique_request_id(label), base_path, [1.0, 0.0, 0.0], 3, 3.0)
         .with_output_path(PathBuf::from("/tmp"), "out.brep")
         .with_feature_id(feature_id)
+}
+
+fn circular_pattern_request(
+    label: &str,
+    feature_id: &str,
+    base_path: &Path,
+) -> CircularPatternRequest {
+    CircularPatternRequest::new(
+        unique_request_id(label),
+        base_path,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        std::f64::consts::FRAC_PI_2,
+        4,
+    )
+    .with_output_path(PathBuf::from("/tmp"), "out.brep")
+    .with_feature_id(feature_id)
 }
 
 fn committed_brep_path(root: &Path, feature_id: &str) -> PathBuf {
@@ -1741,6 +1758,268 @@ fn linear_pattern_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.linear_pattern(&root, request, &fake_worker);
+    assert!(
+        matches!(result, Err(HostError::BrepInvalid { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn circular_pattern_commits_brep_into_a_new_revision() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("circular-pattern-commit", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let base_request = rectangle_extrude_request("circular-pattern-commit-base")
+        .with_output_path(root.join("stage"), "circular-pattern-base.brep")
+        .with_feature_id("circular-pattern-commit-base-1");
+    let base_view = host
+        .extrude(&root, base_request, &worker)
+        .expect("base extrude");
+    assert_eq!(base_view.result.status, "ok");
+
+    let base_brep = committed_brep_path(&root, "circular-pattern-commit-base-1");
+    let request = circular_pattern_request(
+        "circular-pattern-commit",
+        "circular-pattern-commit-1",
+        &base_brep,
+    )
+    .with_output_path(root.join("stage"), "circular-pattern-commit.brep");
+    let view = host
+        .circular_pattern(&root, request, &worker)
+        .expect("circular_pattern commits");
+
+    assert_ne!(view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(view.snapshot.feature_graph_hash, prior.feature_graph_hash);
+    assert_eq!(view.result.status, "ok");
+    assert_eq!(view.result.operation, Operation::CircularPattern);
+    let committed = committed_brep_path(&root, "circular-pattern-commit-1");
+    assert!(
+        committed.is_file(),
+        "circular-pattern BREP is on disk at {committed:?}"
+    );
+    let reloaded = Host::new().load(&root).expect("reloads after commit");
+    assert_eq!(view.snapshot, reloaded);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn circular_pattern_on_l_bracket_shows_patterned_solid_in_viewport() {
+    // Demoable L-bracket end-to-end:
+    //   1. Extrude a 10x5x3 base slab and a 3x10x3 vertical leg.
+    //   2. Fuse them into an L-bracket.
+    //   3. Pattern the L-bracket four times around the +Z axis at
+    //      (0, 0, 0) with a 90° step (the resulting 4-tuple lands the
+    //      copies at 0°, 90°, 180°, 270° around the source).
+    //   4. Commit; the patterned BREP shows the rotated L-bracket.
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("l-bracket-circular-pattern", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let slab_request = ExtrudeRequest::new(
+        unique_request_id("l-bracket-circular-pattern-slab"),
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "l-bracket-circular-pattern-slab.brep")
+    .with_feature_id("l-bracket-circular-pattern-slab-1");
+    let slab_view = host
+        .extrude(&root, slab_request, &worker)
+        .expect("slab extrude");
+    assert_eq!(slab_view.result.status, "ok");
+
+    let leg_request = ExtrudeRequest::new(
+        unique_request_id("l-bracket-circular-pattern-leg"),
+        vec![(0.0, 0.0), (3.0, 0.0), (3.0, 10.0), (0.0, 10.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "l-bracket-circular-pattern-leg.brep")
+    .with_feature_id("l-bracket-circular-pattern-leg-1");
+    let leg_view = host
+        .extrude(&root, leg_request, &worker)
+        .expect("leg extrude");
+    assert_eq!(leg_view.result.status, "ok");
+
+    let fuse_request = BooleanFuseRequest::new(
+        unique_request_id("l-bracket-circular-pattern-fuse"),
+        committed_brep_path(&root, "l-bracket-circular-pattern-slab-1"),
+        committed_brep_path(&root, "l-bracket-circular-pattern-leg-1"),
+    )
+    .with_output_path(root.join("stage"), "l-bracket-circular-pattern.brep")
+    .with_feature_id("l-bracket-circular-pattern-1");
+    let fuse_view = host
+        .boolean_fuse(&root, fuse_request, &worker)
+        .expect("l-bracket fuse");
+    assert_eq!(fuse_view.result.status, "ok");
+
+    let fused_brep = committed_brep_path(&root, "l-bracket-circular-pattern-1");
+    let fused_bytes = fs::read(&fused_brep).expect("fused BREP reads");
+    let pattern_request = CircularPatternRequest::new(
+        unique_request_id("l-bracket-circular-pattern"),
+        &fused_brep,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        std::f64::consts::FRAC_PI_2,
+        4,
+    )
+    .with_output_path(
+        root.join("stage"),
+        "l-bracket-circular-pattern-pattern.brep",
+    )
+    .with_feature_id("l-bracket-circular-pattern-pattern-1");
+    let pattern_view = host
+        .circular_pattern(&root, pattern_request, &worker)
+        .expect("l-bracket circular pattern");
+
+    assert_eq!(pattern_view.result.status, "ok");
+    assert_eq!(pattern_view.result.operation, Operation::CircularPattern);
+    assert_ne!(pattern_view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(
+        pattern_view.snapshot.revision_hash,
+        fuse_view.snapshot.revision_hash
+    );
+    let committed = committed_brep_path(&root, "l-bracket-circular-pattern-pattern-1");
+    assert!(
+        committed.is_file(),
+        "patterned L-bracket BREP is on disk at {committed:?}"
+    );
+    let bytes = fs::read(&committed).expect("patterned BREP reads");
+    assert!(!bytes.is_empty());
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "patterned L-bracket BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+    assert_ne!(
+        bytes, fused_bytes,
+        "patterned L-bracket BREP must differ byte-for-byte from the fused BREP; \
+         an unchanged payload would mean the pattern did not run"
+    );
+    assert_ne!(
+        pattern_view.result.brep_sha256, fuse_view.result.brep_sha256,
+        "patterned BREP sha256 must differ from the fused BREP sha256; \
+         identical hashes would mean the pattern did not run"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn circular_pattern_spawn_failure_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("circular-pattern-spawn-fail", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let bad_worker =
+        threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
+    let request = circular_pattern_request(
+        "circular-pattern-spawn-fail",
+        "circular-pattern-spawn-fail-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    let result = host.circular_pattern(&root, request, &bad_worker);
+    assert!(
+        matches!(result, Err(HostError::WorkerFailure { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn circular_pattern_request_malformed_preserves_canonical_state() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("circular-pattern-bad-req", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut request = circular_pattern_request(
+        "circular-pattern-bad-req",
+        "circular-pattern-bad-req-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    request.axis_normal = [0.0, 0.0, 0.0];
+    let result = host.circular_pattern(&root, request, &worker);
+    assert!(
+        matches!(result, Err(HostError::WorkerFailure { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn circular_pattern_brep_invalid_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("circular-pattern-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-circular-pattern-brep-{}",
+        std::process::id()
+    ));
+    let diagnostic = serde_json::json!({
+        "schema_version": schema_version(),
+        "code": "brep_invalid",
+        "arg": "BRepCheck_Analyzer failed"
+    });
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
+            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let request = circular_pattern_request(
+        "circular-pattern-brep-invalid",
+        "circular-pattern-brep-invalid-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    let result = host.circular_pattern(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::BrepInvalid { .. })),
         "got {result:?}"

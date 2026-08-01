@@ -1331,6 +1331,142 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
     }
 }
 
+bool handle_circular_pattern(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    auto axis_point = get_vec3(request, "axis_point");
+    auto axis_normal = get_vec3(request, "axis_normal");
+    double angle_step = get_number(request, "angle_step");
+    double count_value = get_number(request, "count");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "circular_pattern request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    for (double component : axis_point) {
+        if (!std::isfinite(component)) {
+            error = "circular_pattern axis_point components must be finite";
+            return false;
+        }
+    }
+    for (double component : axis_normal) {
+        if (!std::isfinite(component)) {
+            error = "circular_pattern axis_normal components must be finite";
+            return false;
+        }
+    }
+    double normal_norm_squared = axis_normal[0] * axis_normal[0] +
+                                  axis_normal[1] * axis_normal[1] +
+                                  axis_normal[2] * axis_normal[2];
+    if (normal_norm_squared == 0.0) {
+        error = "circular_pattern axis_normal must be a non-zero vector";
+        return false;
+    }
+    if (!std::isfinite(angle_step) || !(angle_step > 0.0) || angle_step > 2.0 * M_PI) {
+        error = "circular_pattern angle_step must be a positive finite number <= 2π";
+        return false;
+    }
+    if (!std::isfinite(count_value)) {
+        error = "circular_pattern count must be a finite number";
+        return false;
+    }
+    std::uint32_t count = static_cast<std::uint32_t>(count_value);
+    if (static_cast<double>(count) != count_value || count < 1) {
+        error = "circular_pattern count must be an integer >= 1";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        double norm = std::sqrt(normal_norm_squared);
+        gp_Pnt origin(axis_point[0], axis_point[1], axis_point[2]);
+        gp_Dir normal(axis_normal[0] / norm,
+                      axis_normal[1] / norm,
+                      axis_normal[2] / norm);
+        gp_Ax1 rotation_axis(origin, normal);
+
+        TopoDS_Shape result = base;
+        for (std::uint32_t index = 1; index < count; ++index) {
+            gp_Trsf transform;
+            transform.SetRotation(rotation_axis, angle_step * static_cast<double>(index));
+            BRepBuilderAPI_Transform rotated(base, transform, Standard_False, Standard_False);
+            rotated.Build();
+            if (!rotated.IsDone()) {
+                error = "BRepBuilderAPI_Transform did not complete during circular pattern copy";
+                return false;
+            }
+            TopoDS_Shape copy = rotated.Shape();
+            BRepAlgoAPI_Fuse fuse(result, copy);
+            fuse.SetFuzzyValue(1.0e-6);
+            fuse.Build();
+            if (!fuse.IsDone()) {
+                error = "BRepAlgoAPI_Fuse did not complete during circular pattern copy";
+                return false;
+            }
+            result = fuse.Shape();
+        }
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"circular_pattern\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during circular_pattern: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during circular_pattern: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1378,10 +1514,12 @@ int main() {
         success = handle_mirror(envelope, error);
     } else if (operation == "linear_pattern") {
         success = handle_linear_pattern(envelope, error);
+    } else if (operation == "circular_pattern") {
+        success = handle_circular_pattern(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, or linear_pattern");
+hole, revolve, mirror, linear_pattern, or circular_pattern");
         return 2;
     }
 

@@ -351,8 +351,18 @@ impl Host {
 
         let stage = Stage::open(root)
             .map_err(|error| reject(Diagnostic::artifact_promotion_failure(&error.to_string())))?;
+        stage
+            .verify(&header)
+            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+        if let Some(existing) = self.layer1_result(&header.cache_key) {
+            stage.discard_verified(&header.staging_name);
+            return Ok(existing);
+        }
         let path = stage
-            .validate_and_promote(&header)
+            .publish_verified(
+                &header.staging_name,
+                &header.cache_key.final_artifact_name(),
+            )
             .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
         let result = Layer1DerivedResult {
             request_id: header.request_id,

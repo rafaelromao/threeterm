@@ -324,10 +324,10 @@ impl WorkerHost for SubprocessWorkerHost {
         match self.child.try_wait()? {
             Some(_) => Ok(()),
             None => {
-                if let Err(error) = self.child.kill() {
-                    if self.child.try_wait()?.is_none() {
-                        return Err(error.into());
-                    }
+                if let Err(error) = self.child.kill()
+                    && self.child.try_wait()?.is_none()
+                {
+                    return Err(error.into());
                 }
                 self.child.wait()?;
                 Ok(())

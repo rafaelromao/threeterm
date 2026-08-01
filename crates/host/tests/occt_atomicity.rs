@@ -86,7 +86,7 @@ fn extrude_commits_brep_into_a_new_revision() {
     let root = fresh_bundle_with_feature("commit", "box-seed", "box");
     let prior = Host::new().load(&root).expect("host loads prior");
 
-    let request = rectangle_extrude_request("commit").with_output_path(&root, "stage/extrude.brep");
+    let request = rectangle_extrude_request("commit").with_output_path(root.join("stage"), "extrude.brep");
     let view = Host::new()
         .extrude(&root, request, &worker)
         .expect("extrude commits");
@@ -114,7 +114,7 @@ fn worker_spawn_failure_preserves_canonical_state() {
     let bad_worker =
         threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
     let request =
-        rectangle_extrude_request("spawn-fail").with_output_path(&root, "stage/extrude.brep");
+        rectangle_extrude_request("spawn-fail").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &bad_worker);
     assert!(
         matches!(result, Err(HostError::WorkerFailure { .. })),
@@ -141,7 +141,7 @@ fn extrude_request_malformed_preserves_canonical_state() {
 
     // 2-vertex profile is rejected by the worker as request_malformed.
     let mut request = triangle_extrude_request("bad-req", "bad-req-box")
-        .with_output_path(&root, "stage/extrude.brep");
+        .with_output_path(root.join("stage"), "extrude.brep");
     request.profile = vec![[0.0, 0.0], [1.0, 0.0]];
     let result = host.extrude(&root, request, &worker);
     assert!(
@@ -180,7 +180,7 @@ fn extrude_malformed_response_preserves_canonical_state() {
 
     let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
     let request =
-        rectangle_extrude_request("malformed").with_output_path(&root, "stage/extrude.brep");
+        rectangle_extrude_request("malformed").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::WorkerFailure { .. })),
@@ -216,7 +216,7 @@ fn extrude_non_zero_exit_preserves_canonical_state() {
 
     let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
     let request =
-        rectangle_extrude_request("non-zero").with_output_path(&root, "stage/extrude.brep");
+        rectangle_extrude_request("non-zero").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::WorkerFailure { .. })),
@@ -264,7 +264,7 @@ fn extrude_brep_invalid_preserves_canonical_state() {
 
     let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
     let request =
-        rectangle_extrude_request("brep-invalid").with_output_path(&root, "stage/extrude.brep");
+        rectangle_extrude_request("brep-invalid").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::BrepInvalid { .. })),
@@ -321,7 +321,7 @@ fn extrude_persistence_append_failure_preserves_canonical_state() {
     fs::set_permissions(&root, perms).expect("chmod");
 
     let request =
-        rectangle_extrude_request("persist-fail").with_output_path(&root, "stage/extrude.brep");
+        rectangle_extrude_request("persist-fail").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &worker);
     // The read-only permission kills the BREP-directory creation step
     // before the append_feature call, so the error is `HostError::BrepIo`.
@@ -357,7 +357,7 @@ fn boolean_fuse_of_two_extrudes_commits_a_fused_brep() {
     let prior_view = host.load(&root).expect("loads");
 
     let base_request = rectangle_extrude_request("fuse-base")
-        .with_output_path(&root, "stage/base.brep")
+        .with_output_path(root.join("stage"), "base.brep")
         .with_feature_id("fuse-base-1");
     let base_view = host
         .extrude(&root, base_request, &worker)
@@ -369,7 +369,7 @@ fn boolean_fuse_of_two_extrudes_commits_a_fused_brep() {
         vec![(5.0, 0.0), (15.0, 0.0), (15.0, 5.0), (5.0, 5.0)],
         3.0,
     )
-    .with_output_path(&root, "stage/tool.brep")
+    .with_output_path(root.join("stage"), "tool.brep")
     .with_feature_id("fuse-tool-1");
     let tool_view = host
         .extrude(&root, tool_request, &worker)
@@ -381,7 +381,7 @@ fn boolean_fuse_of_two_extrudes_commits_a_fused_brep() {
         root.join("brep/fuse-base-1.brep"),
         root.join("brep/fuse-tool-1.brep"),
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-1");
     let fuse_view = host
         .boolean_fuse(&root, fuse_request, &worker)
@@ -415,7 +415,7 @@ fn boolean_fuse_spawn_failure_preserves_canonical_state() {
         "/no/such/base.brep",
         "/no/such/tool.brep",
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-fail-1");
     let result = host.boolean_fuse(&root, fuse_request, &bad_worker);
     assert!(
@@ -446,7 +446,7 @@ fn boolean_fuse_request_malformed_preserves_canonical_state() {
         "/no/such/base.brep",
         "/no/such/tool.brep",
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-malformed-1");
     let result = host.boolean_fuse(&root, fuse_request, &worker);
     assert!(
@@ -486,7 +486,7 @@ fn boolean_fuse_malformed_response_preserves_canonical_state() {
         "/no/such/base.brep",
         "/no/such/tool.brep",
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-malformed-resp-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
@@ -527,7 +527,7 @@ fn boolean_fuse_non_zero_exit_preserves_canonical_state() {
         "/no/such/base.brep",
         "/no/such/tool.brep",
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-non-zero-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
@@ -580,7 +580,7 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
         "/no/such/base.brep",
         "/no/such/tool.brep",
     )
-    .with_output_path(&root, "stage/fused.brep")
+    .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-brep-invalid-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(

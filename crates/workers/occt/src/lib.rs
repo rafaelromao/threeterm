@@ -7,9 +7,9 @@
 //! * [`schema_version`] — the pinned worker protocol schema.
 //! * [`ExtrudeRequest`], [`ExtrudeResult`], [`BooleanFuseRequest`],
 //!   [`BooleanFuseResult`], [`Operation`], [`RevolveRequest`],
-//!   [`RevolveResult`] — the JSON envelopes exchanged with the worker,
-//!   with `serde(deny_unknown_fields)` to fail closed on unexpected
-//!   fields.
+//!   [`RevolveResult`], [`MirrorRequest`], [`MirrorResult`] — the
+//!   JSON envelopes exchanged with the worker, with
+//!   `serde(deny_unknown_fields)` to fail closed on unexpected fields.
 //! * [`OcctWorker`] — the boundary struct that spawns the worker
 //!   binary, pipes the request in, reads the response, and returns
 //!   either a typed result or an [`OcctDiagnostic`].
@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, Operation, RevolveRequest,
-    RevolveResult, SCHEMA_VERSION,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, MirrorRequest,
+    MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
 };
 
 pub fn schema_version() -> &'static str {
@@ -110,8 +110,8 @@ impl std::fmt::Display for WorkerError {
 impl std::error::Error for WorkerError {}
 
 /// Process-backed OCCT geometry worker. Owns the binary path and
-/// exposes `extrude`, `boolean_fuse`, `fillet`, `chamfer`, `hole`, and
-/// `revolve`.
+/// exposes `extrude`, `boolean_fuse`, `fillet`, `chamfer`, `hole`,
+/// `revolve`, and `mirror`.
 ///
 /// The worker is **disposable**: each call spawns a fresh process, pipes
 /// the request to its stdin, reads one JSON line from its stdout, and
@@ -219,6 +219,15 @@ impl OcctWorker {
             detail: format!("revolve request serialization failed: {error}"),
         })?;
         self.invoke(&bytes)?.into_revolve()
+    }
+
+    /// Mirror `request` by spawning the worker process. See module
+    /// docs for the disposable-worker contract.
+    pub fn mirror(&self, request: &MirrorRequest) -> Result<MirrorResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("mirror request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_mirror()
     }
 
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
@@ -377,6 +386,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_mirror(self) -> Result<MirrorResult, WorkerError> {
+        match serde_json::from_str::<MirrorResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "mirror response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -412,6 +436,10 @@ pub fn parse_hole_request(raw: &str) -> Result<HoleRequest, serde_json::Error> {
 }
 
 pub fn parse_revolve_request(raw: &str) -> Result<RevolveRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_mirror_request(raw: &str) -> Result<MirrorRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -579,5 +607,35 @@ mod tests {
         assert_eq!(value["axis_point"], serde_json::json!([0.0, 0.5, 0.0]));
         assert_eq!(value["axis_direction"], serde_json::json!([0.0, 1.0, 0.0]));
         assert_eq!(value["angle"], std::f64::consts::TAU);
+    }
+
+    #[test]
+    fn mirror_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "mirror",
+            "base_path": "/tmp/base.brep",
+            "plane_point": [0.0, 0.0, 0.0],
+            "plane_normal": [1.0, 0.0, 0.0],
+            "output_filename": "out.brep",
+            "feature_id": "mirror-1",
+            "rogue_key": true
+        }"#;
+        assert!(parse_mirror_request(raw).is_err());
+    }
+
+    #[test]
+    fn mirror_envelope_accepts_canonical_shape() {
+        let request =
+            MirrorRequest::new("req-1", "/tmp/base.brep", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+                .with_feature_id("mirror-1");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "mirror");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["plane_point"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(value["plane_normal"], serde_json::json!([1.0, 0.0, 0.0]));
+        assert_eq!(value["feature_id"], "mirror-1");
     }
 }

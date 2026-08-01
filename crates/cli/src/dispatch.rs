@@ -7,13 +7,14 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, Operation,
+    RevolveRequest,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
+    LOAD_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -69,6 +70,14 @@ enum DispatchPlan {
         direction: [f64; 3],
         diameter: f64,
     },
+    Revolve {
+        bundle: String,
+        feature_id: String,
+        profile_file: String,
+        axis_point: [f64; 3],
+        axis_direction: [f64; 3],
+        angle: f64,
+    },
     Unknown {
         arg: String,
     },
@@ -112,6 +121,7 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         "fillet" => parse_fillet(&args[2..]),
         "chamfer" => parse_chamfer(&args[2..]),
         "hole" => parse_hole(&args[2..]),
+        "revolve" => parse_revolve(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -643,6 +653,119 @@ fn parse_hole(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_revolve(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "revolve".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut profile_file: Option<String> = None;
+    let mut axis_point: Option<[f64; 3]> = None;
+    let mut axis_direction: Option<[f64; 3]> = None;
+    let mut angle: Option<f64> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--profile-file" => {
+                    profile_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--axis-point" => match parse_vec3(&value_str, "--axis-point") {
+                    Ok(parsed) => {
+                        axis_point = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(plan) => return plan,
+                },
+                "--axis-direction" => match parse_vec3(&value_str, "--axis-direction") {
+                    Ok(parsed) => {
+                        axis_direction = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(plan) => return plan,
+                },
+                "--angle" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        angle = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--angle {}", value_str),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(profile_file) = profile_file else {
+        return DispatchPlan::Unknown {
+            arg: "--profile-file".to_string(),
+        };
+    };
+    let Some(axis_point) = axis_point else {
+        return DispatchPlan::Unknown {
+            arg: "--axis-point".to_string(),
+        };
+    };
+    let Some(axis_direction) = axis_direction else {
+        return DispatchPlan::Unknown {
+            arg: "--axis-direction".to_string(),
+        };
+    };
+    let Some(angle) = angle else {
+        return DispatchPlan::Unknown {
+            arg: "--angle".to_string(),
+        };
+    };
+    DispatchPlan::Revolve {
+        bundle,
+        feature_id,
+        profile_file,
+        axis_point,
+        axis_direction,
+        angle,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -716,6 +839,23 @@ where
             position,
             direction,
             diameter,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Revolve {
+            bundle,
+            feature_id,
+            profile_file,
+            axis_point,
+            axis_direction,
+            angle,
+        } => emit_revolve(
+            &bundle,
+            &feature_id,
+            &profile_file,
+            axis_point,
+            axis_direction,
+            angle,
             stdout,
             stderr,
         ),
@@ -1012,6 +1152,49 @@ fn emit_hole(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_revolve(
+    bundle: &str,
+    feature_id: &str,
+    profile_file: &str,
+    axis_point: [f64; 3],
+    axis_direction: [f64; 3],
+    angle: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let profile = match read_profile(profile_file) {
+        Ok(profile) => profile,
+        Err(error) => {
+            write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+    };
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = RevolveRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        profile,
+        axis_point,
+        axis_direction,
+        angle,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().revolve(bundle, request, &worker) {
+        Ok(view) => write_revolve_view(&view, REVOLVE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -1174,6 +1357,29 @@ fn write_hole_view(
     )
 }
 
+fn write_revolve_view(
+    view: &threeterm_host::RevolveCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Revolve.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
@@ -1256,7 +1462,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 9);
+        assert_eq!(commands.len(), 10);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -1617,5 +1823,106 @@ mod tests {
         let _ = dispatch(args(&["--machine", "list"]), &mut stdout, &mut stderr);
         let _ = dispatch(args(&["--machine", "bogus"]), &mut stdout, &mut stderr);
         let _ = dispatch(args(&[]), &mut stdout, &mut stderr);
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_revolve_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "revolve"], "revolve"),
+            (
+                vec!["--machine", "revolve", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "revolve",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "rev-1",
+                ],
+                "--profile-file",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "revolve",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "rev-1",
+                    "--profile-file",
+                    "p.json",
+                ],
+                "--axis-point",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "revolve",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "rev-1",
+                    "--profile-file",
+                    "p.json",
+                    "--axis-point",
+                    "0,0.5,0",
+                ],
+                "--axis-direction",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "revolve",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "rev-1",
+                    "--profile-file",
+                    "p.json",
+                    "--axis-point",
+                    "0,0.5,0",
+                    "--axis-direction",
+                    "0,1,0",
+                ],
+                "--angle",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["code"], "unknown_command");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_revolve_with_malformed_axis_point() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "revolve",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "rev-1",
+                "--profile-file",
+                "p.json",
+                "--axis-point",
+                "0,0.5",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--axis-point 0,0.5");
     }
 }

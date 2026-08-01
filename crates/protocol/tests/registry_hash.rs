@@ -8,7 +8,8 @@
 
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    HOLE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, find,
+    registry_hash,
 };
 
 #[test]
@@ -31,7 +32,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "fc60706ade6ac152dea423d8ea151d01a9568c0ec442ef537a3a08effbad2065",
+        "f6d42604eb9ecbfd6e71e54c67d18f4fcbccb95c7359ff6f6d07e83e79c446ed",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -162,4 +163,32 @@ fn registry_resolves_list_by_command_id() {
     let entry = find(LIST_COMMAND_ID).expect("`list` is the seeded entry");
     assert_eq!(entry.id, LIST_COMMAND_ID);
     assert_eq!(entry.name, "list");
+}
+
+#[test]
+fn registry_contains_versioned_revolve_contract() {
+    let revolve = find(REVOLVE_COMMAND_ID).expect("revolve is registered");
+    assert_eq!(revolve.id, REVOLVE_COMMAND_ID);
+    assert_eq!(revolve.name, "revolve");
+    assert_eq!(revolve.schema_version, "threeterm.command.revolve/1");
+    assert_eq!(
+        revolve.request_schema_version,
+        "threeterm.command.revolve.request/1"
+    );
+    assert_eq!(
+        revolve.response_schema_version,
+        "threeterm.command.revolve.response/1"
+    );
+    assert_eq!(
+        revolve.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "profile",
+            "axis_point",
+            "axis_direction",
+            "angle"
+        ])
+    );
+    assert_eq!(revolve.request_schema["additionalProperties"], false);
 }

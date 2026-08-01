@@ -127,6 +127,99 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "profile", "height"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "profile": {
+                "type": "array",
+                "minItems": 3,
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": { "type": "number" }
+                }
+            },
+            "height": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_FUSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "tool_feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "tool_feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -190,6 +283,30 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        EXTRUDE_COMMAND_ID,
+        CommandSchema {
+            id: EXTRUDE_COMMAND_ID,
+            name: "extrude",
+            schema_version: "threeterm.command.extrude/1",
+            request_schema_version: "threeterm.command.extrude.request/1",
+            request_schema: EXTRUDE_REQUEST_SCHEMA.clone(),
+            response_schema_version: EXTRUDE_RESPONSE_SCHEMA_VERSION,
+            response_schema: EXTRUDE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        BOOLEAN_FUSE_COMMAND_ID,
+        CommandSchema {
+            id: BOOLEAN_FUSE_COMMAND_ID,
+            name: "boolean-fuse",
+            schema_version: "threeterm.command.boolean-fuse/1",
+            request_schema_version: "threeterm.command.boolean-fuse.request/1",
+            request_schema: BOOLEAN_FUSE_REQUEST_SCHEMA.clone(),
+            response_schema_version: BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION,
+            response_schema: BOOLEAN_FUSE_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -197,8 +314,12 @@ pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
+pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
+pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
+pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
+pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

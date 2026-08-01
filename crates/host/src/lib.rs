@@ -1,13 +1,20 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use threeterm_occt_worker::{
+    BooleanFuseRequest, BooleanFuseResult, ExtrudeRequest, ExtrudeResult, OcctWorker, WorkerError,
+};
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::worker::Envelope;
+
+pub const BREP_SUBDIR: &str = "brep";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
@@ -37,11 +44,28 @@ pub struct Layer1DerivedResult {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtrudeCommitView {
+    pub snapshot: SnapshotView,
+    pub result: ExtrudeResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BooleanFuseCommitView {
+    pub snapshot: SnapshotView,
+    pub result: BooleanFuseResult,
+}
+
 #[derive(Debug)]
 pub enum HostError {
     BundlePathMissing { path: PathBuf },
     BundlePathNotDirectory { path: PathBuf },
     Persistence(BundleError),
+    WorkerFailure { detail: String },
+    WorkerUnavailable { detail: String },
+    BrepInvalid { detail: String },
+    BrepFileMissing { path: PathBuf },
+    BrepIo { detail: String },
 }
 
 impl std::fmt::Display for HostError {
@@ -58,6 +82,21 @@ impl std::fmt::Display for HostError {
                 )
             }
             Self::Persistence(error) => error.fmt(formatter),
+            Self::WorkerFailure { detail } => {
+                write!(formatter, "occt worker failure: {detail}")
+            }
+            Self::WorkerUnavailable { detail } => {
+                write!(formatter, "occt worker unavailable: {detail}")
+            }
+            Self::BrepInvalid { detail } => {
+                write!(formatter, "occt brep invalid: {detail}")
+            }
+            Self::BrepFileMissing { path } => {
+                write!(formatter, "occt brep file missing: {}", path.display())
+            }
+            Self::BrepIo { detail } => {
+                write!(formatter, "occt brep io error: {detail}")
+            }
         }
     }
 }
@@ -67,6 +106,27 @@ impl std::error::Error for HostError {}
 impl From<BundleError> for HostError {
     fn from(error: BundleError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+impl From<WorkerError> for HostError {
+    fn from(error: WorkerError) -> Self {
+        match error {
+            WorkerError::Diagnostic(diagnostic) => {
+                if diagnostic.code == "brep_invalid" {
+                    Self::BrepInvalid {
+                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+                    }
+                } else {
+                    Self::WorkerFailure {
+                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+                    }
+                }
+            }
+            other => Self::WorkerFailure {
+                detail: other.to_string(),
+            },
+        }
     }
 }
 
@@ -211,6 +271,179 @@ impl Host {
     pub fn layer1_result(&self, cache_key: &Layer1CacheKey) -> Option<Layer1DerivedResult> {
         self.layer1_results.borrow().get(cache_key).cloned()
     }
+
+    /// Atomically commit a worker-emitted BREP file into the bundle.
+    ///
+    /// The worker's stage lives outside the canonical log (a derived
+    /// artifact under the host-managed staging directory). This seam
+    /// copies the validated BREP into `<root>/brep/<feature_id>.brep`,
+    /// advances the canonical log by one entry (kind = "brep:<feature_id>"),
+    /// seals the manifest, and returns the new `SnapshotView`. On any
+    /// filesystem failure the prior manifest, log, and any prior
+    /// committed BREP for the same `feature_id` are preserved
+    /// byte-equal and `Host::current()` is restored.
+    pub fn commit_brep_feature(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        brep_path: &Path,
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        if !brep_path.is_file() {
+            return Err(HostError::BrepFileMissing {
+                path: brep_path.to_path_buf(),
+            });
+        }
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+        let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
+        let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
+
+        let brep_dir = bundle_root(root).join(BREP_SUBDIR);
+        if let Err(detail) = ensure_dir(&brep_dir) {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepIo { detail });
+        }
+        let target = brep_dir.join(format!("{feature_id}.brep"));
+        // Preserve any prior committed BREP for this feature id so a
+        // mid-commit failure doesn't orphan the canonical log entry.
+        let prior_brep = if target.is_file() {
+            let mut buffer = Vec::new();
+            std::io::Read::read_to_end(
+                &mut fs::File::open(&target).map_err(|error| HostError::BrepIo {
+                    detail: format!("open prior BREP failed: {error}"),
+                })?,
+                &mut buffer,
+            )
+            .map_err(|error| HostError::BrepIo {
+                detail: format!("read prior BREP failed: {error}"),
+            })?;
+            Some(buffer)
+        } else {
+            None
+        };
+        if let Err(detail) = copy_brep(brep_path, &target) {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepIo { detail });
+        }
+
+        let kind = format!("brep:{feature_id}");
+        let updated = match bundle.append_feature(feature_id, &kind) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Restore the prior BREP bytes (or remove the new file if
+                // there was no prior) and verify the canonical state
+                // survived. The prior manifest and log are untouched
+                // because we never reached a successful append.
+                restore_brep(&target, prior_brep.as_deref());
+                // Fail-closed: if the canonical state was not preserved
+                // by the append, surface the persistence error so the
+                // diagnostic taxonomy sees the failure.
+                if let (Ok(m), Ok(l)) = (
+                    read_bundle_file(&bundle_root(root), "manifest.json"),
+                    read_bundle_file(&bundle_root(root), "transactions.log"),
+                ) && (m != prior_manifest || l != prior_log)
+                {
+                    return Err(HostError::from(error));
+                }
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        let _ = prior_view;
+        let view = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(view)
+    }
+
+    /// Extrude `request` against the disposable OCCT worker and, on
+    /// success, commit the BREP into a new revision. Returns the new
+    /// snapshot view plus the typed `ExtrudeResult`.
+    ///
+    /// Atomicity: a worker spawn / exit / parse failure, a non-`ok`
+    /// status, a `BRepCheck_Analyzer` failure, or a persistence
+    /// append failure all leave the bundle's `manifest.json` and
+    /// `transactions.log` byte-identical to the pre-call snapshot.
+    pub fn extrude(
+        &self,
+        root: impl AsRef<Path>,
+        request: ExtrudeRequest,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.extrude(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "extrude returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(ExtrudeCommitView { snapshot, result })
+    }
+
+    /// Boolean-fuse `request` against the disposable OCCT worker and,
+    /// on success, commit the fused BREP into a new revision.
+    pub fn boolean_fuse(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanFuseRequest,
+        worker: &OcctWorker,
+    ) -> Result<BooleanFuseCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.boolean_fuse(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "boolean_fuse returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(BooleanFuseCommitView { snapshot, result })
+    }
 }
 
 fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
@@ -219,6 +452,67 @@ fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
             Diagnostic::artifact_hash_mismatch(expected, actual)
         }
         _ => Diagnostic::artifact_promotion_failure(&error.to_string()),
+    }
+}
+
+fn bundle_root(root: &Path) -> PathBuf {
+    root.to_path_buf()
+}
+
+fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
+    let path = root.join(name);
+    let mut file = fs::File::open(&path).map_err(|error| HostError::BrepIo {
+        detail: format!("could not read {}: {}", path.display(), error),
+    })?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .map_err(|error| HostError::BrepIo {
+            detail: format!("could not read {}: {}", path.display(), error),
+        })?;
+    Ok(buffer)
+}
+
+fn ensure_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| format!("create_dir_all failed: {error}"))
+}
+
+fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
+    let mut reader = fs::File::open(source)
+        .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
+    let mut writer = fs::File::create(target)
+        .map_err(|error| format!("create target BREP {} failed: {error}", target.display()))?;
+    let mut buffer = vec![0u8; 8 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("read source BREP failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| format!("write target BREP failed: {error}"))?;
+    }
+    writer
+        .flush()
+        .map_err(|error| format!("flush target BREP failed: {error}"))?;
+    writer
+        .sync_all()
+        .map_err(|error| format!("sync target BREP failed: {error}"))?;
+    Ok(())
+}
+
+fn restore_brep(target: &Path, prior_bytes: Option<&[u8]>) {
+    match prior_bytes {
+        Some(bytes) => {
+            if let Ok(mut writer) = fs::File::create(target) {
+                let _ = writer.write_all(bytes);
+                let _ = writer.sync_all();
+            }
+        }
+        None => {
+            let _ = fs::remove_file(target);
+        }
     }
 }
 
@@ -285,5 +579,73 @@ mod tests {
     #[test]
     fn schema_version_matches_pinned_string() {
         assert_eq!(schema_version(), "threeterm.host/1");
+    }
+
+    #[test]
+    fn commit_brep_feature_writes_brep_and_advances_canonical_log() {
+        let root = temp_root("brep-commit");
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir creates");
+        let brep_source = staging.join("extrude.brep");
+        let payload: Vec<u8> = (0..512u32).map(|i| (i & 0xff) as u8).collect();
+        std::fs::write(&brep_source, &payload).expect("brep writes");
+
+        let host = Host::new();
+        let view = host
+            .commit_brep_feature(&root, "box-1", &brep_source)
+            .expect("commit succeeds");
+
+        let committed = root.join("brep/box-1.brep");
+        assert!(committed.is_file(), "committed BREP is on disk");
+        let committed_bytes = std::fs::read(&committed).expect("committed BREP reads");
+        assert_eq!(committed_bytes, payload);
+
+        let reloaded = host.load(&root).expect("reloads after commit");
+        assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_brep_feature_rejects_missing_source_brep() {
+        let root = temp_root("brep-missing");
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        let host = Host::new();
+        let prior = host.load(&root).expect("loads");
+        let missing = root.join("no-such.brep");
+        let result = host.commit_brep_feature(&root, "box-1", &missing);
+        assert!(matches!(result, Err(HostError::BrepFileMissing { .. })));
+        assert_eq!(host.current(), Some(prior));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_brep_feature_replaces_prior_bytes_post_commit() {
+        let root = temp_root("brep-replace");
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir creates");
+        let brep_dir = root.join("brep");
+        std::fs::create_dir_all(&brep_dir).expect("brep dir creates");
+        let prior_bytes: Vec<u8> = (0..128u8).collect();
+        std::fs::write(brep_dir.join("box-1.brep"), &prior_bytes).expect("prior BREP writes");
+
+        let new_source = staging.join("new.brep");
+        let new_bytes: Vec<u8> = (128..=255u8).cycle().take(128).collect();
+        std::fs::write(&new_source, &new_bytes).expect("new BREP writes");
+
+        let host = Host::new();
+        let view = host
+            .commit_brep_feature(&root, "box-1", &new_source)
+            .expect("commit succeeds");
+        assert!(view.feature_graph_hash.len() == 64);
+
+        let committed = std::fs::read(brep_dir.join("box-1.brep")).expect("reads");
+        assert_eq!(committed, new_bytes, "BREP bytes are replaced post-commit");
+        let reloaded = host.load(&root).expect("reloads");
+        assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

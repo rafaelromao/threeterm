@@ -5,16 +5,22 @@ use std::path::Path;
 use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
+use threeterm_occt_worker::{BooleanFuseRequest, ExtrudeRequest, Operation};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
-pub use threeterm_protocol::schema::{LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION};
+pub use threeterm_protocol::schema::{
+    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION,
+    LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
+};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_INTEGRITY_FAILURE: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
+pub const EXIT_WORKER_FAILURE: i32 = 4;
+pub const EXIT_BREP_INVALID: i32 = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum DispatchPlan {
     List,
     NewProject {
@@ -27,6 +33,18 @@ enum DispatchPlan {
     },
     Load {
         bundle: String,
+    },
+    Extrude {
+        bundle: String,
+        feature_id: String,
+        profile_file: String,
+        height: f64,
+    },
+    BooleanFuse {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        tool_feature_id: String,
     },
     Unknown {
         arg: String,
@@ -66,6 +84,8 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         },
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
+        "extrude" => parse_extrude(&args[2..]),
+        "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -137,6 +157,165 @@ fn parse_load(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_extrude(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "extrude".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut profile_file: Option<String> = None;
+    let mut height: Option<f64> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--profile-file" => {
+                    profile_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--height" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        height = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--height {}", value_str),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(profile_file) = profile_file else {
+        return DispatchPlan::Unknown {
+            arg: "--profile-file".to_string(),
+        };
+    };
+    let Some(height) = height else {
+        return DispatchPlan::Unknown {
+            arg: "--height".to_string(),
+        };
+    };
+    DispatchPlan::Extrude {
+        bundle,
+        feature_id,
+        profile_file,
+        height,
+    }
+}
+
+fn parse_boolean_fuse(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "boolean-fuse".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut tool_feature_id: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--tool" => {
+                    tool_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(tool_feature_id) = tool_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--tool".to_string(),
+        };
+    };
+    DispatchPlan::BooleanFuse {
+        bundle,
+        feature_id,
+        base_feature_id,
+        tool_feature_id,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -151,6 +330,25 @@ where
             kind,
         } => emit_save(&bundle, &feature_id, &kind, stdout, stderr),
         DispatchPlan::Load { bundle } => emit_load(&bundle, stdout, stderr),
+        DispatchPlan::Extrude {
+            bundle,
+            feature_id,
+            profile_file,
+            height,
+        } => emit_extrude(&bundle, &feature_id, &profile_file, height, stdout, stderr),
+        DispatchPlan::BooleanFuse {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => emit_boolean_fuse(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            &tool_feature_id,
+            stdout,
+            stderr,
+        ),
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
 }
@@ -228,6 +426,124 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
     }
 }
 
+fn emit_extrude(
+    bundle: &str,
+    feature_id: &str,
+    profile_file: &str,
+    height: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let profile = match read_profile(profile_file) {
+        Ok(profile) => profile,
+        Err(error) => {
+            write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+    };
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = ExtrudeRequest::new(threeterm_occt_worker::new_request_id(), profile, height)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().extrude(bundle, request, &worker) {
+        Ok(view) => write_extrude_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_boolean_fuse(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    tool_feature_id: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    let tool_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{tool_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    if !tool_path.is_file() {
+        let detail = format!(
+            "tool feature {tool_feature_id:?} has no committed BREP at {}",
+            tool_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = BooleanFuseRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        &tool_path,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().boolean_fuse(bundle, request, &worker) {
+        Ok(view) => {
+            write_boolean_fuse_view(&view, BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, stdout, stderr)
+        }
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
+    let raw = std::fs::read_to_string(profile_file)
+        .map_err(|error| format!("profile file read failed: {error}"))?;
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("profile JSON parse failed: {error}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| "profile JSON must be a top-level array".to_string())?;
+    let mut profile = Vec::with_capacity(array.len());
+    for entry in array {
+        let pair = entry
+            .as_array()
+            .ok_or_else(|| format!("profile entry {entry:?} must be a [x, y] array"))?;
+        if pair.len() != 2 {
+            return Err(format!(
+                "profile entry {entry:?} must contain exactly two numbers"
+            ));
+        }
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| format!("profile entry x {:?} must be a number", pair[0]))?;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| format!("profile entry y {:?} must be a number", pair[1]))?;
+        profile.push((x, y));
+    }
+    Ok(profile)
+}
+
 fn write_snapshot(
     feature_graph_hash: &str,
     revision_hash: &str,
@@ -246,6 +562,52 @@ fn write_snapshot(
     )
 }
 
+fn write_extrude_view(
+    view: &threeterm_host::ExtrudeCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Extrude.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_boolean_fuse_view(
+    view: &threeterm_host::BooleanFuseCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::BooleanFuse.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
@@ -258,13 +620,31 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
     let detail = match error {
-        HostError::BundlePathMissing { .. } => "bundle_path_missing",
-        HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory",
-        HostError::Persistence(error) => error.diagnostic_detail(),
+        HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
+        HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
+        HostError::Persistence(error) => error.diagnostic_detail().to_string(),
+        HostError::WorkerFailure { detail } => detail.clone(),
+        HostError::WorkerUnavailable { detail } => detail.clone(),
+        HostError::BrepInvalid { detail } => detail.clone(),
+        HostError::BrepFileMissing { path } => {
+            format!("brep file missing: {}", path.display())
+        }
+        HostError::BrepIo { detail } => detail.clone(),
     };
-    let diagnostic = Diagnostic::integrity_failure(detail);
+    let (diagnostic, exit) = match error {
+        HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
+            (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
+        }
+        HostError::WorkerFailure { .. } | HostError::WorkerUnavailable { .. } => {
+            (Diagnostic::worker_failure(&detail), EXIT_WORKER_FAILURE)
+        }
+        _ => (
+            Diagnostic::integrity_failure(&detail),
+            EXIT_INTEGRITY_FAILURE,
+        ),
+    };
     write_diagnostic(stderr, &diagnostic);
-    EXIT_INTEGRITY_FAILURE
+    exit
 }
 
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
@@ -310,7 +690,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 4);
+        assert_eq!(commands.len(), 6);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -389,6 +769,90 @@ mod tests {
             assert!(stdout.is_empty());
             let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
             assert_eq!(parsed["code"], "unknown_command");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_extrude_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "extrude"], "extrude"),
+            (
+                vec!["--machine", "extrude", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "extrude",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "box-1",
+                ],
+                "--profile-file",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "extrude",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "box-1",
+                    "--profile-file",
+                    "p.json",
+                ],
+                "--height",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_boolean_fuse_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "boolean-fuse"], "boolean-fuse"),
+            (
+                vec!["--machine", "boolean-fuse", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "boolean-fuse",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "fuse-1",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "boolean-fuse",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "fuse-1",
+                    "--base",
+                    "box-1",
+                ],
+                "--tool",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
             assert_eq!(parsed["arg"], expected);
         }
     }

@@ -56,6 +56,7 @@
 
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
@@ -1527,18 +1528,38 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Hollow the solid by carving a smaller inner copy out of it.
-        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` takes
-        // the base solid, applies the offset to every face (the
-        // negative offset shrinks them inward), and produces a
-        // thickened solid. We then use `BRepAlgoAPI_Cut(base, inner)`
-        // to carve the inner volume out, leaving a hollow shell with
-        // `thickness`-wide walls.
-        //
-        // The L-bracket BooleanFuse output typically ships as a single
-        // merged solid; we re-wrap the outer shell into a fresh solid
-        // so the offset algorithm has a clean body without residual
-        // internal faces from the fuse.
+        // `BRepOffsetAPI_MakeThickSolid` requires C1-continuous
+        // surfaces and refuses mixed-valence vertices. A BooleanFuse
+        // result typically carries internal seams and partial-merge
+        // edges that trip the offset algorithm (yielding a null
+        // shape). `ShapeUpgrade_UnifySameDomain` merges co-planar
+        // faces and smooth-continuous edges before the offset so the
+        // algorithm sees a clean shell.
+        Handle(ShapeUpgrade_UnifySameDomain) unifier =
+            new ShapeUpgrade_UnifySameDomain(base_solid);
+        unifier->AllowInternalEdges(Standard_False);
+        unifier->Build();
+        TopoDS_Shape unified = unifier->Shape();
+        if (unified.IsNull()) {
+            unified = base_solid;
+        }
+        if (unified.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(unified);
+        } else {
+            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More();
+                 ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "shell base has no TopoDS_Solid after unification";
+            return false;
+        }
+
+        // Rebuild the solid from its outer shell so the offset
+        // algorithm operates on a closed, single-shell body without
+        // residual internal faces from the fuse.
         TopoDS_Shell outer_shell;
         for (TopExp_Explorer ex(base_solid, TopAbs_SHELL); ex.More();
              ex.Next()) {
@@ -1556,6 +1577,11 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         }
         TopoDS_Solid clean_solid = solid_rebuild.Solid();
 
+        // `MakeThickSolidByJoin` produces the hollow shell directly:
+        // the negative offset shrinks every face inward by
+        // `thickness` and the closing walls are stitched to the outer
+        // shell, yielding a single solid bounded by the original
+        // outer surface and an inner offset shell.
         BRepOffsetAPI_MakeThickSolid thickener;
         thickener.MakeThickSolidByJoin(
             clean_solid, TopTools_ListOfShape(),
@@ -1566,21 +1592,9 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             error = "BRepOffsetAPI_MakeThickSolid did not complete";
             return false;
         }
-        TopoDS_Shape inner_shape = thickener.Shape();
-        if (inner_shape.IsNull()) {
+        TopoDS_Shape shelled = thickener.Shape();
+        if (shelled.IsNull()) {
             error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
-            return false;
-        }
-
-        BRepAlgoAPI_Cut cut(clean_solid, inner_shape);
-        cut.Build();
-        if (!cut.IsDone()) {
-            error = "BRepAlgoAPI_Cut did not complete during shell";
-            return false;
-        }
-        TopoDS_Shape result = cut.Shape();
-        if (result.IsNull()) {
-            error = "BRepAlgoAPI_Cut returned a null shape";
             return false;
         }
 
@@ -1589,7 +1603,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             std::error_code ec;
             std::filesystem::create_directories(output_path.parent_path(), ec);
         }
-        if (!write_brep(result, output_path, error)) {
+        if (!write_brep(shelled, output_path, error)) {
             return false;
         }
         std::ifstream stream(output_path, std::ios::binary);
@@ -1598,7 +1612,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         std::string sha = sha256_hex(bytes.str());
 
         std::string status = "ok";
-        if (!analyze_brep(result)) {
+        if (!analyze_brep(shelled)) {
             error = "brep_invalid: BRepCheck_Analyzer failed";
             status = "brep_invalid";
         }

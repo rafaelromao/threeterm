@@ -15,12 +15,18 @@
 //! directory. The `Artifact` envelope carries only the validated header;
 //! the host independently checks the staged file before promotion.
 
+use std::collections::VecDeque;
 use std::fmt;
+use std::io::{Read, Write};
+use std::process::Child;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::artifact::ArtifactHeader;
+use crate::frame::FrameParser;
 
 /// Maximum size of a staged artifact payload, in bytes. Artifacts exceeding
 /// this limit emit `ArtifactError::PayloadTooLarge` so a malicious or buggy
@@ -163,7 +169,7 @@ pub trait WorkerHost {
     /// Receive the next envelope from the worker. Returns
     /// `Err(WorkerError::Closed)` when the worker has exited and no more
     /// envelopes are pending.
-    fn recv(&mut self) -> Result<Envelope, WorkerError>;
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError>;
 
     /// Send a cooperative cancellation for `request_id`. The worker is
     /// expected to acknowledge with a `Cancelled` envelope inside the
@@ -174,6 +180,169 @@ pub trait WorkerHost {
     /// Force-terminate and reap the disposable worker after grace expires.
     fn terminate(&mut self) -> Result<(), WorkerError> {
         Ok(())
+    }
+}
+
+/// Newline-frame transport for a disposable worker byte stream.
+///
+/// A worker process adapter feeds stdout chunks into `inbound` and consumes
+/// encoded host frames from `outbound`. Keeping the timed receive here means
+/// both a process-backed adapter and an in-process channel use the same
+/// deadline contract.
+#[derive(Debug)]
+pub struct FramedWorkerHost {
+    inbound: Receiver<Vec<u8>>,
+    outbound: Sender<Vec<u8>>,
+    parser: FrameParser,
+    pending: VecDeque<Envelope>,
+}
+
+impl FramedWorkerHost {
+    pub fn new(inbound: Receiver<Vec<u8>>, outbound: Sender<Vec<u8>>) -> Self {
+        Self {
+            inbound,
+            outbound,
+            parser: FrameParser::new(),
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+impl WorkerHost for FramedWorkerHost {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        let frame = encode_frame(envelope)
+            .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))?;
+        self.outbound.send(frame).map_err(|_| WorkerError::Closed)
+    }
+
+    fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(WorkerError::TimedOut);
+            }
+
+            if let Some(envelope) = self.pending.pop_front() {
+                return Ok(envelope);
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let bytes = if remaining.is_zero() {
+                match self.inbound.try_recv() {
+                    Ok(bytes) => bytes,
+                    Err(TryRecvError::Empty) => return Err(WorkerError::TimedOut),
+                    Err(TryRecvError::Disconnected) => return Err(WorkerError::Closed),
+                }
+            } else {
+                match self.inbound.recv_timeout(remaining) {
+                    Ok(bytes) => bytes,
+                    Err(RecvTimeoutError::Timeout) => return Err(WorkerError::TimedOut),
+                    Err(RecvTimeoutError::Disconnected) => return Err(WorkerError::Closed),
+                }
+            };
+            let envelopes = self
+                .parser
+                .push(&bytes)
+                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+            self.pending.extend(envelopes);
+        }
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.send(&Envelope::Cancel {
+            schema_version: crate::schema_version().to_string(),
+            request_id: request_id.to_string(),
+            reason: reason.to_string(),
+        })
+    }
+}
+
+/// Production transport binding a subprocess's standard streams to the
+/// deadline-aware newline-frame transport.
+#[derive(Debug)]
+pub struct SubprocessWorkerHost {
+    child: Child,
+    transport: FramedWorkerHost,
+}
+
+impl SubprocessWorkerHost {
+    pub fn new(mut child: Child) -> Result<Self, WorkerError> {
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => return Err(missing_pipe_error(&mut child, "stdin")),
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => return Err(missing_pipe_error(&mut child, "stdout")),
+        };
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        std::thread::spawn(move || {
+            let mut stdout = stdout;
+            let mut buffer = [0; 4096];
+            while let Ok(read) = stdout.read(&mut buffer) {
+                if read == 0 || inbound_tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            while let Ok(frame) = outbound_rx.recv() {
+                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            transport: FramedWorkerHost::new(inbound_rx, outbound_tx),
+        })
+    }
+}
+
+fn missing_pipe_error(child: &mut Child, pipe: &str) -> WorkerError {
+    // Constructor failure must not leave a disposable worker running.
+    let _ = child.kill();
+    let _ = child.wait();
+    WorkerError::Io(std::io::Error::other(format!(
+        "worker {pipe} was not piped"
+    )))
+}
+
+impl WorkerHost for SubprocessWorkerHost {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.transport.send(envelope)
+    }
+
+    fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
+        self.transport.recv(deadline)
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.transport.cancel(request_id, reason)
+    }
+
+    fn terminate(&mut self) -> Result<(), WorkerError> {
+        match self.child.try_wait()? {
+            Some(_) => Ok(()),
+            None => {
+                if let Err(error) = self.child.kill()
+                    && self.child.try_wait()?.is_none()
+                {
+                    return Err(error.into());
+                }
+                self.child.wait()?;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Drop for SubprocessWorkerHost {
+    fn drop(&mut self) {
+        let _ = self.terminate();
     }
 }
 
@@ -199,6 +368,8 @@ pub struct WorkerConfig {
 /// never have to inspect free-form text.
 #[derive(Debug)]
 pub enum WorkerError {
+    /// No complete envelope arrived before the receive deadline.
+    TimedOut,
     /// The worker process exited or its channel closed before delivering
     /// the requested envelope.
     Closed,
@@ -214,6 +385,7 @@ pub enum WorkerError {
 impl fmt::Display for WorkerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TimedOut => formatter.write_str("worker receive deadline exceeded"),
             Self::Closed => formatter.write_str("worker closed before delivering envelope"),
             Self::Protocol(detail) => write!(formatter, "worker protocol violation: {detail}"),
             Self::SchemaMismatch { received, expected } => write!(
@@ -247,6 +419,9 @@ mod tests {
     use super::*;
     use crate::artifact::{Layer1CacheKey, WorkerFingerprint};
     use serde_json::json;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     fn schema() -> String {
         crate::schema_version().to_string()
@@ -367,5 +542,98 @@ mod tests {
         let parsed: Envelope =
             serde_json::from_slice(body).expect("frame body is a valid envelope");
         assert_eq!(parsed, envelope);
+    }
+
+    #[test]
+    fn framed_transport_times_out_at_an_expired_deadline_without_consuming_a_later_frame() {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (_outbound_tx, outbound_rx) = mpsc::channel();
+        let mut transport = FramedWorkerHost::new(inbound_rx, _outbound_tx);
+        let ready = Envelope::WorkerReady {
+            schema_version: schema(),
+            worker_id: "occt-worker".to_string(),
+        };
+        assert!(matches!(
+            transport.recv(Instant::now() - Duration::from_nanos(1)),
+            Err(WorkerError::TimedOut)
+        ));
+        inbound_tx
+            .send(encode_frame(&ready).expect("ready frame encodes"))
+            .expect("worker frame queues");
+        assert_eq!(
+            transport
+                .recv(Instant::now() + Duration::from_secs(1))
+                .expect("queued frame remains available"),
+            ready
+        );
+        assert!(outbound_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn framed_transport_preserves_multiple_envelopes_from_one_chunk() {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, _outbound_rx) = mpsc::channel();
+        let mut transport = FramedWorkerHost::new(inbound_rx, outbound_tx);
+        let ready = Envelope::WorkerReady {
+            schema_version: schema(),
+            worker_id: "occt-worker".to_string(),
+        };
+        let progress = Envelope::Progress {
+            schema_version: schema(),
+            request_id: "req-1".to_string(),
+            stage: "tessellating".to_string(),
+            percent: 50,
+        };
+        let mut chunk = encode_frame(&ready).expect("ready frame encodes");
+        chunk.extend(encode_frame(&progress).expect("progress frame encodes"));
+        inbound_tx.send(chunk).expect("worker chunk queues");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            transport.recv(deadline).expect("ready frame decodes"),
+            ready
+        );
+        assert!(matches!(
+            transport.recv(Instant::now() - Duration::from_nanos(1)),
+            Err(WorkerError::TimedOut)
+        ));
+        assert_eq!(transport.pending.pop_front(), Some(progress));
+    }
+
+    #[test]
+    fn framed_transport_times_out_when_only_a_partial_frame_arrives() {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, _outbound_rx) = mpsc::channel();
+        let mut transport = FramedWorkerHost::new(inbound_rx, outbound_tx);
+        let ready = Envelope::WorkerReady {
+            schema_version: schema(),
+            worker_id: "occt-worker".to_string(),
+        };
+        let frame = encode_frame(&ready).expect("ready frame encodes");
+        inbound_tx
+            .send(frame[..frame.len() - 1].to_vec())
+            .expect("partial frame queues");
+
+        assert!(matches!(
+            transport.recv(Instant::now()),
+            Err(WorkerError::TimedOut)
+        ));
+    }
+
+    #[test]
+    fn subprocess_transport_honors_an_expired_receive_deadline() {
+        let child = Command::new("sh")
+            .args(["-c", "exec cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("blocked worker starts");
+        let mut transport = SubprocessWorkerHost::new(child).expect("subprocess transport starts");
+
+        assert!(matches!(
+            transport.recv(Instant::now()),
+            Err(WorkerError::TimedOut)
+        ));
+        transport.terminate().expect("blocked worker terminates");
     }
 }

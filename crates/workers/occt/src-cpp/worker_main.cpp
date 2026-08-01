@@ -1505,10 +1505,10 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
-        if (base.ShapeType() != TopAbs_SOLID) {
-            error = "shell base must be a TopoDS_Solid";
-            return false;
-        }
+        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` accepts
+        // any top-level shape (SOLID, COMPSOLID, or COMPOUND); the
+        // BooleanFuse input path produces a SOLID for simple joins
+        // and a COMPSOLID for disjoint joins, both legal here.
 
         // Hollow the solid by subtracting an inward-offset copy
         // from it. `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin`

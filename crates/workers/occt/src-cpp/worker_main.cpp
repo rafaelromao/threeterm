@@ -54,7 +54,9 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 
-#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
 #include <cstdint>
@@ -1509,24 +1511,45 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Initialize sets `myOffset`, which `MakeThickSolid()` rejects as
-        // null otherwise. A negative offset shrinks every face inward
-        // uniformly, carving the void so the resulting solid is a
-        // hollow shell with `thickness`-wide walls. The
-        // `AddFacetoRemove` list stays empty so every face is offset;
-        // passing a populated list would punch holes through the wall
-        // instead.
-        BRepOffsetAPI_MakeThickSolid thickener;
-        thickener.Initialize(base, -thickness, 1.0e-6, Standard_False);
-        thickener.MakeThickSolid();
-        thickener.Perform();
-        if (!thickener.IsDone()) {
-            error = "BRepOffsetAPI_MakeThickSolid did not complete";
+        // Hollow the solid by carving an inward-offset copy out of it:
+        // 1. Offset every face inward by `thickness` to construct the
+        //    inner shell.
+        // 2. Wrap the inner shell in a solid.
+        // 3. Boolean-cut the inner solid from the base — the
+        //    remainder is a hollow shell with `thickness`-wide walls.
+        BRepOffsetAPI_MakeOffset inner_offset;
+        inner_offset.Initialize(base, -thickness, 1.0e-6, Standard_True);
+        inner_offset.MakeOffset();
+        if (!inner_offset.IsDone()) {
+            error = "BRepOffsetAPI_MakeOffset did not complete";
             return false;
         }
-        TopoDS_Shape result = thickener.Shape();
+        TopTools_ListOfShape inner_shells;
+        for (TopExp_Explorer shell_explorer(inner_offset.Shape(), TopAbs_SHELL);
+             shell_explorer.More();
+             shell_explorer.Next()) {
+            inner_shells.Append(shell_explorer.Current());
+        }
+        if (inner_shells.IsEmpty()) {
+            error = "shell offset did not produce an inner shell";
+            return false;
+        }
+        BRepBuilderAPI_MakeSolid inner_solid_maker(inner_shells);
+        if (!inner_solid_maker.IsDone()) {
+            error = "BRepBuilderAPI_MakeSolid did not complete";
+            return false;
+        }
+        TopoDS_Solid inner_solid = inner_solid_maker.Solid();
+
+        BRepAlgoAPI_Cut cut(base, inner_solid);
+        cut.Build();
+        if (!cut.IsDone()) {
+            error = "BRepAlgoAPI_Cut did not complete during shell";
+            return false;
+        }
+        TopoDS_Shape result = cut.Shape();
         if (result.IsNull()) {
-            error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
+            error = "BRepAlgoAPI_Cut returned a null shape";
             return false;
         }
 

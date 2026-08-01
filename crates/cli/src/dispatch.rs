@@ -396,32 +396,17 @@ mod tests {
             .as_array()
             .expect("dispatch output is a top-level JSON array");
         assert_eq!(commands.len(), 7);
-        assert!(commands.iter().any(|command| command["id"] == "list"));
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["id"] == "define-component")
-        );
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["id"] == "place-instance")
-        );
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["id"] == "transform-instance")
-        );
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["id"] == "independent-copy")
-        );
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["id"] == "edit-parameter")
-        );
+        for id in [
+            "list",
+            "new-project",
+            "define-component",
+            "place-instance",
+            "transform-instance",
+            "independent-copy",
+            "edit-parameter",
+        ] {
+            assert!(commands.iter().any(|command| command["id"] == id));
+        }
     }
 
     #[test]

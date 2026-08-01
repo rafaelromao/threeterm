@@ -42,6 +42,24 @@ pub struct CommandSchema {
     pub response_schema: Value,
 }
 
+fn transform_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["translation_micrometers", "rotation_degrees"],
+        "properties": {
+            "translation_micrometers": {
+                "type": "array",
+                "items": { "type": "integer" }
+            },
+            "rotation_degrees": {
+                "type": "array",
+                "items": { "type": "integer" }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// Canonical request schema document for the `list` command.
 pub static LIST_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
@@ -135,21 +153,50 @@ pub static PLACE_INSTANCE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "instance_id": { "type": "string" },
             "definition_id": { "type": "string" },
-            "transform": {
-                "type": "object",
-                "required": ["translation_micrometers", "rotation_degrees"],
-                "properties": {
-                    "translation_micrometers": {
-                        "type": "array",
-                        "items": { "type": "integer" }
-                    },
-                    "rotation_degrees": {
-                        "type": "array",
-                        "items": { "type": "integer" }
-                    }
-                },
-                "additionalProperties": false
-            }
+            "transform": transform_schema()
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static TRANSFORM_INSTANCE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["instance_id", "transform"],
+        "properties": {
+            "instance_id": { "type": "string" },
+            "transform": transform_schema()
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static INDEPENDENT_COPY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["source_instance_id", "copy_suffix"],
+        "properties": {
+            "source_instance_id": { "type": "string" },
+            "copy_suffix": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static EDIT_PARAMETER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "definition_id",
+            "feature_id",
+            "parameter_name",
+            "parameter_value"
+        ],
+        "properties": {
+            "definition_id": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "parameter_name": { "type": "string" },
+            "parameter_value": {}
         },
         "additionalProperties": false
     })
@@ -167,58 +214,6 @@ pub static COMPONENT_COMMAND_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(||
                 "type": "array",
                 "items": { "type": "string" }
             }
-        },
-        "additionalProperties": false
-    })
-});
-
-pub static TRANSFORM_INSTANCE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "required": ["instance_id", "transform"],
-        "properties": {
-            "instance_id": { "type": "string" },
-            "transform": {
-                "type": "object",
-                "required": ["translation_micrometers", "rotation_degrees"],
-                "properties": {
-                    "translation_micrometers": {
-                        "type": "array",
-                        "items": { "type": "integer" }
-                    },
-                    "rotation_degrees": {
-                        "type": "array",
-                        "items": { "type": "integer" }
-                    }
-                },
-                "additionalProperties": false
-            }
-        },
-        "additionalProperties": false
-    })
-});
-
-pub static INDEPENDENT_COPY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "required": ["source_instance_id", "copy_suffix"],
-        "properties": {
-            "source_instance_id": { "type": "string" },
-            "copy_suffix": { "type": "string", "minLength": 1 }
-        },
-        "additionalProperties": false
-    })
-});
-
-pub static EDIT_PARAMETER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "required": ["definition_id", "feature_id", "parameter_name", "parameter_value"],
-        "properties": {
-            "definition_id": { "type": "string" },
-            "feature_id": { "type": "string" },
-            "parameter_name": { "type": "string", "minLength": 1 },
-            "parameter_value": true
         },
         "additionalProperties": false
     })

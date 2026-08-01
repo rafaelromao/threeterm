@@ -668,4 +668,70 @@ mod tests {
     fn feature_id_rejects_empty_values() {
         assert_eq!(FeatureId::new(""), Err(DomainError::EmptyId));
     }
+
+    #[test]
+    fn resolve_reference_outcomes_match_the_four_state_machine() {
+        let candidate = FeatureDescriptor {
+            id: FeatureId::new("feature-target").unwrap(),
+            kind: "l-bracket".to_string(),
+            parameters: BTreeMap::new(),
+            references: Vec::new(),
+        };
+        let candidates = vec![candidate.clone(), candidate.clone()];
+
+        let resolved = SemanticReference {
+            schema_version: "threeterm.reference.semantic/1".to_string(),
+            source_feature_id: FeatureId::new("feature-target").unwrap(),
+            source_output_role: "face".to_string(),
+            expected_feature_kind: "l-bracket".to_string(),
+        };
+        assert_eq!(
+            resolve_reference(&resolved, std::slice::from_ref(&candidate)),
+            ReattachmentOutcome::Resolved
+        );
+
+        let lost = SemanticReference {
+            schema_version: "threeterm.reference.semantic/1".to_string(),
+            source_feature_id: FeatureId::new("feature-missing").unwrap(),
+            source_output_role: "face".to_string(),
+            expected_feature_kind: "l-bracket".to_string(),
+        };
+        assert_eq!(
+            resolve_reference(&lost, std::slice::from_ref(&candidate)),
+            ReattachmentOutcome::Lost
+        );
+
+        let incompatible_schema = SemanticReference {
+            schema_version: "threeterm.reference.semantic/0".to_string(),
+            source_feature_id: FeatureId::new("feature-target").unwrap(),
+            source_output_role: "face".to_string(),
+            expected_feature_kind: "l-bracket".to_string(),
+        };
+        assert_eq!(
+            resolve_reference(&incompatible_schema, std::slice::from_ref(&candidate)),
+            ReattachmentOutcome::Incompatible
+        );
+
+        let incompatible_kind = SemanticReference {
+            schema_version: "threeterm.reference.semantic/1".to_string(),
+            source_feature_id: FeatureId::new("feature-target").unwrap(),
+            source_output_role: "face".to_string(),
+            expected_feature_kind: "extrude".to_string(),
+        };
+        assert_eq!(
+            resolve_reference(&incompatible_kind, std::slice::from_ref(&candidate)),
+            ReattachmentOutcome::Incompatible
+        );
+
+        let ambiguous = SemanticReference {
+            schema_version: "threeterm.reference.semantic/1".to_string(),
+            source_feature_id: FeatureId::new("feature-target").unwrap(),
+            source_output_role: "face".to_string(),
+            expected_feature_kind: "l-bracket".to_string(),
+        };
+        assert_eq!(
+            resolve_reference(&ambiguous, &candidates),
+            ReattachmentOutcome::Ambiguous
+        );
+    }
 }

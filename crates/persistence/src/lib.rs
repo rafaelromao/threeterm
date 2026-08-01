@@ -249,7 +249,7 @@ fn manifest_for(generation: &ProjectGeneration, transactions: &str) -> Manifest 
         generation_id: generation.id.clone(),
         revision_id: revision.id.clone(),
         revision_count: generation.revisions.len(),
-        transaction_count: transactions.lines().count(),
+        transaction_count: count_lines(transactions),
         transaction_bytes,
         transaction_sha256,
         canonical_root_sha256: String::new(),
@@ -258,6 +258,14 @@ fn manifest_for(generation: &ProjectGeneration, transactions: &str) -> Manifest 
     manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
     manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
     manifest
+}
+
+fn count_lines(transactions: &str) -> usize {
+    if transactions.is_empty() {
+        0
+    } else {
+        transactions.lines().count()
+    }
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {

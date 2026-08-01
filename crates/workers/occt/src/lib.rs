@@ -8,9 +8,10 @@
 //! * [`ExtrudeRequest`], [`ExtrudeResult`], [`BooleanFuseRequest`],
 //!   [`BooleanFuseResult`], [`Operation`], [`RevolveRequest`],
 //!   [`RevolveResult`], [`MirrorRequest`], [`MirrorResult`],
-//!   [`ShellRequest`], [`ShellResult`] — the JSON envelopes
-//!   exchanged with the worker, with `serde(deny_unknown_fields)` to
-//!   fail closed on unexpected fields.
+//!   [`ShellRequest`], [`ShellResult`], [`DraftRequest`],
+//!   [`DraftResult`] — the JSON envelopes exchanged with the worker,
+//!   with `serde(deny_unknown_fields)` to fail closed on unexpected
+//!   fields.
 //! * [`OcctWorker`] — the boundary struct that spawns the worker
 //!   binary, pipes the request in, reads the response, and returns
 //!   either a typed result or an [`OcctDiagnostic`].
@@ -32,9 +33,10 @@ use serde::{Deserialize, Serialize};
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
-    HoleResult, LinearPatternRequest, LinearPatternResult, MirrorRequest, MirrorResult, Operation,
-    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
+    CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
+    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult,
+    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
+    ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -113,8 +115,8 @@ impl std::error::Error for WorkerError {}
 
 /// Process-backed OCCT geometry worker. Owns the binary path and
 /// exposes `extrude`, `boolean_fuse`, `fillet`, `chamfer`, `hole`,
-/// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, and
-/// `shell`.
+/// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, `shell`,
+/// and `draft`.
 ///
 /// The worker is **disposable**: each call spawns a fresh process, pipes
 /// the request to its stdin, reads one JSON line from its stdout, and
@@ -264,6 +266,15 @@ impl OcctWorker {
             detail: format!("shell request serialization failed: {error}"),
         })?;
         self.invoke(&bytes)?.into_shell()
+    }
+
+    /// Draft `request` by spawning the worker process. See module docs
+    /// for the disposable-worker contract.
+    pub fn draft(&self, request: &DraftRequest) -> Result<DraftResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("draft request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_draft()
     }
 
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
@@ -482,6 +493,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_draft(self) -> Result<DraftResult, WorkerError> {
+        match serde_json::from_str::<DraftResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "draft response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -535,6 +561,10 @@ pub fn parse_circular_pattern_request(
 }
 
 pub fn parse_shell_request(raw: &str) -> Result<ShellRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_draft_request(raw: &str) -> Result<DraftRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -829,5 +859,39 @@ mod tests {
         assert_eq!(value["base_path"], "/tmp/base.brep");
         assert_eq!(value["thickness"], 0.5);
         assert_eq!(value["feature_id"], "shell-1");
+    }
+
+    #[test]
+    fn draft_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "draft",
+            "base_path": "/tmp/base.brep",
+            "angle": 0.2617993877991494,
+            "pull_direction": [0.0, 0.0, 1.0],
+            "output_filename": "out.brep",
+            "feature_id": "draft-1",
+            "rogue_key": true
+        }"#;
+        assert!(parse_draft_request(raw).is_err());
+    }
+
+    #[test]
+    fn draft_envelope_accepts_canonical_shape() {
+        let request = DraftRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            std::f64::consts::FRAC_PI_2 / 6.0,
+            [0.0, 0.0, 1.0],
+        )
+        .with_feature_id("draft-1");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "draft");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["angle"], std::f64::consts::FRAC_PI_2 / 6.0);
+        assert_eq!(value["pull_direction"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(value["feature_id"], "draft-1");
     }
 }

@@ -3,9 +3,9 @@
 // threeterm-occt-worker: disposable worker binary for the ThreeTerm OCCT
 // geometry kernel. Reads a JSON envelope from stdin, runs the requested
 // operation (extrude, boolean_fuse, fillet, chamfer, hole, revolve,
-// mirror, linear_pattern, circular_pattern, or shell), validates the
-// BREP with BRepCheck_Analyzer, and writes the BREP to the host-staged
-// output path.
+// mirror, linear_pattern, circular_pattern, shell, or draft), validates
+// the BREP with BRepCheck_Analyzer, and writes the BREP to the
+// host-staged output path.
 //
 // Exit codes:
 //   0  success — BREP written, JSON response on stdout.
@@ -55,9 +55,13 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 
 #include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom_Plane.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopoDS_Face.hxx>
 
 #include <cmath>
 #include <cstdint>
@@ -1641,6 +1645,247 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
     }
 }
 
+bool handle_draft(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    double angle = get_number(request, "angle");
+    std::array<double, 3> pull_direction = get_vec3(request, "pull_direction");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "draft request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!std::isfinite(angle) || !(angle > 0.0)) {
+        error = "draft angle must be a positive finite number";
+        return false;
+    }
+    double magnitude_squared = 0.0;
+    for (double component : pull_direction) {
+        if (!std::isfinite(component)) {
+            error = "draft pull_direction must contain only finite numbers";
+            return false;
+        }
+        magnitude_squared += component * component;
+    }
+    if (!(magnitude_squared > 0.0)) {
+        error = "draft pull_direction must be a non-zero vector";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+        // The draft algorithm wants a single `TopoDS_Solid`; unwrap a
+        // compound or compsolid the same way shell does.
+        TopoDS_Solid base_solid;
+        if (base.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(base);
+        } else if (base.ShapeType() == TopAbs_COMPSOLID ||
+                   base.ShapeType() == TopAbs_COMPOUND) {
+            for (TopExp_Explorer ex(base, TopAbs_SOLID); ex.More(); ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "draft base has no TopoDS_Solid";
+            return false;
+        }
+
+        // `BRepOffsetAPI_DraftAngle` requires C1-continuous surfaces and
+        // refuses mixed-valence vertices. A BooleanFuse result typically
+        // carries internal seams and partial-merge edges that trip the
+        // draft algorithm (yielding a null shape or an OCCT exception).
+        // `ShapeUpgrade_UnifySameDomain` merges co-planar faces and
+        // smooth-continuous edges before the draft so the algorithm
+        // sees a clean shell.
+        Handle(ShapeUpgrade_UnifySameDomain) unifier =
+            new ShapeUpgrade_UnifySameDomain(base_solid);
+        unifier->AllowInternalEdges(Standard_False);
+        unifier->Build();
+        TopoDS_Shape unified = unifier->Shape();
+        if (unified.IsNull()) {
+            unified = base_solid;
+        }
+        if (unified.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(unified);
+        } else {
+            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More(); ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "draft base has no TopoDS_Solid after unification";
+            return false;
+        }
+
+        gp_Dir pull_dir(pull_direction[0], pull_direction[1], pull_direction[2]);
+        // `gp_Dir` normalizes a non-zero input vector; we already
+        // rejected the zero vector above.
+
+        // Collect every planar face whose normal is (anti-)parallel to
+        // `pull_dir` as a cap. Among the caps, pick the one whose
+        // centroid has the most negative dot product with `pull_dir`
+        // as the neutral face — that is the cap furthest "behind" the
+        // pull direction, i.e. the natural base of the extrusion.
+        struct Cap {
+            TopoDS_Face face;
+            gp_Pnt centroid;
+            gp_Dir normal;
+        };
+        std::vector<Cap> caps;
+        for (TopExp_Explorer ex(base_solid, TopAbs_FACE); ex.More(); ex.Next()) {
+            TopoDS_Face face = TopoDS::Face(ex.Current());
+            Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) continue;
+            if (surface->DynamicType() != STANDARD_TYPE(Geom_Plane)) continue;
+            Handle(Geom_Plane) plane = Handle(Geom_Plane)::DownCast(surface);
+            if (plane.IsNull()) continue;
+            gp_Pln pln = plane->Pln();
+            gp_Dir face_normal = pln.Axis().Direction();
+            // Accept either orientation (face normal points either way).
+            if (std::abs(face_normal.X() * pull_dir.X() +
+                         face_normal.Y() * pull_dir.Y() +
+                         face_normal.Z() * pull_dir.Z()) < 1.0 - 1e-6) {
+                continue;
+            }
+            // Approximate the face centroid by sampling its bounding box.
+            Bnd_Box box;
+            BRepBndLib::Add(face, box);
+            Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+            box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+            gp_Pnt centroid(0.5 * (xmin + xmax), 0.5 * (ymin + ymax),
+                            0.5 * (zmin + zmax));
+            caps.push_back({face, centroid, face_normal});
+        }
+        if (caps.empty()) {
+            error = "draft base has no planar face parallel to pull_direction";
+            return false;
+        }
+        // Pick the cap with the most negative centroid dot product.
+        std::size_t neutral_index = 0;
+        double best_projection = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 0; index < caps.size(); ++index) {
+            const Cap& cap = caps[index];
+            double projection = cap.centroid.X() * pull_dir.X() +
+                                cap.centroid.Y() * pull_dir.Y() +
+                                cap.centroid.Z() * pull_dir.Z();
+            if (projection < best_projection) {
+                best_projection = projection;
+                neutral_index = index;
+            }
+        }
+        const Cap& neutral = caps[neutral_index];
+        // `BRepOffsetAPI_DraftAngle::Add` takes a `gp_Dir` that points
+        // toward the side material is removed from. With a positive
+        // draft angle we want material removed on the far side, so we
+        // orient the direction toward the pull direction (positive
+        // projection). If the neutral face's stored normal already
+        // points along +pull_dir, leave it; otherwise flip it.
+        gp_Dir direction_for_draft = neutral.normal;
+        if (direction_for_draft.X() * pull_dir.X() +
+                direction_for_draft.Y() * pull_dir.Y() +
+                direction_for_draft.Z() * pull_dir.Z() <
+            0.0) {
+            direction_for_draft = gp_Dir(-neutral.normal.X(),
+                                         -neutral.normal.Y(),
+                                         -neutral.normal.Z());
+        }
+        gp_Pln neutral_plane(neutral.centroid, direction_for_draft);
+
+        BRepOffsetAPI_DraftAngle draft;
+        draft.Init(base_solid);
+        // Draft every face that is NOT a planar cap. A face whose
+        // normal is parallel to the pull direction is a cap (top/bottom
+        // of an extrusion); drafting such a face is undefined because
+        // it is parallel to the neutral plane. The neutral cap is
+        // excluded above; the remaining caps are excluded here.
+        for (TopExp_Explorer ex(base_solid, TopAbs_FACE); ex.More(); ex.Next()) {
+            TopoDS_Face face = TopoDS::Face(ex.Current());
+            bool is_cap = false;
+            for (const Cap& cap : caps) {
+                if (cap.face.IsSame(face)) {
+                    is_cap = true;
+                    break;
+                }
+            }
+            if (is_cap) continue;
+            draft.Add(face, direction_for_draft, angle, neutral_plane,
+                      Standard_True);
+            if (!draft.AddDone()) {
+                Draft_ErrorStatus status = draft.Status();
+                error = "draft_failed: face status=" +
+                        std::to_string(static_cast<int>(status));
+                return false;
+            }
+        }
+        draft.Build();
+        TopoDS_Shape drafted = draft.Shape();
+        if (drafted.IsNull()) {
+            error = "BRepOffsetAPI_DraftAngle returned a null shape";
+            return false;
+        }
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(drafted, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(drafted)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"draft\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during draft: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during draft: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1692,10 +1937,12 @@ int main() {
         success = handle_circular_pattern(envelope, error);
     } else if (operation == "shell") {
         success = handle_shell(envelope, error);
+    } else if (operation == "draft") {
+        success = handle_draft(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, linear_pattern, circular_pattern, or shell");
+hole, revolve, mirror, linear_pattern, circular_pattern, shell, or draft");
         return 2;
     }
 

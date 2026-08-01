@@ -1505,10 +1505,26 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
-        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` accepts
-        // any top-level shape (SOLID, COMPSOLID, or COMPOUND); the
-        // BooleanFuse input path produces a SOLID for simple joins
-        // and a COMPSOLID for disjoint joins, both legal here.
+        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` expects a
+        // single `TopoDS_Solid`. Boolean-fused inputs can come back as
+        // a COMPSOLID (touching solids) or a COMPOUND; pick the first
+        // inner solid so the offset algorithm has a single body to
+        // shell.
+        TopoDS_Solid base_solid;
+        if (base.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(base);
+        } else if (base.ShapeType() == TopAbs_COMPSOLID ||
+                   base.ShapeType() == TopAbs_COMPOUND) {
+            for (TopExp_Explorer ex(base, TopAbs_SOLID); ex.More();
+                 ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "shell base has no TopoDS_Solid";
+            return false;
+        }
 
         // Hollow the solid by subtracting an inward-offset copy
         // from it. `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin`
@@ -1521,7 +1537,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         // `thickness`-wide walls.
         BRepOffsetAPI_MakeThickSolid thickener;
         thickener.MakeThickSolidByJoin(
-            base, TopTools_ListOfShape(),
+            base_solid, TopTools_ListOfShape(),
             -thickness, 1.0e-6,
             BRepOffset_Skin, Standard_False, Standard_False,
             GeomAbs_Intersection, Standard_False);
@@ -1535,7 +1551,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        BRepAlgoAPI_Cut cut(base, inner_shape);
+        BRepAlgoAPI_Cut cut(base_solid, inner_shape);
         cut.Build();
         if (!cut.IsDone()) {
             error = "BRepAlgoAPI_Cut did not complete during shell";

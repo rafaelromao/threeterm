@@ -73,9 +73,9 @@ pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// A deterministic filesystem boundary for generation publication tests. The
-/// hook fails the operation before it reaches the filesystem, then clears
-/// itself.
+/// A deterministic filesystem-operation boundary for generation-publication
+/// tests. The hook makes the selected operation return an I/O error, then
+/// clears itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationFailurePoint {
     StagingSync,
@@ -747,9 +747,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // An interrupted cleanup leaves a generation that is older than the two
     // recovery generations. Reconcile it before rotating again so a retry is
     // not blocked by the deterministic retired path.
-    if retired.exists() {
-        fs::remove_dir_all(&retired)?;
-    }
+    remove_retired_generation(&retired)?;
     if previous.exists() {
         fs::rename(&previous, &retired)?;
     }
@@ -776,10 +774,9 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // This is the generation older than the retained predecessor. It is no
     // longer part of recovery, so its cleanup must not block a later publish
     // if the post-promotion durability sync reports an error.
-    if retired.exists() {
-        fail_if_injected(PublicationFailurePoint::RetiredCleanup)?;
-        let _ = fs::remove_dir_all(&retired);
-    }
+    // Cleanup is outside the two-generation publication boundary. A failed
+    // cleanup is retained for the next publication to reconcile.
+    let _ = remove_retired_generation(&retired);
     if let Some(parent) = destination.parent() {
         sync_directory(parent, PublicationFailurePoint::ParentSync)?;
     }
@@ -798,6 +795,14 @@ fn rename_generation(
 fn sync_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
     fail_if_injected(point)?;
     File::open(path)?.sync_all()
+}
+
+fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        fail_if_injected(PublicationFailurePoint::RetiredCleanup)?;
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
 }
 
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
@@ -822,6 +827,9 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
             ));
         } else {
             fs::copy(entry.path(), &target)?;
+            // A generation is sealed only after every copied artifact has
+            // reached the staging filesystem, not merely its directory.
+            File::open(&target)?.sync_all()?;
         }
     }
     Ok(())
@@ -1332,7 +1340,9 @@ mod tests {
             .expect("second publish");
 
         fail_next_publication_at(PublicationFailurePoint::RetiredCleanup);
-        assert!(bundle.append_feature("box-3", "box").is_err());
+        bundle
+            .append_feature("box-3", "box")
+            .expect("cleanup failure does not invalidate publication");
 
         bundle
             .append_feature("box-4", "box")

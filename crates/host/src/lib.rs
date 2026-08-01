@@ -220,6 +220,9 @@ impl Host {
                     path: root.to_path_buf(),
                 });
             }
+            // `load` owns schema migration. Appending through `Bundle::open`
+            // alone would reject a recoverable v0 generation.
+            load(root)?;
             Bundle::at(root)
         } else {
             let mut previous = root.to_path_buf();
@@ -228,6 +231,9 @@ impl Host {
                 root.file_name().unwrap_or_default().to_string_lossy()
             ));
             if previous.exists() {
+                // A missing root can retain a v0 source after an interrupted
+                // migration. Recover/migrate it before attempting an append.
+                load(root)?;
                 Bundle::at(root)
             } else {
                 Bundle::create(root)?
@@ -542,7 +548,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -583,7 +588,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -624,7 +628,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -665,7 +668,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -706,7 +708,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -747,7 +748,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -788,7 +788,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -830,7 +829,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -872,7 +870,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -913,7 +910,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };

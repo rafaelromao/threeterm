@@ -49,6 +49,39 @@ fn wire_round_trip(
     envelopes.remove(0)
 }
 
+fn completed_outcome(
+    artifact_root: &std::path::Path,
+    request: &Layer1ArtifactRequest,
+    artifact: Envelope,
+) -> SupervisorOutcome {
+    let worker = CompletedWorker {
+        pending: VecDeque::from([
+            Envelope::WorkerReady {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                worker_id: "fake".to_string(),
+            },
+            artifact,
+            Envelope::Completed {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                request_id: request.request_id.clone(),
+                result: serde_json::json!({ "ok": true }),
+            },
+        ]),
+    };
+    let stage = threeterm_protocol::artifact::Stage::open(artifact_root).expect("stage opens");
+    let mut supervisor = Supervisor::new(
+        std::time::Duration::from_millis(100),
+        Box::new(worker),
+        Some(stage),
+    );
+    supervisor.request(Request {
+        request_id: request.request_id.clone(),
+        command_id: "build".to_string(),
+        args: serde_json::json!({}),
+        revision_id: request.source_revision_id.clone(),
+    })
+}
+
 #[test]
 fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
     let project_root = temp_root("project");
@@ -146,32 +179,7 @@ fn worker_completion_is_published_only_by_host_acceptance_and_rejection_cleans_u
     };
     let emitted = emit_staged_artifact(&artifact_root, &request, b"accepted result")
         .expect("worker stages artifact bytes");
-    let worker = CompletedWorker {
-        pending: VecDeque::from([
-            Envelope::WorkerReady {
-                schema_version: threeterm_protocol::schema_version().to_string(),
-                worker_id: "fake".to_string(),
-            },
-            emitted,
-            Envelope::Completed {
-                schema_version: threeterm_protocol::schema_version().to_string(),
-                request_id: request.request_id.clone(),
-                result: serde_json::json!({ "ok": true }),
-            },
-        ]),
-    };
-    let stage = threeterm_protocol::artifact::Stage::open(&artifact_root).expect("stage opens");
-    let mut supervisor = Supervisor::new(
-        std::time::Duration::from_millis(100),
-        Box::new(worker),
-        Some(stage),
-    );
-    let outcome = supervisor.request(Request {
-        request_id: request.request_id.clone(),
-        command_id: "build".to_string(),
-        args: serde_json::json!({}),
-        revision_id: request.source_revision_id.clone(),
-    });
+    let outcome = completed_outcome(&artifact_root, &request, emitted);
     assert!(
         !artifact_root.join(&request.staging_name).exists(),
         "supervisor never publishes a staged Derived Result"
@@ -192,18 +200,13 @@ fn worker_completion_is_published_only_by_host_acceptance_and_rejection_cleans_u
         std::fs::read(rejected_root.join("box-1.brep.partial")).expect("staged bytes read");
     bytes[0] ^= 1;
     std::fs::write(rejected_root.join("box-1.brep.partial"), bytes).expect("staged bytes tamper");
-    let Envelope::Artifact { header, .. } = emitted else {
-        panic!("worker emits artifact");
-    };
+    let outcome = completed_outcome(&rejected_root, &rejected_request, emitted);
     let diagnostic = host
         .accept_derived_result(
             &rejected_root,
             &rejected_request,
             &worker_fingerprint(),
-            SupervisorOutcome::Completed {
-                request_id: rejected_request.request_id.clone(),
-                artifact_headers: vec![*header],
-            },
+            outcome,
         )
         .expect_err("host rejects tampered result");
     assert_eq!(diagnostic.code, DiagnosticCode::ArtifactHashMismatch);

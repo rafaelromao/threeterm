@@ -267,12 +267,18 @@ impl Host {
             ));
         };
         if request_id != request.request_id {
+            for header in &artifact_headers {
+                cleanup_staged_artifact(root, &header.staging_name);
+            }
             cleanup_staged_artifact(root, &request.staging_name);
             return Err(Diagnostic::artifact_request_mismatch(
                 "completed_request_id_mismatch",
             ));
         }
         if artifact_headers.len() != 1 {
+            for header in &artifact_headers {
+                cleanup_staged_artifact(root, &header.staging_name);
+            }
             cleanup_staged_artifact(root, &request.staging_name);
             return Err(Diagnostic::artifact_promotion_failure(
                 "expected_exactly_one_artifact",
@@ -325,8 +331,10 @@ impl Host {
         header: threeterm_protocol::artifact::ArtifactHeader,
     ) -> Result<Layer1DerivedResult, Diagnostic> {
         let root = artifact_root.as_ref();
+        let header_staging_name = header.staging_name.clone();
         let reject = |diagnostic| {
             cleanup_staged_artifact(root, &request.staging_name);
+            cleanup_staged_artifact(root, &header_staging_name);
             diagnostic
         };
         let current = self.current().ok_or_else(|| {
@@ -943,6 +951,13 @@ fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
 }
 
 fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
+    if staging_name.is_empty()
+        || staging_name.contains('/')
+        || staging_name.contains('\\')
+        || staging_name.contains('\0')
+    {
+        return;
+    }
     let _ = fs::remove_file(root.join(format!("{staging_name}.partial")));
     let _ = fs::remove_file(root.join(format!(".{staging_name}.verified")));
 }

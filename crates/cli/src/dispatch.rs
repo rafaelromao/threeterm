@@ -2847,6 +2847,54 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_preserves_profile_read_failures() {
+        for arguments in [
+            vec![
+                "--machine",
+                "extrude",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "box-1",
+                "--profile-file",
+                "missing-profile.json",
+                "--height",
+                "1",
+            ],
+            vec![
+                "--machine",
+                "revolve",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "rev-1",
+                "--profile-file",
+                "missing-profile.json",
+                "--axis-point",
+                "0,0,0",
+                "--axis-direction",
+                "0,1,0",
+                "--angle",
+                "90",
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+
+            assert_eq!(exit, EXIT_PERSISTENCE_FAILURE);
+            assert!(stdout.is_empty());
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["code"], "persistence_failure");
+            assert!(
+                parsed["arg"]
+                    .as_str()
+                    .is_some_and(|arg| arg.starts_with("profile file read failed:"))
+            );
+        }
+    }
+
+    #[test]
     fn dispatch_rejects_missing_boolean_fuse_arguments() {
         for (arguments, expected) in [
             (vec!["--machine", "boolean-fuse"], "boolean-fuse"),

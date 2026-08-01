@@ -6,16 +6,16 @@ use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, MirrorRequest,
-    Operation, RevolveRequest,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest,
+    LinearPatternRequest, MirrorRequest, Operation, RevolveRequest,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
-    SAVE_RESPONSE_SCHEMA_VERSION,
+    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
+    MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -86,6 +86,14 @@ enum DispatchPlan {
         plane_point: [f64; 3],
         plane_normal: [f64; 3],
     },
+    LinearPattern {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        direction: [f64; 3],
+        count: u32,
+        spacing: f64,
+    },
     Unknown {
         arg: String,
     },
@@ -131,6 +139,7 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         "hole" => parse_hole(&args[2..]),
         "revolve" => parse_revolve(&args[2..]),
         "mirror" => parse_mirror(&args[2..]),
+        "linear-pattern" => parse_linear_pattern(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -869,6 +878,123 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "linear-pattern".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut direction: Option<[f64; 3]> = None;
+    let mut count: Option<u32> = None;
+    let mut spacing: Option<f64> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--direction" => match parse_vec3(&value_str, "--direction") {
+                    Ok(parsed) => {
+                        direction = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(plan) => return plan,
+                },
+                "--count" => match value_str.parse::<u32>() {
+                    Ok(parsed) => {
+                        count = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--count {value_str}"),
+                        };
+                    }
+                },
+                "--spacing" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        spacing = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--spacing {value_str}"),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(direction) = direction else {
+        return DispatchPlan::Unknown {
+            arg: "--direction".to_string(),
+        };
+    };
+    let Some(count) = count else {
+        return DispatchPlan::Unknown {
+            arg: "--count".to_string(),
+        };
+    };
+    let Some(spacing) = spacing else {
+        return DispatchPlan::Unknown {
+            arg: "--spacing".to_string(),
+        };
+    };
+    DispatchPlan::LinearPattern {
+        bundle,
+        feature_id,
+        base_feature_id,
+        direction,
+        count,
+        spacing,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -974,6 +1100,23 @@ where
             &base_feature_id,
             plane_point,
             plane_normal,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::LinearPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            direction,
+            count,
+            spacing,
+        } => emit_linear_pattern(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            direction,
+            count,
+            spacing,
             stdout,
             stderr,
         ),
@@ -1358,6 +1501,58 @@ fn emit_mirror(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_linear_pattern(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    direction: [f64; 3],
+    count: u32,
+    spacing: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = LinearPatternRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        direction,
+        count,
+        spacing,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().linear_pattern(bundle, request, &worker) {
+        Ok(view) => write_linear_pattern_view(
+            &view,
+            LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            stdout,
+            stderr,
+        ),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -1566,6 +1761,29 @@ fn write_mirror_view(
     )
 }
 
+fn write_linear_pattern_view(
+    view: &threeterm_host::LinearPatternCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::LinearPattern.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
@@ -1648,7 +1866,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 11);
+        assert_eq!(commands.len(), 12);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -2194,5 +2412,134 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "--plane-point 0,0");
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_linear_pattern_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "linear-pattern"], "linear-pattern"),
+            (
+                vec!["--machine", "linear-pattern", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "linear-pattern",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "lin-1",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "linear-pattern",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "lin-1",
+                    "--base",
+                    "box-1",
+                ],
+                "--direction",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "linear-pattern",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "lin-1",
+                    "--base",
+                    "box-1",
+                    "--direction",
+                    "1,0,0",
+                ],
+                "--count",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "linear-pattern",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "lin-1",
+                    "--base",
+                    "box-1",
+                    "--direction",
+                    "1,0,0",
+                    "--count",
+                    "3",
+                ],
+                "--spacing",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["code"], "unknown_command");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_linear_pattern_with_malformed_direction() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "linear-pattern",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "lin-1",
+                "--base",
+                "box-1",
+                "--direction",
+                "1,0",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--direction 1,0");
+    }
+
+    #[test]
+    fn dispatch_rejects_linear_pattern_with_non_integer_count() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "linear-pattern",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "lin-1",
+                "--base",
+                "box-1",
+                "--direction",
+                "1,0,0",
+                "--count",
+                "notanint",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--count notanint");
     }
 }

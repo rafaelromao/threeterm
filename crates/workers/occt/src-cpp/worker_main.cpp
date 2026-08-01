@@ -55,8 +55,6 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
-#include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
 #include <cstdint>
@@ -1511,21 +1509,16 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Build a list with every face of the solid; offset every face
-        // inward by `thickness` so the void sweeps from every direction.
-        TopTools_ListOfShape faces_to_remove;
-        for (TopExp_Explorer explorer(base, TopAbs_FACE); explorer.More(); explorer.Next()) {
-            faces_to_remove.Append(TopoDS::Face(explorer.Current()));
-        }
-
-        BRepOffsetAPI_MakeThickSolid thickener;
         // Initialize sets `myOffset`, which `MakeThickSolid()` rejects as
-        // null otherwise. A negative offset shrinks every face inward,
-        // carving the void so the resulting solid is a hollow shell with
-        // uniform walls.
+        // null otherwise. A negative offset shrinks every face inward
+        // uniformly, carving the void so the resulting solid is a
+        // hollow shell with `thickness`-wide walls. The
+        // `AddFacetoRemove` list stays empty so every face is offset;
+        // passing a populated list would punch holes through the wall
+        // instead.
+        BRepOffsetAPI_MakeThickSolid thickener;
         thickener.Initialize(base, -thickness, 1.0e-6, Standard_False);
         thickener.MakeThickSolid();
-        thickener.AddFacetoRemove(faces_to_remove);
         thickener.Perform();
         if (!thickener.IsDone()) {
             error = "BRepOffsetAPI_MakeThickSolid did not complete";

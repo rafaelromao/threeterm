@@ -17,6 +17,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::{Read, Write};
+use std::process::Child;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Instant;
 
@@ -250,6 +252,77 @@ impl WorkerHost for FramedWorkerHost {
     }
 }
 
+/// Production transport binding a subprocess's standard streams to the
+/// deadline-aware newline-frame transport.
+#[derive(Debug)]
+pub struct SubprocessWorkerHost {
+    child: Child,
+    transport: FramedWorkerHost,
+}
+
+impl SubprocessWorkerHost {
+    pub fn new(mut child: Child) -> Result<Self, WorkerError> {
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| WorkerError::Io(std::io::Error::other("worker stdin was not piped")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| WorkerError::Io(std::io::Error::other("worker stdout was not piped")))?;
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        std::thread::spawn(move || {
+            let mut stdout = stdout;
+            let mut buffer = [0; 4096];
+            while let Ok(read) = stdout.read(&mut buffer) {
+                if read == 0 || inbound_tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            while let Ok(frame) = outbound_rx.recv() {
+                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            transport: FramedWorkerHost::new(inbound_rx, outbound_tx),
+        })
+    }
+}
+
+impl WorkerHost for SubprocessWorkerHost {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.transport.send(envelope)
+    }
+
+    fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
+        self.transport.recv(deadline)
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.transport.cancel(request_id, reason)
+    }
+
+    fn terminate(&mut self) -> Result<(), WorkerError> {
+        match self.child.try_wait()? {
+            Some(_) => Ok(()),
+            None => {
+                self.child.kill()?;
+                self.child.wait()?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Production wiring of `WorkerHost` over a real subprocess. The
 /// foundation slice does not implement this trait; it exists so the
 /// future OCCT/`libslvs` adapters have a seam.
@@ -323,6 +396,7 @@ mod tests {
     use super::*;
     use crate::artifact::{Layer1CacheKey, WorkerFingerprint};
     use serde_json::json;
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -522,5 +596,22 @@ mod tests {
             transport.recv(Instant::now()),
             Err(WorkerError::TimedOut)
         ));
+    }
+
+    #[test]
+    fn subprocess_transport_honors_an_expired_receive_deadline() {
+        let child = Command::new("sh")
+            .args(["-c", "exec sleep 60"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sleeping worker starts");
+        let mut transport = SubprocessWorkerHost::new(child).expect("subprocess transport starts");
+
+        assert!(matches!(
+            transport.recv(Instant::now()),
+            Err(WorkerError::TimedOut)
+        ));
+        transport.terminate().expect("sleeping worker terminates");
     }
 }

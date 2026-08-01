@@ -609,9 +609,9 @@ fn envelope_kind_label(envelope: &Envelope) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::WorkerHost;
+    use crate::worker::{FramedWorkerHost, WorkerHost};
     use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
     /// A fake worker that serves a scripted sequence of envelopes to
     /// `recv` and records every envelope it received via `send`. The
@@ -684,6 +684,20 @@ mod tests {
             args: serde_json::json!({}),
             revision_id: "rev-0".to_string(),
         }
+    }
+
+    fn timed_out_transport() -> (
+        FramedWorkerHost,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, outbound_rx) = mpsc::channel();
+        (
+            FramedWorkerHost::new(inbound_rx, outbound_tx),
+            inbound_tx,
+            outbound_rx,
+        )
     }
 
     #[test]
@@ -809,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn framed_transport_timeout_force_terminates_handshake_without_sending_request() {
+        let (transport, _inbound_tx, _outbound_rx) = timed_out_transport();
+        let mut supervisor = Supervisor::new(Duration::ZERO, Box::new(transport), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "handshake_grace_exceeded");
+    }
+
+    #[test]
     fn request_force_terminates_when_terminal_receive_times_out() {
         let (worker, terminated) = ScriptedWorker::with_results(vec![
             Ok(ready_envelope()),
@@ -838,6 +864,26 @@ mod tests {
     }
 
     #[test]
+    fn framed_transport_timeout_force_terminates_request_after_handshake() {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, _outbound_rx) = mpsc::channel();
+        inbound_tx
+            .send(crate::worker::encode_frame(&ready_envelope()).expect("ready envelope encodes"))
+            .expect("ready frame queues");
+        let mut supervisor = Supervisor::new(
+            Duration::ZERO,
+            Box::new(FramedWorkerHost::new(inbound_rx, outbound_tx)),
+            None,
+        );
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "grace_exceeded");
+    }
+
+    #[test]
     fn cancel_force_terminates_when_acknowledgement_receive_times_out() {
         let (worker, terminated) = ScriptedWorker::with_results(vec![Err(WorkerError::TimedOut)]);
         let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
@@ -848,6 +894,18 @@ mod tests {
         };
         assert_eq!(record.stage, "cancel_grace_exceeded");
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn framed_transport_timeout_force_terminates_cancellation() {
+        let (transport, _inbound_tx, _outbound_rx) = timed_out_transport();
+        let mut supervisor = Supervisor::new(Duration::ZERO, Box::new(transport), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop")
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "cancel_grace_exceeded");
     }
 
     #[test]

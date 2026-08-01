@@ -1526,21 +1526,41 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Hollow the solid by subtracting an inward-offset copy
-        // from it. `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin`
-        // takes the base solid as the surface to join with the offset
-        // (`SJoin`), an empty list of faces to delete (`SDel`),
-        // and a negative offset distance. The result is the base
-        // solid shrunk inward by `thickness` on every face. Then
-        // `BRepAlgoAPI_Cut(base, inner)` carves that inner volume
-        // out of the original, leaving a hollow shell with
+        // Hollow the solid by carving a smaller inner copy out of it.
+        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` takes
+        // the base solid, applies the offset to every face (the
+        // negative offset shrinks them inward), and produces a
+        // thickened solid. We then use `BRepAlgoAPI_Cut(base, inner)`
+        // to carve the inner volume out, leaving a hollow shell with
         // `thickness`-wide walls.
+        //
+        // The L-bracket BooleanFuse output typically ships as a single
+        // merged solid; we re-wrap the outer shell into a fresh solid
+        // so the offset algorithm has a clean body without residual
+        // internal faces from the fuse.
+        TopoDS_Shell outer_shell;
+        for (TopExp_Explorer ex(base_solid, TopAbs_SHELL); ex.More();
+             ex.Next()) {
+            outer_shell = TopoDS::Shell(ex.Current());
+            break;
+        }
+        if (outer_shell.IsNull()) {
+            error = "shell base has no outer shell";
+            return false;
+        }
+        BRepBuilderAPI_MakeSolid solid_rebuild(outer_shell);
+        if (!solid_rebuild.IsDone()) {
+            error = "could not rebuild base solid from outer shell";
+            return false;
+        }
+        TopoDS_Solid clean_solid = solid_rebuild.Solid();
+
         BRepOffsetAPI_MakeThickSolid thickener;
         thickener.MakeThickSolidByJoin(
-            base_solid, TopTools_ListOfShape(),
+            clean_solid, TopTools_ListOfShape(),
             -thickness, 1.0e-6,
             BRepOffset_Skin, Standard_False, Standard_False,
-            GeomAbs_Intersection, Standard_False);
+            GeomAbs_Arc, Standard_False);
         if (!thickener.IsDone()) {
             error = "BRepOffsetAPI_MakeThickSolid did not complete";
             return false;
@@ -1551,7 +1571,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        BRepAlgoAPI_Cut cut(base_solid, inner_shape);
+        BRepAlgoAPI_Cut cut(clean_solid, inner_shape);
         cut.Build();
         if (!cut.IsDone()) {
             error = "BRepAlgoAPI_Cut did not complete during shell";

@@ -1,9 +1,9 @@
 //! Staged binary artifact promotion.
 //!
-//! The worker emits a `Artifact` envelope carrying a base64-encoded
-//! payload and the SHA-256 it claims for the decoded bytes. The host
-//! validates the hash, persists the bytes to a `.partial` staging path,
-//! and atomically renames the file to its final filename on `promote`.
+//! The worker writes bytes to a host-chosen private `.partial` path and
+//! emits an `Artifact` header declaring identity, byte count, and SHA-256.
+//! The host validates the staged file independently and atomically renames
+//! it to its final filename on `promote`.
 //!
 //! A force-terminated run calls `discard` so the staged entry never
 //! competes with the authoritative Revision Snapshot. Mirrors the
@@ -17,19 +17,69 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::worker::MAX_ARTIFACT_BYTES;
 
-/// Handle returned by `Stage::write`. Holds the staging path, the final
-/// destination, and the validated SHA-256 of the decoded bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkerFingerprint {
+    pub worker_kind: String,
+    pub worker_schema_version: String,
+    pub protocol_schema_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layer1ArtifactRequest {
+    pub request_id: String,
+    pub source_revision_id: String,
+    pub artifact_kind: String,
+    pub staging_name: String,
+    pub semantic_input_sha256: String,
+    pub deterministic_settings_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Layer1CacheKey {
+    pub source_revision_id: String,
+    pub worker_fingerprint: WorkerFingerprint,
+    pub artifact_kind: String,
+    pub semantic_input_sha256: String,
+    pub deterministic_settings_sha256: String,
+}
+
+impl Layer1CacheKey {
+    pub fn issue(request: &Layer1ArtifactRequest, worker_fingerprint: &WorkerFingerprint) -> Self {
+        Self {
+            source_revision_id: request.source_revision_id.clone(),
+            worker_fingerprint: worker_fingerprint.clone(),
+            artifact_kind: request.artifact_kind.clone(),
+            semantic_input_sha256: request.semantic_input_sha256.clone(),
+            deterministic_settings_sha256: request.deterministic_settings_sha256.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactHeader {
+    pub request_id: String,
+    pub source_revision_id: String,
+    pub cache_key: Layer1CacheKey,
+    pub worker_fingerprint: WorkerFingerprint,
+    pub artifact_kind: String,
+    pub staging_name: String,
+    pub byte_count: u64,
+    pub sha256: String,
+}
+
+/// Handle returned by staging or validating artifact bytes. Holds the final
+/// destination, SHA-256, and byte count.
 #[derive(Debug, Clone)]
 pub struct StagedArtifact {
     pub staging_name: String,
     pub final_path: PathBuf,
     pub sha256: String,
+    pub byte_count: u64,
 }
 
 /// A staging directory rooted at a host-chosen path. Every artifact
@@ -55,66 +105,76 @@ impl Stage {
         &self.root
     }
 
-    /// Decode `bytes_b64`, validate `advertised_sha256` against the
-    /// decoded bytes, and persist them to
-    /// `<root>/<staging_name>.partial`. The returned handle carries the
-    /// final path (`<root>/<staging_name>`) and the validated hash; pass
-    /// it to `promote` or `discard`.
-    ///
-    /// Validates the payload size against `MAX_ARTIFACT_BYTES` so a
-    /// hostile worker cannot exhaust the host's memory.
-    pub fn write(
+    pub fn stage_bytes(
         &self,
         staging_name: &str,
-        bytes_b64: &str,
-        advertised_sha256: &str,
+        bytes: &[u8],
     ) -> Result<StagedArtifact, ArtifactError> {
-        if staging_name.is_empty() {
-            return Err(ArtifactError::InvalidName(String::new()));
-        }
-        if staging_name.contains('/') || staging_name.contains('\\') || staging_name.contains('\0')
+        if staging_name.is_empty()
+            || staging_name.contains('/')
+            || staging_name.contains('\\')
+            || staging_name.contains('\0')
         {
             return Err(ArtifactError::InvalidName(staging_name.to_string()));
         }
-
-        let max_encoded = MAX_ARTIFACT_BYTES
-            .saturating_add(2)
-            .saturating_mul(4)
-            .div_ceil(3);
-        if bytes_b64.len() > max_encoded {
-            return Err(ArtifactError::PayloadTooLarge {
-                size: bytes_b64.len(),
-                max: max_encoded,
-            });
-        }
-        let bytes = BASE64
-            .decode(bytes_b64)
-            .map_err(|error| ArtifactError::Decode(error.to_string()))?;
         if bytes.len() > MAX_ARTIFACT_BYTES {
             return Err(ArtifactError::PayloadTooLarge {
                 size: bytes.len(),
                 max: MAX_ARTIFACT_BYTES,
             });
         }
-
-        let sha256 = sha256_hex(&bytes);
-        if sha256 != advertised_sha256 {
-            return Err(ArtifactError::HashMismatch {
-                expected: advertised_sha256.to_string(),
-                actual: sha256,
-            });
-        }
-
+        let sha256 = sha256_hex(bytes);
         let final_path = self.root.join(staging_name);
         let staging_path = self.root.join(format!("{staging_name}.partial"));
         let mut file = fs::File::create(&staging_path).map_err(ArtifactError::Io)?;
-        file.write_all(&bytes).map_err(ArtifactError::Io)?;
+        file.write_all(bytes).map_err(ArtifactError::Io)?;
         file.sync_all().map_err(ArtifactError::Io)?;
-
         Ok(StagedArtifact {
             staging_name: staging_name.to_string(),
             final_path,
             sha256,
+            byte_count: bytes.len() as u64,
+        })
+    }
+
+    pub fn validate(&self, header: &ArtifactHeader) -> Result<StagedArtifact, ArtifactError> {
+        if header.staging_name.is_empty()
+            || header.staging_name.contains('/')
+            || header.staging_name.contains('\\')
+            || header.staging_name.contains('\0')
+        {
+            return Err(ArtifactError::InvalidName(header.staging_name.clone()));
+        }
+        let staging_path = self.root.join(format!("{}.partial", header.staging_name));
+        let bytes = fs::read(&staging_path).map_err(ArtifactError::Io)?;
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            let _ = fs::remove_file(&staging_path);
+            return Err(ArtifactError::PayloadTooLarge {
+                size: bytes.len(),
+                max: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let byte_count = bytes.len() as u64;
+        if byte_count != header.byte_count {
+            let _ = fs::remove_file(&staging_path);
+            return Err(ArtifactError::ByteCountMismatch {
+                expected: header.byte_count,
+                actual: byte_count,
+            });
+        }
+        let sha256 = sha256_hex(&bytes);
+        if sha256 != header.sha256 {
+            let _ = fs::remove_file(&staging_path);
+            return Err(ArtifactError::HashMismatch {
+                expected: header.sha256.clone(),
+                actual: sha256,
+            });
+        }
+        Ok(StagedArtifact {
+            staging_name: header.staging_name.clone(),
+            final_path: self.root.join(&header.staging_name),
+            sha256,
+            byte_count,
         })
     }
 
@@ -155,12 +215,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// neutral identifier the supervisor routes into the diagnostic taxonomy.
 #[derive(Debug)]
 pub enum ArtifactError {
-    /// The worker's advertised SHA-256 did not match the decoded bytes.
-    HashMismatch { expected: String, actual: String },
-    /// The base64 payload could not be decoded.
-    Decode(String),
-    /// The decoded payload exceeded `MAX_ARTIFACT_BYTES`.
-    PayloadTooLarge { size: usize, max: usize },
+    /// The worker's advertised SHA-256 did not match the staged bytes.
+    HashMismatch {
+        expected: String,
+        actual: String,
+    },
+    ByteCountMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    /// The staged payload exceeded `MAX_ARTIFACT_BYTES`.
+    PayloadTooLarge {
+        size: usize,
+        max: usize,
+    },
     /// The staging name was empty or contained a path separator.
     InvalidName(String),
     /// `promote` was called for an artifact whose `.partial` file no
@@ -179,9 +247,10 @@ impl fmt::Display for ArtifactError {
                 formatter,
                 "staged artifact hash mismatch: worker advertised {expected:?}, host computed {actual:?}"
             ),
-            Self::Decode(detail) => {
-                write!(formatter, "staged artifact base64 decode failed: {detail}")
-            }
+            Self::ByteCountMismatch { expected, actual } => write!(
+                formatter,
+                "staged artifact byte count mismatch: worker advertised {expected}, host computed {actual}"
+            ),
             Self::PayloadTooLarge { size, max } => write!(
                 formatter,
                 "staged artifact exceeds maximum size: {size} > {max}"
@@ -209,17 +278,41 @@ mod tests {
         root
     }
 
+    fn header(staged: &StagedArtifact, sha256: String) -> ArtifactHeader {
+        let worker_fingerprint = WorkerFingerprint {
+            worker_kind: "occt".to_string(),
+            worker_schema_version: "threeterm.workers.occt/1".to_string(),
+            protocol_schema_version: crate::schema_version().to_string(),
+        };
+        ArtifactHeader {
+            request_id: "request-1".to_string(),
+            source_revision_id: "revision-1".to_string(),
+            cache_key: Layer1CacheKey {
+                source_revision_id: "revision-1".to_string(),
+                worker_fingerprint: worker_fingerprint.clone(),
+                artifact_kind: "brep".to_string(),
+                semantic_input_sha256: "11".repeat(32),
+                deterministic_settings_sha256: "22".repeat(32),
+            },
+            worker_fingerprint,
+            artifact_kind: "brep".to_string(),
+            staging_name: staged.staging_name.clone(),
+            byte_count: staged.byte_count,
+            sha256,
+        }
+    }
+
     #[test]
-    fn write_promotes_a_validated_artifact_to_its_final_path() {
+    fn validated_staged_bytes_promote_to_the_final_path() {
         let root = temp_root("promote");
         let stage = Stage::open(&root).expect("stage opens");
         let bytes = b"hello, worker";
-        let sha = sha256_hex(bytes);
-        let encoded = BASE64.encode(bytes);
-
-        let artifact = stage
-            .write("sketch-1.brep", &encoded, &sha)
+        let staged = stage
+            .stage_bytes("sketch-1.brep", bytes)
             .expect("artifact stages");
+        let artifact = stage
+            .validate(&header(&staged, staged.sha256.clone()))
+            .expect("artifact validates");
         let final_path = stage.promote(artifact).expect("artifact promotes");
 
         assert_eq!(final_path, root.join("sketch-1.brep"));
@@ -234,14 +327,16 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_an_artifact_whose_advertised_hash_does_not_match() {
+    fn validate_rejects_an_artifact_whose_advertised_hash_does_not_match() {
         let root = temp_root("mismatch");
         let stage = Stage::open(&root).expect("stage opens");
         let bytes = b"hello, worker";
-        let encoded = BASE64.encode(bytes);
+        let staged = stage
+            .stage_bytes("sketch-1.brep", bytes)
+            .expect("artifact stages");
 
         let error = stage
-            .write("sketch-1.brep", &encoded, "deadbeef")
+            .validate(&header(&staged, "deadbeef".to_string()))
             .expect_err("hash mismatch must reject the artifact");
         match error {
             ArtifactError::HashMismatch { expected, actual } => {
@@ -260,15 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_a_payload_that_decodes_to_more_than_max_artifact_bytes() {
+    fn stage_bytes_rejects_a_payload_over_the_maximum() {
         let root = temp_root("oversize");
         let stage = Stage::open(&root).expect("stage opens");
         let bytes = vec![0u8; MAX_ARTIFACT_BYTES + 1];
-        let sha = sha256_hex(&bytes);
-        let encoded = BASE64.encode(&bytes);
 
         let error = stage
-            .write("oversize.brep", &encoded, &sha)
+            .stage_bytes("oversize.brep", &bytes)
             .expect_err("oversize artifact must be rejected");
         match error {
             ArtifactError::PayloadTooLarge { size, max } => {
@@ -282,15 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_a_staging_name_that_contains_a_path_separator() {
+    fn stage_bytes_rejects_a_name_that_contains_a_path_separator() {
         let root = temp_root("path-separator");
         let stage = Stage::open(&root).expect("stage opens");
         let bytes = b"hello, worker";
-        let sha = sha256_hex(bytes);
-        let encoded = BASE64.encode(bytes);
 
         let error = stage
-            .write("nested/file.brep", &encoded, &sha)
+            .stage_bytes("nested/file.brep", bytes)
             .expect_err("separator-bearing name must be rejected");
         assert!(
             matches!(error, ArtifactError::InvalidName(_)),
@@ -305,10 +396,8 @@ mod tests {
         let root = temp_root("discard");
         let stage = Stage::open(&root).expect("stage opens");
         let bytes = b"hello, worker";
-        let sha = sha256_hex(bytes);
-        let encoded = BASE64.encode(bytes);
         let _ = stage
-            .write("sketch-1.brep", &encoded, &sha)
+            .stage_bytes("sketch-1.brep", bytes)
             .expect("artifact stages");
 
         stage.discard().expect("discard succeeds");

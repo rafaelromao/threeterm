@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::artifact::{Stage, StagedArtifact};
+use crate::artifact::{ArtifactHeader, Stage, StagedArtifact};
 use crate::worker::{Envelope, WorkerError, WorkerHost};
 
 /// A host-issued worker request.
@@ -178,8 +178,8 @@ impl Supervisor {
                     };
                 }
                 Ok(Envelope::Progress { .. }) => {}
-                Ok(Envelope::Artifact { staging_name, .. }) => {
-                    let _ = staging_name;
+                Ok(Envelope::Artifact { header, .. }) => {
+                    let _ = header.staging_name;
                 }
                 Ok(_) => {}
                 Err(WorkerError::Closed) => {
@@ -259,14 +259,8 @@ impl Supervisor {
                 Ok(Envelope::Progress { stage, percent, .. }) => {
                     last_progress = Some(Progress { stage, percent });
                 }
-                Ok(Envelope::Artifact {
-                    staging_name,
-                    bytes_b64,
-                    sha256,
-                    request_id,
-                    ..
-                }) => {
-                    self.record_artifact(&staging_name, &bytes_b64, &sha256, &request_id);
+                Ok(Envelope::Artifact { header, .. }) => {
+                    self.record_artifact(&header);
                 }
                 // An unsolicited Cancelled envelope during the request
                 // lifecycle is a protocol violation: `request()` never
@@ -418,20 +412,18 @@ impl Supervisor {
         }
     }
 
-    fn record_artifact(
-        &mut self,
-        staging_name: &str,
-        bytes_b64: &str,
-        advertised_sha256: &str,
-        request_id: &str,
-    ) {
+    fn record_artifact(&mut self, header: &ArtifactHeader) {
         let Some(stage) = self.stage.as_ref() else {
             return;
         };
-        match stage.write(staging_name, bytes_b64, advertised_sha256) {
+        match stage.validate(header) {
             Ok(handle) => self.staged_artifacts.push(handle),
             Err(error) => {
-                let _ = request_id;
+                let _ = std::fs::remove_file(
+                    stage
+                        .root()
+                        .join(format!("{}.partial", header.staging_name)),
+                );
                 self.last_artifact_error = Some(error.to_string());
             }
         }
@@ -532,7 +524,7 @@ fn envelope_kind_label(envelope: &Envelope) -> String {
         Envelope::Request { request_id, .. } => format!("request:{request_id}"),
         Envelope::Cancel { request_id, .. } => format!("cancel:{request_id}"),
         Envelope::Progress { stage, .. } => format!("progress:{stage}"),
-        Envelope::Artifact { staging_name, .. } => format!("artifact:{staging_name}"),
+        Envelope::Artifact { header, .. } => format!("artifact:{}", header.staging_name),
         Envelope::Completed { request_id, .. } => format!("completed:{request_id}"),
         Envelope::Cancelled { request_id, .. } => format!("cancelled:{request_id}"),
         Envelope::Failed { request_id, .. } => format!("failed:{request_id}"),

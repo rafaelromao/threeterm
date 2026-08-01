@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,7 +182,9 @@ name = "threeterm-host"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "threeterm-occt-worker",
  "threeterm-persistence",
+ "threeterm-protocol",
 ]
 
 [[package]]
@@ -202,6 +198,9 @@ version = "0.1.0"
 [[package]]
 name = "threeterm-occt-worker"
 version = "0.1.0"
+dependencies = [
+ "threeterm-protocol",
+]
 
 [[package]]
 name = "threeterm-persistence"
@@ -217,7 +216,6 @@ dependencies = [
 name = "threeterm-protocol"
 version = "0.1.0"
 dependencies = [
- "base64",
  "serde",
  "serde_json",
  "sha2",

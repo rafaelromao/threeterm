@@ -231,7 +231,7 @@ pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "required": [
             "bundle_path",
             "feature_id",
-            "profile_file",
+            "profile",
             "axis_point",
             "axis_direction",
             "angle"
@@ -239,7 +239,16 @@ pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
-            "profile_file": { "type": "string", "minLength": 1 },
+            "profile": {
+                "type": "array",
+                "minItems": 3,
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": { "type": "number" }
+                }
+            },
             "axis_point": {
                 "type": "array",
                 "minItems": 3,

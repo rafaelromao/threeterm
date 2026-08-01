@@ -32,7 +32,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "c19b4387a81a370781c2378f30098ed168b6f1b965954165af53472ab2c41079",
+        "f6d42604eb9ecbfd6e71e54c67d18f4fcbccb95c7359ff6f6d07e83e79c446ed",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -184,7 +184,7 @@ fn registry_contains_versioned_revolve_contract() {
         serde_json::json!([
             "bundle_path",
             "feature_id",
-            "profile_file",
+            "profile",
             "axis_point",
             "axis_direction",
             "angle"

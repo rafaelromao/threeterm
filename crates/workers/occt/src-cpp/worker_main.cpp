@@ -342,6 +342,11 @@ std::vector<std::array<double, 2>> get_profile(const JsonParser::Value& object,
 }
 
 std::string sha256_hex(const std::string& bytes) {
+    // Inline 32-bit right-rotation. `std::rotr` is C++20; this slice
+    // builds with `-std=c++17`, so we provide a small helper.
+    auto rotr = [](std::uint32_t value, std::uint32_t bits) -> std::uint32_t {
+        return (value >> bits) | (value << (32 - bits));
+    };
     static const std::uint32_t k[64] = {
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
         0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -380,16 +385,16 @@ std::string sha256_hex(const std::string& bytes) {
                    std::uint32_t(buffer[chunk + i * 4 + 3]);
         }
         for (int i = 16; i < 64; ++i) {
-            std::uint32_t s0 = std::rotr(w[i - 15], 7) ^ std::rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-            std::uint32_t s1 = std::rotr(w[i - 2], 17) ^ std::rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            std::uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            std::uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16] + s0 + w[i - 7] + s1;
         }
         std::uint32_t a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, hh = h7;
         for (int i = 0; i < 64; ++i) {
-            std::uint32_t S1 = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
+            std::uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
             std::uint32_t ch = (e & f) ^ (~e & g);
             std::uint32_t temp1 = hh + S1 + ch + k[i] + w[i];
-            std::uint32_t S0 = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
+            std::uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
             std::uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
             std::uint32_t temp2 = S0 + maj;
             hh = g; g = f; f = e; e = d + temp1; d = c; c = b; b = a; a = temp1 + temp2;

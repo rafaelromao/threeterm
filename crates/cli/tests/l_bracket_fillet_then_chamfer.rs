@@ -208,7 +208,10 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         base_revision,
         "fillet must advance the revision hash"
     );
-    let fillet_revision = fillet_response["revision_hash"].as_str().unwrap().to_string();
+    let fillet_revision = fillet_response["revision_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.25);
     assert_ne!(
@@ -229,11 +232,7 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         chamfer_response["feature_graph_hash"]
     );
 
-    let committed = [
-        "l-bracket-base",
-        "l-bracket-fillet",
-        "l-bracket-chamfer",
-    ];
+    let committed = ["l-bracket-base", "l-bracket-fillet", "l-bracket-chamfer"];
     for feature_id in committed {
         let brep = root.join(format!("brep/{feature_id}.brep"));
         assert!(brep.is_file(), "committed BREP missing at {brep:?}");

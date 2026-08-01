@@ -95,9 +95,15 @@ fn main() {
         .arg("-L")
         .arg(occt.lib_dir());
 
+    // OCCT's TKFillet and TKOffset have circular dependencies on one
+    // another through TopOpeBRepDS_* and BRepFill_*, so we group the
+    // OCCT libraries inside --start-group/--end-group to let the
+    // linker resolve the cycles.
+    command.arg("-Wl,--start-group");
     for lib in occt.system_libs() {
         command.arg(format!("-l{lib}"));
     }
+    command.arg("-Wl,--end-group");
 
     command.arg("-o").arg(&worker_bin);
 
@@ -185,6 +191,7 @@ fn check_occt(root: &Path) -> Result<OcctInstall, String> {
         "TKTopAlgo".to_string(),
         "TKPrim".to_string(),
         "TKBO".to_string(),
+        "TKBool".to_string(),
         "TKFillet".to_string(),
         "TKShHealing".to_string(),
         "TKMesh".to_string(),

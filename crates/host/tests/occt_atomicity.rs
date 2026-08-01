@@ -21,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest, Operation, ShellRequest,
-    schema_version,
+    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
+    ShellRequest, schema_version,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -2604,6 +2604,216 @@ fn draft_brep_invalid_preserves_canonical_state() {
         std::f64::consts::FRAC_PI_2 / 6.0,
     );
     let result = host.draft(&root, request, &fake_worker);
+    assert!(
+        matches!(result, Err(HostError::BrepInvalid { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+fn loft_request(label: &str, feature_id: &str) -> LoftRequest {
+    LoftRequest::new(
+        unique_request_id(label),
+        vec![
+            vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 10.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ],
+            vec![
+                [2.5, 2.5, 5.0],
+                [7.5, 2.5, 5.0],
+                [7.5, 7.5, 5.0],
+                [2.5, 7.5, 5.0],
+            ],
+        ],
+    )
+    .with_output_path(PathBuf::from("/tmp"), "out.brep")
+    .with_feature_id(feature_id)
+}
+
+#[test]
+fn loft_commits_brep_into_a_new_revision() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("loft-commit", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let request = loft_request("loft-commit", "loft-commit-1")
+        .with_output_path(root.join("stage"), "loft-commit.brep");
+    let view = host.loft(&root, request, &worker).expect("loft commits");
+
+    assert_ne!(view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(view.snapshot.feature_graph_hash, prior.feature_graph_hash);
+    assert_eq!(view.result.status, "ok");
+    assert_eq!(view.result.operation, Operation::Loft);
+    let committed = committed_brep_path(&root, "loft-commit-1");
+    assert!(
+        committed.is_file(),
+        "lofted BREP is on disk at {committed:?}"
+    );
+    let reloaded = Host::new().load(&root).expect("reloads after commit");
+    assert_eq!(view.snapshot, reloaded);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn loft_on_two_rectangles_shows_lofted_solid_in_viewport() {
+    // Demoable end-to-end: build a loft from two rectangles that share
+    // the same edge count, commit, and verify the BREP starts with the
+    // OCCT viewport marker and differs from the underlying extrude BREP.
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("l-bracket-loft", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let slab_request = ExtrudeRequest::new(
+        unique_request_id("l-bracket-loft-slab"),
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        1.0,
+    )
+    .with_output_path(root.join("stage"), "l-bracket-loft-slab.brep")
+    .with_feature_id("l-bracket-loft-slab-1");
+    let slab_view = host
+        .extrude(&root, slab_request, &worker)
+        .expect("slab extrude");
+    assert_eq!(slab_view.result.status, "ok");
+
+    let extrude_brep = committed_brep_path(&root, "l-bracket-loft-slab-1");
+    let extrude_bytes = fs::read(&extrude_brep).expect("extrude BREP reads");
+
+    let profiles = vec![
+        vec![
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+        ],
+        vec![
+            [2.5, 2.5, 5.0],
+            [7.5, 2.5, 5.0],
+            [7.5, 7.5, 5.0],
+            [2.5, 7.5, 5.0],
+        ],
+    ];
+    let loft_request = LoftRequest::new(unique_request_id("l-bracket-loft"), profiles)
+        .with_output_path(root.join("stage"), "l-bracket-loft-lofted.brep")
+        .with_feature_id("l-bracket-loft-lofted-1");
+    let loft_view = host
+        .loft(&root, loft_request, &worker)
+        .expect("l-bracket loft");
+
+    assert_eq!(loft_view.result.status, "ok");
+    assert_eq!(loft_view.result.operation, Operation::Loft);
+    assert_ne!(loft_view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(
+        loft_view.snapshot.revision_hash,
+        slab_view.snapshot.revision_hash
+    );
+    let committed = committed_brep_path(&root, "l-bracket-loft-lofted-1");
+    assert!(
+        committed.is_file(),
+        "lofted BREP is on disk at {committed:?}"
+    );
+    let bytes = fs::read(&committed).expect("lofted BREP reads");
+    assert!(!bytes.is_empty());
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "lofted BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+    assert_ne!(
+        bytes, extrude_bytes,
+        "lofted BREP must differ byte-for-byte from the extrude BREP; \
+         an unchanged payload would mean the loft did not run"
+    );
+    assert_ne!(
+        loft_view.result.brep_sha256, slab_view.result.brep_sha256,
+        "lofted BREP sha256 must differ from the extrude BREP sha256; \
+         identical hashes would mean the loft did not run"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn loft_spawn_failure_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("loft-spawn-fail", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let bad_worker =
+        threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
+    let request = loft_request("loft-spawn-fail", "loft-spawn-fail-1")
+        .with_output_path(root.join("stage"), "loft-spawn.brep");
+    let result = host.loft(&root, request, &bad_worker);
+    assert!(
+        matches!(result, Err(HostError::WorkerFailure { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn loft_brep_invalid_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("loft-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-loft-brep-{}",
+        std::process::id()
+    ));
+    let diagnostic = serde_json::json!({
+        "schema_version": schema_version(),
+        "code": "brep_invalid",
+        "arg": "BRepCheck_Analyzer failed"
+    });
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
+            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let request = loft_request("loft-brep-invalid", "loft-brep-invalid-1")
+        .with_output_path(root.join("stage"), "loft-brep.brep");
+    let result = host.loft(&root, request, &fake_worker);
     assert!(
         matches!(result, Err(HostError::BrepInvalid { .. })),
         "got {result:?}"

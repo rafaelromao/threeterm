@@ -3,8 +3,8 @@
 // threeterm-occt-worker: disposable worker binary for the ThreeTerm OCCT
 // geometry kernel. Reads a JSON envelope from stdin, runs the requested
 // operation (extrude, boolean_fuse, fillet, chamfer, hole, revolve,
-// mirror, linear_pattern, circular_pattern, shell, or draft), validates
-// the BREP with BRepCheck_Analyzer, and writes the BREP to the
+// mirror, linear_pattern, circular_pattern, shell, draft, or loft),
+// validates the BREP with BRepCheck_Analyzer, and writes the BREP to the
 // host-staged output path.
 //
 // Exit codes:
@@ -57,6 +57,7 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_Plane.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -379,6 +380,55 @@ std::array<double, 3> get_vec3(const JsonParser::Value& object, const std::strin
         result[index] = value->array_value[index].number_value;
     }
     return result;
+}
+
+bool get_bool(const JsonParser::Value& object, const std::string& key, bool default_value,
+              std::string& error) {
+    const auto* value = find_field(object, key);
+    if (value == nullptr) return default_value;
+    if (value->kind == JsonParser::ValueKind::Bool) return value->bool_value;
+    error = key + " must be a boolean";
+    return default_value;
+}
+
+bool get_profiles(const JsonParser::Value& object, const std::string& key,
+                  std::vector<std::vector<std::array<double, 3>>>& result, std::string& error) {
+    result.clear();
+    const auto* value = find_field(object, key);
+    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) {
+        error = "loft profiles must be an array";
+        return false;
+    }
+    result.reserve(value->array_value.size());
+    for (std::size_t profile_index = 0; profile_index < value->array_value.size(); ++profile_index) {
+        const auto& profile_value = value->array_value[profile_index];
+        if (profile_value.kind != JsonParser::ValueKind::Array) {
+            error = "loft profile " + std::to_string(profile_index) + " must be an array";
+            return false;
+        }
+        std::vector<std::array<double, 3>> profile;
+        profile.reserve(profile_value.array_value.size());
+        for (std::size_t vertex_index = 0; vertex_index < profile_value.array_value.size(); ++vertex_index) {
+            const auto& vertex = profile_value.array_value[vertex_index];
+            if (vertex.kind != JsonParser::ValueKind::Array || vertex.array_value.size() != 3) {
+                error = "loft profile " + std::to_string(profile_index) + " vertex " +
+                        std::to_string(vertex_index) + " must be an array of exactly 3 numbers";
+                return false;
+            }
+            for (const auto& coordinate : vertex.array_value) {
+                if (coordinate.kind != JsonParser::ValueKind::Number) {
+                    error = "loft profile " + std::to_string(profile_index) + " vertex " +
+                            std::to_string(vertex_index) + " must contain only numbers";
+                    return false;
+                }
+            }
+            profile.push_back({vertex.array_value[0].number_value,
+                               vertex.array_value[1].number_value,
+                               vertex.array_value[2].number_value});
+        }
+        result.push_back(std::move(profile));
+    }
+    return true;
 }
 
 std::string sha256_hex(const std::string& bytes) {
@@ -1886,6 +1936,120 @@ bool handle_draft(const JsonParser::Value& request, std::string& error) {
     }
 }
 
+bool handle_loft(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    std::vector<std::vector<std::array<double, 3>>> profiles;
+    if (!get_profiles(request, "profiles", profiles, error)) return false;
+    bool is_solid = get_bool(request, "is_solid", true, error);
+    if (!error.empty()) return false;
+    bool ruled = get_bool(request, "ruled", false, error);
+    if (!error.empty()) return false;
+
+    if (request_id.empty() || feature_id.empty() || output_dir.empty() || output_filename.empty()) {
+        error = "loft request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (profiles.size() < 2) {
+        error = "loft requires at least two profiles";
+        return false;
+    }
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        if (profiles[index].size() < 3) {
+            error = "loft profile " + std::to_string(index) +
+                    " must contain at least 3 vertices";
+            return false;
+        }
+        for (const auto& vertex : profiles[index]) {
+            for (double component : vertex) {
+                if (!std::isfinite(component)) {
+                    error = "loft profile " + std::to_string(index) +
+                            " contains non-finite coordinates";
+                    return false;
+                }
+            }
+        }
+    }
+
+    try {
+        BRepOffsetAPI_ThruSections loft(is_solid ? Standard_True : Standard_False,
+                                        ruled ? Standard_True : Standard_False);
+        loft.CheckCompatibility(Standard_True);
+
+        for (std::size_t index = 0; index < profiles.size(); ++index) {
+            BRepBuilderAPI_MakePolygon polygon;
+            for (const auto& vertex : profiles[index]) {
+                polygon.Add(gp_Pnt(vertex[0], vertex[1], vertex[2]));
+            }
+            polygon.Close();
+            if (!polygon.IsDone()) {
+                error = "could not build profile " + std::to_string(index) +
+                        " (non-convex or self-intersecting?)";
+                return false;
+            }
+            loft.AddWire(polygon.Wire());
+        }
+
+        loft.Build();
+        if (loft.IsDone() == Standard_False) {
+            error = "BRepOffsetAPI_ThruSections did not complete";
+            return false;
+        }
+        TopoDS_Shape shape = loft.Shape();
+        if (shape.IsNull()) {
+            error = "BRepOffsetAPI_ThruSections returned a null shape";
+            return false;
+        }
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(shape, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(shape)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"loft\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during loft: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during loft: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1939,10 +2103,12 @@ int main() {
         success = handle_shell(envelope, error);
     } else if (operation == "draft") {
         success = handle_draft(envelope, error);
+    } else if (operation == "loft") {
+        success = handle_loft(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, linear_pattern, circular_pattern, shell, or draft");
+hole, revolve, mirror, linear_pattern, circular_pattern, shell, draft, or loft");
         return 2;
     }
 

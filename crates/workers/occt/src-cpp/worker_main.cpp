@@ -28,6 +28,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
@@ -40,7 +41,9 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Solid.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -953,6 +956,128 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
     }
 }
 
+bool handle_revolve(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    auto profile = get_profile(request, "profile");
+    auto axis_point = get_vec3(request, "axis_point");
+    auto axis_direction = get_vec3(request, "axis_direction");
+    double angle = get_number(request, "angle");
+
+    if (request_id.empty() || feature_id.empty() || output_dir.empty() || output_filename.empty()) {
+        error = "revolve request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (profile.size() < 3) {
+        error = "revolve profile must contain at least 3 vertices";
+        return false;
+    }
+    for (double component : axis_point) {
+        if (!std::isfinite(component)) {
+            error = "revolve axis_point components must be finite";
+            return false;
+        }
+    }
+    for (double component : axis_direction) {
+        if (!std::isfinite(component)) {
+            error = "revolve axis_direction components must be finite";
+            return false;
+        }
+    }
+    double direction_norm_squared = axis_direction[0] * axis_direction[0] +
+                                    axis_direction[1] * axis_direction[1] +
+                                    axis_direction[2] * axis_direction[2];
+    if (direction_norm_squared == 0.0) {
+        error = "revolve axis_direction must be a non-zero vector";
+        return false;
+    }
+    if (!(angle > 0.0) || !std::isfinite(angle)) {
+        error = "revolve angle must be a positive finite number";
+        return false;
+    }
+
+    try {
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const auto& vertex : profile) {
+            polygon.Add(gp_Pnt(vertex[0], vertex[1], 0.0));
+        }
+        polygon.Close();
+        if (!polygon.IsDone()) {
+            error = "could not build the 2D polygon (non-convex or self-intersecting profile?)";
+            return false;
+        }
+        TopoDS_Wire wire = polygon.Wire();
+        BRepBuilderAPI_MakeFace face(wire);
+        if (!face.IsDone()) {
+            error = "could not build the planar face from the polygon";
+            return false;
+        }
+        TopoDS_Face planar_face = face.Face();
+
+        double norm = std::sqrt(direction_norm_squared);
+        gp_Pnt origin(axis_point[0], axis_point[1], axis_point[2]);
+        gp_Dir axis_dir(axis_direction[0] / norm,
+                        axis_direction[1] / norm,
+                        axis_direction[2] / norm);
+        gp_Ax1 axis(origin, axis_dir);
+
+        BRepPrimAPI_MakeRevol revol(planar_face, axis, angle);
+        revol.Build();
+        if (!revol.IsDone()) {
+            error = "BRepPrimAPI_MakeRevol did not complete";
+            return false;
+        }
+        TopoDS_Shape result = revol.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"revolve\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during revolve: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during revolve: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -994,9 +1119,12 @@ int main() {
         success = handle_chamfer(envelope, error);
     } else if (operation == "hole") {
         success = handle_hole(envelope, error);
+    } else if (operation == "revolve") {
+        success = handle_revolve(envelope, error);
     } else {
         write_stderr_line(
-            "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, or hole");
+            "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
+hole, or revolve");
         return 2;
     }
 

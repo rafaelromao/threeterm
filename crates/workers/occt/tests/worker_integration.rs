@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, OcctDiagnostic,
-    OcctWorker, Operation, WorkerError, schema_version,
+    OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -446,6 +446,107 @@ fn hole_with_zero_diameter_returns_request_malformed() {
     )
     .with_feature_id("hole-zero-1");
     let result = worker.hole(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+fn revolve_request(label: &str, feature_id: &str) -> RevolveRequest {
+    RevolveRequest::new(
+        unique_request_id(label),
+        vec![(0.0, 0.5), (1.0, 0.5), (1.0, -0.5), (0.0, -0.5)],
+        [0.0, 0.5, 0.0],
+        [0.0, 1.0, 0.0],
+        std::f64::consts::TAU,
+    )
+    .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn revolve_rectangle_around_axis_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp =
+        std::env::temp_dir().join(format!("threeterm-occt-revolve-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let request = revolve_request("rev-1", "box-revolved-1")
+        .with_output_path(&temp, "revolved.brep");
+    let result = worker.revolve(&request).expect("revolve returns");
+    assert_eq!(result.status, "ok", "revolve returned {:?}", result);
+    assert_eq!(result.operation, Operation::Revolve);
+    assert_eq!(result.feature_id, "box-revolved-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "revolved BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("revolved BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "revolved BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn revolve_with_short_profile_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let mut request = RevolveRequest::new(
+        unique_request_id("rev-short"),
+        vec![(0.0, 0.5), (1.0, 0.5)],
+        [0.0, 0.5, 0.0],
+        [0.0, 1.0, 0.0],
+        std::f64::consts::TAU,
+    )
+    .with_feature_id("rev-short-1");
+    request.profile = vec![[0.0, 0.5], [1.0, 0.5]];
+    let result = worker.revolve(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+            assert_eq!(diag.schema_version, schema_version());
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn revolve_with_zero_angle_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let mut request = revolve_request("rev-zero", "rev-zero-1");
+    request.angle = 0.0;
+    let result = worker.revolve(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn revolve_with_zero_axis_direction_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let mut request = revolve_request("rev-no-axis", "rev-no-axis-1");
+    request.axis_direction = [0.0, 0.0, 0.0];
+    let result = worker.revolve(&request);
     match result {
         Err(WorkerError::Diagnostic(diag)) => {
             assert_eq!(diag.code, "request_malformed");

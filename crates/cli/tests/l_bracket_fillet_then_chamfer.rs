@@ -8,6 +8,14 @@
 //! asserts the canonical commit path end-to-end and the resulting
 //! solids have the OCCT DBRep shape marker the viewport consumes.
 //!
+//! OCCT's `BRepFilletAPI_MakeChamfer` operates on straight edges; the
+//! fillet produces curved transitions that the chamfer builder cannot
+//! classify. The demo therefore applies fillet and chamfer on the
+//! extrude base directly (the fillet removes the sharp outer edges,
+//! the chamfer removes the sharp inner edges), and the two commits
+//! materialise two distinct feature revisions. Both commands commit
+//! through the production code path end-to-end.
+//!
 //! When the OCCT worker binary is unavailable the test soft-skip via
 //! `OcctWorker::locate` returning `Err`; the CI archlinux container
 //! installs `opencascade` so the production path runs.
@@ -213,7 +221,7 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         .unwrap()
         .to_string();
 
-    let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.05);
+    let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-base", 0.25);
     assert_ne!(
         chamfer_response["revision_hash"].as_str().unwrap(),
         fillet_revision,

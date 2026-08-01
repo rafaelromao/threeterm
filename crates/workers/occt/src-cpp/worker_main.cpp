@@ -1519,11 +1519,15 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         }
 
         BRepOffsetAPI_MakeThickSolid thickener;
-        thickiner.MakeThickSolid();
-        thickiner.AddFacetoRemove(faces_to_remove);
-        // Negative offset shrinks every face inward to carve the void.
-        thickiner.Perform();
-        if (!thickiner.IsDone()) {
+        // Initialize sets `myOffset`, which `MakeThickSolid()` rejects as
+        // null otherwise. A negative offset shrinks every face inward,
+        // carving the void so the resulting solid is a hollow shell with
+        // uniform walls.
+        thickener.Initialize(base, -thickness, 1.0e-6, Standard_False);
+        thickener.MakeThickSolid();
+        thickener.AddFacetoRemove(faces_to_remove);
+        thickener.Perform();
+        if (!thickener.IsDone()) {
             error = "BRepOffsetAPI_MakeThickSolid did not complete";
             return false;
         }

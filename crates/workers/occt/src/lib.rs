@@ -7,9 +7,10 @@
 //! * [`schema_version`] — the pinned worker protocol schema.
 //! * [`ExtrudeRequest`], [`ExtrudeResult`], [`BooleanFuseRequest`],
 //!   [`BooleanFuseResult`], [`Operation`], [`RevolveRequest`],
-//!   [`RevolveResult`], [`MirrorRequest`], [`MirrorResult`] — the
-//!   JSON envelopes exchanged with the worker, with
-//!   `serde(deny_unknown_fields)` to fail closed on unexpected fields.
+//!   [`RevolveResult`], [`MirrorRequest`], [`MirrorResult`],
+//!   [`ShellRequest`], [`ShellResult`] — the JSON envelopes
+//!   exchanged with the worker, with `serde(deny_unknown_fields)` to
+//!   fail closed on unexpected fields.
 //! * [`OcctWorker`] — the boundary struct that spawns the worker
 //!   binary, pipes the request in, reads the response, and returns
 //!   either a typed result or an [`OcctDiagnostic`].
@@ -33,7 +34,7 @@ pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
     HoleResult, LinearPatternRequest, LinearPatternResult, MirrorRequest, MirrorResult, Operation,
-    RevolveRequest, RevolveResult, SCHEMA_VERSION,
+    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -112,7 +113,8 @@ impl std::error::Error for WorkerError {}
 
 /// Process-backed OCCT geometry worker. Owns the binary path and
 /// exposes `extrude`, `boolean_fuse`, `fillet`, `chamfer`, `hole`,
-/// `revolve`, and `mirror`.
+/// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, and
+/// `shell`.
 ///
 /// The worker is **disposable**: each call spawns a fresh process, pipes
 /// the request to its stdin, reads one JSON line from its stdout, and
@@ -253,6 +255,15 @@ impl OcctWorker {
             detail: format!("circular_pattern request serialization failed: {error}"),
         })?;
         self.invoke(&bytes)?.into_circular_pattern()
+    }
+
+    /// Shell `request` by spawning the worker process. See module docs
+    /// for the disposable-worker contract.
+    pub fn shell(&self, request: &ShellRequest) -> Result<ShellResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("shell request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_shell()
     }
 
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
@@ -456,6 +467,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_shell(self) -> Result<ShellResult, WorkerError> {
+        match serde_json::from_str::<ShellResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "shell response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -505,6 +531,10 @@ pub fn parse_linear_pattern_request(raw: &str) -> Result<LinearPatternRequest, s
 pub fn parse_circular_pattern_request(
     raw: &str,
 ) -> Result<CircularPatternRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_shell_request(raw: &str) -> Result<ShellRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -773,5 +803,31 @@ mod tests {
         assert_eq!(value["angle_step"], std::f64::consts::FRAC_PI_2);
         assert_eq!(value["count"], 4);
         assert_eq!(value["feature_id"], "cir-1");
+    }
+
+    #[test]
+    fn shell_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "shell",
+            "base_path": "/tmp/base.brep",
+            "thickness": 0.5,
+            "output_filename": "out.brep",
+            "feature_id": "shell-1",
+            "rogue_key": true
+        }"#;
+        assert!(parse_shell_request(raw).is_err());
+    }
+
+    #[test]
+    fn shell_envelope_accepts_canonical_shape() {
+        let request = ShellRequest::new("req-1", "/tmp/base.brep", 0.5).with_feature_id("shell-1");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "shell");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["thickness"], 0.5);
+        assert_eq!(value["feature_id"], "shell-1");
     }
 }

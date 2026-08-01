@@ -2,8 +2,10 @@
 //
 // threeterm-occt-worker: disposable worker binary for the ThreeTerm OCCT
 // geometry kernel. Reads a JSON envelope from stdin, runs the requested
-// operation (extrude or boolean_fuse), validates the BREP with
-// BRepCheck_Analyzer, and writes the BREP to the host-staged output path.
+// operation (extrude, boolean_fuse, fillet, chamfer, hole, revolve,
+// mirror, linear_pattern, circular_pattern, or shell), validates the
+// BREP with BRepCheck_Analyzer, and writes the BREP to the host-staged
+// output path.
 //
 // Exit codes:
 //   0  success — BREP written, JSON response on stdout.
@@ -51,6 +53,11 @@
 
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
 #include <cstdint>
@@ -1467,6 +1474,173 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
     }
 }
 
+bool handle_shell(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    double thickness = get_number(request, "thickness");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "shell request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!std::isfinite(thickness) || !(thickness > 0.0)) {
+        error = "shell thickness must be a positive finite number";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+        // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` expects a
+        // single `TopoDS_Solid`. Boolean-fused inputs can come back as
+        // a COMPSOLID (touching solids) or a COMPOUND; pick the first
+        // inner solid so the offset algorithm has a single body to
+        // shell.
+        TopoDS_Solid base_solid;
+        if (base.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(base);
+        } else if (base.ShapeType() == TopAbs_COMPSOLID ||
+                   base.ShapeType() == TopAbs_COMPOUND) {
+            for (TopExp_Explorer ex(base, TopAbs_SOLID); ex.More();
+                 ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "shell base has no TopoDS_Solid";
+            return false;
+        }
+
+        // `BRepOffsetAPI_MakeThickSolid` requires C1-continuous
+        // surfaces and refuses mixed-valence vertices. A BooleanFuse
+        // result typically carries internal seams and partial-merge
+        // edges that trip the offset algorithm (yielding a null
+        // shape). `ShapeUpgrade_UnifySameDomain` merges co-planar
+        // faces and smooth-continuous edges before the offset so the
+        // algorithm sees a clean shell.
+        Handle(ShapeUpgrade_UnifySameDomain) unifier =
+            new ShapeUpgrade_UnifySameDomain(base_solid);
+        unifier->AllowInternalEdges(Standard_False);
+        unifier->Build();
+        TopoDS_Shape unified = unifier->Shape();
+        if (unified.IsNull()) {
+            unified = base_solid;
+        }
+        if (unified.ShapeType() == TopAbs_SOLID) {
+            base_solid = TopoDS::Solid(unified);
+        } else {
+            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More();
+                 ex.Next()) {
+                base_solid = TopoDS::Solid(ex.Current());
+                break;
+            }
+        }
+        if (base_solid.IsNull()) {
+            error = "shell base has no TopoDS_Solid after unification";
+            return false;
+        }
+
+        // Rebuild the solid from its outer shell so the offset
+        // algorithm operates on a closed, single-shell body without
+        // residual internal faces from the fuse.
+        TopoDS_Shell outer_shell;
+        for (TopExp_Explorer ex(base_solid, TopAbs_SHELL); ex.More();
+             ex.Next()) {
+            outer_shell = TopoDS::Shell(ex.Current());
+            break;
+        }
+        if (outer_shell.IsNull()) {
+            error = "shell base has no outer shell";
+            return false;
+        }
+        BRepBuilderAPI_MakeSolid solid_rebuild(outer_shell);
+        if (!solid_rebuild.IsDone()) {
+            error = "could not rebuild base solid from outer shell";
+            return false;
+        }
+        TopoDS_Solid clean_solid = solid_rebuild.Solid();
+
+        // `MakeThickSolidByJoin` produces the hollow shell directly:
+        // the negative offset shrinks every face inward by
+        // `thickness` and the closing walls are stitched to the outer
+        // shell, yielding a single solid bounded by the original
+        // outer surface and an inner offset shell.
+        BRepOffsetAPI_MakeThickSolid thickener;
+        thickener.MakeThickSolidByJoin(
+            clean_solid, TopTools_ListOfShape(),
+            -thickness, 1.0e-6,
+            BRepOffset_Skin, Standard_False, Standard_False,
+            GeomAbs_Arc, Standard_False);
+        if (!thickener.IsDone()) {
+            error = "BRepOffsetAPI_MakeThickSolid did not complete";
+            return false;
+        }
+        TopoDS_Shape shelled = thickener.Shape();
+        if (shelled.IsNull()) {
+            error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
+            return false;
+        }
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(shelled, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(shelled)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"shell\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during shell: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during shell: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1516,10 +1690,12 @@ int main() {
         success = handle_linear_pattern(envelope, error);
     } else if (operation == "circular_pattern") {
         success = handle_circular_pattern(envelope, error);
+    } else if (operation == "shell") {
+        success = handle_shell(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, linear_pattern, or circular_pattern");
+hole, revolve, mirror, linear_pattern, circular_pattern, or shell");
         return 2;
     }
 

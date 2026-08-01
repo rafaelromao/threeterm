@@ -8,7 +8,7 @@ use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
     HoleResult, LinearPatternRequest, LinearPatternResult, MirrorRequest, MirrorResult, OcctWorker,
-    RevolveRequest, RevolveResult, WorkerError,
+    RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
 use threeterm_protocol::artifact::{
@@ -99,6 +99,12 @@ pub struct LinearPatternCommitView {
 pub struct CircularPatternCommitView {
     pub snapshot: SnapshotView,
     pub result: CircularPatternResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShellCommitView {
+    pub snapshot: SnapshotView,
+    pub result: ShellResult,
 }
 
 #[derive(Debug)]
@@ -777,6 +783,47 @@ impl Host {
         };
         let _ = prior_view;
         Ok(CircularPatternCommitView { snapshot, result })
+    }
+
+    /// Shell `request` against the disposable OCCT worker and, on
+    /// success, commit the shelled BREP into a new revision.
+    pub fn shell(
+        &self,
+        root: impl AsRef<Path>,
+        request: ShellRequest,
+        worker: &OcctWorker,
+    ) -> Result<ShellCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.shell(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "shell returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(ShellCommitView { snapshot, result })
     }
 }
 

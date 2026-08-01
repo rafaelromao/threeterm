@@ -47,6 +47,7 @@ pub enum Operation {
     Mirror,
     LinearPattern,
     CircularPattern,
+    Shell,
 }
 
 impl Operation {
@@ -61,6 +62,7 @@ impl Operation {
             Self::Mirror => "mirror",
             Self::LinearPattern => "linear_pattern",
             Self::CircularPattern => "circular_pattern",
+            Self::Shell => "shell",
         }
     }
 }
@@ -1211,6 +1213,122 @@ impl CircularPatternResult {
     }
 }
 
+/// Shell request: hollow the BREP at `base_path` by offsetting every
+/// face inward by `thickness` to produce a uniform-wall shell solid.
+/// The OCCT worker constructs `BRepOffsetAPI_MakeThickSolid` with the
+/// full face list and the signed offset, then writes the resulting
+/// solid to `<output_dir>/<output_filename>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    /// Path to the BREP file the worker reads as the input solid.
+    pub base_path: PathBuf,
+    /// Wall thickness. Must be positive and finite; the worker
+    /// offsets every face inward by this amount.
+    pub thickness: f64,
+    /// Output directory where the worker writes the BREP file.
+    pub output_dir: PathBuf,
+    /// Output file name (no path separators; the worker uses this
+    /// filename literally, so callers should include the `.brep`
+    /// extension).
+    pub output_filename: String,
+    /// Stable ThreeTerm feature id the host will commit.
+    pub feature_id: String,
+}
+
+impl ShellRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        thickness: f64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Shell,
+            base_path: base_path.into(),
+            thickness,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Shell {
+            return Err(format!(
+                "operation must be shell for ShellRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self.thickness.is_finite()
+            || self
+                .thickness
+                .partial_cmp(&0.0)
+                .map(|ordering| ordering.is_le())
+                .unwrap_or(true)
+        {
+            return Err("shell thickness must be a positive finite number".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl ShellResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2214,6 +2332,125 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "cir-1".to_string(),
+        };
+        assert!(result.is_success());
+
+        result.status = "brep_invalid".to_string();
+        assert!(!result.is_success());
+    }
+
+    fn canonical_shell_request() -> ShellRequest {
+        ShellRequest::new("req-1", "/tmp/base.brep", 0.5)
+            .with_output_path("/tmp", "shelled.brep")
+            .with_feature_id("shell-1")
+    }
+
+    #[test]
+    fn operation_as_str_returns_snake_case_for_shell() {
+        assert_eq!(Operation::Shell.as_str(), "shell");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_shell() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("shell envelope is valid");
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_shell_thickness() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.thickness = 0.0;
+        assert!(request.validate().is_err());
+
+        request.thickness = -0.5;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_shell_thickness() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.thickness = f64::NAN;
+        assert!(request.validate().is_err());
+        request.thickness = f64::INFINITY;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shell_with_empty_base_path() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.base_path = PathBuf::new();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shell_with_wrong_operation() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::CircularPattern;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shell_output_filename_with_path_separator() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.output_filename = "sub/out.brep".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_shell_with_unknown_schema_version() {
+        let mut request = canonical_shell_request();
+        request.schema_version = "threeterm.workers.occt/0".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn shell_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "shell",
+            "base_path": "/tmp/base.brep",
+            "thickness": 0.5,
+            "output_filename": "out.brep",
+            "feature_id": "shell-1",
+            "rogue_key": true
+        }"#;
+        assert!(serde_json::from_str::<ShellRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn shell_envelope_round_trips_through_canonical_json() {
+        let mut request = canonical_shell_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        let value = serde_json::to_value(&request).expect("shell request serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["request_id"], "req-1");
+        assert_eq!(value["operation"], "shell");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["thickness"], 0.5);
+        assert_eq!(value["feature_id"], "shell-1");
+        let decoded: ShellRequest =
+            serde_json::from_value(value).expect("shell request deserializes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn shell_result_is_success_predicate() {
+        let mut result = ShellResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::Shell,
+            status: "ok".to_string(),
+            brep_path: PathBuf::from("/tmp/out.brep"),
+            brep_sha256: "deadbeef".to_string(),
+            brep_bytes: 42,
+            feature_id: "shell-1".to_string(),
         };
         assert!(result.is_success());
 

@@ -203,7 +203,7 @@ fn l_bracket_shell_commits_through_the_cli() {
     );
     let l_bracket_revision = fuse_response["revision_hash"].as_str().unwrap().to_string();
 
-    let shell_response = shell(bin, &root, "l-bracket-shell-shell", "l-bracket-shell", 0.3);
+    let shell_response = shell(bin, &root, "l-bracket-shell-shell", "l-bracket-shell", 0.01);
     assert_ne!(
         shell_response["revision_hash"].as_str().unwrap(),
         l_bracket_revision,

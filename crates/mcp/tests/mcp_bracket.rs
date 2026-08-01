@@ -97,6 +97,32 @@ fn run_mcp(requests: &[Value]) -> Vec<Value> {
 }
 
 #[test]
+fn initialize_returns_protocol_version_server_info_and_capabilities() {
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "clientInfo": {"name": "fixture", "version": "0"}
+        }
+    })]);
+
+    assert_eq!(responses.len(), 1);
+    let response = &responses[0];
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    let result = &response["result"];
+    assert_eq!(result["protocolVersion"], "2024-11-05");
+    assert_eq!(result["serverInfo"]["name"], "threeterm-mcp");
+    assert!(result["serverInfo"]["version"].is_string());
+    assert!(
+        result["capabilities"]["tools"].is_object(),
+        "initialize must declare tools capability"
+    );
+}
+
+#[test]
 fn tools_list_advertises_every_registered_command_with_populated_schemas() {
     let responses = run_mcp(&[serde_json::json!({
         "jsonrpc": "2.0",

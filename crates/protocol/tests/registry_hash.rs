@@ -8,7 +8,7 @@
 
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    HOLE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -31,7 +31,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "eea1f75e77e1425be1d2f2268066ec0c2bf611fc21e0c6344ad305cc0142b0ac",
+        "fc60706ade6ac152dea423d8ea151d01a9568c0ec442ef537a3a08effbad2065",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -127,6 +127,34 @@ fn registry_contains_versioned_fillet_and_chamfer_contracts() {
         serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "distance"])
     );
     assert_eq!(chamfer.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_hole_contract() {
+    let hole = find(HOLE_COMMAND_ID).expect("hole is registered");
+    assert_eq!(hole.id, HOLE_COMMAND_ID);
+    assert_eq!(hole.name, "hole");
+    assert_eq!(hole.schema_version, "threeterm.command.hole/1");
+    assert_eq!(
+        hole.request_schema_version,
+        "threeterm.command.hole.request/1"
+    );
+    assert_eq!(
+        hole.response_schema_version,
+        "threeterm.command.hole.response/1"
+    );
+    assert_eq!(
+        hole.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "position",
+            "direction",
+            "diameter"
+        ])
+    );
+    assert_eq!(hole.request_schema["additionalProperties"], false);
 }
 
 #[test]

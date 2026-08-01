@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, Operation, SCHEMA_VERSION,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, Operation, SCHEMA_VERSION,
 };
 
 pub fn schema_version() -> &'static str {
@@ -200,6 +200,15 @@ impl OcctWorker {
         self.invoke(&bytes)?.into_chamfer()
     }
 
+    /// Hole `request` by spawning the worker process. See module
+    /// docs for the disposable-worker contract.
+    pub fn hole(&self, request: &HoleRequest) -> Result<HoleResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("hole request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_hole()
+    }
+
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
         let mut child = Command::new(&self.binary_path)
             .stdin(Stdio::piped())
@@ -326,6 +335,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_hole(self) -> Result<HoleResult, WorkerError> {
+        match serde_json::from_str::<HoleResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "hole response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -353,6 +377,10 @@ pub fn parse_fillet_request(raw: &str) -> Result<FilletRequest, serde_json::Erro
 }
 
 pub fn parse_chamfer_request(raw: &str) -> Result<ChamferRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_hole_request(raw: &str) -> Result<HoleRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 

@@ -18,6 +18,7 @@
 // This file is part of ThreeTerm; see ../NOTICE for upstream provenance
 // and the LGPL-2.1 redistribution obligations.
 
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -25,6 +26,7 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
@@ -38,6 +40,10 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Solid.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -343,6 +349,18 @@ std::vector<std::array<double, 2>> get_profile(const JsonParser::Value& object,
         if (pair.array_value[1].kind != JsonParser::ValueKind::Number) continue;
         result.push_back(
             {pair.array_value[0].number_value, pair.array_value[1].number_value});
+    }
+    return result;
+}
+
+std::array<double, 3> get_vec3(const JsonParser::Value& object, const std::string& key) {
+    std::array<double, 3> result{0.0, 0.0, 0.0};
+    const auto* value = find_field(object, key);
+    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) return result;
+    if (value->array_value.size() != 3) return result;
+    for (std::size_t index = 0; index < 3; ++index) {
+        if (value->array_value[index].kind != JsonParser::ValueKind::Number) return result;
+        result[index] = value->array_value[index].number_value;
     }
     return result;
 }
@@ -792,6 +810,149 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
     }
 }
 
+bool handle_hole(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    auto position = get_vec3(request, "position");
+    auto direction = get_vec3(request, "direction");
+    double diameter = get_number(request, "diameter");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "hole request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!(diameter > 0.0) || !std::isfinite(diameter)) {
+        error = "hole diameter must be a positive finite number";
+        return false;
+    }
+    for (double component : position) {
+        if (!std::isfinite(component)) {
+            error = "hole position components must be finite";
+            return false;
+        }
+    }
+    for (double component : direction) {
+        if (!std::isfinite(component)) {
+            error = "hole direction components must be finite";
+            return false;
+        }
+    }
+    double direction_norm_squared = direction[0] * direction[0] +
+                                    direction[1] * direction[1] +
+                                    direction[2] * direction[2];
+    if (direction_norm_squared == 0.0) {
+        error = "hole direction must be a non-zero vector";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        // Size the cutting cylinder to the base bounding box diagonal so
+        // the hole is through regardless of base orientation. A non-zero
+        // fall-back keeps a malformed base from producing a zero-length
+        // cylinder.
+        Bnd_Box bbox;
+        BRepBndLib::Add(base, bbox);
+        double diag = std::sqrt(
+            bbox.CornerMax().X() * bbox.CornerMax().X() +
+            bbox.CornerMax().Y() * bbox.CornerMax().Y() +
+            bbox.CornerMax().Z() * bbox.CornerMax().Z());
+        if (!(diag > 0.0) || !std::isfinite(diag)) {
+            diag = 1.0e6;
+        }
+        double cylinder_length = 2.0 * diag;
+
+        double norm = std::sqrt(direction_norm_squared);
+        gp_Dir axis_dir(direction[0] / norm, direction[1] / norm, direction[2] / norm);
+        gp_Pnt centre(position[0], position[1], position[2]);
+        // gp_Ax2 needs a "X direction" — the cylinder's reference axis.
+        // Pick the first world axis not parallel to the hole axis so the
+        // resulting cylinder is unambiguously oriented.
+        gp_Dir x_dir;
+        if (std::abs(axis_dir.Z()) < 0.9) {
+            x_dir = gp::DX();
+        } else {
+            x_dir = gp::DY();
+        }
+        gp_Ax2 cylinder_axis(centre, axis_dir, x_dir);
+        BRepPrimAPI_MakeCylinder cylinder(cylinder_axis, diameter / 2.0, cylinder_length);
+        cylinder.Build();
+        if (!cylinder.IsDone()) {
+            error = "BRepPrimAPI_MakeCylinder did not complete";
+            return false;
+        }
+        TopoDS_Shape tool = cylinder.Shape();
+
+        BRepAlgoAPI_Cut cut(base, tool);
+        cut.SetFuzzyValue(1.0e-6);
+        cut.Build();
+        if (!cut.IsDone()) {
+            error = "BRepAlgoAPI_Cut did not complete";
+            return false;
+        }
+        TopoDS_Shape result = cut.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"hole\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during hole: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during hole: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -831,9 +992,11 @@ int main() {
         success = handle_fillet(envelope, error);
     } else if (operation == "chamfer") {
         success = handle_chamfer(envelope, error);
+    } else if (operation == "hole") {
+        success = handle_hole(envelope, error);
     } else {
         write_stderr_line(
-            "request_malformed: operation must be extrude, boolean_fuse, fillet, or chamfer");
+            "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, or hole");
         return 2;
     }
 

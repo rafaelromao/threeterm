@@ -10,8 +10,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, OcctDiagnostic, OcctWorker,
-    Operation, WorkerError, schema_version,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, HoleRequest, OcctDiagnostic,
+    OcctWorker, Operation, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -355,6 +355,97 @@ fn chamfer_with_zero_distance_returns_request_malformed() {
     let request = ChamferRequest::new(unique_request_id("chamfer-zero"), "/tmp/base.brep", 0.0)
         .with_feature_id("chamfer-zero-1");
     let result = worker.chamfer(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+fn hole_request(base_path: &std::path::Path, label: &str, feature_id: &str) -> HoleRequest {
+    HoleRequest::new(
+        unique_request_id(label),
+        base_path,
+        [1.5, 1.5, 0.0],
+        [0.0, 0.0, 1.0],
+        1.0,
+    )
+    .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn hole_of_extruded_box_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-hole-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = rectangle_extrude_request()
+        .with_output_path(&temp, "hole-base.brep")
+        .with_feature_id("hole-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = hole_request(&base_result.brep_path, "hole-1", "box-holed-1")
+        .with_output_path(&temp, "hole-out.brep");
+    let result = worker.hole(&request).expect("hole returns");
+    assert_eq!(result.status, "ok", "hole returned {:?}", result);
+    assert_eq!(result.operation, Operation::Hole);
+    assert_eq!(result.feature_id, "box-holed-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "holed BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("holed BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "holed BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn hole_with_missing_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = hole_request(
+        std::path::Path::new("/no/such/base.brep"),
+        "hole-missing",
+        "hole-missing-1",
+    );
+    let result = worker.hole(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn hole_with_zero_diameter_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = HoleRequest::new(
+        unique_request_id("hole-zero"),
+        "/tmp/base.brep",
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        0.0,
+    )
+    .with_feature_id("hole-zero-1");
+    let result = worker.hole(&request);
     match result {
         Err(WorkerError::Diagnostic(diag)) => {
             assert_eq!(diag.code, "request_malformed");

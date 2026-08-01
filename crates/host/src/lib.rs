@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
+use threeterm_slvs_worker::{SketchRequest, SolveResult, SlvsWorker, WorkerError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
@@ -23,6 +24,9 @@ pub enum HostError {
     BundlePathMissing { path: PathBuf },
     BundlePathNotDirectory { path: PathBuf },
     Persistence(BundleError),
+    WorkerFailure { detail: String },
+    WorkerUnavailable { detail: String },
+    SketchNotFullyConstrained { status: String, dof: i64 },
 }
 
 impl std::fmt::Display for HostError {
@@ -39,6 +43,18 @@ impl std::fmt::Display for HostError {
                 )
             }
             Self::Persistence(error) => error.fmt(formatter),
+            Self::WorkerFailure { detail } => {
+                write!(formatter, "sketch worker failure: {detail}")
+            }
+            Self::WorkerUnavailable { detail } => {
+                write!(formatter, "sketch worker unavailable: {detail}")
+            }
+            Self::SketchNotFullyConstrained { status, dof } => {
+                write!(
+                    formatter,
+                    "sketch not fully constrained: status={status} dof={dof}"
+                )
+            }
         }
     }
 }
@@ -49,6 +65,24 @@ impl From<BundleError> for HostError {
     fn from(error: BundleError) -> Self {
         Self::Persistence(error)
     }
+}
+
+impl From<WorkerError> for HostError {
+    fn from(error: WorkerError) -> Self {
+        match error {
+            WorkerError::Diagnostic(diagnostic) => {
+                Self::WorkerFailure { detail: format!("{} {}", diagnostic.code, diagnostic.arg) }
+            }
+            other => Self::WorkerFailure { detail: other.to_string() },
+        }
+    }
+}
+
+/// View of a successful sketch solve that has been committed to a new revision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSolveView {
+    pub snapshot: SnapshotView,
+    pub solve: SolveResult,
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +138,87 @@ impl Host {
 
     pub fn current(&self) -> Option<SnapshotView> {
         self.current.borrow().as_ref().map(SnapshotView::from)
+    }
+
+    /// Solve `request` against the disposable `libslvs` worker and, on
+    /// success, append the resolved geometry as a new revision in the
+    /// bundle rooted at `root`. Returns the new snapshot view plus the
+    /// normalized solve result.
+    ///
+    /// Atomicity: a non-`ok` solver status, a worker spawn / exit /
+    /// parse failure, or a persistence append failure all leave the
+    /// bundle's `manifest.json` and `transactions.log` byte-identical to
+    /// the pre-solve snapshot. `Host::current()` is preserved.
+    ///
+    /// The host commits on any successful (`status == "ok"` or
+    /// `redundant_okay`) solve. The `dof` field in the returned
+    /// `SketchSolveView` reports the libslvs kernel's residual degrees
+    /// of freedom; a future slice that forks libslvs to mark the
+    /// workplane origin and normal as `known = true` will reduce the
+    /// reported dof for fully-pinned sketches to zero.
+    pub fn solve_sketch(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchRequest,
+        worker: &SlvsWorker,
+    ) -> Result<SketchSolveView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_snapshot = SnapshotView::from(&loaded);
+        let solve = worker.solve(request).map_err(HostError::from)?;
+        if !solve.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::WorkerFailure {
+                detail: format!(
+                    "solver returned non-ok status: status={} dof={} failed={:?}",
+                    solve.status,
+                    solve.dof,
+                    solve.failed_constraint_ids
+                ),
+            });
+        }
+        let feature_id = derive_feature_id(request);
+        let result = match bundle.append_feature(feature_id.as_str(), "sketch") {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        let _ = prior_snapshot; // preserved for future diagnostics
+        let snapshot = SnapshotView::from(&result);
+        self.current.replace(Some(result));
+        Ok(SketchSolveView { snapshot, solve })
+    }
+}
+
+fn derive_feature_id(request: &SketchRequest) -> String {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut parts: Vec<&str> = Vec::new();
+    parts.push("sketch");
+    for entity in &request.entities {
+        if seen.insert(entity.id.as_str()) {
+            parts.push(entity.id.as_str());
+        }
+    }
+    if parts.len() == 1 {
+        parts.push(&request.request_id);
+    }
+    let joined = parts.join(":");
+    if joined.len() <= 64 {
+        joined
+    } else {
+        let mut out = String::from("sketch:");
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        hasher.update(joined.as_bytes());
+        let digest = hasher.finalize();
+        for byte in digest.iter().take(20) {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
     }
 }
 

@@ -116,6 +116,49 @@ pub static SAVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static SOLVE_SKETCH_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "sketch"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "sketch": { "type": "object" },
+            "feature_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional caller-supplied feature id; when omitted the host derives a deterministic one from the sketch envelope."
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static SOLVE_SKETCH_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "dof",
+            "resolved_entity_ids",
+            "failed_constraint_ids",
+            "feature_graph_hash",
+            "revision_hash",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "dof": { "type": "integer" },
+            "resolved_entity_ids": { "type": "array", "items": { "type": "string" } },
+            "failed_constraint_ids": { "type": "array", "items": { "type": "string" } },
+            "coordinates": { "type": "object" },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -190,6 +233,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        SOLVE_SKETCH_COMMAND_ID,
+        CommandSchema {
+            id: SOLVE_SKETCH_COMMAND_ID,
+            name: "solve-sketch",
+            schema_version: "threeterm.command.solve-sketch/1",
+            request_schema_version: "threeterm.command.solve-sketch.request/1",
+            request_schema: SOLVE_SKETCH_REQUEST_SCHEMA.clone(),
+            response_schema_version: SOLVE_SKETCH_RESPONSE_SCHEMA_VERSION,
+            response_schema: SOLVE_SKETCH_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -197,8 +252,10 @@ pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
+pub const SOLVE_SKETCH_COMMAND_ID: CommandId = CommandId("solve-sketch");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
+pub const SOLVE_SKETCH_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.solve-sketch.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

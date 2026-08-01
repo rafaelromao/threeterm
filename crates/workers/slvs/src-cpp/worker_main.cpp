@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <slvs.h>
@@ -47,9 +48,33 @@ void write_stderr_line(const std::string& line) {
     std::fflush(stderr);
 }
 
-// Minimal JSON parser tailored to the slice-1 envelope shape. Strict about
-// the supported subset: objects, arrays, strings, numbers (decimal),
-// booleans, and null. Returns an error string on the first violation.
+std::string json_escape(const std::string& input) {
+    std::string out;
+    out.reserve(input.size() + 2);
+    for (char c : input) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buffer[8];
+                    std::snprintf(buffer, sizeof(buffer), "\\u%04x",
+                                  static_cast<unsigned char>(c));
+                    out += buffer;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    return out;
+}
+
+// Minimal JSON parser tailored to the slice-1 envelope shape.
 class JsonParser {
 public:
     enum class ValueKind { Object, Array, String, Number, Bool, Null };
@@ -189,17 +214,6 @@ public:
         return true;
     }
 
-    bool consume_or_end(char ch, std::string& error) {
-        skip_ws();
-        if (at_end()) { error = "unexpected end of input"; return false; }
-        if (source_[cursor_] != ch) {
-            error = std::string("expected '") + ch + "'";
-            return false;
-        }
-        cursor_++;
-        return true;
-    }
-
     void skip_ws() {
         while (!at_end()) {
             char c = source_[cursor_];
@@ -215,7 +229,6 @@ public:
     std::size_t cursor() const { return cursor_; }
 
 private:
-
     bool parse_object(Value* out, std::string& error) {
         if (!consume('{', error)) return false;
         Value result;
@@ -298,15 +311,6 @@ struct SketchRequest {
     std::vector<SketchEntity> entities;
     std::vector<SketchConstraint> constraints;
 };
-
-bool get_string(const JsonParser::Value* obj, const std::string& key, std::string* out) {
-    (void)obj;
-    (void)key;
-    (void)out;
-    return false;
-}
-
-// Above helpers are placeholders; below we use direct value traversal.
 
 struct JsonObject {
     const std::vector<std::pair<std::string, JsonParser::Value>>* pairs;
@@ -504,32 +508,6 @@ bool parse_request(const std::string& raw, SketchRequest& out, std::string& erro
     return true;
 }
 
-std::string json_escape(const std::string& input) {
-    std::string out;
-    out.reserve(input.size() + 2);
-    for (char c : input) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buffer[8];
-                    std::snprintf(buffer, sizeof(buffer), "\\u%04x",
-                                  static_cast<unsigned char>(c));
-                    out += buffer;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    return out;
-}
-
 void emit_diagnostic(const std::string& code, const std::string& arg) {
     std::ostringstream os;
     os << "{\"code\":\"" << json_escape(code) << "\","
@@ -641,132 +619,29 @@ int main() {
         return 2;
     }
 
-    Slvs_System sys;
-    std::memset(&sys, 0, sizeof(sys));
+    // Reset the global SolveSpace kernel state. The worker is disposable
+    // (one process per request) so this is the canonical state.
+    Slvs_ClearSketch();
 
-    std::vector<Slvs_Param> slvs_params;
-    std::vector<Slvs_Entity> slvs_entities;
-    std::vector<Slvs_Constraint> slvs_constraints;
+    // Build the implicit XY workplane (creates origin point + normal + workplane).
+    // Note: libslvs treats the workplane's normal and origin params as
+    // unknown variables by default, which contributes up to 6 free dof
+    // (3 translation + 3 rotation) into the system. The host-side
+    // `solve_sketch` accepts the resulting `dof >= 0` from any successful
+    // solve as long as the constraint system is consistent and the
+    // caller-supplied initial guess is honored. A future slice that wants
+    // truly pinned workplanes can fork libslvs to mark these params
+    // `known = true` at construction time.
+    Slvs_Entity workplane = Slvs_AddBase2D(kGroup);
+
+    // First pass: add points (and lock fixed points via WHERE_DRAGGED).
     std::map<std::string, Slvs_Entity> entity_by_id;
-    std::map<std::string, Slvs_hConstraint> constraint_handle_by_id;
-    std::map<std::string, Slvs_hParam> param_x_by_id;
-    std::map<std::string, Slvs_hParam> param_y_by_id;
-
-    Slvs_hParam next_param = 1;
-    Slvs_hEntity next_entity = 1;
-    Slvs_hConstraint next_constraint = 1;
-
-    auto make_param = [&](double value) {
-        Slvs_hParam handle = next_param++;
-        Slvs_Param p;
-        std::memset(&p, 0, sizeof(p));
-        p.h = handle;
-        p.group = kGroup;
-        p.val = value;
-        slvs_params.push_back(p);
-        return handle;
-    };
-
-    auto add_entity = [&](Slvs_Entity e, const std::string& id) {
-        // e.h was assigned by libslvs internally for entities created via
-        // helper functions. For entities we built manually, assign a handle
-        // here so the global counter is consistent.
-        if (e.h == 0) {
-            e.h = next_entity++;
-        }
-        slvs_entities.push_back(e);
-        entity_by_id[id] = e;
-        return e.h;
-    };
-
-    auto add_constraint = [&](Slvs_Constraint c, const std::string& id) {
-        // The handle was auto-assigned by libslvs inside Slvs_AddConstraint;
-        // preserve it so the failed[] buffer maps back to it correctly.
-        slvs_constraints.push_back(c);
-        constraint_handle_by_id[id] = c.h;
-        return c.h;
-    };
-
-    // Implicit XY workplane. libslvs requires a workplane to have an origin
-    // point and a normal entity describing orientation. We build all three
-    // explicitly so we can include them in slvs_entities.
-    // Normal: identity quaternion (w=1, x=0, y=0, z=0).
-    Slvs_hParam qw = make_param(1.0);
-    Slvs_hParam qx = make_param(0.0);
-    Slvs_hParam qy = make_param(0.0);
-    Slvs_hParam qz = make_param(0.0);
-    Slvs_Entity normal;
-    std::memset(&normal, 0, sizeof(normal));
-    normal.type = SLVS_E_NORMAL_IN_3D;
-    normal.group = kGroup;
-    normal.wrkpl = SLVS_FREE_IN_3D;
-    normal.param[0] = qw;
-    normal.param[1] = qx;
-    normal.param[2] = qy;
-    normal.param[3] = qz;
-    Slvs_hEntity normal_handle = next_entity++;
-    normal.h = normal_handle;
-    slvs_entities.push_back(normal);
-
-    // Origin: 3D point at (0, 0, 0).
-    Slvs_hParam ox = make_param(0.0);
-    Slvs_hParam oy = make_param(0.0);
-    Slvs_hParam oz = make_param(0.0);
-    Slvs_Entity origin;
-    std::memset(&origin, 0, sizeof(origin));
-    origin.type = SLVS_E_POINT_IN_3D;
-    origin.group = kGroup;
-    origin.wrkpl = SLVS_FREE_IN_3D;
-    origin.param[0] = ox;
-    origin.param[1] = oy;
-    origin.param[2] = oz;
-    Slvs_hEntity origin_handle = next_entity++;
-    origin.h = origin_handle;
-    slvs_entities.push_back(origin);
-
-    // Workplane.
-    Slvs_Entity workplane;
-    std::memset(&workplane, 0, sizeof(workplane));
-    workplane.type = SLVS_E_WORKPLANE;
-    workplane.group = kGroup;
-    workplane.wrkpl = SLVS_FREE_IN_3D;
-    workplane.point[0] = origin_handle;
-    workplane.normal = normal_handle;
-    Slvs_hEntity workplane_handle = next_entity++;
-    workplane.h = workplane_handle;
-    slvs_entities.push_back(workplane);
-
-    Slvs_Entity workplane_entity = workplane;
-
-    // First pass: points (and their params).
     for (const auto& entity : request.entities) {
         if (entity.type == "point_2d") {
-            Slvs_hParam px = make_param(entity.x);
-            Slvs_hParam py = make_param(entity.y);
-            param_x_by_id[entity.id] = px;
-            param_y_by_id[entity.id] = py;
-            Slvs_Entity point = Slvs_MakePoint2d(SLVS_FREE_IN_3D, kGroup, workplane_handle, px, py);
-            Slvs_Entity point_stored = point;
-            point_stored.h = next_entity;
-            point.h = next_entity;
-            next_entity++;
-            slvs_entities.push_back(point);
+            Slvs_Entity point = Slvs_AddPoint2D(kGroup, entity.x, entity.y, workplane);
             entity_by_id[entity.id] = point;
-            // Anchor the point if requested.
             if (entity.fixed) {
-                Slvs_hParam ax = make_param(entity.x);
-                Slvs_hParam ay = make_param(entity.y);
-                Slvs_hParam az = make_param(0.0);
-                Slvs_Entity origin = Slvs_MakePoint3d(SLVS_FREE_IN_3D, kGroup, ax, ay, az);
-                Slvs_Entity origin_stored = origin;
-                origin_stored.h = next_entity;
-                origin.h = next_entity;
-                next_entity++;
-                slvs_entities.push_back(origin);
-                entity_by_id[entity.id + "__anchor__"] = origin;
-                Slvs_Constraint fix = Slvs_Coincident(kGroup, point_stored, origin_stored,
-                                                      workplane_entity);
-                add_constraint(fix, entity.id + "__anchor_constraint__");
+                Slvs_Dragged(kGroup, point, workplane);
             }
         } else if (entity.type != "line_segment_2d") {
             emit_diagnostic("request_malformed",
@@ -775,36 +650,31 @@ int main() {
         }
     }
 
-    // Second pass: line segments, referencing point entities.
+    // Second pass: add line segments referencing point entities.
     for (const auto& entity : request.entities) {
         if (entity.type != "line_segment_2d") continue;
         auto start_it = entity_by_id.find(entity.start_id);
         auto end_it = entity_by_id.find(entity.end_id);
         if (start_it == entity_by_id.end() || end_it == entity_by_id.end()) {
-            emit_diagnostic("internal_error", "line references unknown endpoint");
-            return 3;
+            emit_diagnostic("request_malformed", "line references unknown endpoint");
+            return 2;
         }
-        Slvs_Entity line;
-        std::memset(&line, 0, sizeof(line));
-        line.group = kGroup;
-        line.type = SLVS_E_LINE_SEGMENT;
-        line.wrkpl = workplane_handle;
-        line.point[0] = start_it->second.h;
-        line.point[1] = end_it->second.h;
-        add_entity(line, entity.id);
+        Slvs_Entity line = Slvs_AddLine2D(kGroup, start_it->second, end_it->second, workplane);
+        entity_by_id[entity.id] = line;
     }
 
-    // Third pass: constraints.
-    auto require_entity = [&](const std::string& id, Slvs_Entity& out) {
+    // Third pass: add constraints. Capture each constraint's auto-assigned
+    // handle so the bad[] list returned by the solver can be mapped back to
+    // the caller-supplied ids.
+    std::map<Slvs_hConstraint, std::string> handle_to_id;
+    auto require_entity = [&](const std::string& id, Slvs_Entity& out) -> bool {
         auto it = entity_by_id.find(id);
         if (it == entity_by_id.end()) return false;
         out = it->second;
         return true;
     };
     for (const auto& constraint : request.constraints) {
-        Slvs_Constraint c;
-        std::memset(&c, 0, sizeof(c));
-        c.group = kGroup;
+        Slvs_Constraint added{};
         if (constraint.type == "coincident") {
             if (constraint.entities.size() != 2) {
                 emit_diagnostic("request_malformed",
@@ -819,7 +689,7 @@ int main() {
                 emit_diagnostic("request_malformed", "coincident references unknown entity");
                 return 2;
             }
-            c = Slvs_Coincident(kGroup, a, b, workplane_entity);
+            added = Slvs_Coincident(kGroup, a, b, workplane);
         } else if (constraint.type == "distance") {
             if (constraint.entities.size() != 2) {
                 emit_diagnostic("request_malformed",
@@ -834,7 +704,7 @@ int main() {
                 emit_diagnostic("request_malformed", "distance references unknown entity");
                 return 2;
             }
-            c = Slvs_Distance(kGroup, a, b, constraint.value, workplane_entity);
+            added = Slvs_Distance(kGroup, a, b, constraint.value, workplane);
         } else if (constraint.type == "horizontal") {
             if (constraint.entities.size() != 1) {
                 emit_diagnostic("request_malformed",
@@ -847,7 +717,7 @@ int main() {
                 emit_diagnostic("request_malformed", "horizontal references unknown entity");
                 return 2;
             }
-            c = Slvs_Horizontal(kGroup, a, workplane_entity, SLVS_E_NONE);
+            added = Slvs_Horizontal(kGroup, a, workplane, SLVS_E_NONE);
         } else if (constraint.type == "vertical") {
             if (constraint.entities.size() != 1) {
                 emit_diagnostic("request_malformed",
@@ -860,58 +730,35 @@ int main() {
                 emit_diagnostic("request_malformed", "vertical references unknown entity");
                 return 2;
             }
-            c = Slvs_Vertical(kGroup, a, workplane_entity, SLVS_E_NONE);
+            added = Slvs_Vertical(kGroup, a, workplane, SLVS_E_NONE);
         } else {
             emit_diagnostic("request_malformed",
                             "unsupported constraint type \"" + constraint.type + "\"");
             return 2;
         }
-        add_constraint(c, constraint.id);
+        handle_to_id[added.h] = constraint.id;
     }
 
-    sys.param = slvs_params.data();
-    sys.params = static_cast<int>(slvs_params.size());
-    sys.entity = slvs_entities.data();
-    sys.entities = static_cast<int>(slvs_entities.size());
-    sys.constraint = slvs_constraints.data();
-    sys.constraints = static_cast<int>(slvs_constraints.size());
-
-    std::vector<Slvs_hConstraint> failed_buffers(slvs_constraints.size(), 0);
-    sys.calculateFaileds = 1;
-    sys.failed = failed_buffers.data();
-    sys.faileds = static_cast<int>(failed_buffers.size());
-
-    Slvs_Solve(&sys, kGroup);
-
-    int dof = sys.dof;
-    int result = sys.result;
-    int faileds = sys.faileds;
+    // Solve. The bad list is heap-allocated by libslvs when failures are
+    // detected; we own the lifetime and free it after mapping back to IDs.
+    Slvs_hConstraint* bad = nullptr;
+    Slvs_SolveResult sr = Slvs_SolveSketch(kGroup, &bad);
 
     std::string status;
-    switch (result) {
-        case SLVS_RESULT_OKAY: status = "ok"; break;
-        case SLVS_RESULT_INCONSISTENT: status = "inconsistent"; break;
+    switch (sr.result) {
+        case SLVS_RESULT_OKAY:           status = "ok"; break;
+        case SLVS_RESULT_INCONSISTENT:   status = "inconsistent"; break;
         case SLVS_RESULT_DIDNT_CONVERGE: status = "nonconvergent"; break;
         case SLVS_RESULT_TOO_MANY_UNKNOWNS: status = "rank_deficient"; break;
         case SLVS_RESULT_REDUNDANT_OKAY: status = "redundant_okay"; break;
-        default: status = "internal_error"; break;
+        default:                         status = "internal_error"; break;
     }
 
     std::vector<std::string> failed_constraint_ids;
-    if (faileds > 0) {
-        // Build a reverse map: libslvs constraint handle -> user id.
-        std::map<Slvs_hConstraint, std::string> handle_to_user_id;
-        for (const auto& constraint : request.constraints) {
-            auto it = constraint_handle_by_id.find(constraint.id);
-            if (it != constraint_handle_by_id.end()) {
-                handle_to_user_id[it->second] = constraint.id;
-            }
-        }
-        for (int i = 0; i < faileds; ++i) {
-            Slvs_hConstraint bad = failed_buffers[i];
-            if (bad == 0) continue;
-            auto it = handle_to_user_id.find(bad);
-            if (it != handle_to_user_id.end()) {
+    if (bad != nullptr && sr.nbad > 0) {
+        for (int i = 0; i < sr.nbad; ++i) {
+            auto it = handle_to_id.find(bad[i]);
+            if (it != handle_to_id.end()) {
                 failed_constraint_ids.push_back(it->second);
             }
         }
@@ -921,32 +768,23 @@ int main() {
     std::map<std::string, std::pair<double, double>> coordinates;
     for (const auto& entity : request.entities) {
         if (entity.type != "point_2d") continue;
-        auto px_it = param_x_by_id.find(entity.id);
-        auto py_it = param_y_by_id.find(entity.id);
-        if (px_it == param_x_by_id.end() || py_it == param_y_by_id.end()) continue;
-        bool found_x = false;
-        bool found_y = false;
-        double xv = 0.0;
-        double yv = 0.0;
-        for (const auto& p : slvs_params) {
-            if (p.h == px_it->second) {
-                xv = p.val;
-                found_x = true;
-            }
-            if (p.h == py_it->second) {
-                yv = p.val;
-                found_y = true;
-            }
-        }
-        if (found_x && found_y) {
-            double rounded_x = std::round(xv * 1e9) / 1e9;
-            double rounded_y = std::round(yv * 1e9) / 1e9;
-            coordinates[entity.id] = std::make_pair(rounded_x, rounded_y);
-            resolved_entity_ids.push_back(entity.id);
-        }
+        auto it = entity_by_id.find(entity.id);
+        if (it == entity_by_id.end()) continue;
+        const Slvs_Entity& point = it->second;
+        if (point.param[0] == 0 || point.param[1] == 0) continue;
+        double xv = Slvs_GetParamValue(point.param[0]);
+        double yv = Slvs_GetParamValue(point.param[1]);
+        double rounded_x = std::round(xv * 1e9) / 1e9;
+        double rounded_y = std::round(yv * 1e9) / 1e9;
+        coordinates[entity.id] = std::make_pair(rounded_x, rounded_y);
+        resolved_entity_ids.push_back(entity.id);
     }
 
-    emit_response(request.request_id, status, dof, resolved_entity_ids,
+    if (bad != nullptr) {
+        std::free(bad);
+    }
+
+    emit_response(request.request_id, status, sr.dof, resolved_entity_ids,
                   failed_constraint_ids, coordinates);
     return 0;
 }

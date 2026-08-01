@@ -26,6 +26,8 @@ fn main() {
             "threeterm-slvs-worker: THREETERM_SKIP_SLVSBUILD is set; skipping libslvs build."
         );
         write_worker_metadata(&manifest_dir, &out_dir, None, &profile);
+        let stub = out_dir.join("bin/threeterm-slvs-worker");
+        emit_worker_path_rs(&out_dir, &stub);
         return;
     }
 
@@ -40,8 +42,9 @@ fn main() {
         }
         let bin_dir = out_dir.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir creates");
-        compile_worker(&manifest_dir, &out_dir, &prebuilt_lib);
+        let worker_bin = compile_worker(&manifest_dir, &out_dir, &prebuilt_lib);
         write_worker_metadata(&manifest_dir, &out_dir, Some(&prebuilt_lib), &profile);
+        emit_worker_path_rs(&out_dir, &worker_bin);
         return;
     }
 
@@ -57,8 +60,45 @@ fn main() {
         );
     }
 
-    compile_worker(&manifest_dir, &out_dir, &prebuilt_lib);
+    let worker_bin = compile_worker(&manifest_dir, &out_dir, &prebuilt_lib);
     write_worker_metadata(&manifest_dir, &out_dir, Some(&prebuilt_lib), &profile);
+    emit_worker_path_rs(&out_dir, &worker_bin);
+    install_worker_at_target_root(&out_dir);
+}
+
+fn install_worker_at_target_root(out_dir: &Path) {
+    let worker_bin = out_dir.join("bin/threeterm-slvs-worker");
+    if !worker_bin.exists() {
+        return;
+    }
+    let Ok(target_dir) = env::var("CARGO_TARGET_DIR") else { return };
+    let target_dir = PathBuf::from(target_dir);
+    for profile in ["debug", "release"] {
+        let install_dir = target_dir.join(profile).join("bin");
+        let _ = fs::create_dir_all(&install_dir);
+        let dest = install_dir.join("threeterm-slvs-worker");
+        if let Err(error) = fs::copy(&worker_bin, &dest) {
+            eprintln!(
+                "threeterm-slvs-worker: failed to install worker at {}: {}",
+                dest.display(),
+                error
+            );
+        } else {
+            eprintln!(
+                "threeterm-slvs-worker: installed worker binary at {}",
+                dest.display()
+            );
+        }
+    }
+}
+
+fn emit_worker_path_rs(out_dir: &Path, worker_bin: &Path) {
+    let path_str = worker_bin
+        .to_str()
+        .expect("worker path is valid UTF-8")
+        .to_string();
+    let path = out_dir.join("worker_path.txt");
+    fs::write(&path, path_str).expect("worker_path.txt writes");
 }
 
 fn libslvs_soname() -> &'static str {
@@ -189,7 +229,7 @@ fn build_libslvs(solvespace_dir: &Path) {
     }
 }
 
-fn compile_worker(manifest_dir: &Path, out_dir: &Path, libslvs_so: &Path) {
+fn compile_worker(manifest_dir: &Path, out_dir: &Path, libslvs_so: &Path) -> PathBuf {
     let bin_dir = out_dir.join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir creates");
     let worker_src = manifest_dir.join("src-cpp/worker_main.cpp");
@@ -213,10 +253,17 @@ fn compile_worker(manifest_dir: &Path, out_dir: &Path, libslvs_so: &Path) {
     if !status.success() {
         panic!("worker compile failed");
     }
+    // Emit the worker path as both a build-time env var (for tests in the
+    // same crate) and a generated text file embedded into the lib crate
+    // (for downstream crates). `cargo:rustc-env` does not propagate
+    // across crate boundaries, so downstream consumers resolve the path
+    // through the embedded constant instead.
     println!(
         "cargo:rustc-env=THREETERM_SLVSBUILD_WORKER={}",
         worker_bin.display()
     );
+    emit_worker_path_rs(out_dir, &worker_bin);
+    worker_bin
 }
 
 fn libslvs_include_dir(libslvs_so: &Path) -> PathBuf {

@@ -13,6 +13,7 @@ threeterm-domain = { path = "../domain" }
 threeterm-host = { path = "../host" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
+threeterm-slvs-worker = { path = "../workers/slvs" }
 
 [[bin]]
 name = "threeterm"

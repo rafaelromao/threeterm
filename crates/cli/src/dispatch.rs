@@ -5,14 +5,18 @@ use std::path::Path;
 use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
-use threeterm_protocol::diagnostic::Diagnostic;
+use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::iter;
-pub use threeterm_protocol::schema::{LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION};
+pub use threeterm_protocol::schema::{
+    LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SOLVE_SKETCH_RESPONSE_SCHEMA_VERSION,
+};
+use threeterm_slvs_worker::{SketchRequest, SlvsWorker};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
 pub const EXIT_INTEGRITY_FAILURE: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
+pub const EXIT_WORKER_FAILURE: i32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DispatchPlan {
@@ -27,6 +31,10 @@ enum DispatchPlan {
     },
     Load {
         bundle: String,
+    },
+    SolveSketch {
+        bundle: String,
+        sketch_file: String,
     },
     Unknown {
         arg: String,
@@ -66,9 +74,66 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         },
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
+        "solve-sketch" => parse_solve_sketch(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
+    }
+}
+
+fn parse_solve_sketch(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "solve-sketch".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut sketch_file: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if flag == "--bundle" {
+            let Some(value) = args.get(index + 1) else {
+                return DispatchPlan::Unknown {
+                    arg: flag.into_owned(),
+                };
+            };
+            bundle = Some(value.to_string_lossy().into_owned());
+            index += 2;
+            continue;
+        }
+        if flag == "--sketch-file" {
+            let Some(value) = args.get(index + 1) else {
+                return DispatchPlan::Unknown {
+                    arg: flag.into_owned(),
+                };
+            };
+            sketch_file = Some(value.to_string_lossy().into_owned());
+            index += 2;
+            continue;
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(sketch_file) = sketch_file else {
+        return DispatchPlan::Unknown {
+            arg: "--sketch-file".to_string(),
+        };
+    };
+    DispatchPlan::SolveSketch {
+        bundle,
+        sketch_file,
     }
 }
 
@@ -151,6 +216,9 @@ where
             kind,
         } => emit_save(&bundle, &feature_id, &kind, stdout, stderr),
         DispatchPlan::Load { bundle } => emit_load(&bundle, stdout, stderr),
+        DispatchPlan::SolveSketch { bundle, sketch_file } => {
+            emit_solve_sketch(&bundle, &sketch_file, stdout, stderr)
+        }
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
 }
@@ -222,6 +290,83 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
     }
 }
 
+fn emit_solve_sketch(
+    bundle: &str,
+    sketch_file: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let raw = match std::fs::read_to_string(sketch_file) {
+        Ok(raw) => raw,
+        Err(error) => {
+            let diagnostic =
+                Diagnostic::persistence_failure(&format!("sketch file read failed: {error}"));
+            write_diagnostic(stderr, &diagnostic);
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+    };
+    let request: SketchRequest = match serde_json::from_str(&raw) {
+        Ok(request) => request,
+        Err(error) => {
+            let diagnostic =
+                Diagnostic::unknown_command(&format!("sketch envelope invalid: {error}"));
+            write_diagnostic(stderr, &diagnostic);
+            return EXIT_UNKNOWN_COMMAND;
+        }
+    };
+    let worker = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("worker locate failed: {error}");
+            let diagnostic = Diagnostic::integrity_failure(&detail);
+            write_diagnostic(stderr, &diagnostic);
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    match Host::new().solve_sketch(bundle, &request, &worker) {
+        Ok(view) => {
+            let coords = view.solve.coordinates.clone().unwrap_or_default();
+            let value = serde_json::json!({
+                "status": view.solve.status,
+                "dof": view.solve.dof,
+                "resolved_entity_ids": view.solve.resolved_entity_ids,
+                "failed_constraint_ids": view.solve.failed_constraint_ids,
+                "coordinates": coords,
+                "feature_graph_hash": view.snapshot.feature_graph_hash,
+                "revision_hash": view.snapshot.revision_hash,
+                "schema_version": SOLVE_SKETCH_RESPONSE_SCHEMA_VERSION,
+            });
+            write_success(stdout, &value, stderr)
+        }
+        Err(error) => {
+            let detail = format!("{error}");
+            let diagnostic = match &error {
+                HostError::WorkerFailure { .. } | HostError::WorkerUnavailable { .. } => {
+                    Diagnostic {
+                        code: DiagnosticCode::WorkerFailure,
+                        arg: detail.clone(),
+                        schema_version: crate::schema_version(),
+                    }
+                }
+                HostError::SketchNotFullyConstrained { status, dof } => Diagnostic {
+                    code: DiagnosticCode::SketchNotFullyConstrained,
+                    arg: format!("status={status} dof={dof}"),
+                    schema_version: crate::schema_version(),
+                },
+                _ => Diagnostic::integrity_failure(&detail),
+            };
+            write_diagnostic(stderr, &diagnostic);
+            match error {
+                HostError::Persistence(_) => EXIT_PERSISTENCE_FAILURE,
+                HostError::WorkerFailure { .. }
+                | HostError::WorkerUnavailable { .. }
+                | HostError::SketchNotFullyConstrained { .. } => EXIT_WORKER_FAILURE,
+                _ => EXIT_INTEGRITY_FAILURE,
+            }
+        }
+    }
+}
+
 fn write_snapshot(
     feature_graph_hash: &str,
     revision_hash: &str,
@@ -255,10 +400,29 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::BundlePathMissing { .. } => "bundle_path_missing",
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory",
         HostError::Persistence(error) => error.diagnostic_detail(),
+        HostError::WorkerFailure { detail } => detail,
+        HostError::WorkerUnavailable { detail } => detail,
+        HostError::SketchNotFullyConstrained { status, dof } => {
+            return emit_sketch_not_constrained(status, *dof, stderr);
+        }
     };
     let diagnostic = Diagnostic::integrity_failure(detail);
     write_diagnostic(stderr, &diagnostic);
     EXIT_INTEGRITY_FAILURE
+}
+
+fn emit_sketch_not_constrained(
+    status: &str,
+    dof: i64,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let diagnostic = Diagnostic {
+        code: DiagnosticCode::SketchNotFullyConstrained,
+        arg: format!("status={status} dof={dof}"),
+        schema_version: crate::schema_version(),
+    };
+    write_diagnostic(stderr, &diagnostic);
+    EXIT_WORKER_FAILURE
 }
 
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
@@ -304,7 +468,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 4);
+        assert_eq!(commands.len(), 5);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

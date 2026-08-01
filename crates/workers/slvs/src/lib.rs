@@ -17,10 +17,8 @@
 //! `THREETERM_SLVSBUILD_WORKER` environment variable when cargo provides the
 //! path through the build script.
 
-use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +30,9 @@ pub const SCHEMA_VERSION: &str = "threeterm.workers.slvs/1";
 pub fn schema_version() -> &'static str {
     SCHEMA_VERSION
 }
+
+#[doc(hidden)]
+pub const BUILT_WORKER_PATH: &str = include_str!(concat!(env!("OUT_DIR"), "/worker_path.txt"));
 
 pub mod envelope;
 pub use envelope::{SketchEntity, SketchParam, SketchRequest, SketchConstraint, SolveResult};
@@ -116,19 +117,17 @@ pub struct SlvsWorker {
 }
 
 impl SlvsWorker {
-    /// Locate the worker binary. Prefers the `THREETERM_SLVSBUILD_WORKER`
-    /// environment variable (set by `build.rs`), then falls back to the
-    /// `target/<profile>/` and `OUT_DIR/bin/` heuristics, and finally to
-    /// `which`-style lookup under `target/`.
+    /// Locate the worker binary. Prefers the path embedded at build time
+    /// (the `OUT_DIR/bin/threeterm-slvs-worker` produced by `build.rs`),
+    /// then the `THREETERM_SLVSBUILD_WORKER` environment variable, and
+    /// finally the `target/<profile>/bin/` heuristics.
     pub fn locate() -> Result<Self, WorkerError> {
+        let built = PathBuf::from(BUILT_WORKER_PATH.trim());
+        if built.is_file() {
+            return Ok(Self::with_binary_path(built));
+        }
         if let Some(path) = env::var_os("THREETERM_SLVSBUILD_WORKER") {
             let candidate = PathBuf::from(path);
-            if candidate.is_file() {
-                return Ok(Self::with_binary_path(candidate));
-            }
-        }
-        if let Ok(out_dir) = env::var("OUT_DIR") {
-            let candidate = PathBuf::from(out_dir).join("bin/threeterm-slvs-worker");
             if candidate.is_file() {
                 return Ok(Self::with_binary_path(candidate));
             }

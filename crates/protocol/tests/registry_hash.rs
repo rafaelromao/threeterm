@@ -7,7 +7,7 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, SOLVE_SKETCH_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -30,7 +30,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "d157a7980611896a6b66238f23216fd5fd49393e65ecbe7ed5f930ead92fc10b",
+        "0b04f37a14de08c334101c28361fe7bb6702c733dd3ab97bdc96b2b492915abf",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -76,4 +76,42 @@ fn registry_resolves_list_by_command_id() {
     let entry = find(LIST_COMMAND_ID).expect("`list` is the seeded entry");
     assert_eq!(entry.id, LIST_COMMAND_ID);
     assert_eq!(entry.name, "list");
+}
+
+#[test]
+fn registry_contains_versioned_solve_sketch_contract() {
+    let entry = find(SOLVE_SKETCH_COMMAND_ID).expect("solve-sketch is registered");
+    assert_eq!(entry.id, SOLVE_SKETCH_COMMAND_ID);
+    assert_eq!(entry.name, "solve-sketch");
+    assert_eq!(
+        entry.schema_version,
+        "threeterm.command.solve-sketch/1"
+    );
+    assert_eq!(
+        entry.request_schema_version,
+        "threeterm.command.solve-sketch.request/1"
+    );
+    assert_eq!(
+        entry.response_schema_version,
+        "threeterm.command.solve-sketch.response/1"
+    );
+    assert_eq!(entry.request_schema["required"], serde_json::json!(["bundle_path", "sketch"]));
+    assert_eq!(entry.request_schema["additionalProperties"], false);
+    let response_required = entry.response_schema["required"]
+        .as_array()
+        .expect("response.required is an array");
+    for key in [
+        "status",
+        "dof",
+        "resolved_entity_ids",
+        "failed_constraint_ids",
+        "feature_graph_hash",
+        "revision_hash",
+        "schema_version",
+    ] {
+        assert!(
+            response_required.iter().any(|item| item == &serde_json::Value::String(key.to_string())),
+            "response.required missing {key}; got {response_required:?}"
+        );
+    }
 }

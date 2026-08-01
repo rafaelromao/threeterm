@@ -166,6 +166,7 @@ dependencies = [
  "threeterm-host",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-slvs-worker",
 ]
 
 [[package]]
@@ -182,7 +183,9 @@ name = "threeterm-host"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sha2",
  "threeterm-persistence",
+ "threeterm-slvs-worker",
 ]
 
 [[package]]
@@ -219,6 +222,10 @@ dependencies = [
 [[package]]
 name = "threeterm-slvs-worker"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "threeterm-theme"

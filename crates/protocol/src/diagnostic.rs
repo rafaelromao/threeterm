@@ -21,6 +21,8 @@ pub enum DiagnosticCode {
     UnknownCommand,
     PersistenceFailure,
     IntegrityFailure,
+    WorkerFailure,
+    SketchNotFullyConstrained,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:

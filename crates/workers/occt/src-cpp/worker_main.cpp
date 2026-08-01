@@ -29,6 +29,8 @@
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
+#include <Message_ProgressRange.hxx>
+#include <Standard_IStream.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Shape.hxx>
@@ -415,9 +417,8 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
 }
 
 bool analyze_brep(const TopoDS_Shape& shape) {
-    BRepCheck_Analyzer analyzer;
-    analyzer.Initialize(shape);
-    analyzer.SetParallelMode(false);
+    BRepCheck_Analyzer analyzer(shape);
+    analyzer.SetParallel(false);
     return analyzer.IsValid() != 0;
 }
 
@@ -543,11 +544,12 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
 
     TopoDS_Shape base;
     TopoDS_Shape tool;
-    if (!BRepTools::Read(base, base_path_str.c_str(), nullptr)) {
+    BRep_Builder builder;
+    if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
         error = "could not read base BREP at " + base_path_str;
         return false;
     }
-    if (!BRepTools::Read(tool, tool_path_str.c_str(), nullptr)) {
+    if (!BRepTools::Read(tool, tool_path_str.c_str(), builder)) {
         error = "could not read tool BREP at " + tool_path_str;
         return false;
     }

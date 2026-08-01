@@ -9,8 +9,8 @@
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
     EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID,
-    SHELL_COMMAND_ID, find, registry_hash,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
+    SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -33,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "8f4bd8f263d961bef116b15f0a9ac6bdefe18ff82b407528580895b5088eed82",
+        "150d41ed09a999a1e809db5b976b79360aaea241eaedfde94d84917cc3da2503",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -327,4 +327,25 @@ fn registry_contains_versioned_draft_contract() {
         ])
     );
     assert_eq!(draft.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_loft_contract() {
+    let loft = find(LOFT_COMMAND_ID).expect("loft is registered");
+    assert_eq!(loft.id, LOFT_COMMAND_ID);
+    assert_eq!(loft.name, "loft");
+    assert_eq!(loft.schema_version, "threeterm.command.loft/1");
+    assert_eq!(
+        loft.request_schema_version,
+        "threeterm.command.loft.request/1"
+    );
+    assert_eq!(
+        loft.response_schema_version,
+        "threeterm.command.loft.response/1"
+    );
+    assert_eq!(
+        loft.request_schema["required"],
+        serde_json::json!(["bundle_path", "feature_id", "profiles"])
+    );
+    assert_eq!(loft.request_schema["additionalProperties"], false);
 }

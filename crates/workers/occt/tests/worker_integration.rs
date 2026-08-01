@@ -10,8 +10,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ExtrudeRequest, OcctDiagnostic, OcctWorker, Operation, WorkerError,
-    schema_version,
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, OcctDiagnostic, OcctWorker,
+    Operation, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -202,4 +202,163 @@ fn diagnostic_round_trips_with_schema_version() {
     assert_eq!(value["code"], "brep_invalid");
     assert_eq!(value["arg"], "BRepCheck_Analyzer failed");
     assert_eq!(value["schema_version"], schema_version());
+}
+
+fn fillet_request(base_path: &std::path::Path, label: &str) -> FilletRequest {
+    FilletRequest::new(unique_request_id(label), base_path, 0.5).with_feature_id("box-filleted-1")
+}
+
+fn chamfer_request(base_path: &std::path::Path, label: &str) -> ChamferRequest {
+    ChamferRequest::new(unique_request_id(label), base_path, 0.25)
+        .with_feature_id("box-chamfered-1")
+}
+
+#[test]
+fn fillet_of_extruded_box_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-fillet-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = triangle_extrude_request("fillet-base")
+        .with_output_path(&temp, "fillet-base.brep")
+        .with_feature_id("fillet-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = fillet_request(&base_result.brep_path, "fillet-1")
+        .with_output_path(&temp, "fillet-out.brep");
+    let result = worker.fillet(&request).expect("fillet returns");
+    assert_eq!(result.status, "ok", "fillet returned {:?}", result);
+    assert_eq!(result.operation, Operation::Fillet);
+    assert_eq!(result.feature_id, "box-filleted-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "filleted BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("filleted BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "filleted BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn chamfer_of_extruded_box_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-chamfer-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = triangle_extrude_request("chamfer-base")
+        .with_output_path(&temp, "chamfer-base.brep")
+        .with_feature_id("chamfer-base-1");
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+    assert_eq!(base_result.status, "ok");
+
+    let request = chamfer_request(&base_result.brep_path, "chamfer-1")
+        .with_output_path(&temp, "chamfer-out.brep");
+    let result = worker.chamfer(&request).expect("chamfer returns");
+    assert_eq!(result.status, "ok", "chamfer returned {:?}", result);
+    assert_eq!(result.operation, Operation::Chamfer);
+    assert_eq!(result.feature_id, "box-chamfered-1");
+    let brep_path = result.brep_path.clone();
+    assert!(
+        brep_path.is_file(),
+        "chamfered BREP was not written: {brep_path:?}"
+    );
+    let bytes = std::fs::read(&brep_path).expect("chamfered BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "chamfered BREP must start with DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn fillet_with_missing_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = FilletRequest::new(
+        unique_request_id("fillet-missing"),
+        "/no/such/base.brep",
+        0.5,
+    )
+    .with_feature_id("fillet-missing-1");
+    let result = worker.fillet(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn chamfer_with_missing_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = ChamferRequest::new(
+        unique_request_id("chamfer-missing"),
+        "/no/such/base.brep",
+        0.25,
+    )
+    .with_feature_id("chamfer-missing-1");
+    let result = worker.chamfer(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn fillet_with_zero_radius_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = FilletRequest::new(unique_request_id("fillet-zero"), "/tmp/base.brep", 0.0)
+        .with_feature_id("fillet-zero-1");
+    let result = worker.fillet(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn chamfer_with_zero_distance_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = ChamferRequest::new(unique_request_id("chamfer-zero"), "/tmp/base.brep", 0.0)
+        .with_feature_id("chamfer-zero-1");
+    let result = worker.chamfer(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
 }

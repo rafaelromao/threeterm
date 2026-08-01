@@ -5,12 +5,15 @@ use std::path::Path;
 use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::{BooleanFuseRequest, ExtrudeRequest, Operation};
+use threeterm_occt_worker::{
+    BooleanFuseRequest, ChamferRequest, ExtrudeRequest, FilletRequest, Operation,
+};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
 pub use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
+    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
+    EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -45,6 +48,18 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         tool_feature_id: String,
+    },
+    Fillet {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        radius: f64,
+    },
+    Chamfer {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        distance: f64,
     },
     Unknown {
         arg: String,
@@ -86,6 +101,8 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         "load" => parse_load(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
+        "fillet" => parse_fillet(&args[2..]),
+        "chamfer" => parse_chamfer(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -316,6 +333,172 @@ fn parse_boolean_fuse(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_fillet(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "fillet".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut radius: Option<f64> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--radius" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        radius = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--radius {}", value_str),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(radius) = radius else {
+        return DispatchPlan::Unknown {
+            arg: "--radius".to_string(),
+        };
+    };
+    DispatchPlan::Fillet {
+        bundle,
+        feature_id,
+        base_feature_id,
+        radius,
+    }
+}
+
+fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "chamfer".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut distance: Option<f64> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--distance" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        distance = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--distance {}", value_str),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(distance) = distance else {
+        return DispatchPlan::Unknown {
+            arg: "--distance".to_string(),
+        };
+    };
+    DispatchPlan::Chamfer {
+        bundle,
+        feature_id,
+        base_feature_id,
+        distance,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -346,6 +529,32 @@ where
             &feature_id,
             &base_feature_id,
             &tool_feature_id,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Fillet {
+            bundle,
+            feature_id,
+            base_feature_id,
+            radius,
+        } => emit_fillet(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            radius,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Chamfer {
+            bundle,
+            feature_id,
+            base_feature_id,
+            distance,
+        } => emit_chamfer(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            distance,
             stdout,
             stderr,
         ),
@@ -515,6 +724,86 @@ fn emit_boolean_fuse(
     }
 }
 
+fn emit_fillet(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    radius: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().fillet(bundle, request, &worker) {
+        Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_chamfer(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    distance: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = ChamferRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        distance,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().chamfer(bundle, request, &worker) {
+        Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -596,6 +885,52 @@ fn write_boolean_fuse_view(
         &serde_json::json!({
             "status": view.result.status,
             "operation": Operation::BooleanFuse.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_fillet_view(
+    view: &threeterm_host::FilletCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Fillet.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_chamfer_view(
+    view: &threeterm_host::ChamferCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Chamfer.as_str(),
             "feature_id": view.result.feature_id,
             "feature_graph_hash": view.snapshot.feature_graph_hash,
             "revision_hash": view.snapshot.revision_hash,
@@ -690,7 +1025,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands.len(), 8);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -846,6 +1181,90 @@ mod tests {
                     "box-1",
                 ],
                 "--tool",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_fillet_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "fillet"], "fillet"),
+            (
+                vec!["--machine", "fillet", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "fillet",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "fillet-1",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "fillet",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "fillet-1",
+                    "--base",
+                    "box-1",
+                ],
+                "--radius",
+            ),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = dispatch(args(&arguments), &mut stdout, &mut stderr);
+            assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+            let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+            assert_eq!(parsed["arg"], expected);
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_chamfer_arguments() {
+        for (arguments, expected) in [
+            (vec!["--machine", "chamfer"], "chamfer"),
+            (
+                vec!["--machine", "chamfer", "--bundle", "path"],
+                "--feature-id",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "chamfer",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "chamfer-1",
+                ],
+                "--base",
+            ),
+            (
+                vec![
+                    "--machine",
+                    "chamfer",
+                    "--bundle",
+                    "path",
+                    "--feature-id",
+                    "chamfer-1",
+                    "--base",
+                    "box-1",
+                ],
+                "--distance",
             ),
         ] {
             let mut stdout = Vec::new();

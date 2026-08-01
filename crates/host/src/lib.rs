@@ -5,7 +5,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanFuseResult, ExtrudeRequest, ExtrudeResult, OcctWorker, WorkerError,
+    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
+    ExtrudeResult, FilletRequest, FilletResult, OcctWorker, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
 use threeterm_protocol::artifact::{
@@ -54,6 +55,18 @@ pub struct ExtrudeCommitView {
 pub struct BooleanFuseCommitView {
     pub snapshot: SnapshotView,
     pub result: BooleanFuseResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilletCommitView {
+    pub snapshot: SnapshotView,
+    pub result: FilletResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChamferCommitView {
+    pub snapshot: SnapshotView,
+    pub result: ChamferResult,
 }
 
 #[derive(Debug)]
@@ -443,6 +456,88 @@ impl Host {
         };
         let _ = prior_view;
         Ok(BooleanFuseCommitView { snapshot, result })
+    }
+
+    /// Fillet `request` against the disposable OCCT worker and, on
+    /// success, commit the filleted BREP into a new revision.
+    pub fn fillet(
+        &self,
+        root: impl AsRef<Path>,
+        request: FilletRequest,
+        worker: &OcctWorker,
+    ) -> Result<FilletCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.fillet(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "fillet returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(FilletCommitView { snapshot, result })
+    }
+
+    /// Chamfer `request` against the disposable OCCT worker and, on
+    /// success, commit the chamfered BREP into a new revision.
+    pub fn chamfer(
+        &self,
+        root: impl AsRef<Path>,
+        request: ChamferRequest,
+        worker: &OcctWorker,
+    ) -> Result<ChamferCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker.chamfer(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                detail: format!(
+                    "chamfer returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(ChamferCommitView { snapshot, result })
     }
 }
 

@@ -32,6 +32,7 @@
 #include <Message_ProgressRange.hxx>
 #include <Standard_IStream.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>

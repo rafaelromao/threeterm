@@ -220,7 +220,7 @@ impl Supervisor {
                 return self.force_terminate_outcome(
                     request_id,
                     started,
-                    "grace_exceeded",
+                    "cancel_grace_exceeded",
                     None,
                     None,
                 );
@@ -902,6 +902,7 @@ mod tests {
     #[test]
     fn cancel_checks_deadline_after_a_mismatched_acknowledgement() {
         struct MismatchedAcknowledgementWorker {
+            responses: VecDeque<Result<Envelope, WorkerError>>,
             recv_calls: Arc<Mutex<usize>>,
             terminated: Arc<Mutex<usize>>,
         }
@@ -913,11 +914,9 @@ mod tests {
 
             fn recv(&mut self, _: Instant) -> Result<Envelope, WorkerError> {
                 *self.recv_calls.lock().expect("receive count mutex") += 1;
-                Ok(Envelope::Cancelled {
-                    schema_version: crate::schema_version().to_string(),
-                    request_id: "other-request".to_string(),
-                    reason: "not this cancellation".to_string(),
-                })
+                self.responses
+                    .pop_front()
+                    .unwrap_or(Err(WorkerError::TimedOut))
             }
 
             fn cancel(&mut self, _: &str, _: &str) -> Result<(), WorkerError> {
@@ -933,6 +932,15 @@ mod tests {
         let recv_calls = Arc::new(Mutex::new(0));
         let terminated = Arc::new(Mutex::new(0));
         let worker = MismatchedAcknowledgementWorker {
+            responses: vec![
+                Ok(Envelope::Cancelled {
+                    schema_version: crate::schema_version().to_string(),
+                    request_id: "other-request".to_string(),
+                    reason: "not this cancellation".to_string(),
+                }),
+                Err(WorkerError::TimedOut),
+            ]
+            .into(),
             recv_calls: Arc::clone(&recv_calls),
             terminated: Arc::clone(&terminated),
         };
@@ -942,7 +950,7 @@ mod tests {
         else {
             panic!("expected force termination");
         };
-        assert_eq!(record.stage, "grace_exceeded");
+        assert_eq!(record.stage, "cancel_grace_exceeded");
         assert_eq!(*recv_calls.lock().expect("receive count mutex"), 1);
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }

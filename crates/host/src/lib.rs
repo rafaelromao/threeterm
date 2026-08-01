@@ -299,12 +299,7 @@ impl Host {
                 "artifact_schema_mismatch",
             ));
         }
-        self.accept_staged_artifact(
-            root,
-            request,
-            expected_worker,
-            artifact.header,
-        )
+        self.accept_staged_artifact(root, request, expected_worker, artifact.header)
     }
 
     fn accept_staged_artifact(

@@ -485,7 +485,12 @@ impl Supervisor {
         }
     }
 
-    fn record_artifact(&mut self, schema_version: String, header: ArtifactHeader, request: &Request) {
+    fn record_artifact(
+        &mut self,
+        schema_version: String,
+        header: ArtifactHeader,
+        request: &Request,
+    ) {
         let _ = request;
         self.artifact_headers.push(StagedArtifact {
             schema_version,

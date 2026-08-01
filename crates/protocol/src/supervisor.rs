@@ -170,14 +170,17 @@ impl Supervisor {
                     ..
                 }) => {
                     if ack_request_id != request_id {
-                        continue;
+                        // A buffered stream of acknowledgements for other
+                        // requests must not keep cancellation alive past its
+                        // deadline.
+                    } else {
+                        self.discard_stage();
+                        return SupervisorOutcome::Acknowledged {
+                            request_id: ack_request_id,
+                            reason: ack_reason,
+                            elapsed: started.elapsed(),
+                        };
                     }
-                    self.discard_stage();
-                    return SupervisorOutcome::Acknowledged {
-                        request_id: ack_request_id,
-                        reason: ack_reason,
-                        elapsed: started.elapsed(),
-                    };
                 }
                 Ok(Envelope::Progress { .. }) => {}
                 Ok(Envelope::Artifact { header, .. }) => {
@@ -893,6 +896,54 @@ mod tests {
             panic!("expected force termination");
         };
         assert_eq!(record.stage, "cancel_grace_exceeded");
+        assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn cancel_checks_deadline_after_a_mismatched_acknowledgement() {
+        struct MismatchedAcknowledgementWorker {
+            recv_calls: Arc<Mutex<usize>>,
+            terminated: Arc<Mutex<usize>>,
+        }
+
+        impl WorkerHost for MismatchedAcknowledgementWorker {
+            fn send(&mut self, _: &Envelope) -> Result<(), WorkerError> {
+                Ok(())
+            }
+
+            fn recv(&mut self, _: Instant) -> Result<Envelope, WorkerError> {
+                *self.recv_calls.lock().expect("receive count mutex") += 1;
+                Ok(Envelope::Cancelled {
+                    schema_version: crate::schema_version().to_string(),
+                    request_id: "other-request".to_string(),
+                    reason: "not this cancellation".to_string(),
+                })
+            }
+
+            fn cancel(&mut self, _: &str, _: &str) -> Result<(), WorkerError> {
+                Ok(())
+            }
+
+            fn terminate(&mut self) -> Result<(), WorkerError> {
+                *self.terminated.lock().expect("termination log mutex") += 1;
+                Ok(())
+            }
+        }
+
+        let recv_calls = Arc::new(Mutex::new(0));
+        let terminated = Arc::new(Mutex::new(0));
+        let worker = MismatchedAcknowledgementWorker {
+            recv_calls: Arc::clone(&recv_calls),
+            terminated: Arc::clone(&terminated),
+        };
+        let mut supervisor = Supervisor::new(Duration::ZERO, Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop")
+        else {
+            panic!("expected force termination");
+        };
+        assert_eq!(record.stage, "grace_exceeded");
+        assert_eq!(*recv_calls.lock().expect("receive count mutex"), 1);
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }
 

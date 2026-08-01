@@ -262,14 +262,14 @@ pub struct SubprocessWorkerHost {
 
 impl SubprocessWorkerHost {
     pub fn new(mut child: Child) -> Result<Self, WorkerError> {
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| WorkerError::Io(std::io::Error::other("worker stdin was not piped")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| WorkerError::Io(std::io::Error::other("worker stdout was not piped")))?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => return Err(missing_pipe_error(&mut child, "stdin")),
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => return Err(missing_pipe_error(&mut child, "stdout")),
+        };
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
@@ -296,6 +296,15 @@ impl SubprocessWorkerHost {
             transport: FramedWorkerHost::new(inbound_rx, outbound_tx),
         })
     }
+}
+
+fn missing_pipe_error(child: &mut Child, pipe: &str) -> WorkerError {
+    // Constructor failure must not leave a disposable worker running.
+    let _ = child.kill();
+    let _ = child.wait();
+    WorkerError::Io(std::io::Error::other(format!(
+        "worker {pipe} was not piped"
+    )))
 }
 
 impl WorkerHost for SubprocessWorkerHost {

@@ -7,8 +7,8 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, EXTRUDE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID,
-    find, registry_hash,
+    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -31,7 +31,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "935557b57a26224da1da8de07c0a874fb6b0422e04a0e39b652844ef8ce5fc95",
+        "eea1f75e77e1425be1d2f2268066ec0c2bf611fc21e0c6344ad305cc0142b0ac",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -100,6 +100,33 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
         ])
     );
     assert_eq!(fuse.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_fillet_and_chamfer_contracts() {
+    let fillet = find(FILLET_COMMAND_ID).expect("fillet is registered");
+    assert_eq!(fillet.name, "fillet");
+    assert_eq!(
+        fillet.response_schema_version,
+        "threeterm.command.fillet.response/1"
+    );
+    assert_eq!(
+        fillet.request_schema["required"],
+        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "radius"])
+    );
+    assert_eq!(fillet.request_schema["additionalProperties"], false);
+
+    let chamfer = find(CHAMFER_COMMAND_ID).expect("chamfer is registered");
+    assert_eq!(chamfer.name, "chamfer");
+    assert_eq!(
+        chamfer.response_schema_version,
+        "threeterm.command.chamfer.response/1"
+    );
+    assert_eq!(
+        chamfer.request_schema["required"],
+        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "distance"])
+    );
+    assert_eq!(chamfer.request_schema["additionalProperties"], false);
 }
 
 #[test]

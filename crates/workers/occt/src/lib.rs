@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod envelope;
 pub use envelope::{
-    BooleanFuseRequest, BooleanFuseResult, ExtrudeRequest, ExtrudeResult, Operation, SCHEMA_VERSION,
+    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, ExtrudeRequest,
+    ExtrudeResult, FilletRequest, FilletResult, Operation, SCHEMA_VERSION,
 };
 
 pub fn schema_version() -> &'static str {
@@ -181,6 +182,24 @@ impl OcctWorker {
         self.invoke(&bytes)?.into_boolean_fuse()
     }
 
+    /// Fillet `request` by spawning the worker process. See module
+    /// docs for the disposable-worker contract.
+    pub fn fillet(&self, request: &FilletRequest) -> Result<FilletResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("fillet request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_fillet()
+    }
+
+    /// Chamfer `request` by spawning the worker process. See module
+    /// docs for the disposable-worker contract.
+    pub fn chamfer(&self, request: &ChamferRequest) -> Result<ChamferResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("chamfer request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_chamfer()
+    }
+
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
         let mut child = Command::new(&self.binary_path)
             .stdin(Stdio::piped())
@@ -277,6 +296,36 @@ impl RawResult {
             },
         }
     }
+
+    fn into_fillet(self) -> Result<FilletResult, WorkerError> {
+        match serde_json::from_str::<FilletResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "fillet response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
+
+    fn into_chamfer(self) -> Result<ChamferResult, WorkerError> {
+        match serde_json::from_str::<ChamferResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "chamfer response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -296,6 +345,14 @@ pub fn parse_extrude_request(raw: &str) -> Result<ExtrudeRequest, serde_json::Er
 }
 
 pub fn parse_boolean_fuse_request(raw: &str) -> Result<BooleanFuseRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_fillet_request(raw: &str) -> Result<FilletRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_chamfer_request(raw: &str) -> Result<ChamferRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 

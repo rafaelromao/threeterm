@@ -1510,28 +1510,40 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Build a list of every face on the base solid. An empty
-        // Join/Del list lets `MakeThickSolidByJoin` treat every face
-        // in the context as part of the offset surface, so a
-        // negative offset shrinks every face inward uniformly into a
-        // hollow shell with `thickness`-wide walls.
-        TopTools_ListOfShape faces;
-        for (TopExp_Explorer explorer(base, TopAbs_FACE); explorer.More();
-             explorer.Next()) {
-            faces.Append(TopoDS::Face(explorer.Current()));
-        }
-        TopTools_ListOfShape empty;
+        // Hollow the solid by subtracting an inward-offset copy
+        // from it. `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin`
+        // takes the base solid as the surface to join with the offset
+        // (`SJoin`), an empty list of faces to delete (`SDel`),
+        // and a negative offset distance. The result is the base
+        // solid shrunk inward by `thickness` on every face. Then
+        // `BRepAlgoAPI_Cut(base, inner)` carves that inner volume
+        // out of the original, leaving a hollow shell with
+        // `thickness`-wide walls.
         BRepOffsetAPI_MakeThickSolid thickener;
         thickener.MakeThickSolidByJoin(
-            empty, empty, faces, -thickness, 1.0e-6,
-            Standard_False, Standard_False);
+            base, TopTools_ListOfShape(),
+            -thickness, 1.0e-6,
+            BRepOffset_Skin, Standard_False, Standard_False,
+            GeomAbs_Intersection, Standard_False);
         if (!thickener.IsDone()) {
             error = "BRepOffsetAPI_MakeThickSolid did not complete";
             return false;
         }
-        TopoDS_Shape result = thickener.Shape();
-        if (result.IsNull()) {
+        TopoDS_Shape inner_shape = thickener.Shape();
+        if (inner_shape.IsNull()) {
             error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
+            return false;
+        }
+
+        BRepAlgoAPI_Cut cut(base, inner_shape);
+        cut.Build();
+        if (!cut.IsDone()) {
+            error = "BRepAlgoAPI_Cut did not complete during shell";
+            return false;
+        }
+        TopoDS_Shape result = cut.Shape();
+        if (result.IsNull()) {
+            error = "BRepAlgoAPI_Cut returned a null shape";
             return false;
         }
 

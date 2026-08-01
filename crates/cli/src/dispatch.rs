@@ -274,6 +274,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
                 .all(|value| value.is_finite())
                 && angle_step.is_finite()
         }
+        DispatchPlan::Loft { .. } => true,
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
@@ -1772,13 +1773,13 @@ fn execute_handler(
         DispatchPlan::Loft {
             bundle,
             feature_id,
-            profile_files,
             is_solid,
             ruled,
+            ..
         } => emit_loft(
             &bundle,
             &feature_id,
-            &profile_files,
+            profiles_from_request(request),
             is_solid,
             ruled,
             stdout,
@@ -1935,6 +1936,16 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction })
         }
+        DispatchPlan::Loft {
+            bundle,
+            feature_id,
+            profile_files,
+            is_solid,
+            ruled,
+        } => {
+            let profiles: Result<Vec<_>, _> = profile_files.iter().map(|path| read_profile_3d(path)).collect();
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled })
+        }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
         }
@@ -2023,6 +2034,11 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
 fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
     serde_json::from_value(request["profile"].clone())
         .expect("registered profile schema guarantees coordinate pairs")
+}
+
+fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
+    serde_json::from_value(request["profiles"].clone())
+        .expect("registered loft schema guarantees profile triples")
 }
 
 fn emit_extrude(
@@ -2513,22 +2529,12 @@ fn emit_draft(
 fn emit_loft(
     bundle: &str,
     feature_id: &str,
-    profile_files: &[String],
+    profiles: Vec<Vec<[f64; 3]>>,
     is_solid: bool,
     ruled: bool,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let mut profiles: Vec<Vec<[f64; 3]>> = Vec::with_capacity(profile_files.len());
-    for path in profile_files {
-        match read_profile_3d(path) {
-            Ok(profile) => profiles.push(profile),
-            Err(error) => {
-                write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
-                return EXIT_PERSISTENCE_FAILURE;
-            }
-        }
-    }
     let worker = match threeterm_occt_worker::OcctWorker::locate() {
         Ok(worker) => worker,
         Err(error) => {

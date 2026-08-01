@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
-    HoleRequest, LinearPatternRequest, MirrorRequest, OcctDiagnostic, OcctWorker, Operation,
-    RevolveRequest, WorkerError, schema_version,
+    HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, OcctDiagnostic, OcctWorker,
+    Operation, RevolveRequest, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -1109,6 +1109,88 @@ fn circular_pattern_with_zero_angle_step_returns_request_malformed() {
     );
     request.angle_step = 0.0;
     let result = worker.circular_pattern(&request);
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+fn canonical_loft_request() -> LoftRequest {
+    LoftRequest::new(
+        unique_request_id("loft"),
+        vec![
+            vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 10.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ],
+            vec![
+                [2.5, 2.5, 5.0],
+                [7.5, 2.5, 5.0],
+                [7.5, 7.5, 5.0],
+                [2.5, 7.5, 5.0],
+            ],
+        ],
+    )
+    .with_feature_id("loft-1")
+}
+
+#[test]
+fn loft_two_rectangles_returns_ok_with_real_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-loft-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let request = canonical_loft_request().with_output_path(&temp, "loft.brep");
+    let result = worker.loft(&request).expect("loft returns");
+
+    assert_eq!(result.status, "ok", "loft returned {:?}", result);
+    assert_eq!(result.operation, Operation::Loft);
+    assert_eq!(result.feature_id, "loft-1");
+    let brep_path = result.brep_path.clone();
+    assert!(brep_path.is_file(), "BREP was not written: {brep_path:?}");
+    let bytes = std::fs::read(&brep_path).expect("BREP reads");
+    assert!(!bytes.is_empty());
+    assert_eq!(result.brep_bytes, bytes.len());
+    assert_eq!(result.brep_sha256.len(), 64);
+    // The OCCT BREP file starts with the `DBRep_DrawableShape` marker
+    // emitted by `BRepTools::Write`. Asserting on the prefix proves
+    // the file is a real OCCT shape — not an empty payload or a
+    // hand-coded fixture.
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn loft_with_single_profile_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp =
+        std::env::temp_dir().join(format!("threeterm-occt-loft-single-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let request = LoftRequest::new(
+        unique_request_id("loft-single"),
+        vec![vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]],
+    )
+    .with_output_path(&temp, "loft-single.brep")
+    .with_feature_id("loft-single-1");
+
+    let result = worker.loft(&request);
     match result {
         Err(WorkerError::Diagnostic(diag)) => {
             assert_eq!(diag.code, "request_malformed");

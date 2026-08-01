@@ -34,9 +34,9 @@ pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult,
-    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
-    ShellRequest, ShellResult,
+    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
+    LoftResult, MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult,
+    SCHEMA_VERSION, ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -277,6 +277,15 @@ impl OcctWorker {
         self.invoke(&bytes)?.into_draft()
     }
 
+    /// Loft `request` by spawning the worker process. See module docs
+    /// for the disposable-worker contract.
+    pub fn loft(&self, request: &LoftRequest) -> Result<LoftResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("loft request serialization failed: {error}"),
+        })?;
+        self.invoke(&bytes)?.into_loft()
+    }
+
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
         let mut child = Command::new(&self.binary_path)
             .stdin(Stdio::piped())
@@ -508,6 +517,21 @@ impl RawResult {
             },
         }
     }
+
+    fn into_loft(self) -> Result<LoftResult, WorkerError> {
+        match serde_json::from_str::<LoftResult>(&self.line) {
+            Ok(result) => Ok(result),
+            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
+                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
+                Err(error) => Err(WorkerError::Malformed {
+                    detail: format!(
+                        "loft response could not be parsed: {error}; line={}",
+                        self.line
+                    ),
+                }),
+            },
+        }
+    }
 }
 
 /// Helper for tests and consumers that need a deterministic request
@@ -565,6 +589,10 @@ pub fn parse_shell_request(raw: &str) -> Result<ShellRequest, serde_json::Error>
 }
 
 pub fn parse_draft_request(raw: &str) -> Result<DraftRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_loft_request(raw: &str) -> Result<LoftRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -893,5 +921,62 @@ mod tests {
         assert_eq!(value["angle"], std::f64::consts::FRAC_PI_2 / 6.0);
         assert_eq!(value["pull_direction"], serde_json::json!([0.0, 0.0, 1.0]));
         assert_eq!(value["feature_id"], "draft-1");
+    }
+
+    #[test]
+    fn loft_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "loft",
+            "profiles": [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]]],
+            "rogue_key": true
+        }"#;
+        assert!(parse_loft_request(raw).is_err());
+    }
+
+    #[test]
+    fn loft_envelope_accepts_canonical_shape() {
+        let request = LoftRequest::new(
+            "req-1",
+            vec![
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.0, 10.0, 0.0],
+                ],
+                vec![
+                    [2.5, 2.5, 5.0],
+                    [7.5, 2.5, 5.0],
+                    [7.5, 7.5, 5.0],
+                    [2.5, 7.5, 5.0],
+                ],
+            ],
+        )
+        .with_feature_id("loft-1");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "loft");
+        assert_eq!(value["is_solid"], true);
+        assert_eq!(value["ruled"], false);
+        assert_eq!(
+            value["profiles"],
+            serde_json::json!([
+                [
+                    [0.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.0, 10.0, 0.0]
+                ],
+                [
+                    [2.5, 2.5, 5.0],
+                    [7.5, 2.5, 5.0],
+                    [7.5, 7.5, 5.0],
+                    [2.5, 7.5, 5.0]
+                ]
+            ])
+        );
+        assert_eq!(value["feature_id"], "loft-1");
     }
 }

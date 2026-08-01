@@ -49,6 +49,7 @@ pub enum Operation {
     CircularPattern,
     Shell,
     Draft,
+    Loft,
 }
 
 impl Operation {
@@ -65,6 +66,7 @@ impl Operation {
             Self::CircularPattern => "circular_pattern",
             Self::Shell => "shell",
             Self::Draft => "draft",
+            Self::Loft => "loft",
         }
     }
 }
@@ -1467,6 +1469,145 @@ impl DraftResult {
     }
 }
 
+/// Loft request: build a solid that passes through a sequence of closed
+/// 2D profiles placed at arbitrary `[x, y, z]` positions. The OCCT
+/// worker constructs each profile wire with `BRepBuilderAPI_MakePolygon`
+/// using the 3D coordinates, feeds the wires to
+/// `BRepOffsetAPI_ThruSections` in declaration order, and writes the
+/// resulting solid (or shell) to `<output_dir>/<output_filename>`. When
+/// `is_solid` is true (the default) the worker builds a closed solid;
+/// otherwise it emits the open shell. When `ruled` is true the faces
+/// between consecutive profiles are ruled (flat between edges); the
+/// default is smooth interpolation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoftRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    /// Ordered list of closed profiles. Each profile is a list of
+    /// `[x, y, z]` vertices; the polygon is closed implicitly by the
+    /// worker. Two or more profiles are required.
+    pub profiles: Vec<Vec<[f64; 3]>>,
+    /// Build a closed solid (default `true`). When `false` the result
+    /// is an open shell.
+    pub is_solid: bool,
+    /// Use ruled (flat) faces between consecutive profiles (default
+    /// `false`, smooth interpolation).
+    pub ruled: bool,
+    /// Output directory where the worker writes the BREP file.
+    pub output_dir: PathBuf,
+    /// Output file name (no path separators; the worker uses this
+    /// filename literally, so callers should include the `.brep`
+    /// extension).
+    pub output_filename: String,
+    /// Stable ThreeTerm feature id the host will commit.
+    pub feature_id: String,
+}
+
+impl LoftRequest {
+    pub fn new(request_id: impl Into<String>, profiles: Vec<Vec<[f64; 3]>>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Loft,
+            profiles,
+            is_solid: true,
+            ruled: false,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_solid(mut self, is_solid: bool) -> Self {
+        self.is_solid = is_solid;
+        self
+    }
+
+    pub fn with_ruled(mut self, ruled: bool) -> Self {
+        self.ruled = ruled;
+        self
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Loft {
+            return Err(format!(
+                "operation must be loft for LoftRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.profiles.len() < 2 {
+            return Err("loft requires at least two profiles".to_string());
+        }
+        for (index, profile) in self.profiles.iter().enumerate() {
+            if profile.len() < 3 {
+                return Err(format!(
+                    "loft profile {index} must contain at least 3 vertices; got {}",
+                    profile.len()
+                ));
+            }
+            for vertex in profile.iter() {
+                if !vertex.iter().all(|component| component.is_finite()) {
+                    return Err(format!(
+                        "loft profile {index} contains non-finite coordinates"
+                    ));
+                }
+            }
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoftResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl LoftResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2738,6 +2879,178 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "draft-1".to_string(),
+        };
+        assert!(result.is_success());
+
+        result.status = "brep_invalid".to_string();
+        assert!(!result.is_success());
+    }
+
+    fn canonical_loft_request() -> LoftRequest {
+        // Two rectangular profiles of the same edge count, stacked at
+        // Z=0 (10x10) and Z=5 (5x5), produces a solid frustum.
+        LoftRequest::new(
+            "req-1",
+            vec![
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.0, 10.0, 0.0],
+                ],
+                vec![
+                    [2.5, 2.5, 5.0],
+                    [7.5, 2.5, 5.0],
+                    [7.5, 7.5, 5.0],
+                    [2.5, 7.5, 5.0],
+                ],
+            ],
+        )
+        .with_output_path("/tmp", "lofted.brep")
+        .with_feature_id("loft-1")
+    }
+
+    #[test]
+    fn operation_as_str_returns_snake_case_for_loft() {
+        assert_eq!(Operation::Loft.as_str(), "loft");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_loft() {
+        let mut request = canonical_loft_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("loft envelope is valid");
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_single_profile() {
+        let mut request = LoftRequest::new(
+            "req-1",
+            vec![vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]],
+        )
+        .with_output_path("/tmp", "out.brep")
+        .with_feature_id("loft-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_short_profile() {
+        let mut request = LoftRequest::new(
+            "req-1",
+            vec![
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            ],
+        )
+        .with_output_path("/tmp", "out.brep")
+        .with_feature_id("loft-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_non_finite_profile() {
+        let mut request = LoftRequest::new(
+            "req-1",
+            vec![
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+                vec![[0.0, 0.0, 0.0], [f64::NAN, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            ],
+        )
+        .with_output_path("/tmp", "out.brep")
+        .with_feature_id("loft-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_empty_feature_id() {
+        let mut request = canonical_loft_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.feature_id = String::new();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_wrong_operation() {
+        let mut request = canonical_loft_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::Draft;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_output_filename_with_path_separator() {
+        let mut request = canonical_loft_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.output_filename = "sub/out.brep".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_loft_with_unknown_schema_version() {
+        let mut request = canonical_loft_request();
+        request.schema_version = "threeterm.workers.occt/0".to_string();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn loft_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "loft",
+            "profiles": [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]]],
+            "rogue_key": true
+        }"#;
+        assert!(serde_json::from_str::<LoftRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn loft_envelope_round_trips_through_canonical_json() {
+        let mut request = canonical_loft_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        let value = serde_json::to_value(&request).expect("loft request serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["request_id"], "req-1");
+        assert_eq!(value["operation"], "loft");
+        assert_eq!(value["is_solid"], true);
+        assert_eq!(value["ruled"], false);
+        assert_eq!(
+            value["profiles"],
+            serde_json::json!([
+                [
+                    [0.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.0, 10.0, 0.0]
+                ],
+                [
+                    [2.5, 2.5, 5.0],
+                    [7.5, 2.5, 5.0],
+                    [7.5, 7.5, 5.0],
+                    [2.5, 7.5, 5.0]
+                ]
+            ])
+        );
+        assert_eq!(value["feature_id"], "loft-1");
+        let decoded: LoftRequest =
+            serde_json::from_value(value).expect("loft request deserializes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn loft_result_is_success_predicate() {
+        let mut result = LoftResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::Loft,
+            status: "ok".to_string(),
+            brep_path: PathBuf::from("/tmp/out.brep"),
+            brep_sha256: "deadbeef".to_string(),
+            brep_bytes: 42,
+            feature_id: "loft-1".to_string(),
         };
         assert!(result.is_success());
 

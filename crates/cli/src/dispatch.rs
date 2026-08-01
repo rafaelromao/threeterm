@@ -7,8 +7,8 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest, Operation, RevolveRequest,
-    ShellRequest,
+    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
+    RevolveRequest, ShellRequest,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::iter;
@@ -17,8 +17,8 @@ pub use threeterm_protocol::schema::{
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
     EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
     LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
-    MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
-    SHELL_RESPONSE_SCHEMA_VERSION,
+    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -119,6 +119,14 @@ enum DispatchPlan {
         angle: f64,
         pull_direction: [f64; 3],
     },
+    Loft {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        profile_files: Vec<String>,
+        is_solid: bool,
+        ruled: bool,
+    },
     Unknown {
         arg: String,
     },
@@ -168,6 +176,7 @@ fn plan(args: &[OsString]) -> DispatchPlan {
         "circular-pattern" => parse_circular_pattern(&args[2..]),
         "shell" => parse_shell(&args[2..]),
         "draft" => parse_draft(&args[2..]),
+        "loft" => parse_loft(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -1367,6 +1376,105 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
     }
 }
 
+fn parse_loft(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "loft".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut profile_files: Vec<String> = Vec::new();
+    let mut is_solid = true;
+    let mut ruled = false;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--profile-file" => {
+                    profile_files.push(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--is-solid" => match value_str.parse::<bool>() {
+                    Ok(parsed) => {
+                        is_solid = parsed;
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--is-solid {value_str}"),
+                        };
+                    }
+                },
+                "--ruled" => match value_str.parse::<bool>() {
+                    Ok(parsed) => {
+                        ruled = parsed;
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--ruled {value_str}"),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    if profile_files.len() < 2 {
+        return DispatchPlan::Unknown {
+            arg: "--profile-file".to_string(),
+        };
+    }
+    DispatchPlan::Loft {
+        bundle,
+        feature_id,
+        base_feature_id: base_feature_id.unwrap_or_default(),
+        profile_files,
+        is_solid,
+        ruled,
+    }
+}
+
 pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = OsString>,
@@ -1536,6 +1644,23 @@ where
             &base_feature_id,
             angle,
             pull_direction,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Loft {
+            bundle,
+            feature_id,
+            base_feature_id,
+            profile_files,
+            is_solid,
+            ruled,
+        } => emit_loft(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            &profile_files,
+            is_solid,
+            ruled,
             stdout,
             stderr,
         ),
@@ -2114,6 +2239,48 @@ fn emit_draft(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_loft(
+    bundle: &str,
+    feature_id: &str,
+    _base_feature_id: &str,
+    profile_files: &[String],
+    is_solid: bool,
+    ruled: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut profiles: Vec<Vec<[f64; 3]>> = Vec::with_capacity(profile_files.len());
+    for path in profile_files {
+        match read_profile_3d(path) {
+            Ok(profile) => profiles.push(profile),
+            Err(error) => {
+                write_diagnostic(stderr, &Diagnostic::persistence_failure(&error));
+                return EXIT_PERSISTENCE_FAILURE;
+            }
+        }
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!("{feature_id}.brep");
+    let request = LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
+        .with_solid(is_solid)
+        .with_ruled(ruled)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().loft(bundle, request, &worker) {
+        Ok(view) => write_loft_view(&view, LOFT_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -2139,6 +2306,38 @@ fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
             .as_f64()
             .ok_or_else(|| format!("profile entry y {:?} must be a number", pair[1]))?;
         profile.push((x, y));
+    }
+    Ok(profile)
+}
+
+fn read_profile_3d(profile_file: &str) -> Result<Vec<[f64; 3]>, String> {
+    let raw = std::fs::read_to_string(profile_file)
+        .map_err(|error| format!("profile file read failed: {error}"))?;
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("profile JSON parse failed: {error}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| "profile JSON must be a top-level array".to_string())?;
+    let mut profile = Vec::with_capacity(array.len());
+    for entry in array {
+        let triple = entry
+            .as_array()
+            .ok_or_else(|| format!("profile entry {entry:?} must be a [x, y, z] array"))?;
+        if triple.len() != 3 {
+            return Err(format!(
+                "profile entry {entry:?} must contain exactly three numbers"
+            ));
+        }
+        let x = triple[0]
+            .as_f64()
+            .ok_or_else(|| format!("profile entry x {:?} must be a number", triple[0]))?;
+        let y = triple[1]
+            .as_f64()
+            .ok_or_else(|| format!("profile entry y {:?} must be a number", triple[1]))?;
+        let z = triple[2]
+            .as_f64()
+            .ok_or_else(|| format!("profile entry z {:?} must be a number", triple[2]))?;
+        profile.push([x, y, z]);
     }
     Ok(profile)
 }
@@ -2414,6 +2613,29 @@ fn write_draft_view(
     )
 }
 
+fn write_loft_view(
+    view: &threeterm_host::LoftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Loft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
     match serde_json::to_writer_pretty(&mut *stdout, value) {
         Ok(()) => {
@@ -2496,7 +2718,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 15);
+        assert_eq!(commands.len(), 16);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -3560,5 +3782,105 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "--pull-direction 0,x,1");
+    }
+
+    #[test]
+    fn dispatch_rejects_missing_loft_arguments() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(args(&["--machine", "loft"]), &mut stdout, &mut stderr);
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "loft");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&["--machine", "loft", "--bundle", "path"]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--feature-id");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "loft",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "loft-1",
+                "--profile-file",
+                "a.json",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--profile-file");
+    }
+
+    #[test]
+    fn dispatch_rejects_loft_with_non_boolean_is_solid() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "loft",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "loft-1",
+                "--profile-file",
+                "a.json",
+                "--profile-file",
+                "b.json",
+                "--is-solid",
+                "maybe",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--is-solid maybe");
+    }
+
+    #[test]
+    fn dispatch_rejects_loft_with_non_boolean_ruled() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch(
+            args(&[
+                "--machine",
+                "loft",
+                "--bundle",
+                "path",
+                "--feature-id",
+                "loft-1",
+                "--profile-file",
+                "a.json",
+                "--profile-file",
+                "b.json",
+                "--ruled",
+                "kinda",
+            ]),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_UNKNOWN_COMMAND);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unknown_command");
+        assert_eq!(parsed["arg"], "--ruled kinda");
     }
 }

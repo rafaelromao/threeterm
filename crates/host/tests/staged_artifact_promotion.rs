@@ -7,7 +7,7 @@ use threeterm_occt_worker::{emit_staged_artifact, worker_fingerprint};
 use threeterm_protocol::artifact::Layer1ArtifactRequest;
 use threeterm_protocol::diagnostic::DiagnosticCode;
 use threeterm_protocol::frame::FrameParser;
-use threeterm_protocol::supervisor::{Request, Supervisor, SupervisorOutcome};
+use threeterm_protocol::supervisor::{Request, StagedArtifact, Supervisor, SupervisorOutcome};
 use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
 
 struct CompletedWorker {
@@ -149,12 +149,19 @@ fn host_accepts_completed_worker_result_before_publishing() {
     };
     let emitted = emit_staged_artifact(&artifact_root, &request, b"worker result")
         .expect("worker stages artifact bytes");
-    let Envelope::Artifact { header, .. } = wire_round_trip(&emitted) else {
+    let Envelope::Artifact {
+        schema_version,
+        header,
+    } = wire_round_trip(&emitted)
+    else {
         panic!("worker emits an artifact envelope");
     };
     let outcome = SupervisorOutcome::Completed {
         request_id: request.request_id.clone(),
-        artifact_headers: vec![*header],
+        artifact_headers: vec![StagedArtifact {
+            schema_version,
+            header: *header,
+        }],
     };
 
     let result = host

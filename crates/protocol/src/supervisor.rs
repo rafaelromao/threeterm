@@ -54,6 +54,13 @@ pub enum SupervisorOutcome {
     ForceTerminated { record: TerminationRecord },
 }
 
+/// A worker-reported staged artifact, including its envelope identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedArtifact {
+    pub schema_version: String,
+    pub header: ArtifactHeader,
+}
+
 /// Structured record emitted on every supervisor terminal transition
 /// (cooperative terminal envelope, handshake failure, or force-terminate
 /// after grace). The host uses these fields to surface the failure in
@@ -113,7 +120,7 @@ pub struct Supervisor {
     /// Artifact headers accumulated during the request lifecycle. The
     /// `Completed` arm returns them as worker lifecycle facts; `discard_stage`
     /// clears them without publishing.
-    artifact_headers: Vec<ArtifactHeader>,
+    artifact_headers: Vec<StagedArtifact>,
     /// Most recent artifact binding or validation failure. The supervisor
     /// surfaces staging errors here so the host's diagnostic taxonomy sees them.
     last_artifact_error: Option<String>,
@@ -300,8 +307,11 @@ impl Supervisor {
                 Ok(Envelope::Progress { stage, percent, .. }) => {
                     last_progress = Some(Progress { stage, percent });
                 }
-                Ok(Envelope::Artifact { header, .. }) => {
-                    self.record_artifact(&header, &request);
+                Ok(Envelope::Artifact {
+                    schema_version,
+                    header,
+                }) => {
+                    self.record_artifact(schema_version, *header, &request);
                 }
                 // An unsolicited Cancelled envelope during the request
                 // lifecycle is a protocol violation: `request()` never
@@ -475,9 +485,12 @@ impl Supervisor {
         }
     }
 
-    fn record_artifact(&mut self, header: &ArtifactHeader, request: &Request) {
+    fn record_artifact(&mut self, schema_version: String, header: ArtifactHeader, request: &Request) {
         let _ = request;
-        self.artifact_headers.push(header.clone());
+        self.artifact_headers.push(StagedArtifact {
+            schema_version,
+            header,
+        });
     }
 
     /// Return the staged-artifact facts from a `Completed` envelope. The
@@ -503,6 +516,7 @@ impl Supervisor {
             );
         }
         if let Err(error) = self.host.terminate() {
+            self.discard_stage();
             return SupervisorOutcome::ForceTerminated {
                 record: TerminationRecord {
                     request_id,

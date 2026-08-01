@@ -272,8 +272,8 @@ impl Host {
             ));
         };
         if request_id != request.request_id {
-            for header in &artifact_headers {
-                cleanup_staged_artifact(root, &header.staging_name);
+            for artifact in &artifact_headers {
+                cleanup_staged_artifact(root, &artifact.header.staging_name);
             }
             cleanup_staged_artifact(root, &request.staging_name);
             return Err(Diagnostic::artifact_request_mismatch(
@@ -281,21 +281,29 @@ impl Host {
             ));
         }
         if artifact_headers.len() != 1 {
-            for header in &artifact_headers {
-                cleanup_staged_artifact(root, &header.staging_name);
+            for artifact in &artifact_headers {
+                cleanup_staged_artifact(root, &artifact.header.staging_name);
             }
             cleanup_staged_artifact(root, &request.staging_name);
             return Err(Diagnostic::artifact_promotion_failure(
                 "expected_exactly_one_artifact",
             ));
         }
+        let artifact = artifact_headers
+            .pop()
+            .expect("checked exactly one artifact");
+        if artifact.schema_version != threeterm_protocol::schema_version() {
+            cleanup_staged_artifact(root, &request.staging_name);
+            cleanup_staged_artifact(root, &artifact.header.staging_name);
+            return Err(Diagnostic::artifact_promotion_failure(
+                "artifact_schema_mismatch",
+            ));
+        }
         self.accept_staged_artifact(
             root,
             request,
             expected_worker,
-            artifact_headers
-                .pop()
-                .expect("checked exactly one artifact"),
+            artifact.header,
         )
     }
 

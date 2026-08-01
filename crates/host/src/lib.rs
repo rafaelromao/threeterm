@@ -354,15 +354,21 @@ impl Host {
         stage
             .verify(&header)
             .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+        let final_name = header.cache_key.final_artifact_name();
         if let Some(existing) = self.layer1_result(&header.cache_key) {
-            stage.discard_verified(&header.staging_name);
-            return Ok(existing);
+            if stage
+                .published_matches(&final_name, existing.byte_count, &existing.sha256)
+                .map_err(|error| reject(artifact_error_diagnostic(&error)))?
+            {
+                stage.discard_verified(&header.staging_name);
+                return Ok(existing);
+            }
+            stage
+                .discard_final(&final_name)
+                .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
         }
         let path = stage
-            .publish_verified(
-                &header.staging_name,
-                &header.cache_key.final_artifact_name(),
-            )
+            .publish_verified(&header.staging_name, &final_name)
             .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
         let result = Layer1DerivedResult {
             request_id: header.request_id,

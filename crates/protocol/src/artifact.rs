@@ -277,6 +277,53 @@ impl Stage {
         result.map(|()| final_path)
     }
 
+    /// Check that a published artifact is still the regular file recorded by
+    /// its result metadata.
+    pub fn published_matches(
+        &self,
+        final_name: &str,
+        byte_count: u64,
+        sha256: &str,
+    ) -> Result<bool, ArtifactError> {
+        validate_name(final_name)?;
+        let final_path = self.root.join(final_name);
+        let metadata = match fs::symlink_metadata(&final_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(ArtifactError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != byte_count
+        {
+            return Ok(false);
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(0o400000)
+            .open(&final_path)
+            .map_err(ArtifactError::Io)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = file.read(&mut buffer).map_err(ArtifactError::Io)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        Ok(hex_digest(&digest.finalize()) == sha256)
+    }
+
+    /// Remove an invalid cache-owned final artifact before recovering it from
+    /// a newly verified staging file.
+    pub fn discard_final(&self, final_name: &str) -> Result<(), ArtifactError> {
+        validate_name(final_name)?;
+        match fs::remove_file(self.root.join(final_name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ArtifactError::Io(error)),
+        }
+    }
+
     /// Remove a verified artifact after the Host accepts an existing cache hit.
     pub fn discard_verified(&self, staging_name: &str) {
         if validate_name(staging_name).is_ok() {

@@ -1053,7 +1053,7 @@ mod tests {
     use threeterm_domain::ProjectGeneration;
     use threeterm_persistence::{
         Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX, schema_epoch,
-        write_v0_fixture,
+        write_fresh, write_v0_fixture,
     };
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -1122,16 +1122,67 @@ mod tests {
         let host = Host::new();
         let view = host.load(&root).expect("prior epoch migrates and loads");
 
-        assert_eq!(host.current(), Some(view));
+        assert_eq!(host.current(), Some(view.clone()));
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.join(MANIFEST_FILENAME)).expect("migrated manifest reads"),
         )
         .expect("migrated manifest parses");
         assert_eq!(manifest["schema_version"], schema_epoch());
         assert!(backup.is_dir(), "pre-migration backup is retained");
+        let reopened = Bundle::at(&root).open().expect("migrated bundle reopens");
+        assert_eq!(view, SnapshotView::from(&reopened));
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(backup);
+    }
+
+    #[test]
+    fn rejected_manifests_preserve_current_snapshot_and_source_bytes() {
+        let valid_root = temp_root("valid-manifest");
+        Bundle::create_for_test(&valid_root, "00".repeat(16).as_str())
+            .expect("valid bundle creates");
+        let host = Host::new();
+        let current = host.load(&valid_root).expect("valid bundle loads");
+
+        for (label, mutation) in [
+            ("malformed", serde_json::json!({ "future_field": true })),
+            (
+                "unsupported",
+                serde_json::json!({ "schema_version": "threeterm.persistence/99" }),
+            ),
+        ] {
+            let root = temp_root(label);
+            write_fresh(
+                &root,
+                ProjectGeneration::with_id(format!("generation-{label}")),
+            )
+            .expect("current bundle writes");
+            let manifest_path = root.join(MANIFEST_FILENAME);
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest reads"))
+                    .expect("manifest parses");
+            for (key, value) in mutation.as_object().expect("mutation is an object") {
+                manifest[key] = value.clone();
+            }
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).expect("manifest serializes"),
+            )
+            .expect("manifest writes");
+            let source = std::fs::read(&manifest_path).expect("source manifest reads");
+
+            assert!(host.load(&root).is_err(), "{label} manifest is rejected");
+            assert_eq!(host.current(), Some(current.clone()));
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("source manifest re-reads"),
+                source,
+                "{label} manifest remains byte-identical"
+            );
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        let _ = std::fs::remove_dir_all(valid_root);
     }
 
     #[test]

@@ -54,6 +54,11 @@ fn machine_load_migrates_prior_epoch_bundle_and_retains_backup() {
     )
     .expect("migrated manifest parses");
     assert_eq!(manifest["schema_version"], schema_epoch());
+    assert_eq!(
+        response["feature_graph_hash"],
+        manifest["feature_graph_hash"]
+    );
+    assert_eq!(response["revision_hash"], manifest["revision_hash"]);
     assert!(backup.is_dir(), "pre-migration backup is retained");
 
     let _ = fs::remove_dir_all(root);

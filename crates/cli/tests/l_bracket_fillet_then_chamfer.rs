@@ -213,7 +213,7 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         .unwrap()
         .to_string();
 
-    let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.25);
+    let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.05);
     assert_ne!(
         chamfer_response["revision_hash"].as_str().unwrap(),
         fillet_revision,

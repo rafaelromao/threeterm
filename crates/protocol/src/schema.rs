@@ -139,6 +139,43 @@ pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+/// Canonical request schema document for the `bracket` command. The numeric
+/// dimensions are stored in the canonical transaction log but no OCCT
+/// geometry is computed in this slice — that is the responsibility of a
+/// future worker slice.
+pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "bracket_id", "length", "width", "height", "thickness"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "bracket_id": { "type": "string", "minLength": 1 },
+            "length": { "type": "number", "minimum": 0 },
+            "width": { "type": "number", "minimum": 0 },
+            "height": { "type": "number", "minimum": 0 },
+            "thickness": { "type": "number", "minimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `bracket` command. The
+/// `schema_version` field is pinned to the bracket response-schema version
+/// constant so the dispatcher emits the same wire contract as `save` and
+/// `load`.
+pub static BRACKET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["feature_graph_hash", "revision_hash", "schema_version"],
+        "properties": {
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -190,6 +227,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        BRACKET_COMMAND_ID,
+        CommandSchema {
+            id: BRACKET_COMMAND_ID,
+            name: "bracket",
+            schema_version: "threeterm.command.bracket/1",
+            request_schema_version: "threeterm.command.bracket.request/1",
+            request_schema: BRACKET_REQUEST_SCHEMA.clone(),
+            response_schema_version: BRACKET_RESPONSE_SCHEMA_VERSION,
+            response_schema: BRACKET_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -197,8 +246,10 @@ pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
+pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
+pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

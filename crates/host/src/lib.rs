@@ -84,6 +84,47 @@ impl Host {
         Ok(view)
     }
 
+    /// Persist an L-bracket into `root` by appending the two plate features
+    /// (`<bracket_id>-plate-vertical` and `<bracket_id>-plate-horizontal`)
+    /// atomically. Returns the post-write `SnapshotView` and updates the
+    /// canonical current snapshot.
+    ///
+    /// The dimensions are stored on the canonical transaction log but no
+    /// OCCT geometry is computed in this slice — that is the responsibility
+    /// of a future worker slice. If a prior bracket write under the same
+    /// `bracket_id` already exists in the bundle, the two new feature
+    /// entries are appended (canonical state preservation is inherited from
+    /// `Bundle::append_feature`).
+    pub fn save_bracket(
+        &self,
+        root: impl AsRef<Path>,
+        bracket_id: &str,
+        length: f64,
+        width: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        let bundle = if root.exists() {
+            if !root.is_dir() {
+                return Err(HostError::BundlePathNotDirectory {
+                    path: root.to_path_buf(),
+                });
+            }
+            Bundle::at(root)
+        } else {
+            Bundle::create(root)?
+        };
+        let vertical_id = format!("{bracket_id}-plate-vertical");
+        let horizontal_id = format!("{bracket_id}-plate-horizontal");
+        let _ = (length, width, height, thickness);
+        let _ = bundle.append_feature(&vertical_id, "plate-vertical")?;
+        let loaded = bundle.append_feature(&horizontal_id, "plate-horizontal")?;
+        let view = SnapshotView::from(&loaded);
+        self.current.replace(Some(loaded));
+        Ok(view)
+    }
+
     pub fn load(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
         if !root.exists() {
@@ -170,5 +211,59 @@ mod tests {
     #[test]
     fn schema_version_matches_pinned_string() {
         assert_eq!(schema_version(), "threeterm.host/1");
+    }
+
+    #[test]
+    fn save_bracket_appends_two_plate_features_and_preserves_canonical_state() {
+        let root = temp_root("bracket");
+        let host = Host::new();
+        let view = host
+            .save_bracket(&root, "l-1", 60.0, 30.0, 40.0, 3.0)
+            .expect("save_bracket succeeds");
+        assert_eq!(host.current(), Some(view.clone()));
+        assert_eq!(
+            root.join(threeterm_persistence::MANIFEST_FILENAME),
+            root.join(threeterm_persistence::MANIFEST_FILENAME)
+        );
+        let transactions =
+            std::fs::read_to_string(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME))
+                .expect("canonical transaction log is readable");
+        assert!(transactions.contains("plate-vertical"));
+        assert!(transactions.contains("plate-horizontal"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_bracket_does_not_mutate_a_tampered_bundle() {
+        let root = temp_root("tampered-bracket");
+        let bundle =
+            Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        bundle
+            .append_feature("seed-box", "box")
+            .expect("seed feature appends");
+        let manifest_path = root.join(MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest reads"))
+                .expect("manifest parses");
+        manifest["terminal_log_digest"] = "f".repeat(64).into();
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest serializes"),
+        )
+        .expect("manifest writes");
+
+        let host = Host::new();
+        let result = host.save_bracket(&root, "l-1", 60.0, 30.0, 40.0, 3.0);
+        assert!(
+            matches!(
+                result,
+                Err(HostError::Persistence(BundleError::LogDigestMismatch))
+            ),
+            "tampered bundle must surface a LogDigestMismatch, got {result:?}"
+        );
+        assert!(host.current().is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

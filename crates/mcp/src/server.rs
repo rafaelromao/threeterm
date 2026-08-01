@@ -27,8 +27,6 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
-#[allow(unused_imports)]
-use threeterm_protocol::schema::find as _find;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandSchema, iter};
 use threeterm_protocol::schema_validator::validate;
 

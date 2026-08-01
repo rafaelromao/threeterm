@@ -212,18 +212,8 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
     assert!(mcp["error"].is_null(), "mcp response must not be an error");
     let structured = &mcp["result"]["structuredContent"];
     assert_eq!(
-        structured["schema_version"],
-        "threeterm.command.bracket.response/1"
-    );
-    let cli_hash = cli["feature_graph_hash"]
-        .as_str()
-        .expect("cli hash is a string");
-    let mcp_hash = structured["feature_graph_hash"]
-        .as_str()
-        .expect("mcp hash is a string");
-    assert_eq!(
-        cli_hash, mcp_hash,
-        "CLI and MCP bracket invocations must produce the same feature_graph_hash"
+        structured, &cli,
+        "the MCP bracket result must be structurally equal to the CLI bracket result"
     );
 
     let loaded = Command::new(threeterm_binary())
@@ -237,7 +227,18 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
         String::from_utf8_lossy(&loaded.stderr)
     );
     let loaded: Value = serde_json::from_slice(&loaded.stdout).expect("load response is JSON");
-    assert_eq!(loaded["feature_graph_hash"], mcp_hash);
+    assert_eq!(
+        loaded["feature_graph_hash"], cli["feature_graph_hash"],
+        "load must report the same feature_graph_hash as the bracket write"
+    );
+    assert_eq!(
+        loaded["revision_hash"], cli["revision_hash"],
+        "load must report the same revision_hash as the bracket write"
+    );
+    assert_eq!(
+        loaded["schema_version"], "threeterm.command.load.response/1",
+        "load returns its own response-schema version, distinct from bracket's"
+    );
 
     let _ = std::fs::remove_dir_all(cli_root);
     let _ = std::fs::remove_dir_all(mcp_root);

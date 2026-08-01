@@ -1012,15 +1012,18 @@ bool handle_mirror(const JsonParser::Value& request, std::string& error) {
         gp_Dir normal(plane_normal[0] / norm,
                       plane_normal[1] / norm,
                       plane_normal[2] / norm);
-        // gp_Ax2 requires a "X direction" reference axis orthogonal to
-        // the normal. Pick the first world axis not parallel to the
-        // plane normal so the coordinate system is unambiguously
-        // oriented (matches the hole path's reference-axis selection).
+        // gp_Ax2 requires a "X direction" reference axis that is
+        // NOT parallel to the plane normal (otherwise the cross
+        // product the constructor uses internally collapses to a
+        // zero-norm vector). Pick the first world axis whose dot
+        // product with the normal is not ~1.
         gp_Dir x_dir;
-        if (std::abs(normal.Z()) < 0.9) {
+        if (std::abs(normal.X()) < 0.9) {
             x_dir = gp::DX();
-        } else {
+        } else if (std::abs(normal.Y()) < 0.9) {
             x_dir = gp::DY();
+        } else {
+            x_dir = gp::DZ();
         }
         gp_Ax2 mirror_plane(origin, normal, x_dir);
 

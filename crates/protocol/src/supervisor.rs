@@ -3,7 +3,7 @@
 //! The supervisor drives one `WorkerHost` per `Request`. The
 //! `Supervisor::request` method runs the full request lifecycle:
 //! consume the versioned `WorkerReady` handshake, send the `Request`
-//! envelope, track staged artifacts, promote them on `Completed`, or
+//! envelope, track staged artifact facts on `Completed`, or
 //! discard them on `Failed` / force termination. The `Supervisor::cancel`
 //! method runs the cooperative cancellation lifecycle: send a `Cancel`
 //! envelope and wait for a `Cancelled` acknowledgement inside the
@@ -33,6 +33,13 @@ pub struct Request {
 /// Outcome of a single `Supervisor::request` / `Supervisor::cancel` invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorOutcome {
+    /// The worker completed a request. The headers describe files that remain
+    /// staged; the Host is solely responsible for accepting and publishing
+    /// them against its current Revision Snapshot.
+    Completed {
+        request_id: String,
+        artifact_headers: Vec<StagedArtifact>,
+    },
     /// The worker acknowledged the cooperative cancellation inside the
     /// grace period and exited cleanly.
     Acknowledged {
@@ -45,6 +52,13 @@ pub enum SupervisorOutcome {
     /// terminal envelope (`Completed` / `Failed`) from a hard
     /// force-terminate after the grace period expired.
     ForceTerminated { record: TerminationRecord },
+}
+
+/// A worker-reported staged artifact, including its envelope identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedArtifact {
+    pub schema_version: String,
+    pub header: ArtifactHeader,
 }
 
 /// Structured record emitted on every supervisor terminal transition
@@ -104,9 +118,9 @@ pub struct Supervisor {
     host: Box<dyn WorkerHost>,
     stage: Option<Stage>,
     /// Artifact headers accumulated during the request lifecycle. The
-    /// `Completed` arm validates and atomically promotes each staged file.
-    /// `discard_stage` clears the headers without promoting.
-    artifact_headers: Vec<ArtifactHeader>,
+    /// `Completed` arm returns them as worker lifecycle facts; `discard_stage`
+    /// clears them without publishing.
+    artifact_headers: Vec<StagedArtifact>,
     /// Most recent artifact binding or validation failure. The supervisor
     /// surfaces staging errors here so the host's diagnostic taxonomy sees them.
     last_artifact_error: Option<String>,
@@ -243,9 +257,9 @@ impl Supervisor {
     /// Request lifecycle: consume the versioned `WorkerReady`
     /// handshake, send the `Request` envelope, track staged artifacts,
     /// and wait for a terminal envelope inside the configured grace
-    /// period. On `Completed` every staged artifact is promoted to its
-    /// final filename; on `Failed` / unsolicited `Cancelled` / force
-    /// termination every staged artifact is discarded.
+    /// period. On `Completed` staged artifact facts are returned to the
+    /// caller; on `Failed` / unsolicited `Cancelled` / force termination
+    /// every staged artifact is discarded.
     pub fn request(&mut self, request: Request) -> SupervisorOutcome {
         let started = Instant::now();
 
@@ -293,8 +307,11 @@ impl Supervisor {
                 Ok(Envelope::Progress { stage, percent, .. }) => {
                     last_progress = Some(Progress { stage, percent });
                 }
-                Ok(Envelope::Artifact { header, .. }) => {
-                    self.record_artifact(&header, &request);
+                Ok(Envelope::Artifact {
+                    schema_version,
+                    header,
+                }) => {
+                    self.record_artifact(schema_version, *header, &request);
                 }
                 // An unsolicited Cancelled envelope during the request
                 // lifecycle is a protocol violation: `request()` never
@@ -315,7 +332,7 @@ impl Supervisor {
                     });
                 }
                 Ok(Envelope::Completed { request_id, .. }) => {
-                    return self.complete_with_promotion(
+                    return self.complete_with_artifact_facts(
                         request_id,
                         &request,
                         started,
@@ -468,42 +485,23 @@ impl Supervisor {
         }
     }
 
-    fn record_artifact(&mut self, header: &ArtifactHeader, request: &Request) {
-        let Some(stage) = self.stage.as_ref() else {
-            return;
-        };
-        let binding_error = if header.request_id != request.request_id {
-            Some("artifact_request_id_mismatch")
-        } else if header.source_revision_id != request.revision_id
-            || header.cache_key.source_revision_id != request.revision_id
-        {
-            Some("artifact_source_revision_mismatch")
-        } else if header.cache_key.worker_fingerprint != header.worker_fingerprint
-            || header.cache_key.artifact_kind != header.artifact_kind
-            || header.worker_fingerprint.protocol_schema_version != crate::schema_version()
-        {
-            Some("artifact_cache_key_mismatch")
-        } else {
-            None
-        };
-        if let Some(error) = binding_error {
-            let _ = std::fs::remove_file(
-                stage
-                    .root()
-                    .join(format!("{}.partial", header.staging_name)),
-            );
-            self.last_artifact_error = Some(error.to_string());
-        } else {
-            self.artifact_headers.push(header.clone());
-        }
+    fn record_artifact(
+        &mut self,
+        schema_version: String,
+        header: ArtifactHeader,
+        request: &Request,
+    ) {
+        let _ = request;
+        self.artifact_headers.push(StagedArtifact {
+            schema_version,
+            header,
+        });
     }
 
-    /// Drive the staged-artifact promotion contract on a `Completed`
-    /// envelope. Each bound header is validated immediately before atomic
-    /// promotion; any failure discards the staging directory and returns
-    /// `ForceTerminated` with `stage: "promotion_failed:..."` so canonical
-    /// host state never sees a partial result.
-    fn complete_with_promotion(
+    /// Return the staged-artifact facts from a `Completed` envelope. The
+    /// Host validates and promotes them; this transport boundary never
+    /// publishes a Derived Result.
+    fn complete_with_artifact_facts(
         &mut self,
         request_id: String,
         request: &Request,
@@ -522,50 +520,23 @@ impl Supervisor {
                 artifact_error,
             );
         }
-        if self.last_artifact_error.is_some() {
+        if let Err(error) = self.host.terminate() {
             self.discard_stage();
-            let artifact_error = self.last_artifact_error.take();
-            return self.cooperative_termination_outcome(
-                request_id,
-                "artifact_rejected".to_string(),
-                started,
-                last_progress,
-                artifact_error,
-            );
+            return SupervisorOutcome::ForceTerminated {
+                record: TerminationRecord {
+                    request_id,
+                    stage: format!("completed_reap_failed:{error}"),
+                    elapsed: started.elapsed(),
+                    last_progress,
+                    last_artifact_error: self.last_artifact_error.take(),
+                    exit_kind: ExitKind::ForceAfterGrace,
+                },
+            };
         }
-        let mut first_error: Option<String> = None;
-        if let Some(stage) = self.stage.as_ref() {
-            let headers = std::mem::take(&mut self.artifact_headers);
-            for header in headers {
-                let promotion = stage.validate_and_promote(&header);
-                if let Err(error) = promotion {
-                    first_error = Some(error.to_string());
-                    break;
-                }
-            }
-        }
-
-        if let Some(error) = first_error {
-            let _ = self.stage.take().map(|stage| stage.discard());
-            let artifact_error = self.last_artifact_error.take().or(Some(error.clone()));
-            return self.cooperative_termination_outcome(
-                request_id,
-                format!("promotion_failed:{error}"),
-                started,
-                last_progress,
-                artifact_error,
-            );
-        }
-
-        let _ = self.stage.take();
-        let artifact_error = self.last_artifact_error.take();
-        self.cooperative_termination_outcome(
+        SupervisorOutcome::Completed {
             request_id,
-            "completed".to_string(),
-            started,
-            last_progress,
-            artifact_error,
-        )
+            artifact_headers: std::mem::take(&mut self.artifact_headers),
+        }
     }
 
     fn cooperative_termination_outcome(
@@ -818,12 +789,14 @@ mod tests {
 
         let outcome = supervisor.request(sample_request());
         match outcome {
-            SupervisorOutcome::ForceTerminated { record } => {
-                assert_eq!(record.stage, "completed");
-                assert_eq!(record.exit_kind, ExitKind::Cooperative);
-                assert_eq!(record.request_id, "req-1");
+            SupervisorOutcome::Completed {
+                request_id,
+                artifact_headers,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert!(artifact_headers.is_empty());
             }
-            other => panic!("expected ForceTerminated(Completed); got {other:?}"),
+            other => panic!("expected Completed; got {other:?}"),
         }
     }
 
@@ -841,7 +814,7 @@ mod tests {
 
         assert!(matches!(
             supervisor.request(sample_request()),
-            SupervisorOutcome::ForceTerminated { .. }
+            SupervisorOutcome::Completed { .. }
         ));
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }

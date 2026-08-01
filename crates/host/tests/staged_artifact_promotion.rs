@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6,7 +7,26 @@ use threeterm_occt_worker::{emit_staged_artifact, worker_fingerprint};
 use threeterm_protocol::artifact::Layer1ArtifactRequest;
 use threeterm_protocol::diagnostic::DiagnosticCode;
 use threeterm_protocol::frame::FrameParser;
-use threeterm_protocol::worker::{Envelope, encode_frame};
+use threeterm_protocol::supervisor::{Request, StagedArtifact, Supervisor, SupervisorOutcome};
+use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
+
+struct CompletedWorker {
+    pending: VecDeque<Envelope>,
+}
+
+impl WorkerHost for CompletedWorker {
+    fn send(&mut self, _envelope: &Envelope) -> Result<(), WorkerError> {
+        Ok(())
+    }
+
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.pending.pop_front().ok_or(WorkerError::Closed)
+    }
+
+    fn cancel(&mut self, _request_id: &str, _reason: &str) -> Result<(), WorkerError> {
+        Ok(())
+    }
+}
 
 fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -27,6 +47,40 @@ fn wire_round_trip(
     let mut envelopes = parser.push(&frame).expect("artifact envelope parses");
     assert_eq!(envelopes.len(), 1);
     envelopes.remove(0)
+}
+
+fn completed_outcome(
+    artifact_root: &std::path::Path,
+    request: &Layer1ArtifactRequest,
+    artifact: Envelope,
+) -> SupervisorOutcome {
+    let completed = Envelope::Completed {
+        schema_version: threeterm_protocol::schema_version().to_string(),
+        request_id: request.request_id.clone(),
+        result: serde_json::json!({ "ok": true }),
+    };
+    let worker = CompletedWorker {
+        pending: VecDeque::from([
+            wire_round_trip(&Envelope::WorkerReady {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                worker_id: "fake".to_string(),
+            }),
+            wire_round_trip(&artifact),
+            wire_round_trip(&completed),
+        ]),
+    };
+    let stage = threeterm_protocol::artifact::Stage::open(artifact_root).expect("stage opens");
+    let mut supervisor = Supervisor::new(
+        std::time::Duration::from_millis(100),
+        Box::new(worker),
+        Some(stage),
+    );
+    supervisor.request(Request {
+        request_id: request.request_id.clone(),
+        command_id: "build".to_string(),
+        args: serde_json::json!({}),
+        revision_id: request.source_revision_id.clone(),
+    })
 }
 
 #[test]
@@ -54,7 +108,12 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
     let parsed = wire_round_trip(&emitted);
 
     let result = host
-        .promote_staged_artifact(&artifact_root, &request, &worker_fingerprint(), parsed)
+        .accept_derived_result(
+            &artifact_root,
+            &request,
+            &worker_fingerprint(),
+            completed_outcome(&artifact_root, &request, parsed),
+        )
         .expect("valid artifact promotes");
 
     assert_eq!(std::fs::read(&result.path).expect("artifact reads"), bytes);
@@ -70,6 +129,111 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
 
     let _ = std::fs::remove_dir_all(project_root);
     let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
+fn host_accepts_completed_worker_result_before_publishing() {
+    let project_root = temp_root("completed-project");
+    let artifact_root = temp_root("completed-artifacts");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "box-1", "box")
+        .expect("canonical snapshot saves");
+    let request = Layer1ArtifactRequest {
+        request_id: "request-1".to_string(),
+        source_revision_id: snapshot.revision_hash,
+        artifact_kind: "brep".to_string(),
+        staging_name: "box-1.brep".to_string(),
+        semantic_input_sha256: "11".repeat(32),
+        deterministic_settings_sha256: "22".repeat(32),
+    };
+    let emitted = emit_staged_artifact(&artifact_root, &request, b"worker result")
+        .expect("worker stages artifact bytes");
+    let Envelope::Artifact {
+        schema_version,
+        header,
+    } = wire_round_trip(&emitted)
+    else {
+        panic!("worker emits an artifact envelope");
+    };
+    let outcome = SupervisorOutcome::Completed {
+        request_id: request.request_id.clone(),
+        artifact_headers: vec![StagedArtifact {
+            schema_version,
+            header: *header,
+        }],
+    };
+
+    let result = host
+        .accept_derived_result(&artifact_root, &request, &worker_fingerprint(), outcome)
+        .expect("host accepts completed result");
+
+    assert!(result.path.is_file(), "host publishes after acceptance");
+    assert_eq!(host.layer1_result(&result.cache_key), Some(result));
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
+fn worker_completion_is_published_only_by_host_acceptance_and_rejection_cleans_up() {
+    let project_root = temp_root("supervised-project");
+    let artifact_root = temp_root("supervised-artifacts");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "box-1", "box")
+        .expect("canonical snapshot saves");
+    let request = Layer1ArtifactRequest {
+        request_id: "request-1".to_string(),
+        source_revision_id: snapshot.revision_hash,
+        artifact_kind: "brep".to_string(),
+        staging_name: "box-1.brep".to_string(),
+        semantic_input_sha256: "11".repeat(32),
+        deterministic_settings_sha256: "22".repeat(32),
+    };
+    let emitted = emit_staged_artifact(&artifact_root, &request, b"accepted result")
+        .expect("worker stages artifact bytes");
+    let outcome = completed_outcome(&artifact_root, &request, emitted);
+    assert!(
+        !artifact_root.join(&request.staging_name).exists(),
+        "supervisor never publishes a staged Derived Result"
+    );
+
+    let accepted = host
+        .accept_derived_result(&artifact_root, &request, &worker_fingerprint(), outcome)
+        .expect("host accepts valid completed result");
+    assert!(accepted.path.is_file());
+    assert_eq!(host.layer1_result(&accepted.cache_key), Some(accepted));
+
+    let rejected_root = temp_root("supervised-rejection");
+    let mut rejected_request = request.clone();
+    rejected_request.semantic_input_sha256 = "33".repeat(32);
+    let emitted = emit_staged_artifact(&rejected_root, &rejected_request, b"tampered result")
+        .expect("worker stages rejected bytes");
+    let mut bytes =
+        std::fs::read(rejected_root.join("box-1.brep.partial")).expect("staged bytes read");
+    bytes[0] ^= 1;
+    std::fs::write(rejected_root.join("box-1.brep.partial"), bytes).expect("staged bytes tamper");
+    let outcome = completed_outcome(&rejected_root, &rejected_request, emitted);
+    let diagnostic = host
+        .accept_derived_result(
+            &rejected_root,
+            &rejected_request,
+            &worker_fingerprint(),
+            outcome,
+        )
+        .expect_err("host rejects tampered result");
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactHashMismatch);
+    assert!(!rejected_root.join("box-1.brep.partial").exists());
+    assert!(!rejected_root.join("box-1.brep").exists());
+    let expected_key = threeterm_protocol::artifact::Layer1CacheKey::issue(
+        &rejected_request,
+        &worker_fingerprint(),
+    );
+    assert!(host.layer1_result(&expected_key).is_none());
+
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(artifact_root);
+    let _ = std::fs::remove_dir_all(rejected_root);
 }
 
 #[test]
@@ -90,13 +254,17 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
     };
     let original_bytes = b"current valid artifact";
     let original = host
-        .promote_staged_artifact(
+        .accept_derived_result(
             &artifact_root,
             &request,
             &worker_fingerprint(),
-            wire_round_trip(
-                &emit_staged_artifact(&artifact_root, &request, original_bytes)
-                    .expect("worker stages initial artifact"),
+            completed_outcome(
+                &artifact_root,
+                &request,
+                wire_round_trip(
+                    &emit_staged_artifact(&artifact_root, &request, original_bytes)
+                        .expect("worker stages initial artifact"),
+                ),
             ),
         )
         .expect("initial artifact promotes");
@@ -109,11 +277,11 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
     std::fs::write(&partial_path, decoded).expect("staged payload is tampered");
 
     let diagnostic = host
-        .promote_staged_artifact(
+        .accept_derived_result(
             &artifact_root,
             &request,
             &worker_fingerprint(),
-            wire_round_trip(&tampered),
+            completed_outcome(&artifact_root, &request, wire_round_trip(&tampered)),
         )
         .expect_err("tampered artifact is rejected");
 
@@ -180,11 +348,11 @@ fn misbound_artifact_headers_are_rejected_without_host_mutation() {
         }
 
         let diagnostic = host
-            .promote_staged_artifact(
+            .accept_derived_result(
                 &artifact_root,
                 &request,
                 &worker_fingerprint(),
-                wire_round_trip(&emitted),
+                completed_outcome(&artifact_root, &request, wire_round_trip(&emitted)),
             )
             .expect_err("misbound artifact is rejected");
 

@@ -9,7 +9,8 @@
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
     FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID,
-    LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    LOAD_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID,
+    find, registry_hash,
 };
 
 #[test]
@@ -32,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "a24b888aa438d913934358922697c7f8f138d6002edb07f3e3cec6aac491331f",
+        "ad5af8493ad06f418a4be6c202e090a62e0eddedbadf7269a5a3780969bebe53",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -278,4 +279,25 @@ fn registry_contains_versioned_circular_pattern_contract() {
         ])
     );
     assert_eq!(pattern.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_shell_contract() {
+    let shell = find(SHELL_COMMAND_ID).expect("shell is registered");
+    assert_eq!(shell.id, SHELL_COMMAND_ID);
+    assert_eq!(shell.name, "shell");
+    assert_eq!(shell.schema_version, "threeterm.command.shell/1");
+    assert_eq!(
+        shell.request_schema_version,
+        "threeterm.command.shell.request/1"
+    );
+    assert_eq!(
+        shell.response_schema_version,
+        "threeterm.command.shell.response/1"
+    );
+    assert_eq!(
+        shell.request_schema["required"],
+        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "thickness"])
+    );
+    assert_eq!(shell.request_schema["additionalProperties"], false);
 }

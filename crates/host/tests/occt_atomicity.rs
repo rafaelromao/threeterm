@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
-    HoleRequest, LinearPatternRequest, MirrorRequest, Operation, schema_version,
+    HoleRequest, LinearPatternRequest, MirrorRequest, Operation, ShellRequest, schema_version,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -657,6 +657,12 @@ fn circular_pattern_request(
     )
     .with_output_path(PathBuf::from("/tmp"), "out.brep")
     .with_feature_id(feature_id)
+}
+
+fn shell_request(label: &str, feature_id: &str, base_path: &Path) -> ShellRequest {
+    ShellRequest::new(unique_request_id(label), base_path, 0.3)
+        .with_output_path(PathBuf::from("/tmp"), "out.brep")
+        .with_feature_id(feature_id)
 }
 
 fn committed_brep_path(root: &Path, feature_id: &str) -> PathBuf {
@@ -2032,4 +2038,314 @@ fn circular_pattern_brep_invalid_preserves_canonical_state() {
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(script);
+}
+
+#[test]
+fn shell_commits_brep_into_a_new_revision() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-commit", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let base_request = rectangle_extrude_request("shell-commit-base")
+        .with_output_path(root.join("stage"), "shell-base.brep")
+        .with_feature_id("shell-commit-base-1");
+    let base_view = host
+        .extrude(&root, base_request, &worker)
+        .expect("base extrude");
+    assert_eq!(base_view.result.status, "ok");
+
+    let base_brep = committed_brep_path(&root, "shell-commit-base-1");
+    let request = shell_request("shell-commit", "shell-commit-1", &base_brep)
+        .with_output_path(root.join("stage"), "shell-commit.brep");
+    let view = host.shell(&root, request, &worker).expect("shell commits");
+
+    assert_ne!(view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(view.snapshot.feature_graph_hash, prior.feature_graph_hash);
+    assert_eq!(view.result.status, "ok");
+    assert_eq!(view.result.operation, Operation::Shell);
+    let committed = committed_brep_path(&root, "shell-commit-1");
+    assert!(
+        committed.is_file(),
+        "shelled BREP is on disk at {committed:?}"
+    );
+    let reloaded = Host::new().load(&root).expect("reloads after commit");
+    assert_eq!(view.snapshot, reloaded);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shell_on_l_bracket_shows_shelled_solid_in_viewport() {
+    // Demoable L-bracket end-to-end:
+    //   1. Extrude a 10x5x3 base slab and a 3x10x3 vertical leg.
+    //   2. Fuse them into an L-bracket.
+    //   3. Shell the L-bracket with a positive wall thickness,
+    //      producing a hollow BREP.
+    //   4. Commit; the resulting BREP shows the shelled L-bracket.
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("l-bracket-shell", "box-seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+
+    let slab_request = ExtrudeRequest::new(
+        unique_request_id("l-bracket-shell-slab"),
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "l-bracket-shell-slab.brep")
+    .with_feature_id("l-bracket-shell-slab-1");
+    let slab_view = host
+        .extrude(&root, slab_request, &worker)
+        .expect("slab extrude");
+    assert_eq!(slab_view.result.status, "ok");
+
+    let leg_request = ExtrudeRequest::new(
+        unique_request_id("l-bracket-shell-leg"),
+        vec![(0.0, 0.0), (3.0, 0.0), (3.0, 10.0), (0.0, 10.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "l-bracket-shell-leg.brep")
+    .with_feature_id("l-bracket-shell-leg-1");
+    let leg_view = host
+        .extrude(&root, leg_request, &worker)
+        .expect("leg extrude");
+    assert_eq!(leg_view.result.status, "ok");
+
+    let fuse_request = BooleanFuseRequest::new(
+        unique_request_id("l-bracket-shell-fuse"),
+        committed_brep_path(&root, "l-bracket-shell-slab-1"),
+        committed_brep_path(&root, "l-bracket-shell-leg-1"),
+    )
+    .with_output_path(root.join("stage"), "l-bracket-shell.brep")
+    .with_feature_id("l-bracket-shell-1");
+    let fuse_view = host
+        .boolean_fuse(&root, fuse_request, &worker)
+        .expect("l-bracket fuse");
+    assert_eq!(fuse_view.result.status, "ok");
+
+    let fused_brep = committed_brep_path(&root, "l-bracket-shell-1");
+    let fused_bytes = fs::read(&fused_brep).expect("fused BREP reads");
+    let shell_request = ShellRequest::new(unique_request_id("l-bracket-shell"), &fused_brep, 0.3)
+        .with_output_path(root.join("stage"), "l-bracket-shell-shell.brep")
+        .with_feature_id("l-bracket-shell-shell-1");
+    let shell_view = host
+        .shell(&root, shell_request, &worker)
+        .expect("l-bracket shell");
+
+    assert_eq!(shell_view.result.status, "ok");
+    assert_eq!(shell_view.result.operation, Operation::Shell);
+    assert_ne!(shell_view.snapshot.revision_hash, prior.revision_hash);
+    assert_ne!(
+        shell_view.snapshot.revision_hash,
+        fuse_view.snapshot.revision_hash
+    );
+    let committed = committed_brep_path(&root, "l-bracket-shell-shell-1");
+    assert!(
+        committed.is_file(),
+        "shelled L-bracket BREP is on disk at {committed:?}"
+    );
+    let bytes = fs::read(&committed).expect("shelled BREP reads");
+    assert!(!bytes.is_empty());
+    let prefix = &bytes[..bytes.len().min(64)];
+    let prefix_str = String::from_utf8_lossy(prefix);
+    assert!(
+        prefix_str.contains("DBRep_DrawableShape"),
+        "shelled L-bracket BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
+    );
+    assert_ne!(
+        bytes, fused_bytes,
+        "shelled L-bracket BREP must differ byte-for-byte from the fused BREP; \
+         an unchanged payload would mean the shell did not run"
+    );
+    assert_ne!(
+        shell_view.result.brep_sha256, fuse_view.result.brep_sha256,
+        "shelled BREP sha256 must differ from the fused BREP sha256; \
+         identical hashes would mean the shell did not run"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shell_spawn_failure_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-spawn-fail", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let bad_worker =
+        threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
+    let request = shell_request(
+        "shell-spawn-fail",
+        "shell-spawn-fail-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    let result = host.shell(&root, request, &bad_worker);
+    assert!(
+        matches!(result, Err(HostError::WorkerFailure { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shell_request_malformed_preserves_canonical_state() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-bad-req", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut request = ShellRequest::new(
+        unique_request_id("shell-bad-req"),
+        "/no/such/base.brep",
+        0.3,
+    )
+    .with_output_path(root.join("stage"), "shell.brep")
+    .with_feature_id("shell-bad-req-1");
+    request.thickness = 0.0;
+    let result = host.shell(&root, request, &worker);
+    assert!(
+        matches!(result, Err(HostError::WorkerFailure { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shell_brep_invalid_preserves_canonical_state() {
+    let Some(_) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-shell-brep-{}",
+        std::process::id()
+    ));
+    let diagnostic = serde_json::json!({
+        "schema_version": schema_version(),
+        "code": "brep_invalid",
+        "arg": "BRepCheck_Analyzer failed"
+    });
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
+            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let request = shell_request(
+        "shell-brep-invalid",
+        "shell-brep-invalid-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    let result = host.shell(&root, request, &fake_worker);
+    assert!(
+        matches!(result, Err(HostError::BrepInvalid { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn shell_persistence_append_failure_preserves_canonical_state() {
+    use std::os::unix::fs::PermissionsExt;
+    {
+        let probe_parent = std::env::temp_dir().join(format!(
+            "threeterm-host-occt-shell-persist-probe-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&probe_parent).expect("probe parent creates");
+        let mut perms = fs::metadata(&probe_parent).expect("stat").permissions();
+        perms.set_mode(0o500);
+        fs::set_permissions(&probe_parent, perms).expect("chmod");
+        let probe = probe_parent.join("attempt");
+        let write = fs::write(&probe, b"x");
+        let mut restore = fs::metadata(&probe_parent).expect("stat").permissions();
+        restore.set_mode(0o700);
+        fs::set_permissions(&probe_parent, restore).expect("restore perms");
+        let _ = fs::remove_dir_all(&probe_parent);
+        if write.is_ok() {
+            eprintln!(
+                "shell_persistence_append_failure_preserves_canonical_state: skipping under root"
+            );
+            return;
+        }
+    }
+
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-persist-fail", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut perms = fs::metadata(&root).expect("stat").permissions();
+    perms.set_mode(0o500);
+    fs::set_permissions(&root, perms).expect("chmod");
+
+    let request = shell_request(
+        "shell-persist-fail",
+        "shell-persist-fail-1",
+        &PathBuf::from("/no/such/base.brep"),
+    );
+    let result = host.shell(&root, request, &worker);
+    assert!(
+        matches!(
+            result,
+            Err(HostError::Persistence(_)) | Err(HostError::BrepIo { .. })
+        ),
+        "got {result:?}"
+    );
+
+    let mut perms = fs::metadata(&root).expect("stat").permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(&root, perms).expect("restore perms");
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
 }

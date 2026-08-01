@@ -2,8 +2,10 @@
 //
 // threeterm-occt-worker: disposable worker binary for the ThreeTerm OCCT
 // geometry kernel. Reads a JSON envelope from stdin, runs the requested
-// operation (extrude or boolean_fuse), validates the BREP with
-// BRepCheck_Analyzer, and writes the BREP to the host-staged output path.
+// operation (extrude, boolean_fuse, fillet, chamfer, hole, revolve,
+// mirror, linear_pattern, circular_pattern, or shell), validates the
+// BREP with BRepCheck_Analyzer, and writes the BREP to the host-staged
+// output path.
 //
 // Exit codes:
 //   0  success — BREP written, JSON response on stdout.
@@ -51,6 +53,10 @@
 
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <cmath>
 #include <cstdint>
@@ -1467,6 +1473,109 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
     }
 }
 
+bool handle_shell(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    double thickness = get_number(request, "thickness");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "shell request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!std::isfinite(thickness) || !(thickness > 0.0)) {
+        error = "shell thickness must be a positive finite number";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+        if (base.ShapeType() != TopAbs_SOLID) {
+            error = "shell base must be a TopoDS_Solid";
+            return false;
+        }
+
+        // Build a list with every face of the solid; offset every face
+        // inward by `thickness` so the void sweeps from every direction.
+        TopTools_ListOfShape faces_to_remove;
+        for (TopExp_Explorer explorer(base, TopAbs_FACE); explorer.More(); explorer.Next()) {
+            faces_to_remove.Append(TopoDS::Face(explorer.Current()));
+        }
+
+        BRepOffsetAPI_MakeThickSolid thickener;
+        thickiner.MakeThickSolid();
+        thickiner.AddFacetoRemove(faces_to_remove);
+        // Negative offset shrinks every face inward to carve the void.
+        thickiner.Perform();
+        if (!thickiner.IsDone()) {
+            error = "BRepOffsetAPI_MakeThickSolid did not complete";
+            return false;
+        }
+        TopoDS_Shape result = thickener.Shape();
+        if (result.IsNull()) {
+            error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
+            return false;
+        }
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"shell\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        write_stdout_line(out.str());
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during shell: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during shell: ";
+        error += e.what();
+        return false;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1516,10 +1625,12 @@ int main() {
         success = handle_linear_pattern(envelope, error);
     } else if (operation == "circular_pattern") {
         success = handle_circular_pattern(envelope, error);
+    } else if (operation == "shell") {
+        success = handle_shell(envelope, error);
     } else {
         write_stderr_line(
             "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, linear_pattern, or circular_pattern");
+hole, revolve, mirror, linear_pattern, circular_pattern, or shell");
         return 2;
     }
 

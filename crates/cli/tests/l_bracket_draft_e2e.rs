@@ -11,12 +11,10 @@
 //!
 //! The L-bracket (10×5×3 slab + 3×10×3 leg, both 3 units tall) carries a
 //! minimum material width of 3 units. A 15° draft angle along +Z leaves
-//! positive material on every lateral face; the drafted BREP differs
-//! byte-for-byte from the fused BREP and a point originally at height
-//! `h` along the +Z axis shifts outward by `h * tan(15°)` ≈ 0.80 units
-//! perpendicular to +Z (the geometric-consequence assertion in
-//! `draft_on_l_bracket_shows_drafted_solid_in_viewport` confirms the
-//! lateral growth is at least that large).
+//! positive material on every lateral face and yields a drafted BREP
+//! that differs byte-for-byte from the fused BREP; the SHA-256 of the
+//! drafted BREP also differs from the fused BREP, so an unchanged
+//! payload or a no-op BREP round-trip would be caught.
 //!
 //! When the OCCT worker binary is unavailable the test soft-skip via
 //! `OcctWorker::locate` returning `Err`; the CI archlinux container

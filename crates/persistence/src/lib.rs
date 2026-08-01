@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -88,6 +89,8 @@ pub enum PublicationFailurePoint {
 thread_local! {
     static NEXT_PUBLICATION_FAILURE: RefCell<Option<PublicationFailurePoint>> = const { RefCell::new(None) };
 }
+
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn fail_next_publication_at(point: PublicationFailurePoint) {
     NEXT_PUBLICATION_FAILURE.with(|next| *next.borrow_mut() = Some(point));
@@ -571,7 +574,7 @@ impl Bundle {
             &loaded.log,
             &loaded.graph,
         );
-        let staging = staging_path_for_publish(&self.root);
+        let staging = fresh_staging_path_for_publish(&self.root);
         let source = if self.root.exists() {
             &self.root
         } else {
@@ -788,13 +791,32 @@ fn rename_generation(
     destination: &Path,
     point: PublicationFailurePoint,
 ) -> std::io::Result<()> {
-    fail_if_injected(point)?;
-    fs::rename(source, destination)
+    PublicationFilesystem::rename(source, destination, point)
 }
 
 fn sync_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
-    fail_if_injected(point)?;
-    File::open(path)?.sync_all()
+    PublicationFilesystem::sync_directory(path, point)
+}
+
+/// The one filesystem-operation seam used by durable generation publication.
+/// Tests inject errors here, at the operation being modeled, rather than in
+/// the publisher's control flow.
+struct PublicationFilesystem;
+
+impl PublicationFilesystem {
+    fn rename(
+        source: &Path,
+        destination: &Path,
+        point: PublicationFailurePoint,
+    ) -> std::io::Result<()> {
+        fail_if_injected(point)?;
+        fs::rename(source, destination)
+    }
+
+    fn sync_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
+        fail_if_injected(point)?;
+        File::open(path)?.sync_all()
+    }
 }
 
 fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
@@ -854,6 +876,20 @@ fn staging_path_for_publish(path: &Path) -> PathBuf {
         std::process::id()
     ));
     staging
+}
+
+fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
+    let staging = staging_path_for_publish(path);
+    if !staging.exists() {
+        return staging;
+    }
+    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut fresh = staging.clone();
+    fresh.set_file_name(format!(
+        "{}-{sequence}",
+        staging.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fresh
 }
 
 fn previous_generation_path(path: &Path) -> PathBuf {

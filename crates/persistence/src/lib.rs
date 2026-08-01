@@ -766,11 +766,14 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         let _ = fs::rename(&previous, destination);
         return Err(error);
     }
+    // This is the generation older than the retained predecessor. It is no
+    // longer part of recovery, so its cleanup must not block a later publish
+    // if the post-promotion durability sync reports an error.
+    if retired.exists() {
+        let _ = fs::remove_dir_all(&retired);
+    }
     if let Some(parent) = destination.parent() {
         sync_directory(parent, PublicationFailurePoint::ParentSync)?;
-    }
-    if retired.exists() {
-        let _ = fs::remove_dir_all(retired);
     }
     Ok(())
 }
@@ -1284,6 +1287,29 @@ mod tests {
             let _ = fs::remove_dir_all(previous_generation_path(&root));
             let _ = fs::remove_dir_all(staging_path_for_publish(&root));
         }
+    }
+
+    #[test]
+    fn parent_sync_failure_does_not_block_the_next_publication() {
+        let root = temp_root("parent-sync-retry");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first publish");
+        bundle
+            .append_feature("box-2", "box")
+            .expect("second publish");
+
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(bundle.append_feature("box-3", "box").is_err());
+
+        bundle
+            .append_feature("box-4", "box")
+            .expect("next publication recovers");
+        assert_eq!(bundle.open().unwrap().log.len(), 4);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(previous_generation_path(&root));
     }
 
     #[test]

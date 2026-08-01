@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
@@ -10,7 +10,14 @@ use threeterm_occt_worker::{
     FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest, Operation, RevolveRequest,
     ShellRequest,
 };
+use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
+use threeterm_protocol::schema::{
+    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, MIRROR_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
+    REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, iter,
+};
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
@@ -19,7 +26,6 @@ pub use threeterm_protocol::schema::{
     MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
     SHELL_RESPONSE_SCHEMA_VERSION,
 };
-use threeterm_protocol::schema::{LIST_COMMAND_ID, NEW_PROJECT_COMMAND_ID, find, iter};
 use threeterm_protocol::schema_validator::validate;
 
 pub const EXIT_OK: i32 = 0;
@@ -1373,7 +1379,15 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let args: Vec<OsString> = args.into_iter().collect();
-    match plan(&args) {
+    let plan = plan(&args);
+    let DispatchPlan::Unknown { arg } = &plan else {
+        return execute_registered(plan, stdout, stderr);
+    };
+    emit_unknown_command(arg, stderr)
+}
+
+fn execute_handler(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    match plan {
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
         DispatchPlan::Save {
@@ -1542,6 +1556,175 @@ where
         ),
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
+}
+
+fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    let Some((command, request)) = request_for(&plan) else {
+        return emit_internal_error("parsed command has no registered schema", stderr);
+    };
+    let result = execute(command, request, |_| {
+        let mut handler_stdout = Vec::new();
+        let mut handler_stderr = Vec::new();
+        let exit = execute_handler(plan, &mut handler_stdout, &mut handler_stderr);
+        if exit != EXIT_OK {
+            return Err((exit, handler_stderr));
+        }
+        serde_json::from_slice(&handler_stdout).map_err(|error| {
+            (
+                EXIT_UNKNOWN_COMMAND,
+                format!("command response was not JSON: {error}").into_bytes(),
+            )
+        })
+    });
+
+    match result {
+        Ok(response) => write_success(stdout, &response, stderr),
+        Err(ExecutionError::Handler((exit, diagnostic))) => {
+            let _ = stderr.write_all(&diagnostic);
+            exit
+        }
+        Err(ExecutionError::InvalidRequest(error)) => emit_internal_error(&error, stderr),
+        Err(ExecutionError::InvalidResponse(error)) => emit_internal_error(
+            &format!("response violates registered schema: {error}"),
+            stderr,
+        ),
+        Err(ExecutionError::UnknownCommand(command)) => emit_unknown_command(command.0, stderr),
+    }
+}
+
+fn request_for(plan: &DispatchPlan) -> Option<(threeterm_protocol::schema::CommandId, Value)> {
+    Some(match plan {
+        DispatchPlan::List => (LIST_COMMAND_ID, json!({})),
+        DispatchPlan::NewProject { path } => {
+            (NEW_PROJECT_COMMAND_ID, json!({ "destination": path }))
+        }
+        DispatchPlan::Save {
+            bundle,
+            feature_id,
+            kind,
+        } => (
+            SAVE_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
+        ),
+        DispatchPlan::Load { bundle } => (LOAD_COMMAND_ID, json!({ "bundle_path": bundle })),
+        DispatchPlan::Extrude {
+            bundle,
+            feature_id,
+            profile_file,
+            height,
+        } => (
+            EXTRUDE_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height }),
+        ),
+        DispatchPlan::BooleanFuse {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => (
+            BOOLEAN_FUSE_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id }),
+        ),
+        DispatchPlan::Fillet {
+            bundle,
+            feature_id,
+            base_feature_id,
+            radius,
+        } => (
+            FILLET_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius }),
+        ),
+        DispatchPlan::Chamfer {
+            bundle,
+            feature_id,
+            base_feature_id,
+            distance,
+        } => (
+            CHAMFER_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance }),
+        ),
+        DispatchPlan::Hole {
+            bundle,
+            feature_id,
+            base_feature_id,
+            position,
+            direction,
+            diameter,
+        } => (
+            HOLE_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter }),
+        ),
+        DispatchPlan::Revolve {
+            bundle,
+            feature_id,
+            profile_file,
+            axis_point,
+            axis_direction,
+            angle,
+        } => (
+            REVOLVE_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle }),
+        ),
+        DispatchPlan::Mirror {
+            bundle,
+            feature_id,
+            base_feature_id,
+            plane_point,
+            plane_normal,
+        } => (
+            MIRROR_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal }),
+        ),
+        DispatchPlan::LinearPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            direction,
+            count,
+            spacing,
+        } => (
+            LINEAR_PATTERN_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing }),
+        ),
+        DispatchPlan::CircularPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+        } => (
+            CIRCULAR_PATTERN_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count }),
+        ),
+        DispatchPlan::Shell {
+            bundle,
+            feature_id,
+            base_feature_id,
+            thickness,
+        } => (
+            SHELL_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness }),
+        ),
+        DispatchPlan::Draft {
+            bundle,
+            feature_id,
+            base_feature_id,
+            angle,
+            pull_direction,
+        } => (
+            DRAFT_COMMAND_ID,
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
+        ),
+        DispatchPlan::Unknown { .. } => return None,
+    })
+}
+
+fn profile_json(profile_file: &str) -> Option<Value> {
+    read_profile(profile_file)
+        .ok()
+        .and_then(|profile| serde_json::to_value(profile).ok())
 }
 
 fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {

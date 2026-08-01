@@ -959,10 +959,7 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return Err(error),
-        };
+        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
         let _ = prior_view;
         Ok(DraftCommitView { snapshot, result })
     }
@@ -997,10 +994,7 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return Err(error),
-        };
+        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
         let _ = prior_view;
         Ok(LoftCommitView { snapshot, result })
     }

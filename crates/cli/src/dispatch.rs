@@ -31,6 +31,10 @@ pub const EXIT_BREP_INVALID: i32 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 enum DispatchPlan {
+    Registered {
+        command: CommandId,
+        plan: Box<DispatchPlan>,
+    },
     List,
     NewProject {
         path: String,
@@ -126,6 +130,34 @@ enum DispatchPlan {
 }
 
 fn plan(args: &[OsString]) -> DispatchPlan {
+    let plan = plan_unregistered(args);
+    if matches!(&plan, DispatchPlan::Unknown { .. }) {
+        return plan;
+    }
+    let name = if args.first().is_some_and(|value| value == "new-project") {
+        args.first()
+    } else if args.first().is_some_and(|value| value == "--machine") {
+        args.get(1)
+    } else {
+        None
+    };
+    let Some(name) = name.and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: "command".to_string(),
+        };
+    };
+    let Some(command) = find_by_name(name).map(|schema| schema.id) else {
+        return DispatchPlan::Unknown {
+            arg: name.to_string(),
+        };
+    };
+    DispatchPlan::Registered {
+        command,
+        plan: Box::new(plan),
+    }
+}
+
+fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
     if args.first().is_some_and(|value| value == "new-project") {
         return match args {
             [_, path] => DispatchPlan::NewProject {
@@ -234,7 +266,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
                 .all(|value| value.is_finite())
                 && angle_step.is_finite()
         }
-        DispatchPlan::List
+        DispatchPlan::Registered { .. }
+        | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
         | DispatchPlan::Save { .. }
         | DispatchPlan::Load { .. }
@@ -1462,6 +1495,7 @@ fn execute_handler(
     stderr: &mut dyn Write,
 ) -> i32 {
     match plan {
+        DispatchPlan::Registered { plan, .. } => execute_handler(*plan, request, stdout, stderr),
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
         DispatchPlan::Save {
@@ -1640,15 +1674,17 @@ fn execute_handler(
 }
 
 fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    let (command, request) = match request_for(&plan) {
-        Ok(Some(request)) => request,
-        Ok(None) => return emit_internal_error("parsed command has no registered schema", stderr),
+    let DispatchPlan::Registered { command, plan } = plan else {
+        return emit_internal_error("parsed command has no registered schema", stderr);
+    };
+    let request = match request_for(&plan) {
+        Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
-        let exit = execute_handler(plan, &request, &mut handler_stdout, &mut handler_stderr);
+        let exit = execute_handler(*plan, &request, &mut handler_stdout, &mut handler_stderr);
         if exit != EXIT_OK {
             return Err((exit, handler_stderr));
         }
@@ -1675,55 +1711,40 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     }
 }
 
-fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String> {
-    let (name, request) = match plan {
-        DispatchPlan::List => ("list", json!({})),
-        DispatchPlan::NewProject { path } => ("new-project", json!({ "destination": path })),
+fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
+    let request = match plan {
+        DispatchPlan::List => json!({}),
+        DispatchPlan::NewProject { path } => json!({ "destination": path }),
         DispatchPlan::Save {
             bundle,
             feature_id,
             kind,
-        } => (
-            "save",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
-        ),
-        DispatchPlan::Load { bundle } => ("load", json!({ "bundle_path": bundle })),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
+        DispatchPlan::Load { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
             profile_file,
             height,
-        } => (
-            "extrude",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height }),
         DispatchPlan::BooleanFuse {
             bundle,
             feature_id,
             base_feature_id,
             tool_feature_id,
-        } => (
-            "boolean-fuse",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id }),
         DispatchPlan::Fillet {
             bundle,
             feature_id,
             base_feature_id,
             radius,
-        } => (
-            "fillet",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius }),
         DispatchPlan::Chamfer {
             bundle,
             feature_id,
             base_feature_id,
             distance,
-        } => (
-            "chamfer",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance }),
         DispatchPlan::Hole {
             bundle,
             feature_id,
@@ -1731,10 +1752,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String
             position,
             direction,
             diameter,
-        } => (
-            "hole",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter }),
         DispatchPlan::Revolve {
             bundle,
             feature_id,
@@ -1742,20 +1760,14 @@ fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String
             axis_point,
             axis_direction,
             angle,
-        } => (
-            "revolve",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle }),
         DispatchPlan::Mirror {
             bundle,
             feature_id,
             base_feature_id,
             plane_point,
             plane_normal,
-        } => (
-            "mirror",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal }),
         DispatchPlan::LinearPattern {
             bundle,
             feature_id,
@@ -1763,10 +1775,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String
             direction,
             count,
             spacing,
-        } => (
-            "linear-pattern",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing }),
         DispatchPlan::CircularPattern {
             bundle,
             feature_id,
@@ -1775,35 +1784,25 @@ fn request_for(plan: &DispatchPlan) -> Result<Option<(CommandId, Value)>, String
             axis_normal,
             angle_step,
             count,
-        } => (
-            "circular-pattern",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count }),
         DispatchPlan::Shell {
             bundle,
             feature_id,
             base_feature_id,
             thickness,
-        } => (
-            "shell",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness }),
-        ),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness }),
         DispatchPlan::Draft {
             bundle,
             feature_id,
             base_feature_id,
             angle,
             pull_direction,
-        } => (
-            "draft",
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
-        ),
-        DispatchPlan::Unknown { .. } => return Ok(None),
+        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
+        DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
+            return Err("parsed command has no registered request".to_string());
+        }
     };
-    let command = find_by_name(name)
-        .map(|schema| schema.id)
-        .ok_or_else(|| format!("registered command {name:?} is missing"))?;
-    Ok(Some((command, request)))
+    Ok(request)
 }
 
 fn profile_json(profile_file: &str) -> Result<Value, String> {

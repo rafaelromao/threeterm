@@ -772,6 +772,9 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         PublicationFailurePoint::PromoteStaging,
     ) {
         let _ = fs::rename(&previous, destination);
+        if retired.exists() {
+            let _ = fs::rename(&retired, &previous);
+        }
         return Err(error);
     }
     // This is the generation older than the retained predecessor. It is no
@@ -1339,6 +1342,48 @@ mod tests {
             let _ = fs::remove_dir_all(previous_generation_path(&root));
             let _ = fs::remove_dir_all(staging_path_for_publish(&root));
         }
+    }
+
+    #[test]
+    fn failed_promotion_restores_the_current_and_preceding_generations() {
+        let root = temp_root("promotion-rollback-generations");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first publish");
+        let preceding_manifest =
+            fs::read(root.join(MANIFEST_FILENAME)).expect("preceding manifest");
+        let preceding_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("preceding log");
+        bundle
+            .append_feature("box-2", "box")
+            .expect("second publish");
+        let current_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("current manifest");
+        let current_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("current log");
+
+        fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+        assert!(bundle.append_feature("box-3", "box").is_err());
+
+        let previous = previous_generation_path(&root);
+        assert_eq!(
+            fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+            current_manifest
+        );
+        assert_eq!(
+            fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+            current_log
+        );
+        assert_eq!(
+            fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+            preceding_manifest
+        );
+        assert_eq!(
+            fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+            preceding_log
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(previous);
+        let _ = fs::remove_dir_all(staging_path_for_publish(&root));
     }
 
     #[test]

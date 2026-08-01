@@ -961,10 +961,7 @@ impl Host {
         let feature_id = request.feature_id.clone();
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let _ = prior_view;
         Ok(DraftCommitView { snapshot, result })
@@ -1002,10 +999,7 @@ impl Host {
         let feature_id = request.feature_id.clone();
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let _ = prior_view;
         Ok(LoftCommitView { snapshot, result })

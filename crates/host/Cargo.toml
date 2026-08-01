@@ -14,6 +14,7 @@ threeterm-occt-worker = { path = "../workers/occt" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+threeterm-domain = { path = "../domain" }
 
 [lints]
 workspace = true

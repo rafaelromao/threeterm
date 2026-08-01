@@ -11,7 +11,7 @@ use threeterm_occt_worker::{
     LoftResult, MirrorRequest, MirrorResult, OcctWorker, RevolveRequest, RevolveResult,
     ShellRequest, ShellResult, WorkerError,
 };
-use threeterm_persistence::{Bundle, BundleError, LoadedBundle};
+use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load};
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
 };
@@ -240,7 +240,7 @@ impl Host {
                 path: root.to_path_buf(),
             });
         }
-        let loaded = Bundle::at(root).open()?;
+        let loaded = load(root)?;
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -1050,7 +1050,11 @@ pub fn schema_version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threeterm_persistence::{Bundle, BundleError, MANIFEST_FILENAME};
+    use threeterm_domain::ProjectGeneration;
+    use threeterm_persistence::{
+        Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX, schema_epoch,
+        write_v0_fixture,
+    };
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1101,6 +1105,33 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(valid_root);
         let _ = std::fs::remove_dir_all(tampered_root);
+    }
+
+    #[test]
+    fn load_migrates_prior_epoch_bundle_and_publishes_snapshot() {
+        let root = temp_root("prior-epoch");
+        write_v0_fixture(&root, ProjectGeneration::with_id("generation-prior"))
+            .expect("prior-epoch bundle writes");
+        let backup = root.with_file_name(format!(
+            "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+            root.file_name()
+                .expect("root has filename")
+                .to_string_lossy()
+        ));
+
+        let host = Host::new();
+        let view = host.load(&root).expect("prior epoch migrates and loads");
+
+        assert_eq!(host.current(), Some(view));
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(MANIFEST_FILENAME)).expect("migrated manifest reads"),
+        )
+        .expect("migrated manifest parses");
+        assert_eq!(manifest["schema_version"], schema_epoch());
+        assert!(backup.is_dir(), "pre-migration backup is retained");
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(backup);
     }
 
     #[test]

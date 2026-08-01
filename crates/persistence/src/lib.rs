@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -48,13 +49,15 @@ pub struct V0Bundle {
 pub mod bundle {
     pub use super::{
         Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, LoadedBundle, LogEntry, MANIFEST_FILENAME,
-        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, SchemaStatus,
-        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema, load,
-        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PublicationFailurePoint,
+        SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest,
+        detect_schema, fail_next_publication_at, load, migrate_v0_to_v1, prior_schema_epoch,
+        read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
 pub const PRE_MIGRATION_BACKUP_SUFFIX: &str = ".pre-migration-backup";
+pub const PREVIOUS_GENERATION_SUFFIX: &str = ".previous-generation";
 
 pub fn schema_epoch() -> &'static str {
     "threeterm.persistence/1"
@@ -69,6 +72,35 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// A deterministic test hook for the durability boundaries in generation
+/// publication. The hook fails once, then clears itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationFailurePoint {
+    StagingSync,
+    ReplaceCurrent,
+    PromoteStaging,
+}
+
+thread_local! {
+    static NEXT_PUBLICATION_FAILURE: RefCell<Option<PublicationFailurePoint>> = const { RefCell::new(None) };
+}
+
+pub fn fail_next_publication_at(point: PublicationFailurePoint) {
+    NEXT_PUBLICATION_FAILURE.with(|next| *next.borrow_mut() = Some(point));
+}
+
+fn fail_if_injected(point: PublicationFailurePoint) -> std::io::Result<()> {
+    NEXT_PUBLICATION_FAILURE.with(|next| {
+        let mut next = next.borrow_mut();
+        if *next == Some(point) {
+            *next = None;
+            Err(std::io::Error::other("injected publication failure"))
+        } else {
+            Ok(())
+        }
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +274,9 @@ pub struct LoadedBundle {
     pub transactions: String,
     pub log: TransactionLog,
     pub graph: FeatureGraph,
+    /// `true` when the canonical path was unavailable and the immediately
+    /// preceding sealed Project Generation was opened instead.
+    pub recovered_from_previous: bool,
 }
 
 impl LoadedBundle {
@@ -434,6 +469,16 @@ impl Bundle {
     }
 
     pub fn open(&self) -> Result<LoadedBundle, BundleError> {
+        match self.open_sealed(false) {
+            Ok(loaded) => Ok(loaded),
+            Err(BundleError::ManifestMissing) if !self.root.exists() => {
+                Self::at(previous_generation_path(&self.root)).open_sealed(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_sealed(&self, recovered_from_previous: bool) -> Result<LoadedBundle, BundleError> {
         let manifest_bytes = read_required(&self.manifest_path(), BundleError::ManifestMissing)?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
@@ -492,6 +537,7 @@ impl Bundle {
             transactions,
             log,
             graph,
+            recovered_from_previous,
         })
     }
 
@@ -516,19 +562,24 @@ impl Bundle {
         let mut line =
             serde_json::to_vec(last).map_err(|error| BundleError::Invalid(error.to_string()))?;
         line.push(b'\n');
-        append_and_sync(&self.transactions_path(), &line)?;
-
         loaded.manifest = Manifest::seal(
             &loaded.manifest.generation_id,
             &loaded.manifest.revision_id,
             &loaded.log,
             &loaded.graph,
         );
+        let staging = staging_path_for_publish(&self.root);
+        copy_dir_recursive(&self.root, &staging)?;
+        append_and_sync(&staging.join(TRANSACTIONS_LOG_FILENAME), &line)?;
         atomic_write(
-            &self.manifest_path(),
+            &staging.join(MANIFEST_FILENAME),
             &serde_json::to_vec_pretty(&loaded.manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
         )?;
+        File::open(&staging)?.sync_all()?;
+        fail_if_injected(PublicationFailurePoint::StagingSync)?;
+        Bundle::at(&staging).open_sealed(false)?;
+        publish_staged(&staging, &self.root)?;
         self.open()
     }
 
@@ -560,6 +611,9 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
+        if previous_generation_path(root).exists() {
+            return Bundle::at(root).open();
+        }
         return Err(BundleError::Invalid(format!(
             "bundle path missing: {}",
             root.display()
@@ -652,14 +706,36 @@ fn loaded_with(
         transactions,
         log: stale.log,
         graph: stale.graph,
+        recovered_from_previous: stale.recovered_from_previous,
     }
 }
 
 fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
-    if destination.exists() {
-        fs::remove_dir_all(destination)?;
+    let previous = previous_generation_path(destination);
+    let retired = retired_generation_path(&previous);
+    fail_if_injected(PublicationFailurePoint::ReplaceCurrent)?;
+    if previous.exists() {
+        fs::rename(&previous, &retired)?;
     }
-    fs::rename(staging, destination)
+    if let Err(error) = fs::rename(destination, &previous) {
+        if retired.exists() {
+            let _ = fs::rename(&retired, &previous);
+        }
+        return Err(error);
+    }
+    fail_if_injected(PublicationFailurePoint::PromoteStaging)?;
+    if let Err(error) = fs::rename(staging, destination) {
+        // The previous generation is deliberately left in place. `Bundle::open`
+        // recognizes this interrupted replacement and opens it explicitly.
+        return Err(error);
+    }
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    if retired.exists() {
+        let _ = fs::remove_dir_all(retired);
+    }
+    Ok(())
 }
 
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
@@ -701,6 +777,36 @@ fn staging_path_for_migration(path: &Path) -> PathBuf {
         suffix
     ));
     staging
+}
+
+fn staging_path_for_publish(path: &Path) -> PathBuf {
+    let mut staging = path.to_path_buf();
+    staging.set_file_name(format!(
+        "{}.publish-tmp-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    staging
+}
+
+fn previous_generation_path(path: &Path) -> PathBuf {
+    let mut previous = path.to_path_buf();
+    previous.set_file_name(format!(
+        "{}{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        PREVIOUS_GENERATION_SUFFIX
+    ));
+    previous
+}
+
+fn retired_generation_path(path: &Path) -> PathBuf {
+    let mut retired = path.to_path_buf();
+    retired.set_file_name(format!(
+        "{}.retired-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    retired
 }
 
 fn write_v1_into(
@@ -1053,6 +1159,65 @@ mod tests {
         assert!(root.join(MANIFEST_FILENAME).is_file());
         assert!(root.join(TRANSACTIONS_LOG_FILENAME).is_file());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn interrupted_generation_replacement_recovers_prior_and_retains_candidate() {
+        let root = temp_root("interrupted-publication");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first publish");
+        let prior_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("prior manifest");
+        let prior_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("prior log");
+
+        fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+        assert!(bundle.append_feature("box-2", "box").is_err());
+
+        let recovered = bundle.open().expect("prior generation recovers");
+        assert!(recovered.recovered_from_previous);
+        assert_eq!(recovered.log.len(), 1);
+        let previous = previous_generation_path(&root);
+        assert_eq!(
+            fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+            prior_manifest
+        );
+        assert_eq!(
+            fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+            prior_log
+        );
+        let candidate = staging_path_for_publish(&root);
+        assert!(Bundle::at(&candidate).open_sealed(false).is_ok());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(previous);
+        let _ = fs::remove_dir_all(candidate);
+    }
+
+    #[test]
+    fn publication_sync_and_replacement_failures_preserve_current_generation_bytes() {
+        for point in [
+            PublicationFailurePoint::StagingSync,
+            PublicationFailurePoint::ReplaceCurrent,
+        ] {
+            let root = temp_root("publication-failure");
+            let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+            bundle
+                .append_feature("box-1", "box")
+                .expect("first publish");
+            let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest");
+            let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log");
+
+            fail_next_publication_at(point);
+            assert!(bundle.append_feature("box-2", "box").is_err());
+            assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
+            assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
+            assert_eq!(bundle.open().unwrap().log.len(), 1);
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(previous_generation_path(&root));
+            let _ = fs::remove_dir_all(staging_path_for_publish(&root));
+        }
     }
 
     #[test]

@@ -5,9 +5,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use threeterm_domain::ProjectGeneration;
 use threeterm_persistence::bundle::{
-    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, SchemaStatus, V0Manifest,
-    detect_schema, load, migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh,
-    write_v0_fixture,
+    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PublicationFailurePoint,
+    SchemaStatus, V0Manifest, detect_schema, fail_next_publication_at, load, migrate_v0_to_v1,
+    prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
 };
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -214,6 +214,28 @@ fn migration_failure_leaves_source_unchanged() {
         "no sealed backup may be left behind after a failed migration"
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_migration_replacement_preserves_the_only_canonical_generation() {
+    let root = unique_temp_dir("replacement-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-replacement"))
+        .expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::ReplaceCurrent);
+    assert!(load(&root).is_err(), "replacement failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source remains byte-identical"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
     let _ = fs::remove_dir_all(root);
 }
 

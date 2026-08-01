@@ -16,6 +16,7 @@ use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
+use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_protocol::worker::Envelope;
 
 pub const BREP_SUBDIR: &str = "brep";
@@ -244,6 +245,51 @@ impl Host {
         self.current.borrow().as_ref().map(SnapshotView::from)
     }
 
+    /// Accept a completed worker lifecycle and publish its one Derived Result.
+    /// The Host owns this boundary because only it can compare the staged
+    /// result with its current Revision Snapshot and register the result.
+    pub fn accept_derived_result(
+        &self,
+        artifact_root: impl AsRef<Path>,
+        request: &Layer1ArtifactRequest,
+        expected_worker: &WorkerFingerprint,
+        outcome: SupervisorOutcome,
+    ) -> Result<Layer1DerivedResult, Diagnostic> {
+        let root = artifact_root.as_ref();
+        let SupervisorOutcome::Completed {
+            request_id,
+            mut artifact_headers,
+        } = outcome
+        else {
+            cleanup_staged_artifact(root, &request.staging_name);
+            return Err(Diagnostic::artifact_promotion_failure(
+                "worker_result_not_completed",
+            ));
+        };
+        if request_id != request.request_id {
+            cleanup_staged_artifact(root, &request.staging_name);
+            return Err(Diagnostic::artifact_request_mismatch(
+                "completed_request_id_mismatch",
+            ));
+        }
+        if artifact_headers.len() != 1 {
+            cleanup_staged_artifact(root, &request.staging_name);
+            return Err(Diagnostic::artifact_promotion_failure(
+                "expected_exactly_one_artifact",
+            ));
+        }
+        self.accept_staged_artifact(
+            root,
+            request,
+            expected_worker,
+            artifact_headers
+                .pop()
+                .expect("checked exactly one artifact"),
+        )
+    }
+
+    /// Accept one artifact envelope directly. Worker lifecycle callers should
+    /// use `accept_derived_result` so completion and publication stay explicit.
     pub fn promote_staged_artifact(
         &self,
         artifact_root: impl AsRef<Path>,
@@ -252,31 +298,43 @@ impl Host {
         envelope: Envelope,
     ) -> Result<Layer1DerivedResult, Diagnostic> {
         let root = artifact_root.as_ref();
-        let reject = |diagnostic| {
-            let _ = std::fs::remove_file(root.join(format!("{}.partial", request.staging_name)));
-            diagnostic
-        };
         let Envelope::Artifact {
             schema_version,
             header,
         } = envelope
         else {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
+            cleanup_staged_artifact(root, &request.staging_name);
+            return Err(Diagnostic::artifact_promotion_failure(
                 "artifact_envelope_expected",
-            )));
+            ));
         };
-        let header = *header;
+        if schema_version != threeterm_protocol::schema_version() {
+            cleanup_staged_artifact(root, &request.staging_name);
+            return Err(Diagnostic::artifact_promotion_failure(
+                "artifact_schema_mismatch",
+            ));
+        }
+        self.accept_staged_artifact(root, request, expected_worker, *header)
+    }
+
+    fn accept_staged_artifact(
+        &self,
+        artifact_root: impl AsRef<Path>,
+        request: &Layer1ArtifactRequest,
+        expected_worker: &WorkerFingerprint,
+        header: threeterm_protocol::artifact::ArtifactHeader,
+    ) -> Result<Layer1DerivedResult, Diagnostic> {
+        let root = artifact_root.as_ref();
+        let reject = |diagnostic| {
+            cleanup_staged_artifact(root, &request.staging_name);
+            diagnostic
+        };
         let current = self.current().ok_or_else(|| {
             reject(Diagnostic::artifact_promotion_failure(
                 "canonical_snapshot_missing",
             ))
         })?;
         let expected_cache_key = Layer1CacheKey::issue(request, expected_worker);
-        if schema_version != threeterm_protocol::schema_version() {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_schema_mismatch",
-            )));
-        }
         if request.source_revision_id != current.revision_hash
             || header.source_revision_id != request.source_revision_id
             || header.cache_key.source_revision_id != request.source_revision_id
@@ -882,6 +940,11 @@ fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
         }
         _ => Diagnostic::artifact_promotion_failure(&error.to_string()),
     }
+}
+
+fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
+    let _ = fs::remove_file(root.join(format!("{staging_name}.partial")));
+    let _ = fs::remove_file(root.join(format!(".{staging_name}.verified")));
 }
 
 fn bundle_root(root: &Path) -> PathBuf {

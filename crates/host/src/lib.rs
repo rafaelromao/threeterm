@@ -263,6 +263,18 @@ impl Host {
                 path: root.to_path_buf(),
             });
         }
+        if !root.exists() {
+            let mut previous = root.to_path_buf();
+            previous.set_file_name(format!(
+                "{}.previous-generation",
+                root.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if !previous.exists() {
+                return Err(HostError::BundlePathMissing {
+                    path: root.to_path_buf(),
+                });
+            }
+        }
         let loaded = load(root)?;
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));

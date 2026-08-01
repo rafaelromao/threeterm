@@ -1784,17 +1784,11 @@ bool handle_draft(const JsonParser::Value& request, std::string& error) {
 
         BRepOffsetAPI_DraftAngle draft;
         draft.Init(base_solid);
-        for (std::size_t index = 0; index < caps.size(); ++index) {
-            if (index == neutral_index) continue;
-            draft.Add(caps[index].face, direction_for_draft, angle, neutral_plane,
-                      Standard_True);
-            if (!draft.AddDone()) {
-                Draft_ErrorStatus status = draft.Status();
-                error = "draft_failed: cap face " + std::to_string(index) +
-                        " status=" + std::to_string(static_cast<int>(status));
-                return false;
-            }
-        }
+        // Draft every face that is NOT a planar cap. A face whose
+        // normal is parallel to the pull direction is a cap (top/bottom
+        // of an extrusion); drafting such a face is undefined because
+        // it is parallel to the neutral plane. The neutral cap is
+        // excluded above; the remaining caps are excluded here.
         for (TopExp_Explorer ex(base_solid, TopAbs_FACE); ex.More(); ex.Next()) {
             TopoDS_Face face = TopoDS::Face(ex.Current());
             bool is_cap = false;

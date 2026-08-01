@@ -1943,7 +1943,10 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             is_solid,
             ruled,
         } => {
-            let profiles: Result<Vec<_>, _> = profile_files.iter().map(|path| read_profile_3d(path)).collect();
+            let profiles: Result<Vec<_>, _> = profile_files
+                .iter()
+                .map(|path| read_profile_3d(path))
+                .collect();
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled })
         }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {

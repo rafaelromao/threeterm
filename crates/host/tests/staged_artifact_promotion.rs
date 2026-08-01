@@ -255,8 +255,8 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
                 &artifact_root,
                 &request,
                 wire_round_trip(
-                &emit_staged_artifact(&artifact_root, &request, original_bytes)
-                    .expect("worker stages initial artifact"),
+                    &emit_staged_artifact(&artifact_root, &request, original_bytes)
+                        .expect("worker stages initial artifact"),
                 ),
             ),
         )

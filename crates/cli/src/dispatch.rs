@@ -372,15 +372,21 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
         return emit_persistence_error("destination must not be empty", stderr);
     }
     let generation = ProjectGeneration::fresh();
-    match threeterm_persistence::write_fresh(Path::new(path), generation.clone()) {
-        Ok(manifest) => write_success(
-            stdout,
-            &serde_json::json!({
-                "generation_id": generation.id,
-                "manifest": manifest,
-            }),
-            stderr,
-        ),
+    match threeterm_persistence::write_fresh(Path::new(path), generation) {
+        Ok(manifest) => {
+            // The Project Generation identity is the canonical log
+            // digest; surface the manifest's identity, not the caller's
+            // seed value.
+            let generation_id = manifest.generation_id.clone();
+            write_success(
+                stdout,
+                &serde_json::json!({
+                    "generation_id": generation_id,
+                    "manifest": manifest,
+                }),
+                stderr,
+            )
+        }
         Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
 }

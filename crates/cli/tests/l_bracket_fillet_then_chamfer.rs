@@ -202,7 +202,7 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         .revision_hash_hex()
         .to_string();
 
-    let fillet_response = fillet(bin, &root, "l-bracket-fillet", "l-bracket-base", 0.5);
+    let fillet_response = fillet(bin, &root, "l-bracket-fillet", "l-bracket-base", 0.1);
     assert_ne!(
         fillet_response["revision_hash"].as_str().unwrap(),
         base_revision,

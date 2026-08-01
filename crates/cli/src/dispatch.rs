@@ -1726,25 +1726,33 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             profile_file,
             height,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height })
+        }
         DispatchPlan::BooleanFuse {
             bundle,
             feature_id,
             base_feature_id,
             tool_feature_id,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id })
+        }
         DispatchPlan::Fillet {
             bundle,
             feature_id,
             base_feature_id,
             radius,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius })
+        }
         DispatchPlan::Chamfer {
             bundle,
             feature_id,
             base_feature_id,
             distance,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance })
+        }
         DispatchPlan::Hole {
             bundle,
             feature_id,
@@ -1752,7 +1760,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             position,
             direction,
             diameter,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter })
+        }
         DispatchPlan::Revolve {
             bundle,
             feature_id,
@@ -1760,14 +1770,18 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_point,
             axis_direction,
             angle,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle })
+        }
         DispatchPlan::Mirror {
             bundle,
             feature_id,
             base_feature_id,
             plane_point,
             plane_normal,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal })
+        }
         DispatchPlan::LinearPattern {
             bundle,
             feature_id,
@@ -1775,7 +1789,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             direction,
             count,
             spacing,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing })
+        }
         DispatchPlan::CircularPattern {
             bundle,
             feature_id,
@@ -1784,20 +1800,26 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_normal,
             angle_step,
             count,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count })
+        }
         DispatchPlan::Shell {
             bundle,
             feature_id,
             base_feature_id,
             thickness,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness })
+        }
         DispatchPlan::Draft {
             bundle,
             feature_id,
             base_feature_id,
             angle,
             pull_direction,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction })
+        }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
         }

@@ -10,10 +10,10 @@ description = "Rust host that owns the Revision Snapshot, versioned command API,
 [dependencies]
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
+threeterm-occt-worker = { path = "../workers/occt" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-threeterm-occt-worker = { path = "../workers/occt" }
 
 [lints]
 workspace = true

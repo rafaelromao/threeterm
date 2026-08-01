@@ -21,6 +21,10 @@ pub enum DiagnosticCode {
     UnknownCommand,
     PersistenceFailure,
     IntegrityFailure,
+    WorkerFailure,
+    /// The worker produced a BREP that fails `BRepCheck_Analyzer`. The
+    /// host surfaces this to the caller without committing the revision.
+    BrepInvalid,
     ArtifactPromotionFailure,
     ArtifactHashMismatch,
     ArtifactRevisionMismatch,
@@ -57,6 +61,22 @@ impl Diagnostic {
     pub fn integrity_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::IntegrityFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn worker_failure(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::WorkerFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn brep_invalid(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::BrepInvalid,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

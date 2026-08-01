@@ -7,7 +7,8 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID, find, registry_hash,
+    BOOLEAN_FUSE_COMMAND_ID, EXTRUDE_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, SAVE_COMMAND_ID,
+    find, registry_hash,
 };
 
 #[test]
@@ -30,7 +31,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "d157a7980611896a6b66238f23216fd5fd49393e65ecbe7ed5f930ead92fc10b",
+        "cc6748ba58d873b97b2e1914123a9566cab28db6eec20f47d96e73025b57923e",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -69,6 +70,36 @@ fn registry_contains_versioned_save_and_load_contracts() {
         serde_json::json!(["bundle_path"])
     );
     assert_eq!(load.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
+    let extrude = find(EXTRUDE_COMMAND_ID).expect("extrude is registered");
+    assert_eq!(
+        extrude.response_schema_version,
+        "threeterm.command.extrude.response/1"
+    );
+    assert_eq!(
+        extrude.request_schema["required"],
+        serde_json::json!(["bundle_path", "feature_id", "profile", "height"])
+    );
+    assert_eq!(extrude.request_schema["additionalProperties"], false);
+
+    let fuse = find(BOOLEAN_FUSE_COMMAND_ID).expect("boolean-fuse is registered");
+    assert_eq!(
+        fuse.response_schema_version,
+        "threeterm.command.boolean-fuse.response/1"
+    );
+    assert_eq!(
+        fuse.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "tool_feature_id"
+        ])
+    );
+    assert_eq!(fuse.request_schema["additionalProperties"], false);
 }
 
 #[test]

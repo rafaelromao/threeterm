@@ -132,6 +132,206 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
 }
 
 #[test]
+fn distinct_cache_identities_with_the_same_display_name_preserve_bytes_and_registrations() {
+    let project_root = temp_root("distinct-cache-identities-project");
+    let artifact_root = temp_root("distinct-cache-identities-artifacts");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "box-1", "box")
+        .expect("canonical snapshot saves");
+    let first_request = Layer1ArtifactRequest {
+        request_id: "request-1".to_string(),
+        source_revision_id: snapshot.revision_hash.clone(),
+        artifact_kind: "brep".to_string(),
+        staging_name: "requested-output.brep".to_string(),
+        semantic_input_sha256: "11".repeat(32),
+        deterministic_settings_sha256: "22".repeat(32),
+    };
+    let second_request = Layer1ArtifactRequest {
+        request_id: "request-2".to_string(),
+        semantic_input_sha256: "33".repeat(32),
+        ..first_request.clone()
+    };
+
+    let first = host
+        .accept_derived_result(
+            &artifact_root,
+            &first_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &first_request,
+                emit_staged_artifact(&artifact_root, &first_request, b"first result")
+                    .expect("first artifact stages"),
+            ),
+        )
+        .expect("first result accepts");
+    let second = host
+        .accept_derived_result(
+            &artifact_root,
+            &second_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &second_request,
+                emit_staged_artifact(&artifact_root, &second_request, b"second result")
+                    .expect("second artifact stages"),
+            ),
+        )
+        .expect("second result accepts");
+
+    assert_eq!(first.artifact_name, "requested-output.brep");
+    assert_eq!(second.artifact_name, "requested-output.brep");
+    assert_ne!(first.cache_key, second.cache_key);
+    assert_ne!(first.path, second.path);
+    assert_eq!(
+        std::fs::read(&first.path).expect("first result reads"),
+        b"first result"
+    );
+    assert_eq!(
+        std::fs::read(&second.path).expect("second result reads"),
+        b"second result"
+    );
+    assert_eq!(host.layer1_result(&first.cache_key), Some(first));
+    assert_eq!(host.layer1_result(&second.cache_key), Some(second));
+
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
+fn repeated_cache_identity_reuses_the_first_publication_without_overwriting_it() {
+    let project_root = temp_root("repeated-cache-identity-project");
+    let artifact_root = temp_root("repeated-cache-identity-artifacts");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "box-1", "box")
+        .expect("canonical snapshot saves");
+    let first_request = Layer1ArtifactRequest {
+        request_id: "request-1".to_string(),
+        source_revision_id: snapshot.revision_hash,
+        artifact_kind: "brep".to_string(),
+        staging_name: "first-requested-output.brep".to_string(),
+        semantic_input_sha256: "11".repeat(32),
+        deterministic_settings_sha256: "22".repeat(32),
+    };
+    let second_request = Layer1ArtifactRequest {
+        request_id: "request-2".to_string(),
+        staging_name: "second-requested-output.brep".to_string(),
+        ..first_request.clone()
+    };
+
+    let first = host
+        .accept_derived_result(
+            &artifact_root,
+            &first_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &first_request,
+                emit_staged_artifact(&artifact_root, &first_request, b"first result")
+                    .expect("first artifact stages"),
+            ),
+        )
+        .expect("first result accepts");
+    let repeated = host
+        .accept_derived_result(
+            &artifact_root,
+            &second_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &second_request,
+                emit_staged_artifact(&artifact_root, &second_request, b"replacement result")
+                    .expect("second artifact stages"),
+            ),
+        )
+        .expect("duplicate cache identity reuses first result");
+
+    assert_eq!(repeated, first);
+    assert_eq!(first.artifact_name, "first-requested-output.brep");
+    assert_eq!(
+        std::fs::read(&first.path).expect("first result reads"),
+        b"first result"
+    );
+    assert_eq!(host.layer1_result(&first.cache_key), Some(first));
+    assert!(
+        !artifact_root
+            .join("second-requested-output.brep.partial")
+            .exists()
+    );
+    assert!(
+        !artifact_root
+            .join(".second-requested-output.brep.verified")
+            .exists()
+    );
+
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
+fn repeated_cache_identity_recovers_a_corrupted_publication() {
+    let project_root = temp_root("corrupted-cache-publication-project");
+    let artifact_root = temp_root("corrupted-cache-publication-artifacts");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "box-1", "box")
+        .expect("canonical snapshot saves");
+    let first_request = Layer1ArtifactRequest {
+        request_id: "request-1".to_string(),
+        source_revision_id: snapshot.revision_hash,
+        artifact_kind: "brep".to_string(),
+        staging_name: "first-requested-output.brep".to_string(),
+        semantic_input_sha256: "11".repeat(32),
+        deterministic_settings_sha256: "22".repeat(32),
+    };
+    let recovery_request = Layer1ArtifactRequest {
+        request_id: "request-2".to_string(),
+        staging_name: "recovery-requested-output.brep".to_string(),
+        ..first_request.clone()
+    };
+    let first = host
+        .accept_derived_result(
+            &artifact_root,
+            &first_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &first_request,
+                emit_staged_artifact(&artifact_root, &first_request, b"first result")
+                    .expect("first artifact stages"),
+            ),
+        )
+        .expect("first result accepts");
+    std::fs::write(&first.path, b"corrupted result").expect("publication corrupts");
+
+    let recovered = host
+        .accept_derived_result(
+            &artifact_root,
+            &recovery_request,
+            &worker_fingerprint(),
+            completed_outcome(
+                &artifact_root,
+                &recovery_request,
+                emit_staged_artifact(&artifact_root, &recovery_request, b"recovered result")
+                    .expect("recovery artifact stages"),
+            ),
+        )
+        .expect("corrupted publication recovers");
+
+    assert_eq!(recovered.path, first.path);
+    assert_eq!(
+        std::fs::read(&recovered.path).expect("recovered result reads"),
+        b"recovered result"
+    );
+    assert_eq!(host.layer1_result(&first.cache_key), Some(recovered));
+
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
 fn host_accepts_completed_worker_result_before_publishing() {
     let project_root = temp_root("completed-project");
     let artifact_root = temp_root("completed-artifacts");

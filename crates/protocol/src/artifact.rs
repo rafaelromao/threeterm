@@ -60,6 +60,25 @@ impl Layer1CacheKey {
             deterministic_settings_sha256: request.deterministic_settings_sha256.clone(),
         }
     }
+
+    /// Returns the stable final filename for this cache identity.
+    pub fn final_artifact_name(&self) -> String {
+        let mut identity = Vec::new();
+        for field in [
+            &self.source_revision_id,
+            &self.worker_fingerprint.worker_kind,
+            &self.worker_fingerprint.worker_schema_version,
+            &self.worker_fingerprint.protocol_schema_version,
+            &self.artifact_kind,
+            &self.semantic_input_sha256,
+            &self.deterministic_settings_sha256,
+        ] {
+            let bytes = field.as_bytes();
+            identity.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            identity.extend_from_slice(bytes);
+        }
+        format!("derived-{}", sha256_hex(&identity))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,16 +176,16 @@ impl Stage {
     }
 
     pub fn validate_and_promote(&self, header: &ArtifactHeader) -> Result<PathBuf, ArtifactError> {
-        if header.staging_name.is_empty()
-            || header.staging_name.contains('/')
-            || header.staging_name.contains('\\')
-            || header.staging_name.contains('\0')
-        {
-            return Err(ArtifactError::InvalidName(header.staging_name.clone()));
-        }
+        self.verify(header)?;
+        self.publish_verified(&header.staging_name, &header.staging_name)
+    }
+
+    /// Copy a staged artifact into a private verified file after checking its
+    /// advertised byte count and digest. Verification never publishes bytes.
+    pub fn verify(&self, header: &ArtifactHeader) -> Result<(), ArtifactError> {
+        validate_name(&header.staging_name)?;
         let staging_path = self.root.join(format!("{}.partial", header.staging_name));
         let verified_path = self.root.join(format!(".{}.verified", header.staging_name));
-        let final_path = self.root.join(&header.staging_name);
         let result = (|| {
             let metadata = fs::symlink_metadata(&staging_path).map_err(ArtifactError::Io)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -227,14 +246,89 @@ impl Stage {
                 });
             }
             fs::remove_file(&staging_path).map_err(ArtifactError::Io)?;
-            fs::rename(&verified_path, &final_path).map_err(ArtifactError::Rename)?;
-            Ok(final_path.clone())
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&verified_path);
             let _ = fs::remove_file(&staging_path);
         }
         result
+    }
+
+    /// Publish a verified artifact under a cache-derived final filename.
+    /// `hard_link` atomically refuses to replace an existing final artifact.
+    pub fn publish_verified(
+        &self,
+        staging_name: &str,
+        final_name: &str,
+    ) -> Result<PathBuf, ArtifactError> {
+        validate_name(staging_name)?;
+        validate_name(final_name)?;
+        let verified_path = self.root.join(format!(".{staging_name}.verified"));
+        let final_path = self.root.join(final_name);
+        let result = fs::hard_link(&verified_path, &final_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ArtifactError::FinalPathExists(final_path.clone())
+            } else {
+                ArtifactError::Rename(error)
+            }
+        });
+        let _ = fs::remove_file(&verified_path);
+        result.map(|()| final_path)
+    }
+
+    /// Check that a published artifact is still the regular file recorded by
+    /// its result metadata.
+    pub fn published_matches(
+        &self,
+        final_name: &str,
+        byte_count: u64,
+        sha256: &str,
+    ) -> Result<bool, ArtifactError> {
+        validate_name(final_name)?;
+        let final_path = self.root.join(final_name);
+        let metadata = match fs::symlink_metadata(&final_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(ArtifactError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != byte_count
+        {
+            return Ok(false);
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(0o400000)
+            .open(&final_path)
+            .map_err(ArtifactError::Io)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = file.read(&mut buffer).map_err(ArtifactError::Io)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        Ok(hex_digest(&digest.finalize()) == sha256)
+    }
+
+    /// Remove an invalid cache-owned final artifact before recovering it from
+    /// a newly verified staging file.
+    pub fn discard_final(&self, final_name: &str) -> Result<(), ArtifactError> {
+        validate_name(final_name)?;
+        match fs::remove_file(self.root.join(final_name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ArtifactError::Io(error)),
+        }
+    }
+
+    /// Remove a verified artifact after the Host accepts an existing cache hit.
+    pub fn discard_verified(&self, staging_name: &str) {
+        if validate_name(staging_name).is_ok() {
+            let _ = fs::remove_file(self.root.join(format!(".{staging_name}.verified")));
+        }
     }
 
     /// Remove the staging directory and every `.partial` file it
@@ -251,6 +345,13 @@ impl Stage {
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex_digest(&digest)
+}
+
+fn validate_name(name: &str) -> Result<(), ArtifactError> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err(ArtifactError::InvalidName(name.to_string()));
+    }
+    Ok(())
 }
 
 fn hex_digest(digest: &[u8]) -> String {
@@ -284,6 +385,7 @@ pub enum ArtifactError {
     InvalidName(String),
     InvalidRoot(PathBuf),
     NotRegularFile(String),
+    FinalPathExists(PathBuf),
     /// Filesystem error during write or discard.
     Io(std::io::Error),
     /// Filesystem error during the atomic rename.
@@ -317,6 +419,13 @@ impl fmt::Display for ArtifactError {
             }
             Self::NotRegularFile(name) => {
                 write!(formatter, "staged artifact is not a regular file: {name:?}")
+            }
+            Self::FinalPathExists(path) => {
+                write!(
+                    formatter,
+                    "final artifact already exists: {}",
+                    path.display()
+                )
             }
             Self::Io(error) => write!(formatter, "staged artifact io error: {error}"),
             Self::Rename(error) => write!(formatter, "staged artifact rename error: {error}"),
@@ -363,6 +472,78 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_derives_a_stable_filesystem_safe_final_name() {
+        let worker_fingerprint = WorkerFingerprint {
+            worker_kind: "occt".to_string(),
+            worker_schema_version: "threeterm.workers.occt/1".to_string(),
+            protocol_schema_version: crate::schema_version().to_string(),
+        };
+        let cache_key = Layer1CacheKey {
+            source_revision_id: "revision-1".to_string(),
+            worker_fingerprint: worker_fingerprint.clone(),
+            artifact_kind: "brep".to_string(),
+            semantic_input_sha256: "11".repeat(32),
+            deterministic_settings_sha256: "22".repeat(32),
+        };
+
+        let name = cache_key.final_artifact_name();
+
+        assert_eq!(
+            name,
+            "derived-60e53484e877d7e112519847f6a64ce027744d337d28dc532464583e873a4c75"
+        );
+        assert_eq!(name, cache_key.final_artifact_name());
+        assert!(name.starts_with("derived-"));
+        assert_eq!(name.len(), "derived-".len() + 64);
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        );
+
+        for changed_key in [
+            Layer1CacheKey {
+                source_revision_id: "revision-2".to_string(),
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                worker_fingerprint: WorkerFingerprint {
+                    worker_kind: "slvs".to_string(),
+                    ..worker_fingerprint.clone()
+                },
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                worker_fingerprint: WorkerFingerprint {
+                    worker_schema_version: "threeterm.workers.occt/2".to_string(),
+                    ..worker_fingerprint.clone()
+                },
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                worker_fingerprint: WorkerFingerprint {
+                    protocol_schema_version: "threeterm.protocol/2".to_string(),
+                    ..worker_fingerprint
+                },
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                artifact_kind: "mesh".to_string(),
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                semantic_input_sha256: "33".repeat(32),
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                deterministic_settings_sha256: "44".repeat(32),
+                ..cache_key
+            },
+        ] {
+            assert_ne!(name, changed_key.final_artifact_name());
+        }
+    }
+
+    #[test]
     fn validated_staged_bytes_promote_to_the_final_path() {
         let root = temp_root("promote");
         let stage = Stage::open(&root).expect("stage opens");
@@ -381,6 +562,52 @@ mod tests {
             !root.join("sketch-1.brep.partial").exists(),
             "partial must be removed after promotion"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verified_staged_bytes_publish_at_a_separate_final_name_without_replacing() {
+        let root = temp_root("separate-final-name");
+        let stage = Stage::open(&root).expect("stage opens");
+        let staged = stage
+            .stage_bytes("requested-name.brep", b"first bytes")
+            .expect("first artifact stages");
+        let first_header = header(&staged, staged.sha256.clone());
+        let final_name = first_header.cache_key.final_artifact_name();
+
+        stage
+            .verify(&first_header)
+            .expect("first artifact verifies");
+        let path = stage
+            .publish_verified(&first_header.staging_name, &final_name)
+            .expect("first artifact publishes");
+        assert_eq!(path, root.join(&final_name));
+        assert_eq!(
+            fs::read(&path).expect("first artifact reads"),
+            b"first bytes"
+        );
+
+        let staged = stage
+            .stage_bytes("requested-name.brep", b"replacement bytes")
+            .expect("second artifact stages");
+        let second_header = header(&staged, staged.sha256.clone());
+        stage
+            .verify(&second_header)
+            .expect("second artifact verifies");
+        let error = stage
+            .publish_verified(&second_header.staging_name, &final_name)
+            .expect_err("existing final artifact is not replaced");
+
+        assert!(
+            matches!(error, ArtifactError::FinalPathExists(path) if path == root.join(&final_name))
+        );
+        assert_eq!(
+            fs::read(&path).expect("first artifact re-reads"),
+            b"first bytes"
+        );
+        assert!(!root.join("requested-name.brep.partial").exists());
+        assert!(!root.join(".requested-name.brep.verified").exists());
 
         let _ = fs::remove_dir_all(&root);
     }

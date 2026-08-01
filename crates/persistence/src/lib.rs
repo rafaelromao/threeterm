@@ -80,6 +80,7 @@ pub enum PublicationFailurePoint {
     StagingSync,
     ReplaceCurrent,
     PromoteStaging,
+    ParentSync,
 }
 
 thread_local! {
@@ -569,7 +570,12 @@ impl Bundle {
             &loaded.graph,
         );
         let staging = staging_path_for_publish(&self.root);
-        copy_dir_recursive(&self.root, &staging)?;
+        let source = if self.root.exists() {
+            &self.root
+        } else {
+            &previous_generation_path(&self.root)
+        };
+        copy_dir_recursive(source, &staging)?;
         append_and_sync(&staging.join(TRANSACTIONS_LOG_FILENAME), &line)?;
         atomic_write(
             &staging.join(MANIFEST_FILENAME),
@@ -611,8 +617,20 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
-        if previous_generation_path(root).exists() {
-            return Bundle::at(root).open();
+        let previous = previous_generation_path(root);
+        if previous.exists() {
+            return match detect_schema(&previous)? {
+                SchemaStatus::Current => Bundle::at(&previous).open_sealed(true),
+                SchemaStatus::Prior => {
+                    fs::rename(&previous, root)?;
+                    load_v0_with_migration(root)
+                }
+                SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
+                    found: read_schema_version_raw(&previous).unwrap_or_default(),
+                    expected_current: schema_epoch(),
+                    expected_prior: prior_schema_epoch(),
+                }),
+            };
         }
         return Err(BundleError::Invalid(format!(
             "bundle path missing: {}",
@@ -687,7 +705,8 @@ fn load_v0_with_migration(path: &Path) -> Result<LoadedBundle, BundleError> {
     };
 
     if let Err(error) = publish_staged(&staging, path) {
-        let _ = fs::remove_dir_all(&staging);
+        // A validated staging directory is a sealed recovery candidate. Keep
+        // it for diagnostics and a later retry rather than discarding data.
         return Err(BundleError::Io(error.to_string()));
     }
 
@@ -712,6 +731,14 @@ fn loaded_with(
 
 fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     let previous = previous_generation_path(destination);
+    if !destination.exists() {
+        fs::rename(staging, destination)?;
+        if let Some(parent) = destination.parent() {
+            let _ = fail_if_injected(PublicationFailurePoint::ParentSync);
+            let _ = File::open(parent).and_then(|parent| parent.sync_all());
+        }
+        return Ok(());
+    }
     let retired = retired_generation_path(&previous);
     fail_if_injected(PublicationFailurePoint::ReplaceCurrent)?;
     if previous.exists() {
@@ -723,12 +750,21 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         }
         return Err(error);
     }
-    fail_if_injected(PublicationFailurePoint::PromoteStaging)?;
+    if let Err(error) = fail_if_injected(PublicationFailurePoint::PromoteStaging) {
+        let _ = fs::rename(&previous, destination);
+        return Err(error);
+    }
     // The previous generation is deliberately left in place. `Bundle::open`
     // recognizes an interrupted replacement and opens it explicitly.
-    fs::rename(staging, destination)?;
+    if let Err(error) = fs::rename(staging, destination) {
+        let _ = fs::rename(&previous, destination);
+        return Err(error);
+    }
     if let Some(parent) = destination.parent() {
-        File::open(parent)?.sync_all()?;
+        // Promotion is already visible. Reporting a late parent-sync error as
+        // an uncommitted append would desynchronise host-managed BREP data.
+        let _ = fail_if_injected(PublicationFailurePoint::ParentSync);
+        let _ = File::open(parent).and_then(|parent| parent.sync_all());
     }
     if retired.exists() {
         let _ = fs::remove_dir_all(retired);
@@ -813,11 +849,12 @@ fn write_v1_into(
     transactions: &[u8],
 ) -> Result<(), BundleError> {
     fs::create_dir_all(staging)?;
-    fs::write(staging.join(TRANSACTIONS_LOG_FILENAME), transactions)?;
-    fs::write(
-        staging.join(MANIFEST_FILENAME),
-        serde_json::to_vec_pretty(manifest)?,
+    atomic_write(&staging.join(TRANSACTIONS_LOG_FILENAME), transactions)?;
+    atomic_write(
+        &staging.join(MANIFEST_FILENAME),
+        &serde_json::to_vec_pretty(manifest)?,
     )?;
+    File::open(staging)?.sync_all()?;
     Ok(())
 }
 
@@ -1160,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_generation_replacement_recovers_prior_and_retains_candidate() {
+    fn interrupted_generation_replacement_restores_prior_and_retains_candidate() {
         let root = temp_root("interrupted-publication");
         let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
         bundle
@@ -1172,16 +1209,16 @@ mod tests {
         fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
         assert!(bundle.append_feature("box-2", "box").is_err());
 
-        let recovered = bundle.open().expect("prior generation recovers");
-        assert!(recovered.recovered_from_previous);
+        let recovered = bundle.open().expect("prior generation remains current");
+        assert!(!recovered.recovered_from_previous);
         assert_eq!(recovered.log.len(), 1);
         let previous = previous_generation_path(&root);
         assert_eq!(
-            fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+            fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
             prior_manifest
         );
         assert_eq!(
-            fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+            fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
             prior_log
         );
         let candidate = staging_path_for_publish(&root);
@@ -1197,6 +1234,7 @@ mod tests {
         for point in [
             PublicationFailurePoint::StagingSync,
             PublicationFailurePoint::ReplaceCurrent,
+            PublicationFailurePoint::PromoteStaging,
         ] {
             let root = temp_root("publication-failure");
             let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");

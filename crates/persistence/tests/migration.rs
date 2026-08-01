@@ -240,6 +240,34 @@ fn interrupted_migration_replacement_preserves_the_only_canonical_generation() {
 }
 
 #[test]
+fn interrupted_migration_promotion_restores_the_v0_source_and_retains_staging() {
+    let root = unique_temp_dir("promotion-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-promotion")).expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+    assert!(load(&root).is_err(), "promotion failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source is restored byte-for-byte"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
+    let staging = root.with_file_name(format!(
+        "{}.migrate-tmp-{}",
+        root.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    assert!(staging.exists(), "sealed replacement remains available");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(staging);
+}
+
+#[test]
 fn unknown_manifest_field_fails_closed_with_structured_error() {
     let root = unique_temp_dir("unknown-field");
     let generation = ProjectGeneration::with_id("g-unknown");

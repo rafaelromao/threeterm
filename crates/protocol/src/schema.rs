@@ -792,6 +792,20 @@ pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+pub static LOAD_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["feature_graph_hash", "revision_hash", "recovered_from_previous", "schema_version"],
+        "properties": {
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "recovered_from_previous": { "type": "boolean" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -840,7 +854,7 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema_version: "threeterm.command.load.request/1",
             request_schema: LOAD_REQUEST_SCHEMA.clone(),
             response_schema_version: LOAD_RESPONSE_SCHEMA_VERSION,
-            response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+            response_schema: LOAD_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(

@@ -222,7 +222,16 @@ impl Host {
             }
             Bundle::at(root)
         } else {
-            Bundle::create(root)?
+            let mut previous = root.to_path_buf();
+            previous.set_file_name(format!(
+                "{}.previous-generation",
+                root.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if previous.exists() {
+                Bundle::at(root)
+            } else {
+                Bundle::create(root)?
+            }
         };
         let loaded = bundle.append_feature(feature_id, kind)?;
         let view = SnapshotView::from(&loaded);
@@ -996,7 +1005,15 @@ fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
 }
 
 fn bundle_root(root: &Path) -> PathBuf {
-    root.to_path_buf()
+    if root.exists() {
+        return root.to_path_buf();
+    }
+    let mut previous = root.to_path_buf();
+    previous.set_file_name(format!(
+        "{}.previous-generation",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    previous
 }
 
 fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {

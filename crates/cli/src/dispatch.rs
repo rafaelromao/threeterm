@@ -1571,8 +1571,10 @@ fn execute_handler(
 }
 
 fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    let Some((command, request)) = request_for(&plan) else {
-        return emit_internal_error("parsed command has no registered schema", stderr);
+    let (command, request) = match request_for(&plan) {
+        Ok(Some(request)) => request,
+        Ok(None) => return emit_internal_error("parsed command has no registered schema", stderr),
+        Err(error) => return emit_persistence_error(&error, stderr),
     };
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
@@ -1604,8 +1606,10 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     }
 }
 
-fn request_for(plan: &DispatchPlan) -> Option<(threeterm_protocol::schema::CommandId, Value)> {
-    Some(match plan {
+fn request_for(
+    plan: &DispatchPlan,
+) -> Result<Option<(threeterm_protocol::schema::CommandId, Value)>, String> {
+    Ok(Some(match plan {
         DispatchPlan::List => (LIST_COMMAND_ID, json!({})),
         DispatchPlan::NewProject { path } => {
             (NEW_PROJECT_COMMAND_ID, json!({ "destination": path }))
@@ -1729,14 +1733,13 @@ fn request_for(plan: &DispatchPlan) -> Option<(threeterm_protocol::schema::Comma
             DRAFT_COMMAND_ID,
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction }),
         ),
-        DispatchPlan::Unknown { .. } => return None,
-    })
+        DispatchPlan::Unknown { .. } => return Ok(None),
+    }))
 }
 
-fn profile_json(profile_file: &str) -> Option<Value> {
-    read_profile(profile_file)
-        .ok()
-        .and_then(|profile| serde_json::to_value(profile).ok())
+fn profile_json(profile_file: &str) -> Result<Value, String> {
+    serde_json::to_value(read_profile(profile_file)?)
+        .map_err(|error| format!("profile JSON serialization failed: {error}"))
 }
 
 fn emit_listing(stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {

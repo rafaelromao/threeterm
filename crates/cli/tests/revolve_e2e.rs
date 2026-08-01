@@ -4,8 +4,9 @@
 //! a fresh bundle, save a seed feature, write a profile JSON, run
 //! revolve against the profile and a 3D axis (point + direction) and
 //! angle, and assert the response validates against the registered
-//! schema and that the bundle's `transactions.log` grew by exactly one
-//! entry past the seed save.
+//! schema, the bundle's `feature_graph_hash` / `revision_hash` advance,
+//! and the revolved BREP is committed to the canonical
+//! `<bundle>/brep/<feature_id>.brep` path.
 //!
 //! When the OCCT worker binary is unavailable the test soft-skip with
 //! an eprintln so the local dev path is green; the CI archlinux

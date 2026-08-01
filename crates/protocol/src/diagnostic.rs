@@ -19,10 +19,28 @@ pub enum DiagnosticCode {
     /// arg after `--machine` is not a known subcommand, and when `--machine`
     /// is supplied without a value.
     UnknownCommand,
+    /// The persistence layer rejected the operation: the manifest seal
+    /// mismatch, the bundle cannot be staged, the transaction replay is
+    /// inconsistent, or the on-disk state would be corrupted by publishing.
     PersistenceFailure,
+    /// The request body failed schema validation or domain request
+    /// preflight. Emitted when a command's JSON request is malformed or
+    /// carries structurally invalid data (closed issue #23: every
+    /// reattachment diagnostic carries a stable code callers can switch on).
     InvalidRequest,
+    /// The reattachment policy (`threeterm.reference.semantic`) returned
+    /// `Ambiguous`: more than one candidate satisfied the reference
+    /// predicates and the host cannot choose silently (closed issue #23).
+    /// Emitted when a definition, instance, or semantic reference resolves
+    /// to multiple matches.
     ReferenceAmbiguous,
+    /// The reattachment policy returned `Lost`: zero candidates satisfied
+    /// the reference predicates. The requested id or descriptor does not
+    /// resolve anywhere in the canonical graph (closed issue #23).
     ReferenceLost,
+    /// The reattachment policy returned `Incompatible`: the reference's
+    /// schema version or expected feature kind does not match any
+    /// candidate. The canonical graph was preserved (closed issue #23).
     ReferenceIncompatible,
 }
 

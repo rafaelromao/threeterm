@@ -200,6 +200,10 @@ fn l_bracket_fillet_then_chamfer_reports_an_atomic_geometry_limitation() {
         .as_str()
         .unwrap()
         .to_string();
+    let fillet_feature_graph_hash = fillet_response["feature_graph_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let manifest_before_chamfer = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
     let log_before_chamfer = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
@@ -222,6 +226,7 @@ fn l_bracket_fillet_then_chamfer_reports_an_atomic_geometry_limitation() {
         .open()
         .expect("bundle reopens after rejected chamfer");
     assert_eq!(reloaded.revision_hash_hex(), fillet_revision);
+    assert_eq!(reloaded.feature_graph_hash_hex(), fillet_feature_graph_hash);
     assert_eq!(
         fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads"),
         manifest_before_chamfer

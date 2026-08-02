@@ -123,6 +123,25 @@ fn v0_fixture_loads_on_v1_reader_with_sealed_backup() {
 }
 
 #[test]
+fn missing_v0_root_recovers_with_a_recovery_status() {
+    let root = unique_temp_dir("previous-v0-recovery");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-previous-v0"))
+        .expect("v0 fixture writes");
+    let previous = root.with_file_name(format!(
+        "{}.previous-generation",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(&root, &previous).expect("moves v0 generation to previous slot");
+
+    let loaded = load(&root).expect("previous v0 generation migrates");
+    assert!(loaded.recovered_from_previous);
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[test]
 fn migration_is_deterministic_across_invocations() {
     let root = unique_temp_dir("determinism");
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-det"))
@@ -257,6 +276,23 @@ fn interrupted_migration_staging_sync_preserves_the_only_canonical_generation() 
         detect_schema(&root).expect("source remains readable"),
         SchemaStatus::Prior
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn migration_parent_sync_error_leaves_the_promoted_generation_loadable() {
+    let root = unique_temp_dir("parent-sync-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-parent-sync"))
+        .expect("v0 writes");
+
+    fail_next_publication_at(PublicationFailurePoint::ParentSync);
+    assert!(
+        load(&root).is_err(),
+        "post-promotion sync error is surfaced"
+    );
+
+    let loaded = load(&root).expect("promoted generation remains loadable");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
     let _ = fs::remove_dir_all(root);
 }
 

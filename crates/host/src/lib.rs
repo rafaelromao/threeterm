@@ -275,7 +275,18 @@ impl Host {
                 });
             }
         }
-        let loaded = load(root)?;
+        let loaded = match load(root) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Migration can promote before its final parent sync reports
+                // an error. Re-open the selected generation before returning
+                // so an existing Host never retains a stale snapshot.
+                if let Ok(loaded) = Bundle::at(root).open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -1173,6 +1184,35 @@ mod tests {
             "{}.previous-generation",
             root.file_name().unwrap_or_default().to_string_lossy()
         )));
+    }
+
+    #[test]
+    fn migration_sync_failure_reconciles_current_snapshot_after_promotion() {
+        let existing_root = temp_root("existing-snapshot");
+        let migration_root = temp_root("migration-parent-sync");
+        let existing = Bundle::create_for_test(&existing_root, "00".repeat(16).as_str())
+            .expect("existing bundle creates");
+        existing
+            .append_feature("box-1", "box")
+            .expect("existing feature appends");
+        write_v0_fixture(
+            &migration_root,
+            ProjectGeneration::with_id("migration-generation"),
+        )
+        .expect("v0 fixture writes");
+
+        let host = Host::new();
+        host.load(&existing_root).expect("existing bundle loads");
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.load(&migration_root).is_err());
+
+        let promoted = Bundle::at(&migration_root)
+            .open()
+            .expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&promoted)));
+
+        let _ = std::fs::remove_dir_all(existing_root);
+        let _ = std::fs::remove_dir_all(migration_root);
     }
 
     #[test]

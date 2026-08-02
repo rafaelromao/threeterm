@@ -80,6 +80,7 @@ pub const EMPTY_LOG_DIGEST_HEX: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationFailurePoint {
     StagingSync,
+    RetirePrevious,
     ReplaceCurrent,
     PromoteStaging,
     ParentSync,
@@ -627,7 +628,7 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
                 SchemaStatus::Current => Bundle::at(&previous).open_sealed(true),
                 SchemaStatus::Prior => {
                     fs::rename(&previous, root)?;
-                    load_v0_with_migration(root)
+                    load_v0_with_migration(root, true)
                 }
                 SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
                     found: read_schema_version_raw(&previous).unwrap_or_default(),
@@ -650,7 +651,7 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     let status = detect_schema(root)?;
     match status {
         SchemaStatus::Current => load_v1(root),
-        SchemaStatus::Prior => load_v0_with_migration(root),
+        SchemaStatus::Prior => load_v0_with_migration(root, false),
         SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
             found: read_schema_version_raw(root).unwrap_or_default(),
             expected_current: schema_epoch(),
@@ -672,7 +673,10 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
 /// Orchestrated prior-epoch load: sealed backup → deterministic migration →
 /// validated staging → atomic publish. On any failure the source directory
 /// stays byte-for-byte unchanged and no partial target is published.
-fn load_v0_with_migration(path: &Path) -> Result<LoadedBundle, BundleError> {
+fn load_v0_with_migration(
+    path: &Path,
+    recovered_from_previous: bool,
+) -> Result<LoadedBundle, BundleError> {
     let v0 = read_v0(path).map_err(|error| BundleError::Migration {
         source: Box::new(error),
     })?;
@@ -714,7 +718,13 @@ fn load_v0_with_migration(path: &Path) -> Result<LoadedBundle, BundleError> {
         return Err(BundleError::Io(error.to_string()));
     }
 
-    Ok(loaded_with(validated, manifest, generation, transactions))
+    Ok(loaded_with(
+        validated,
+        manifest,
+        generation,
+        transactions,
+        recovered_from_previous,
+    ))
 }
 
 fn loaded_with(
@@ -722,6 +732,7 @@ fn loaded_with(
     manifest: Manifest,
     generation: ProjectGeneration,
     transactions: String,
+    recovered_from_previous: bool,
 ) -> LoadedBundle {
     LoadedBundle {
         manifest,
@@ -729,7 +740,7 @@ fn loaded_with(
         transactions,
         log: stale.log,
         graph: stale.graph,
-        recovered_from_previous: stale.recovered_from_previous,
+        recovered_from_previous: stale.recovered_from_previous || recovered_from_previous,
     }
 }
 
@@ -752,7 +763,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // not blocked by the deterministic retired path.
     remove_retired_generation(&retired)?;
     if previous.exists() {
-        fs::rename(&previous, &retired)?;
+        rename_generation(&previous, &retired, PublicationFailurePoint::RetirePrevious)?;
     }
     if let Err(error) = rename_generation(
         destination,

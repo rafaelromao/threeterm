@@ -466,7 +466,8 @@ fn assert_translated_box_hole_removes_full_cylindrical_volume(
         1.0,
     )
     .with_output_path(&temp, format!("{label}-out.brep"))
-    .with_feature_id(format!("{label}-1"));
+    .with_feature_id(format!("{label}-1"))
+    .with_removed_volume_measurement();
     let result = worker.hole(&request).expect("hole returns");
 
     assert_eq!(result.status, "ok", "hole returned {result:?}");

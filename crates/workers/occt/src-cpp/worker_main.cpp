@@ -897,6 +897,8 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
     auto position = get_vec3(request, "position");
     auto direction = get_vec3(request, "direction");
     double diameter = get_number(request, "diameter");
+    bool measure_removed_volume = get_bool(request, "measure_removed_volume", false, error);
+    if (!error.empty()) return false;
 
     if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
         output_dir.empty() || output_filename.empty()) {
@@ -1007,11 +1009,14 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             error = "could not read written hole BREP at " + output_path.string();
             return false;
         }
-        GProp_GProps base_properties;
-        GProp_GProps result_properties;
-        BRepGProp::VolumeProperties(base, base_properties);
-        BRepGProp::VolumeProperties(serialized_result, result_properties);
-        double removed_volume = base_properties.Mass() - result_properties.Mass();
+        double removed_volume = 0.0;
+        if (measure_removed_volume) {
+            GProp_GProps base_properties;
+            GProp_GProps result_properties;
+            BRepGProp::VolumeProperties(base, base_properties);
+            BRepGProp::VolumeProperties(serialized_result, result_properties);
+            removed_volume = base_properties.Mass() - result_properties.Mass();
+        }
         std::ifstream stream(output_path, std::ios::binary);
         std::ostringstream bytes;
         bytes << stream.rdbuf();
@@ -1032,9 +1037,11 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
             << "\"brep_sha256\":\"" << json_escape(sha) << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
-            << "\"feature_id\":\"" << json_escape(feature_id) << "\","
-            << "\"removed_volume\":" << removed_volume
-            << "}";
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\"";
+        if (measure_removed_volume) {
+            out << ",\"removed_volume\":" << removed_volume;
+        }
+        out << "}";
         write_stdout_line(out.str());
         return status == "ok";
     } catch (const Standard_Failure& e) {

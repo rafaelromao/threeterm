@@ -222,7 +222,7 @@ impl Host {
             }
             // `load` owns schema migration. Appending through `Bundle::open`
             // alone would reject a recoverable v0 generation.
-            load(root)?;
+            self.load_preflight(root)?;
             Bundle::at(root)
         } else {
             let mut previous = root.to_path_buf();
@@ -233,7 +233,7 @@ impl Host {
             if previous.exists() {
                 // A missing root can retain a v0 source after an interrupted
                 // migration. Recover/migrate it before attempting an append.
-                load(root)?;
+                self.load_preflight(root)?;
                 Bundle::at(root)
             } else {
                 Bundle::create(root)?
@@ -290,6 +290,22 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    /// Runs `load` as a schema-migration preflight and reconciles `Host` state
+    /// when migration promotes a generation before reporting a late parent-sync
+    /// error. `save` reuses this so it never retains a stale snapshot.
+    fn load_preflight(&self, root: &Path) -> Result<(), HostError> {
+        if let Err(error) = load(root) {
+            // Migration can promote before its final parent sync reports an
+            // error. Re-open so in-memory state never lags the selected
+            // generation on disk.
+            if let Ok(loaded) = Bundle::at(root).open() {
+                self.current.replace(Some(loaded));
+            }
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     pub fn current(&self) -> Option<SnapshotView> {
@@ -1205,6 +1221,35 @@ mod tests {
         host.load(&existing_root).expect("existing bundle loads");
         fail_next_publication_at(PublicationFailurePoint::ParentSync);
         assert!(host.load(&migration_root).is_err());
+
+        let promoted = Bundle::at(&migration_root)
+            .open()
+            .expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&promoted)));
+
+        let _ = std::fs::remove_dir_all(existing_root);
+        let _ = std::fs::remove_dir_all(migration_root);
+    }
+
+    #[test]
+    fn save_preflight_reconciles_current_snapshot_after_migration_parent_sync_failure() {
+        let existing_root = temp_root("save-existing-snapshot");
+        let migration_root = temp_root("save-migration-parent-sync");
+        let existing = Bundle::create_for_test(&existing_root, "00".repeat(16).as_str())
+            .expect("existing bundle creates");
+        existing
+            .append_feature("box-1", "box")
+            .expect("existing feature appends");
+        write_v0_fixture(
+            &migration_root,
+            ProjectGeneration::with_id("save-migration-generation"),
+        )
+        .expect("v0 fixture writes");
+
+        let host = Host::new();
+        host.load(&existing_root).expect("existing bundle loads");
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.save(&migration_root, "box-1", "box").is_err());
 
         let promoted = Bundle::at(&migration_root)
             .open()

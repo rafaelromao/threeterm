@@ -1000,12 +1000,8 @@ fn fillet_then_chamfer_chain_commits_two_revisions() {
     let fillet_view = host.fillet(&root, fillet_request, &worker).expect("fillet");
     assert_eq!(fillet_view.result.status, "ok");
 
-    // OCCT's `BRepFilletAPI_MakeChamfer` only operates on straight
-    // edges; the fillet produces curved transitions that the chamfer
-    // builder cannot classify. The chain commit applies chamfer to the
-    // base BREP (the same input the fillet consumed) so the two
-    // commands each materialise a distinct feature revision.
-    let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &base_brep)
+    let fillet_brep = committed_brep_path(&root, "chain-fillet-1");
+    let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &fillet_brep)
         .with_output_path(root.join("stage"), "chain-chamfer.brep");
     let chamfer_view = host
         .chamfer(&root, chamfer_request, &worker)

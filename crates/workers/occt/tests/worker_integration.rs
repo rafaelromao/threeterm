@@ -470,6 +470,11 @@ fn assert_translated_box_hole_removes_full_cylindrical_volume(
     let result = worker.hole(&request).expect("hole returns");
 
     assert_eq!(result.status, "ok", "hole returned {result:?}");
+    assert!(
+        result.brep_path.is_file(),
+        "holed BREP was not written: {:?}",
+        result.brep_path
+    );
     let expected_removed_volume = std::f64::consts::PI * 0.25 * 10.0;
     assert!(
         (result.removed_volume - expected_removed_volume).abs() < 1.0e-4,

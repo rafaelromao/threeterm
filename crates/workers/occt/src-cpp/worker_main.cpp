@@ -991,11 +991,6 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         TopoDS_Shape result = cut.Shape();
-        GProp_GProps base_properties;
-        GProp_GProps result_properties;
-        BRepGProp::VolumeProperties(base, base_properties);
-        BRepGProp::VolumeProperties(result, result_properties);
-        double removed_volume = base_properties.Mass() - result_properties.Mass();
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {
@@ -1005,13 +1000,25 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
         if (!write_brep(result, output_path, error)) {
             return false;
         }
+        TopoDS_Shape serialized_result;
+        BRep_Builder output_builder;
+        if (!BRepTools::Read(serialized_result, output_path.c_str(), output_builder) ||
+            serialized_result.IsNull()) {
+            error = "could not read written hole BREP at " + output_path.string();
+            return false;
+        }
+        GProp_GProps base_properties;
+        GProp_GProps result_properties;
+        BRepGProp::VolumeProperties(base, base_properties);
+        BRepGProp::VolumeProperties(serialized_result, result_properties);
+        double removed_volume = base_properties.Mass() - result_properties.Mass();
         std::ifstream stream(output_path, std::ios::binary);
         std::ostringstream bytes;
         bytes << stream.rdbuf();
         std::string sha = sha256_hex(bytes.str());
 
         std::string status = "ok";
-        if (!analyze_brep(result)) {
+        if (!analyze_brep(serialized_result)) {
             error = "brep_invalid: BRepCheck_Analyzer failed";
             status = "brep_invalid";
         }

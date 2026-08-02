@@ -969,7 +969,7 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
         // Pick the first world axis not parallel to the hole axis so the
         // resulting cylinder is unambiguously oriented.
         gp_Dir x_dir;
-        if (std::abs(axis_dir.Z()) < 0.9) {
+        if (std::abs(axis_dir.X()) < 0.9) {
             x_dir = gp::DX();
         } else {
             x_dir = gp::DY();

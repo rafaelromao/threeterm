@@ -522,6 +522,9 @@ pub struct HoleRequest {
     pub direction: [f64; 3],
     /// Bore diameter. Must be a positive finite number.
     pub diameter: f64,
+    /// Requests the optional removed-volume measurement in the result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measure_removed_volume: Option<bool>,
     /// Output directory where the worker writes the BREP file.
     pub output_dir: PathBuf,
     /// Output file name (no path separators; the worker appends `.brep`).
@@ -546,6 +549,7 @@ impl HoleRequest {
             position,
             direction,
             diameter,
+            measure_removed_volume: None,
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
@@ -564,6 +568,11 @@ impl HoleRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_removed_volume_measurement(mut self) -> Self {
+        self.measure_removed_volume = Some(true);
         self
     }
 
@@ -630,6 +639,8 @@ pub struct HoleResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub removed_volume: Option<f64>,
 }
 
 impl HoleResult {
@@ -1951,9 +1962,17 @@ mod tests {
         assert_eq!(value["direction"], serde_json::json!([0.0, 0.0, 1.0]));
         assert_eq!(value["diameter"], 1.0);
         assert_eq!(value["feature_id"], "hole-1");
+        assert!(value.get("measure_removed_volume").is_none());
         let decoded: HoleRequest =
             serde_json::from_value(value).expect("hole request deserializes");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn hole_request_opt_in_serializes_removed_volume_measurement() {
+        let request = canonical_hole_request().with_removed_volume_measurement();
+        let value = serde_json::to_value(request).expect("hole request serializes");
+        assert_eq!(value["measure_removed_volume"], true);
     }
 
     #[test]
@@ -1967,11 +1986,30 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "hole-1".to_string(),
+            removed_volume: Some(1.0),
         };
         assert!(result.is_success());
 
         result.status = "brep_invalid".to_string();
         assert!(!result.is_success());
+    }
+
+    #[test]
+    fn hole_result_accepts_a_schema_v1_response_without_removed_volume() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "hole",
+            "status": "ok",
+            "brep_path": "/tmp/out.brep",
+            "brep_sha256": "deadbeef",
+            "brep_bytes": 42,
+            "feature_id": "hole-1"
+        }"#;
+
+        let result: HoleResult =
+            serde_json::from_str(raw).expect("schema v1 response deserializes");
+        assert_eq!(result.removed_volume, None);
     }
 
     fn canonical_revolve_request() -> RevolveRequest {

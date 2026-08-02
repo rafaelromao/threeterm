@@ -442,6 +442,84 @@ fn hole_of_extruded_box_returns_ok_with_real_brep() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
+fn assert_translated_box_hole_removes_full_cylindrical_volume(
+    worker: &OcctWorker,
+    label: &str,
+    profile: Vec<(f64, f64)>,
+    position: [f64; 3],
+) {
+    let temp_name = format!("threeterm-occt-{label}-{}", std::process::id());
+    let temp = std::env::temp_dir().join(temp_name);
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request =
+        ExtrudeRequest::new(unique_request_id(&format!("{label}-base")), profile, 3.0)
+            .with_output_path(&temp, format!("{label}-base.brep"))
+            .with_feature_id(format!("{label}-base-1"));
+    let base_result = worker.extrude(&base_request).expect("base extrude");
+
+    let request = HoleRequest::new(
+        unique_request_id(label),
+        &base_result.brep_path,
+        position,
+        [1.0, 0.0, 0.0],
+        1.0,
+    )
+    .with_output_path(&temp, format!("{label}-out.brep"))
+    .with_feature_id(format!("{label}-1"))
+    .with_removed_volume_measurement();
+    let result = worker.hole(&request).expect("hole returns");
+
+    assert_eq!(result.status, "ok", "hole returned {result:?}");
+    assert!(
+        result.brep_path.is_file(),
+        "holed BREP was not written: {:?}",
+        result.brep_path
+    );
+    let expected_removed_volume = std::f64::consts::PI * 0.25 * 10.0;
+    let removed_volume = result
+        .removed_volume
+        .expect("current OCCT worker reports removed volume");
+    assert!(
+        (removed_volume - expected_removed_volume).abs() < 1.0e-4,
+        "expected a complete through-hole to remove {expected_removed_volume}, got {}",
+        removed_volume
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn hole_through_negative_translated_box_removes_full_cylindrical_volume() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_translated_box_hole_removes_full_cylindrical_volume(
+        &worker,
+        "hole-negative",
+        vec![(-10.0, -5.0), (0.0, -5.0), (0.0, 0.0), (-10.0, 0.0)],
+        [-5.0, -2.5, 1.5],
+    );
+}
+
+#[test]
+fn hole_through_positive_translated_box_removes_full_cylindrical_volume() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_translated_box_hole_removes_full_cylindrical_volume(
+        &worker,
+        "hole-positive",
+        vec![
+            (100.0, 100.0),
+            (110.0, 100.0),
+            (110.0, 105.0),
+            (100.0, 105.0),
+        ],
+        [105.0, 102.5, 1.5],
+    );
+}
+
 #[test]
 fn hole_with_missing_base_returns_request_malformed() {
     let Some(worker) = locate_worker() else {

@@ -47,7 +47,7 @@ fn machine_load_migrates_prior_epoch_bundle_and_retains_backup() {
     let response: Value = serde_json::from_slice(&output.stdout).expect("load response is JSON");
     assert_eq!(
         response["schema_version"],
-        "threeterm.command.load.response/1"
+        "threeterm.command.load.response/2"
     );
     let manifest: Value = serde_json::from_slice(
         &fs::read(root.join(MANIFEST_FILENAME)).expect("migrated manifest reads"),

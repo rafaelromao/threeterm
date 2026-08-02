@@ -236,7 +236,7 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
         "load must report the same revision_hash as the bracket write"
     );
     assert_eq!(
-        loaded["schema_version"], "threeterm.command.load.response/1",
+        loaded["schema_version"], "threeterm.command.load.response/2",
         "load returns its own response-schema version, distinct from bracket's"
     );
 

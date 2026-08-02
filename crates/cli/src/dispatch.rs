@@ -2266,9 +2266,10 @@ fn emit_save(
 
 fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     match Host::new().load(bundle) {
-        Ok(view) => write_snapshot(
+        Ok(view) => write_load_snapshot(
             &view.feature_graph_hash,
             &view.revision_hash,
+            view.recovered_from_previous,
             LOAD_RESPONSE_SCHEMA_VERSION,
             stdout,
             stderr,
@@ -2906,6 +2907,26 @@ fn write_snapshot(
         &serde_json::json!({
             "feature_graph_hash": feature_graph_hash,
             "revision_hash": revision_hash,
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_load_snapshot(
+    feature_graph_hash: &str,
+    revision_hash: &str,
+    recovered_from_previous: bool,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "feature_graph_hash": feature_graph_hash,
+            "revision_hash": revision_hash,
+            "recovered_from_previous": recovered_from_previous,
             "schema_version": schema_version,
         }),
         stderr,

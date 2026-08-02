@@ -5,9 +5,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use threeterm_domain::ProjectGeneration;
 use threeterm_persistence::bundle::{
-    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, SchemaStatus, V0Manifest,
-    detect_schema, load, migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh,
-    write_v0_fixture,
+    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PublicationFailurePoint,
+    SchemaStatus, V0Manifest, detect_schema, fail_next_publication_at, load, migrate_v0_to_v1,
+    prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
 };
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -123,6 +123,25 @@ fn v0_fixture_loads_on_v1_reader_with_sealed_backup() {
 }
 
 #[test]
+fn missing_v0_root_recovers_with_a_recovery_status() {
+    let root = unique_temp_dir("previous-v0-recovery");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-previous-v0"))
+        .expect("v0 fixture writes");
+    let previous = root.with_file_name(format!(
+        "{}.previous-generation",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(&root, &previous).expect("moves v0 generation to previous slot");
+
+    let loaded = load(&root).expect("previous v0 generation migrates");
+    assert!(loaded.recovered_from_previous);
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[test]
 fn migration_is_deterministic_across_invocations() {
     let root = unique_temp_dir("determinism");
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-det"))
@@ -215,6 +234,96 @@ fn migration_failure_leaves_source_unchanged() {
     );
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_migration_replacement_preserves_the_only_canonical_generation() {
+    let root = unique_temp_dir("replacement-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-replacement"))
+        .expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::ReplaceCurrent);
+    assert!(load(&root).is_err(), "replacement failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source remains byte-identical"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_migration_staging_sync_preserves_the_only_canonical_generation() {
+    let root = unique_temp_dir("sync-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-sync")).expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::StagingSync);
+    assert!(load(&root).is_err(), "staging sync failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source remains byte-identical when staging cannot be synced"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn migration_parent_sync_error_leaves_the_promoted_generation_loadable() {
+    let root = unique_temp_dir("parent-sync-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-parent-sync"))
+        .expect("v0 writes");
+
+    fail_next_publication_at(PublicationFailurePoint::ParentSync);
+    assert!(
+        load(&root).is_err(),
+        "post-promotion sync error is surfaced"
+    );
+
+    let loaded = load(&root).expect("promoted generation remains loadable");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_migration_promotion_restores_the_v0_source_and_retains_staging() {
+    let root = unique_temp_dir("promotion-failure");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-promotion")).expect("v0 writes");
+    let before = fingerprint(&root);
+
+    fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+    assert!(load(&root).is_err(), "promotion failure is surfaced");
+
+    assert_eq!(
+        fingerprint(&root),
+        before,
+        "v0 source is restored byte-for-byte"
+    );
+    assert_eq!(
+        detect_schema(&root).expect("source remains readable"),
+        SchemaStatus::Prior
+    );
+    let staging = root.with_file_name(format!(
+        "{}.migrate-tmp-{}",
+        root.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    assert!(staging.exists(), "sealed replacement remains available");
+    let retried = load(&root).expect("retained backup permits migration retry");
+    assert_eq!(retried.manifest.schema_version, schema_epoch());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(staging);
 }
 
 #[test]

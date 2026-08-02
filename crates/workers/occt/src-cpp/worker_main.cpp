@@ -29,12 +29,14 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
+#include <GProp_GProps.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
@@ -941,24 +943,28 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // Size the cutting cylinder to the base bounding box diagonal so
-        // the hole is through regardless of base orientation. A non-zero
-        // fall-back keeps a malformed base from producing a zero-length
-        // cylinder.
+        // Span the base bounding box from either side of the requested
+        // point, independent of the base's world-space location.
         Bnd_Box bbox;
         BRepBndLib::Add(base, bbox);
-        double diag = std::sqrt(
-            bbox.CornerMax().X() * bbox.CornerMax().X() +
-            bbox.CornerMax().Y() * bbox.CornerMax().Y() +
-            bbox.CornerMax().Z() * bbox.CornerMax().Z());
-        if (!(diag > 0.0) || !std::isfinite(diag)) {
-            diag = 1.0e6;
+        double xmin, ymin, zmin, xmax, ymax, zmax;
+        bbox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        double diagonal = std::sqrt(
+            (xmax - xmin) * (xmax - xmin) +
+            (ymax - ymin) * (ymax - ymin) +
+            (zmax - zmin) * (zmax - zmin));
+        if (!(diagonal > 0.0) || !std::isfinite(diagonal)) {
+            error = "base BREP bounding box must have finite non-zero extents";
+            return false;
         }
-        double cylinder_length = 2.0 * diag;
+        double cylinder_length = 2.0 * diagonal;
 
         double norm = std::sqrt(direction_norm_squared);
         gp_Dir axis_dir(direction[0] / norm, direction[1] / norm, direction[2] / norm);
-        gp_Pnt centre(position[0], position[1], position[2]);
+        gp_Pnt cutter_start(
+            position[0] - axis_dir.X() * diagonal,
+            position[1] - axis_dir.Y() * diagonal,
+            position[2] - axis_dir.Z() * diagonal);
         // gp_Ax2 needs a "X direction" — the cylinder's reference axis.
         // Pick the first world axis not parallel to the hole axis so the
         // resulting cylinder is unambiguously oriented.
@@ -968,7 +974,7 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
         } else {
             x_dir = gp::DY();
         }
-        gp_Ax2 cylinder_axis(centre, axis_dir, x_dir);
+        gp_Ax2 cylinder_axis(cutter_start, axis_dir, x_dir);
         BRepPrimAPI_MakeCylinder cylinder(cylinder_axis, diameter / 2.0, cylinder_length);
         cylinder.Build();
         if (!cylinder.IsDone()) {
@@ -985,6 +991,11 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         TopoDS_Shape result = cut.Shape();
+        GProp_GProps base_properties;
+        GProp_GProps result_properties;
+        BRepGProp::VolumeProperties(base, base_properties);
+        BRepGProp::VolumeProperties(result, result_properties);
+        double removed_volume = base_properties.Mass() - result_properties.Mass();
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {
@@ -1014,7 +1025,8 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
             << "\"brep_sha256\":\"" << json_escape(sha) << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
-            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\","
+            << "\"removed_volume\":" << removed_volume
             << "}";
         write_stdout_line(out.str());
         return status == "ok";

@@ -630,6 +630,7 @@ pub struct HoleResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    pub removed_volume: f64,
 }
 
 impl HoleResult {
@@ -1967,6 +1968,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "hole-1".to_string(),
+            removed_volume: 1.0,
         };
         assert!(result.is_success());
 

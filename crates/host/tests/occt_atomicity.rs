@@ -979,7 +979,7 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
 }
 
 #[test]
-fn fillet_then_chamfer_chain_commits_two_revisions() {
+fn fillet_then_chamfer_chain_reports_an_atomic_geometry_limitation() {
     let Some(worker) = locate_worker() else {
         return;
     };
@@ -1003,22 +1003,28 @@ fn fillet_then_chamfer_chain_commits_two_revisions() {
     let fillet_brep = committed_brep_path(&root, "chain-fillet-1");
     let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &fillet_brep)
         .with_output_path(root.join("stage"), "chain-chamfer.brep");
-    let chamfer_view = host
-        .chamfer(&root, chamfer_request, &worker)
-        .expect("chamfer");
-    assert_eq!(chamfer_view.result.status, "ok");
+    let (manifest_before_chamfer, log_before_chamfer) = snapshot_files(&root);
+    let result = host.chamfer(&root, chamfer_request, &worker);
+    assert!(
+        matches!(result, Err(HostError::UnsupportedGeometry { .. })),
+        "got {result:?}"
+    );
 
     assert_ne!(
         fillet_view.snapshot.revision_hash,
         base_view.snapshot.revision_hash
     );
-    assert_ne!(
-        chamfer_view.snapshot.revision_hash,
-        fillet_view.snapshot.revision_hash
-    );
 
     let reloaded = Host::new().load(&root).expect("reloads");
-    assert_eq!(chamfer_view.snapshot, reloaded);
+    assert_eq!(fillet_view.snapshot, reloaded);
+    assert_eq!(
+        snapshot_files(&root),
+        (manifest_before_chamfer, log_before_chamfer)
+    );
+    assert!(
+        !root.join("brep/chain-chamfer-1.brep").exists(),
+        "rejected chamfer must not write a BREP"
+    );
 
     let _ = fs::remove_dir_all(root);
 }

@@ -476,10 +476,13 @@ fn assert_translated_box_hole_removes_full_cylindrical_volume(
         result.brep_path
     );
     let expected_removed_volume = std::f64::consts::PI * 0.25 * 10.0;
+    let removed_volume = result
+        .removed_volume
+        .expect("current OCCT worker reports removed volume");
     assert!(
-        (result.removed_volume - expected_removed_volume).abs() < 1.0e-4,
+        (removed_volume - expected_removed_volume).abs() < 1.0e-4,
         "expected a complete through-hole to remove {expected_removed_volume}, got {}",
-        result.removed_volume
+        removed_volume
     );
 
     let _ = std::fs::remove_dir_all(temp);

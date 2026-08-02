@@ -337,6 +337,30 @@ fn chamfer_with_missing_base_returns_request_malformed() {
 }
 
 #[test]
+fn chamfer_with_malformed_base_returns_request_malformed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let path = std::env::temp_dir().join(format!(
+        "threeterm-occt-malformed-chamfer-base-{}",
+        unique_request_id("base")
+    ));
+    std::fs::write(&path, "not a BREP").expect("malformed BREP writes");
+    let request = ChamferRequest::new(unique_request_id("chamfer-malformed"), &path, 0.25)
+        .with_feature_id("chamfer-malformed-1");
+
+    let result = worker.chamfer(&request);
+
+    match result {
+        Err(WorkerError::Diagnostic(diag)) => {
+            assert_eq!(diag.code, "request_malformed");
+        }
+        other => panic!("expected request_malformed diagnostic, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn fillet_with_zero_radius_returns_request_malformed() {
     let Some(worker) = locate_worker() else {
         return;

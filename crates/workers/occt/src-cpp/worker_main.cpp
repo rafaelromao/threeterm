@@ -821,17 +821,27 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        BRepFilletAPI_MakeChamfer chamfer(base);
-        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-            TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-            chamfer.Add(distance, edge);
-        }
-        chamfer.Build();
-        if (!chamfer.IsDone()) {
-            error = "unsupported_geometry: BRepFilletAPI_MakeChamfer did not complete";
+        try {
+            BRepFilletAPI_MakeChamfer chamfer(base);
+            for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+                TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+                chamfer.Add(distance, edge);
+            }
+            chamfer.Build();
+            if (!chamfer.IsDone()) {
+                error = "unsupported_geometry: BRepFilletAPI_MakeChamfer did not complete";
+                return false;
+            }
+            result = chamfer.Shape();
+        } catch (const Standard_Failure& e) {
+            error = "unsupported_geometry: OCCT exception during chamfer: ";
+            error += e.GetMessageString();
+            return false;
+        } catch (const std::exception& e) {
+            error = "unsupported_geometry: std::exception during chamfer: ";
+            error += e.what();
             return false;
         }
-        result = chamfer.Shape();
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {
@@ -866,11 +876,11 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
         write_stdout_line(out.str());
         return status == "ok";
     } catch (const Standard_Failure& e) {
-        error = "unsupported_geometry: OCCT exception during chamfer: ";
+        error = "OCCT exception during chamfer: ";
         error += e.GetMessageString();
         return false;
     } catch (const std::exception& e) {
-        error = "unsupported_geometry: std::exception during chamfer: ";
+        error = "std::exception during chamfer: ";
         error += e.what();
         return false;
     }

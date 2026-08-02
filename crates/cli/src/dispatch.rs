@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
-use threeterm_host::{Host, HostError};
+use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
@@ -13,12 +13,12 @@ use threeterm_occt_worker::{
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 pub use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
-    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
-    EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
-    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
-    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
-    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
+    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_RESPONSE_SCHEMA_VERSION,
+    CHAMFER_RESPONSE_SCHEMA_VERSION, CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+    DRAFT_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
+    HOLE_RESPONSE_SCHEMA_VERSION, LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+    LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
+    REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{CommandId, find_by_name, iter};
 
@@ -46,6 +46,14 @@ enum DispatchPlan {
     },
     Load {
         bundle: String,
+    },
+    Bracket {
+        bundle: String,
+        bracket_id: String,
+        length: f64,
+        width: f64,
+        height: f64,
+        thickness: f64,
     },
     Extrude {
         bundle: String,
@@ -197,6 +205,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         },
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
+        "bracket" => parse_bracket(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
@@ -275,6 +284,15 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
                 && angle_step.is_finite()
         }
         DispatchPlan::Loft { .. } => true,
+        DispatchPlan::Bracket {
+            length,
+            width,
+            height,
+            thickness,
+            ..
+        } => [length, width, height, thickness]
+            .iter()
+            .all(|value| value.is_finite()),
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
@@ -355,6 +373,113 @@ fn parse_load(args: &[OsString]) -> DispatchPlan {
             arg: "load".to_string(),
         },
     }
+}
+
+fn parse_bracket(args: &[OsString]) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: "bracket".to_string(),
+        };
+    };
+    if bundle.starts_with("--") {
+        return DispatchPlan::Unknown {
+            arg: bundle.to_string(),
+        };
+    }
+
+    let mut bracket_id = None;
+    let mut length = None;
+    let mut width = None;
+    let mut height = None;
+    let mut thickness = None;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        let Some(value) = args.get(index + 1) else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        match flag.as_ref() {
+            "--bracket-id" => bracket_id = Some(value.to_string_lossy().into_owned()),
+            "--length" => match parse_dimension(&value.to_string_lossy()) {
+                Some(number) => length = Some(number),
+                None => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            "--width" => match parse_dimension(&value.to_string_lossy()) {
+                Some(number) => width = Some(number),
+                None => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            "--height" => match parse_dimension(&value.to_string_lossy()) {
+                Some(number) => height = Some(number),
+                None => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            "--thickness" => match parse_dimension(&value.to_string_lossy()) {
+                Some(number) => thickness = Some(number),
+                None => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: flag.into_owned(),
+                };
+            }
+        }
+        index += 2;
+    }
+
+    let Some(bracket_id) = bracket_id else {
+        return DispatchPlan::Unknown {
+            arg: "--bracket-id".to_string(),
+        };
+    };
+    let Some(length) = length else {
+        return DispatchPlan::Unknown {
+            arg: "--length".to_string(),
+        };
+    };
+    let Some(width) = width else {
+        return DispatchPlan::Unknown {
+            arg: "--width".to_string(),
+        };
+    };
+    let Some(height) = height else {
+        return DispatchPlan::Unknown {
+            arg: "--height".to_string(),
+        };
+    };
+    let Some(thickness) = thickness else {
+        return DispatchPlan::Unknown {
+            arg: "--thickness".to_string(),
+        };
+    };
+    DispatchPlan::Bracket {
+        bundle: bundle.to_string(),
+        bracket_id,
+        length,
+        width,
+        height,
+        thickness,
+    }
+}
+
+fn parse_dimension(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok()
 }
 
 fn parse_extrude(args: &[OsString]) -> DispatchPlan {
@@ -1605,6 +1730,23 @@ fn execute_handler(
             kind,
         } => emit_save(&bundle, &feature_id, &kind, stdout, stderr),
         DispatchPlan::Load { bundle } => emit_load(&bundle, stdout, stderr),
+        DispatchPlan::Bracket {
+            bundle,
+            bracket_id,
+            length,
+            width,
+            height,
+            thickness,
+        } => emit_bracket(
+            &bundle,
+            &bracket_id,
+            length,
+            width,
+            height,
+            thickness,
+            stdout,
+            stderr,
+        ),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -1789,6 +1931,92 @@ fn execute_handler(
     }
 }
 
+/// Pure dispatcher entry point shared between the CLI and the MCP adapter.
+///
+/// Both transports call this same function so the only difference between
+/// CLI and MCP is framing, parsing, and serialization — not the dispatch
+/// logic. On success the post-write `SnapshotView` is returned; on failure
+/// a structured `DispatchError` carries the same diagnostic detail the
+/// CLI would have written to stderr.
+pub fn dispatch_bracket(
+    bundle: &str,
+    bracket_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+) -> Result<SnapshotView, DispatchError> {
+    Host::new()
+        .save_bracket(bundle, bracket_id, length, width, height, thickness)
+        .map_err(DispatchError::from)
+}
+
+/// Structured failure modes emitted by the shared CLI/MCP dispatcher. The
+/// CLI renders these as JSON diagnostics on stderr; the MCP server
+/// converts them to JSON-RPC error envelopes.
+#[derive(Debug)]
+pub enum DispatchError {
+    Host(HostError),
+    Validation(String),
+    /// The transport cannot dispatch this registered tool in the current
+    /// slice (e.g. the MCP transport advertises every registry command but
+    /// only dispatches `bracket` here). The CLI never emits this variant
+    /// because the CLI's argv parser rejects unknown commands before the
+    /// dispatcher runs.
+    UnsupportedTool {
+        wire_name: String,
+        schema_version: String,
+        _command: threeterm_protocol::schema::CommandId,
+    },
+}
+
+impl From<HostError> for DispatchError {
+    fn from(error: HostError) -> Self {
+        Self::Host(error)
+    }
+}
+
+impl DispatchError {
+    pub fn diagnostic_detail(&self) -> String {
+        match self {
+            Self::Host(error) => match error {
+                HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
+                HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
+                HostError::Validation { detail } => format!("host_validation: {detail}"),
+                HostError::Persistence(error) => error.diagnostic_detail().to_string(),
+                other => other.to_string(),
+            },
+            Self::Validation(detail) => format!("dispatch_validation: {detail}"),
+            Self::UnsupportedTool {
+                wire_name,
+                schema_version,
+                ..
+            } => format!(
+                "tool {wire_name:?} (schema_version {schema_version:?}) is not dispatched by this transport in the current slice"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host(error) => write!(formatter, "{error}"),
+            Self::Validation(detail) => write!(formatter, "dispatch.validation: {detail}"),
+            Self::UnsupportedTool {
+                wire_name,
+                schema_version,
+                ..
+            } => write!(
+                formatter,
+                "tool {wire_name:?} (schema_version {schema_version:?}) is not dispatched by this transport in the current slice"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
 fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let DispatchPlan::Registered { command, plan } = plan else {
         return emit_internal_error("parsed command has no registered schema", stderr);
@@ -1837,6 +2065,21 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             kind,
         } => json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
         DispatchPlan::Load { bundle } => json!({ "bundle_path": bundle }),
+        DispatchPlan::Bracket {
+            bundle,
+            bracket_id,
+            length,
+            width,
+            height,
+            thickness,
+        } => json!({
+            "bundle_path": bundle,
+            "bracket_id": bracket_id,
+            "length": length,
+            "width": width,
+            "height": height,
+            "thickness": thickness,
+        }),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -2032,6 +2275,37 @@ fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
             stderr,
         ),
         Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_bracket(
+    bundle: &str,
+    bracket_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match dispatch_bracket(bundle, bracket_id, length, width, height, thickness) {
+        Ok(view) => write_snapshot(
+            &view.feature_graph_hash,
+            &view.revision_hash,
+            BRACKET_RESPONSE_SCHEMA_VERSION,
+            stdout,
+            stderr,
+        ),
+        Err(error) => match error {
+            DispatchError::Host(host_error) => emit_host_error(&host_error, stderr),
+            DispatchError::Validation(detail) => {
+                emit_internal_error(&format!("bracket validation: {detail}"), stderr)
+            }
+            DispatchError::UnsupportedTool { .. } => unreachable!(
+                "CLI dispatch_bracket never emits UnsupportedTool; the argv parser rejects unknown commands first"
+            ),
+        },
     }
 }
 
@@ -2947,6 +3221,7 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
     let detail = match error {
+        HostError::Validation { detail } => detail.clone(),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
         HostError::Persistence(error) => error.diagnostic_detail().to_string(),
@@ -3022,7 +3297,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 16);
+        assert_eq!(commands.len(), 17);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

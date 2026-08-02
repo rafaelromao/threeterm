@@ -7,5 +7,17 @@ license.workspace = true
 publish.workspace = true
 description = "MCP adapter exposing the ThreeTerm domain command API as agent tools."
 
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+threeterm-cli = { path = "../cli" }
+threeterm-host = { path = "../host" }
+threeterm-persistence = { path = "../persistence" }
+threeterm-protocol = { path = "../protocol" }
+
+[[bin]]
+name = "threeterm-mcp"
+path = "src/main.rs"
+
 [lints]
 workspace = true

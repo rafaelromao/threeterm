@@ -234,6 +234,14 @@ version = "0.1.0"
 [[package]]
 name = "threeterm-mcp"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "threeterm-cli",
+ "threeterm-host",
+ "threeterm-persistence",
+ "threeterm-protocol",
+]
 
 [[package]]
 name = "threeterm-occt-worker"

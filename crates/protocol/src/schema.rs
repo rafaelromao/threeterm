@@ -782,6 +782,46 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 
 pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
+            "type": "object",
+            "required": ["feature_graph_hash", "revision_hash", "schema_version"],
+            "properties": {
+                "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "schema_version": { "type": "string" }
+            },
+            "additionalProperties": false
+    })
+});
+
+/// Canonical request schema document for the `bracket` command. The numeric
+/// dimensions are stored in the canonical transaction log but no OCCT
+/// geometry is computed in this slice — that is the responsibility of a
+/// future worker slice. The four dimensions must each be strictly positive
+/// (`minimum > 0`); zero, negative, NaN, or infinite values describe a
+/// degenerate solid and are rejected by the schema validator before they
+/// reach the host.
+pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "bracket_id", "length", "width", "height", "thickness"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "bracket_id": { "type": "string", "minLength": 1 },
+            "length": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "width": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "height": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "thickness": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+/// Canonical response schema document for the `bracket` command. The
+/// `schema_version` field is pinned to the bracket response-schema version
+/// constant so the dispatcher emits the same wire contract as `save` and
+/// `load`.
+pub static BRACKET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
         "type": "object",
         "required": ["feature_graph_hash", "revision_hash", "schema_version"],
         "properties": {
@@ -855,6 +895,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: LOAD_REQUEST_SCHEMA.clone(),
             response_schema_version: LOAD_RESPONSE_SCHEMA_VERSION,
             response_schema: LOAD_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        BRACKET_COMMAND_ID,
+        CommandSchema {
+            id: BRACKET_COMMAND_ID,
+            name: "bracket",
+            schema_version: "threeterm.command.bracket/1",
+            request_schema_version: "threeterm.command.bracket.request/1",
+            request_schema: BRACKET_REQUEST_SCHEMA.clone(),
+            response_schema_version: BRACKET_RESPONSE_SCHEMA_VERSION,
+            response_schema: BRACKET_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1008,6 +1060,7 @@ pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
+pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
@@ -1022,6 +1075,7 @@ pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
 pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
+pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";

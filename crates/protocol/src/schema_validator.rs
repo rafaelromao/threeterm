@@ -13,6 +13,9 @@
 //! - `properties` maps object keys to their inner schemas.
 //! - `items` schemas array elements.
 //! - `additionalProperties` may be `false` to reject extra keys.
+//! - `minLength` enforces a minimum length on string fields.
+//! - `minimum` enforces a lower bound on numeric and integer fields.
+//! - `pattern` enforces a regex on string fields.
 //!
 //! Anything outside this subset is treated as "no constraint" so the
 //! validator can keep pace with the schema documents as the registry grows.
@@ -157,7 +160,8 @@ fn validate_object_type(
             .ok_or_else(|| format!("`properties` must be an object, got {properties}"))?;
         for (key, property_schema) in properties {
             if let Some(item) = object.get(key) {
-                validate(property_schema, item)?;
+                validate(property_schema, item)
+                    .map_err(|error| format!("property {key:?}: {error}"))?;
             }
         }
         Some(properties)

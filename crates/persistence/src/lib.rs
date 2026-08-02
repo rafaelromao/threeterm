@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -554,22 +554,43 @@ impl Bundle {
         feature_id: &str,
         kind: &str,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_features(&[(feature_id, kind)])
+    }
+
+    /// Atomically append one or more `(feature_id, kind)` pairs to the
+    /// bundle's Canonical Transaction Log and revision graph. The bundle
+    /// is opened once, every entry is applied to the in-memory graph and
+    /// log, the transactions log is rewritten once, the manifest is
+    /// re-sealed once, and the bundle is reopened to return the
+    /// post-write `LoadedBundle`. Either every entry is accepted or none
+    /// is, so a crash between two writes cannot leave a half-bracket on
+    /// disk.
+    ///
+    /// The rewritten log and re-sealed manifest are written into a fresh
+    /// staging directory and published atomically, so a failed publication
+    /// leaves the live bundle (and any preceding generation) byte-for-byte
+    /// untouched on disk.
+    pub fn append_features(&self, entries: &[(&str, &str)]) -> Result<LoadedBundle, BundleError> {
+        if entries.is_empty() {
+            return self.open();
+        }
         let mut loaded = self.open()?;
-        let feature = Feature::new(feature_id, kind)
-            .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        if !loaded.graph.add_feature(feature) {
-            return Ok(loaded);
+        for (feature_id, kind) in entries {
+            let feature = Feature::new(*feature_id, *kind)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            if loaded.graph.add_feature(feature) {
+                loaded.log.append_feature(feature_id, kind);
+            }
         }
 
-        loaded.log.append_feature(feature_id, kind);
-        let last = loaded
-            .log
-            .entries()
-            .last()
-            .expect("appended log has an entry");
-        let mut line =
-            serde_json::to_vec(last).map_err(|error| BundleError::Invalid(error.to_string()))?;
-        line.push(b'\n');
+        let mut encoded = Vec::new();
+        for entry in loaded.log.entries() {
+            let mut line = serde_json::to_vec(entry)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            line.push(b'\n');
+            encoded.extend_from_slice(&line);
+        }
+
         loaded.manifest = Manifest::seal(
             &loaded.manifest.generation_id,
             &loaded.manifest.revision_id,
@@ -583,7 +604,7 @@ impl Bundle {
             &previous_generation_path(&self.root)
         };
         copy_dir_recursive(source, &staging)?;
-        append_and_sync(&staging.join(TRANSACTIONS_LOG_FILENAME), &line)?;
+        atomic_write(&staging.join(TRANSACTIONS_LOG_FILENAME), &encoded)?;
         atomic_write(
             &staging.join(MANIFEST_FILENAME),
             &serde_json::to_vec_pretty(&loaded.manifest)
@@ -1206,13 +1227,6 @@ fn read_required(path: &Path, missing: BundleError) -> Result<Vec<u8>, BundleErr
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(missing),
         Err(error) => Err(error.into()),
     }
-}
-
-fn append_and_sync(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {

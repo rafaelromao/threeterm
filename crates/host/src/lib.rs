@@ -127,6 +127,7 @@ pub enum HostError {
     Persistence(BundleError),
     WorkerFailure { detail: String },
     WorkerUnavailable { detail: String },
+    UnsupportedGeometry { detail: String },
     BrepInvalid { detail: String },
     BrepFileMissing { path: PathBuf },
     BrepIo { detail: String },
@@ -151,6 +152,9 @@ impl std::fmt::Display for HostError {
             }
             Self::WorkerUnavailable { detail } => {
                 write!(formatter, "occt worker unavailable: {detail}")
+            }
+            Self::UnsupportedGeometry { detail } => {
+                write!(formatter, "occt unsupported geometry: {detail}")
             }
             Self::BrepInvalid { detail } => {
                 write!(formatter, "occt brep invalid: {detail}")
@@ -180,6 +184,10 @@ impl From<WorkerError> for HostError {
                 if diagnostic.code == "brep_invalid" {
                     Self::BrepInvalid {
                         detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+                    }
+                } else if diagnostic.code == "unsupported_geometry" {
+                    Self::UnsupportedGeometry {
+                        detail: diagnostic.arg,
                     }
                 } else {
                     Self::WorkerFailure {

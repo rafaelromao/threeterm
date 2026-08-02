@@ -979,7 +979,7 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
 }
 
 #[test]
-fn fillet_then_chamfer_chain_commits_two_revisions() {
+fn fillet_then_chamfer_chain_reports_an_atomic_geometry_limitation() {
     let Some(worker) = locate_worker() else {
         return;
     };
@@ -1000,31 +1000,77 @@ fn fillet_then_chamfer_chain_commits_two_revisions() {
     let fillet_view = host.fillet(&root, fillet_request, &worker).expect("fillet");
     assert_eq!(fillet_view.result.status, "ok");
 
-    // OCCT's `BRepFilletAPI_MakeChamfer` only operates on straight
-    // edges; the fillet produces curved transitions that the chamfer
-    // builder cannot classify. The chain commit applies chamfer to the
-    // base BREP (the same input the fillet consumed) so the two
-    // commands each materialise a distinct feature revision.
-    let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &base_brep)
+    let fillet_brep = committed_brep_path(&root, "chain-fillet-1");
+    let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &fillet_brep)
         .with_output_path(root.join("stage"), "chain-chamfer.brep");
-    let chamfer_view = host
-        .chamfer(&root, chamfer_request, &worker)
-        .expect("chamfer");
-    assert_eq!(chamfer_view.result.status, "ok");
+    let (manifest_before_chamfer, log_before_chamfer) = snapshot_files(&root);
+    let result = host.chamfer(&root, chamfer_request, &worker);
+    assert!(
+        matches!(result, Err(HostError::UnsupportedGeometry { .. })),
+        "got {result:?}"
+    );
 
     assert_ne!(
         fillet_view.snapshot.revision_hash,
         base_view.snapshot.revision_hash
     );
-    assert_ne!(
-        chamfer_view.snapshot.revision_hash,
-        fillet_view.snapshot.revision_hash
-    );
 
     let reloaded = Host::new().load(&root).expect("reloads");
-    assert_eq!(chamfer_view.snapshot, reloaded);
+    assert_eq!(fillet_view.snapshot, reloaded);
+    assert_eq!(
+        snapshot_files(&root),
+        (manifest_before_chamfer, log_before_chamfer)
+    );
+    assert!(
+        !root.join("brep/chain-chamfer-1.brep").exists(),
+        "rejected chamfer must not write a BREP"
+    );
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unsupported_chamfer_preserves_the_preceding_fillet_revision() {
+    let root = fresh_bundle_with_feature("unsupported-chamfer", "l-bracket-fillet-1", "brep");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads preceding fillet revision");
+
+    let script = std::env::temp_dir().join(format!(
+        "threeterm-host-unsupported-chamfer-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' 'unsupported_geometry: selected edges include fillet curves' >&2\nexit 4\n",
+    )
+    .expect("script writes");
+    let mut permissions = fs::metadata(&script).expect("stat").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("chmod");
+
+    let worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let request = chamfer_request(
+        "unsupported-chamfer",
+        "l-bracket-chamfer-1",
+        &root.join("brep/l-bracket-fillet-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "l-bracket-chamfer.brep");
+    let result = host.chamfer(&root, request, &worker);
+    assert!(
+        matches!(result, Err(HostError::UnsupportedGeometry { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view.clone()));
+    assert_eq!(Host::new().load(&root).expect("reloads"), prior_view);
+    assert!(!root.join("brep/l-bracket-chamfer-1.brep").exists());
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
 }
 
 #[allow(dead_code)]

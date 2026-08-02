@@ -476,6 +476,7 @@ impl Bundle {
     }
 
     pub fn open(&self) -> Result<LoadedBundle, BundleError> {
+        reconcile_interrupted_rotation(&self.root)?;
         match self.open_sealed(false) {
             Ok(loaded) => Ok(loaded),
             Err(BundleError::ManifestMissing) if !self.root.exists() => {
@@ -919,11 +920,23 @@ fn previous_generation_path(path: &Path) -> PathBuf {
 fn retired_generation_path(path: &Path) -> PathBuf {
     let mut retired = path.to_path_buf();
     retired.set_file_name(format!(
-        "{}.retired-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        "{}.retired-generation",
+        path.file_name().unwrap_or_default().to_string_lossy()
     ));
     retired
+}
+
+fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError> {
+    let previous = previous_generation_path(destination);
+    let retired = retired_generation_path(&previous);
+    if destination.exists() && !previous.exists() && retired.exists() {
+        // A crash after retiring the predecessor has not changed the selected
+        // canonical generation. Restore the recognized previous slot before
+        // allowing either reads or another publication to proceed.
+        Bundle::at(&retired).open_sealed(false)?;
+        fs::rename(retired, previous)?;
+    }
+    Ok(())
 }
 
 fn write_v1_into(
@@ -1395,6 +1408,33 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(previous);
         let _ = fs::remove_dir_all(staging_path_for_publish(&root));
+    }
+
+    #[test]
+    fn interrupted_rotation_restores_the_recognized_previous_generation() {
+        let root = temp_root("interrupted-rotation");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        bundle
+            .append_feature("box-1", "box")
+            .expect("first publish");
+        bundle
+            .append_feature("box-2", "box")
+            .expect("second publish");
+        let previous = previous_generation_path(&root);
+        let retired = retired_generation_path(&previous);
+        let preceding_manifest = fs::read(previous.join(MANIFEST_FILENAME)).expect("manifest");
+        fs::rename(&previous, &retired).expect("simulates interrupted rotation");
+
+        let loaded = bundle.open().expect("canonical generation opens");
+        assert_eq!(loaded.log.len(), 2);
+        assert_eq!(
+            fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+            preceding_manifest
+        );
+        assert!(!retired.exists());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(previous);
     }
 
     #[test]

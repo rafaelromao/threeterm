@@ -328,7 +328,7 @@ impl OcctWorker {
             Some(4) => {
                 return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
                     "unsupported_geometry",
-                    stderr.trim().to_string(),
+                    error_detail(&stderr),
                 )));
             }
             Some(code) => {
@@ -352,6 +352,13 @@ impl OcctWorker {
             line: line.to_string(),
         })
     }
+}
+
+fn error_detail(stderr: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(stderr)
+        .ok()
+        .and_then(|response| response["diagnostic"].as_str().map(str::to_string))
+        .unwrap_or_else(|| stderr.trim().to_string())
 }
 
 struct RawResult {

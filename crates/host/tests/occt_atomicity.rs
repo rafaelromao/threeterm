@@ -1059,7 +1059,8 @@ fn unsupported_chamfer_preserves_the_preceding_fillet_revision() {
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
     assert_eq!(prior_log, post_log);
-    assert_eq!(host.current(), Some(prior_view));
+    assert_eq!(host.current(), Some(prior_view.clone()));
+    assert_eq!(Host::new().load(&root).expect("reloads"), prior_view);
     assert!(!root.join("brep/l-bracket-chamfer-1.brep").exists());
 
     let _ = fs::remove_dir_all(root);

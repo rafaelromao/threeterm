@@ -3,9 +3,18 @@ name = "threeterm-occt-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "LGPL-2.1-or-later"
 publish.workspace = true
-description = "Rust skeleton crate for the disposable OCCT worker boundary. C++ worker code lives outside the workspace."
+description = "Disposable OCCT geometry worker (LGPL-2.1, see NOTICE for upstream provenance and redistribution source)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+threeterm-protocol = { path = "../../protocol" }
+
+[features]
+default = []
 
 [lints]
 workspace = true

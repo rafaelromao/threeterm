@@ -1,0 +1,67 @@
+ThreeTerm OCCT geometry worker — provenance, modifications, and build
+
+Upstream
+- Project: OpenCASCADE Technology (OCCT)
+- URL: https://github.com/Open-Cascade-SAS/OCCT
+- Pinned tag: V7_9_2 (see crates/workers/occt/build.rs::OCCT_PINNED_TAG)
+- Pinned commit: c5f20409c52bf8f658314d205a0e5d6f0be0969c (see crates/workers/occt/build.rs::OCCT_PINNED_SHA)
+- License: LGPL-2.1 (with the OCCT static-linking exception)
+
+Vendored files
+- This slice does not vendor OCCT sources; it links against the system
+  OCCT install (Archlinux community `opencascade` package on the CI
+  container; `THREETERM_OCCT_DIR` override for any prebuilt tree). The
+  Archlinux package version recorded at slice time is what the CI
+  install resolves to. Vendoring is gated behind `THREETERM_OCCT_VENDOR=1`
+  and not used in the default build.
+
+ThreeTerm additions (NOT derived from upstream)
+- src-cpp/worker_main.cpp — ThreeTerm-only worker binary that exchanges
+  extrude / boolean-fuse envelopes over stdin/stdout JSON, builds OCCT
+  solids (extrude via `BRepBuilderAPI_MakePolygon` + `BRepPrimAPI_MakePrism`,
+  Boolean fuse via `BRepAlgoAPI_Fuse`), validates the result with
+  `BRepCheck_Analyzer`, and writes the BREP to the host-staged output
+  path. The worker exits 2 on a malformed request, 3 on a BREP that
+  fails `BRepCheck_Analyzer`, and 0 on success.
+- build.rs — ThreeTerm-only cargo build glue that locates the system
+  OCCT install (`THREETERM_OCCT_DIR` / `/usr/include/opencascade` /
+  `/usr/local/include/opencascade`), compiles worker_main.cpp against
+  the OCCT system libraries, and writes the worker binary to
+  `OUT_DIR/bin/threeterm-occt-worker`. The Rust boundary in
+  `crates/workers/occt/src/lib.rs` spawns the binary as a disposable
+  subprocess per request.
+
+Build
+- Prerequisites: g++ (or any C++17 compiler), the system OCCT 7.x
+  development package (Archlinux: `pacman -Syu opencascade`).
+- `cargo build -p threeterm-occt-worker` runs build.rs which:
+    1. searches for the system OCCT install (env var first, then the
+       default include / lib search paths);
+    2. compiles worker_main.cpp against the OCCT system libraries
+       (`TKernel`, `TKMath`, `TKG2d`, `TKG3d`, `TKGeomBase`,
+       `TKGeomAlgo`, `TKBRep`, `TKTopAlgo`, `TKPrim`, `TKBO`,
+       `TKFillet`, `TKShHealing`, `TKMesh`, `TKXSBase`) and writes
+       the worker binary to `OUT_DIR/bin/threeterm-occt-worker`.
+- `THREETERM_OCCT_DIR=<dir>` overrides the search path.
+- `THREETERM_OCCT_VENDOR=1` enables a multi-hour vendored build from
+  the pinned tag (off by default; not used in CI).
+- `THREETERM_SKIP_OCCTBUILD=1` skips the C++ build (test harnesses
+  set this when they provide their own worker binary).
+- `THREETERM_OCCTBUILD_WORKER=<path>` overrides the resolved worker
+  binary path used by `OcctWorker::locate`.
+
+Distribution obligations (LGPL-2.1)
+- The worker binary dynamically links against the system OCCT shared
+  libraries. Users must be able to relink the worker against a
+  different OCCT version; the dynamic link contract satisfies this
+  without further obligations beyond the LGPL notice and a path to
+  the corresponding OCCT source (the upstream URL above).
+- The worker binary embeds the pinned OCCT tag and commit SHA in
+  `worker-metadata.txt` so the corresponding source for any given
+  build is unambiguous.
+
+Schema
+- worker_main.cpp exchanges envelopes at schema_version
+  "threeterm.workers.occt/1". The host (ThreeTerm) is the sole owner
+  of stable feature_ids; OCCT numeric handles are private to the
+  worker.

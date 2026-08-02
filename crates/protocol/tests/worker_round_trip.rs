@@ -14,9 +14,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use threeterm_protocol::artifact::{Stage, sha256_hex};
+use threeterm_protocol::artifact::{
+    ArtifactHeader, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
+};
 use threeterm_protocol::frame::FrameParser;
 use threeterm_protocol::schema_version;
 use threeterm_protocol::supervisor::{
@@ -50,7 +50,7 @@ impl WorkerHost for FakeWorker {
         Ok(())
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
         self.pending.pop_front().ok_or(WorkerError::Closed)
     }
 
@@ -91,6 +91,38 @@ fn ready_envelope() -> Envelope {
     }
 }
 
+fn artifact_header(
+    staging_root: &std::path::Path,
+    bytes: &[u8],
+    sha256: String,
+) -> Box<ArtifactHeader> {
+    let staged = Stage::open(staging_root)
+        .expect("stage opens")
+        .stage_bytes("sketch-1.brep", bytes)
+        .expect("worker bytes stage");
+    let worker_fingerprint = WorkerFingerprint {
+        worker_kind: "occt".to_string(),
+        worker_schema_version: "threeterm.workers.occt/1".to_string(),
+        protocol_schema_version: schema_version().to_string(),
+    };
+    Box::new(ArtifactHeader {
+        request_id: "req-1".to_string(),
+        source_revision_id: "rev-0".to_string(),
+        cache_key: Layer1CacheKey {
+            source_revision_id: "rev-0".to_string(),
+            worker_fingerprint: worker_fingerprint.clone(),
+            artifact_kind: "brep".to_string(),
+            semantic_input_sha256: "11".repeat(32),
+            deterministic_settings_sha256: "22".repeat(32),
+        },
+        worker_fingerprint,
+        artifact_kind: "brep".to_string(),
+        staging_name: staged.staging_name,
+        byte_count: staged.byte_count,
+        sha256,
+    })
+}
+
 /// `PipeHost` is the production-style wiring: it pipes the host's
 /// envelopes through `encode_frame` and the worker's envelopes through
 /// `FrameParser::push` so the wire format is exercised on every send and
@@ -125,7 +157,7 @@ impl WorkerHost for PipeHost {
             .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
         let frame = self.outbound.pop_front().ok_or(WorkerError::Closed)?;
         let envelopes = self
             .parser
@@ -181,11 +213,10 @@ fn cooperative_cancellation_returns_structured_acknowledgement() {
 }
 
 #[test]
-fn request_consumes_worker_ready_handshake_then_promotes_completed() {
+fn request_consumes_worker_ready_handshake_then_returns_staged_facts() {
     // Worker handshake + a valid staged artifact + Completed. The
-    // supervisor must consume WorkerReady, stage the artifact,
-    // promote it on Completed, and report a Cooperative terminal
-    // record.
+    // supervisor must consume WorkerReady and return the staged artifact
+    // fact on Completed without publishing it.
     let staging_root = std::env::temp_dir().join(format!(
         "threeterm-pipe-stage-promote-{}",
         std::process::id()
@@ -195,17 +226,12 @@ fn request_consumes_worker_ready_handshake_then_promotes_completed() {
 
     let bytes = b"hello, worker";
     let sha = sha256_hex(bytes);
-    let encoded = BASE64.encode(bytes);
 
     let worker = PipeHost::new(vec![
         ready_envelope(),
         Envelope::Artifact {
             schema_version: schema_version().to_string(),
-            request_id: "req-1".to_string(),
-            artifact_kind: "brep".to_string(),
-            staging_name: "sketch-1.brep".to_string(),
-            sha256: sha.clone(),
-            bytes_b64: encoded.clone(),
+            header: artifact_header(&staging_root, bytes, sha.clone()),
         },
         Envelope::Completed {
             schema_version: schema_version().to_string(),
@@ -217,25 +243,25 @@ fn request_consumes_worker_ready_handshake_then_promotes_completed() {
 
     let outcome = supervisor.request(sample_request());
 
-    let SupervisorOutcome::ForceTerminated { record } = outcome else {
-        panic!("expected ForceTerminated(Completed); got {outcome:?}");
+    let SupervisorOutcome::Completed {
+        request_id,
+        artifact_headers,
+    } = outcome
+    else {
+        panic!("expected Completed; got {outcome:?}");
     };
-    assert_eq!(record.request_id, "req-1");
-    assert_eq!(record.exit_kind, ExitKind::Cooperative);
-    assert_eq!(record.stage, "completed");
-    assert!(record.last_artifact_error.is_none());
+    assert_eq!(request_id, "req-1");
+    assert_eq!(artifact_headers.len(), 1);
 
-    // The artifact's .partial file must have been promoted to its final
-    // filename with the validated bytes on disk.
+    // Publication is exclusively a Host acceptance concern.
     let final_path = staging_root.join("sketch-1.brep");
-    let promoted = std::fs::read(&final_path).expect("promoted file reads");
-    assert_eq!(
-        promoted, bytes,
-        "promoted bytes must match the worker payload"
+    assert!(
+        !final_path.exists(),
+        "supervisor must not publish artifacts"
     );
     assert!(
-        !staging_root.join("sketch-1.brep.partial").exists(),
-        "partial must be gone after promotion"
+        staging_root.join("sketch-1.brep.partial").exists(),
+        "host must receive the staged artifact for acceptance"
     );
 
     let _ = std::fs::remove_dir_all(&staging_root);
@@ -382,12 +408,10 @@ fn request_records_protocol_violation_on_unsolicited_cancelled_envelope() {
 }
 
 #[test]
-fn request_surfaces_staging_failures_in_last_artifact_error() {
+fn request_returns_unvalidated_staged_artifact_facts_to_host() {
     // Worker sends WorkerReady + an Artifact whose advertised hash is
-    // wrong. The supervisor must NOT promote the artifact, must
-    // surface the `HashMismatch` error in the terminal record, and
-    // must preserve the canonical host state by discarding the
-    // rejected .partial file.
+    // wrong. The supervisor must not validate or promote it; the Host
+    // receives the fact and decides whether to reject and clean it up.
     let staging_root = std::env::temp_dir().join(format!(
         "threeterm-pipe-stage-mismatch-{}",
         std::process::id()
@@ -396,17 +420,12 @@ fn request_surfaces_staging_failures_in_last_artifact_error() {
     let stage = Stage::open(&staging_root).expect("stage opens");
 
     let bytes = b"hello, worker";
-    let encoded = BASE64.encode(bytes);
 
     let worker = PipeHost::new(vec![
         ready_envelope(),
         Envelope::Artifact {
             schema_version: schema_version().to_string(),
-            request_id: "req-1".to_string(),
-            artifact_kind: "brep".to_string(),
-            staging_name: "sketch-1.brep".to_string(),
-            sha256: "deadbeef".to_string(),
-            bytes_b64: encoded,
+            header: artifact_header(&staging_root, bytes, "deadbeef".to_string()),
         },
         Envelope::Completed {
             schema_version: schema_version().to_string(),
@@ -418,22 +437,19 @@ fn request_surfaces_staging_failures_in_last_artifact_error() {
 
     let outcome = supervisor.request(sample_request());
 
-    let SupervisorOutcome::ForceTerminated { record } = outcome else {
-        panic!("expected ForceTerminated(Completed); got {outcome:?}");
+    let SupervisorOutcome::Completed {
+        artifact_headers, ..
+    } = outcome
+    else {
+        panic!("expected Completed; got {outcome:?}");
     };
-    assert_eq!(record.exit_kind, ExitKind::Cooperative);
-    let error = record
-        .last_artifact_error
-        .expect("staging failure must surface in last_artifact_error");
-    assert!(
-        error.contains("hash mismatch") || error.contains("HashMismatch"),
-        "expected a hash-mismatch diagnostic; got {error:?}"
-    );
+    assert_eq!(artifact_headers.len(), 1);
 
-    // Canonical host state preserved: no .partial, no final file.
+    // No final file exists before Host acceptance, and the staged file is
+    // available for the Host's independent digest validation.
     assert!(
-        !staging_root.join("sketch-1.brep.partial").exists(),
-        "rejected artifacts must not leave a partial behind"
+        staging_root.join("sketch-1.brep.partial").exists(),
+        "host acceptance must receive the staged artifact"
     );
     assert!(
         !staging_root.join("sketch-1.brep").exists(),
@@ -527,8 +543,8 @@ impl WorkerHost for CapturingFake {
         self.inner.send(envelope)
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
-        self.inner.recv()
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -583,8 +599,8 @@ impl WorkerHost for CancelLoggingWorker {
         self.inner.send(envelope)
     }
 
-    fn recv(&mut self) -> Result<Envelope, WorkerError> {
-        self.inner.recv()
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -594,4 +610,43 @@ impl WorkerHost for CancelLoggingWorker {
             .push((request_id.to_string(), reason.to_string()));
         self.inner.cancel(request_id, reason)
     }
+}
+
+#[test]
+fn request_rejects_an_artifact_bound_to_another_revision() {
+    let staging_root = std::env::temp_dir().join(format!(
+        "threeterm-pipe-stage-stale-revision-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging_root);
+    let stage = Stage::open(&staging_root).expect("stage opens");
+    let bytes = b"stale worker bytes";
+    let mut header = artifact_header(&staging_root, bytes, sha256_hex(bytes));
+    header.source_revision_id = "rev-stale".to_string();
+    header.cache_key.source_revision_id = "rev-stale".to_string();
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Artifact {
+            schema_version: schema_version().to_string(),
+            header,
+        },
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), Some(stage));
+
+    let SupervisorOutcome::Completed {
+        artifact_headers, ..
+    } = supervisor.request(sample_request())
+    else {
+        panic!("expected completed facts");
+    };
+
+    assert_eq!(artifact_headers.len(), 1);
+    assert!(staging_root.join("sketch-1.brep.partial").exists());
+    assert!(!staging_root.join("sketch-1.brep").exists());
+    let _ = std::fs::remove_dir_all(staging_root);
 }

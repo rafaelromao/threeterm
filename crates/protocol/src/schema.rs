@@ -127,6 +127,659 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "profile", "height"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "profile": {
+                "type": "array",
+                "minItems": 3,
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": { "type": "number" }
+                }
+            },
+            "height": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_FUSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "tool_feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "tool_feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static FILLET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "radius"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "radius": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static CHAMFER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "distance"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "distance": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "position",
+            "direction",
+            "diameter"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "position": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "direction": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "diameter": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "profile",
+            "axis_point",
+            "axis_direction",
+            "angle"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "profile": {
+                "type": "array",
+                "minItems": 3,
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": { "type": "number" }
+                }
+            },
+            "axis_point": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "axis_direction": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "angle": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static FILLET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static CHAMFER_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static HOLE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REVOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static MIRROR_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "plane_point",
+            "plane_normal"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "plane_point": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "plane_normal": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static LINEAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "direction",
+            "count",
+            "spacing"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "direction": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "count": { "type": "integer", "minimum": 1 },
+            "spacing": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+// `maximum: 6.283185307179586` is exactly 2π; the float literal
+// trips `clippy::approx_constant` so the constant is hoisted behind
+// an explicit allow.
+#[allow(clippy::approx_constant)]
+const CIRCULAR_PATTERN_ANGLE_STEP_MAX: f64 = 6.283185307179586;
+
+pub static CIRCULAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "axis_point",
+            "axis_normal",
+            "angle_step",
+            "count"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "axis_point": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "axis_normal": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            },
+            "angle_step": { "type": "number", "exclusiveMinimum": 0, "maximum": CIRCULAR_PATTERN_ANGLE_STEP_MAX },
+            "count": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static MIRROR_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static LINEAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static CIRCULAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static SHELL_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "thickness"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "thickness": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static SHELL_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static DRAFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "angle",
+            "pull_direction"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "angle": { "type": "number", "exclusiveMinimum": 0 },
+            "pull_direction": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static DRAFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static LOFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "feature_id",
+            "profiles"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "profiles": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                    "type": "array",
+                    "minItems": 3,
+                    "items": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": { "type": "number" }
+                    }
+                }
+            },
+            "is_solid": { "type": "boolean" },
+            "ruled": { "type": "boolean" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -242,6 +895,150 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: BRACKET_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        EXTRUDE_COMMAND_ID,
+        CommandSchema {
+            id: EXTRUDE_COMMAND_ID,
+            name: "extrude",
+            schema_version: "threeterm.command.extrude/1",
+            request_schema_version: "threeterm.command.extrude.request/1",
+            request_schema: EXTRUDE_REQUEST_SCHEMA.clone(),
+            response_schema_version: EXTRUDE_RESPONSE_SCHEMA_VERSION,
+            response_schema: EXTRUDE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        BOOLEAN_FUSE_COMMAND_ID,
+        CommandSchema {
+            id: BOOLEAN_FUSE_COMMAND_ID,
+            name: "boolean-fuse",
+            schema_version: "threeterm.command.boolean-fuse/1",
+            request_schema_version: "threeterm.command.boolean-fuse.request/1",
+            request_schema: BOOLEAN_FUSE_REQUEST_SCHEMA.clone(),
+            response_schema_version: BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION,
+            response_schema: BOOLEAN_FUSE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        FILLET_COMMAND_ID,
+        CommandSchema {
+            id: FILLET_COMMAND_ID,
+            name: "fillet",
+            schema_version: "threeterm.command.fillet/1",
+            request_schema_version: "threeterm.command.fillet.request/1",
+            request_schema: FILLET_REQUEST_SCHEMA.clone(),
+            response_schema_version: FILLET_RESPONSE_SCHEMA_VERSION,
+            response_schema: FILLET_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        CHAMFER_COMMAND_ID,
+        CommandSchema {
+            id: CHAMFER_COMMAND_ID,
+            name: "chamfer",
+            schema_version: "threeterm.command.chamfer/1",
+            request_schema_version: "threeterm.command.chamfer.request/1",
+            request_schema: CHAMFER_REQUEST_SCHEMA.clone(),
+            response_schema_version: CHAMFER_RESPONSE_SCHEMA_VERSION,
+            response_schema: CHAMFER_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        HOLE_COMMAND_ID,
+        CommandSchema {
+            id: HOLE_COMMAND_ID,
+            name: "hole",
+            schema_version: "threeterm.command.hole/1",
+            request_schema_version: "threeterm.command.hole.request/1",
+            request_schema: HOLE_REQUEST_SCHEMA.clone(),
+            response_schema_version: HOLE_RESPONSE_SCHEMA_VERSION,
+            response_schema: HOLE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        REVOLVE_COMMAND_ID,
+        CommandSchema {
+            id: REVOLVE_COMMAND_ID,
+            name: "revolve",
+            schema_version: "threeterm.command.revolve/1",
+            request_schema_version: "threeterm.command.revolve.request/1",
+            request_schema: REVOLVE_REQUEST_SCHEMA.clone(),
+            response_schema_version: REVOLVE_RESPONSE_SCHEMA_VERSION,
+            response_schema: REVOLVE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        MIRROR_COMMAND_ID,
+        CommandSchema {
+            id: MIRROR_COMMAND_ID,
+            name: "mirror",
+            schema_version: "threeterm.command.mirror/1",
+            request_schema_version: "threeterm.command.mirror.request/1",
+            request_schema: MIRROR_REQUEST_SCHEMA.clone(),
+            response_schema_version: MIRROR_RESPONSE_SCHEMA_VERSION,
+            response_schema: MIRROR_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        LINEAR_PATTERN_COMMAND_ID,
+        CommandSchema {
+            id: LINEAR_PATTERN_COMMAND_ID,
+            name: "linear-pattern",
+            schema_version: "threeterm.command.linear-pattern/1",
+            request_schema_version: "threeterm.command.linear-pattern.request/1",
+            request_schema: LINEAR_PATTERN_REQUEST_SCHEMA.clone(),
+            response_schema_version: LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            response_schema: LINEAR_PATTERN_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        CIRCULAR_PATTERN_COMMAND_ID,
+        CommandSchema {
+            id: CIRCULAR_PATTERN_COMMAND_ID,
+            name: "circular-pattern",
+            schema_version: "threeterm.command.circular-pattern/1",
+            request_schema_version: "threeterm.command.circular-pattern.request/1",
+            request_schema: CIRCULAR_PATTERN_REQUEST_SCHEMA.clone(),
+            response_schema_version: CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            response_schema: CIRCULAR_PATTERN_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        SHELL_COMMAND_ID,
+        CommandSchema {
+            id: SHELL_COMMAND_ID,
+            name: "shell",
+            schema_version: "threeterm.command.shell/1",
+            request_schema_version: "threeterm.command.shell.request/1",
+            request_schema: SHELL_REQUEST_SCHEMA.clone(),
+            response_schema_version: SHELL_RESPONSE_SCHEMA_VERSION,
+            response_schema: SHELL_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        DRAFT_COMMAND_ID,
+        CommandSchema {
+            id: DRAFT_COMMAND_ID,
+            name: "draft",
+            schema_version: "threeterm.command.draft/1",
+            request_schema_version: "threeterm.command.draft.request/1",
+            request_schema: DRAFT_REQUEST_SCHEMA.clone(),
+            response_schema_version: DRAFT_RESPONSE_SCHEMA_VERSION,
+            response_schema: DRAFT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        LOFT_COMMAND_ID,
+        CommandSchema {
+            id: LOFT_COMMAND_ID,
+            name: "loft",
+            schema_version: "threeterm.command.loft/1",
+            request_schema_version: "threeterm.command.loft.request/1",
+            request_schema: LOFT_REQUEST_SCHEMA.clone(),
+            response_schema_version: LOFT_RESPONSE_SCHEMA_VERSION,
+            response_schema: LOFT_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -250,14 +1047,45 @@ pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
+pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
+pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
+pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
+pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
+pub const HOLE_COMMAND_ID: CommandId = CommandId("hole");
+pub const REVOLVE_COMMAND_ID: CommandId = CommandId("revolve");
+pub const MIRROR_COMMAND_ID: CommandId = CommandId("mirror");
+pub const LINEAR_PATTERN_COMMAND_ID: CommandId = CommandId("linear-pattern");
+pub const CIRCULAR_PATTERN_COMMAND_ID: CommandId = CommandId("circular-pattern");
+pub const SHELL_COMMAND_ID: CommandId = CommandId("shell");
+pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
+pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/1";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
+pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
+pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
+pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
+pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";
+pub const HOLE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.hole.response/1";
+pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.response/1";
+pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";
+pub const LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.linear-pattern.response/1";
+pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.circular-pattern.response/1";
+pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.response/1";
+pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
+pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.
 pub fn find(command: CommandId) -> Option<&'static CommandSchema> {
     COMMAND_REGISTRY.get(&command)
+}
+
+/// Resolve a registered command from its presentation-neutral name.
+pub fn find_by_name(name: &str) -> Option<&'static CommandSchema> {
+    iter().find(|entry| entry.name == name)
 }
 
 /// Iterate the registered commands in stable insertion order.

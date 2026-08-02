@@ -3,10 +3,13 @@
 version = 4
 
 [[package]]
-name = "base64"
-version = "0.22.1"
+name = "aho-corasick"
+version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "block-buffer"
@@ -99,6 +102,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -170,6 +202,7 @@ dependencies = [
  "serde_json",
  "threeterm-domain",
  "threeterm-host",
+ "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
 ]
@@ -188,7 +221,10 @@ name = "threeterm-host"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "threeterm-domain",
+ "threeterm-occt-worker",
  "threeterm-persistence",
+ "threeterm-protocol",
 ]
 
 [[package]]
@@ -210,6 +246,12 @@ dependencies = [
 [[package]]
 name = "threeterm-occt-worker"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "threeterm-protocol",
+]
 
 [[package]]
 name = "threeterm-persistence"
@@ -225,7 +267,7 @@ dependencies = [
 name = "threeterm-protocol"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

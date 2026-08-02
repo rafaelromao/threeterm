@@ -21,6 +21,17 @@ pub enum DiagnosticCode {
     UnknownCommand,
     PersistenceFailure,
     IntegrityFailure,
+    WorkerFailure,
+    /// OCCT cannot apply the requested operation to the selected geometry.
+    UnsupportedGeometry,
+    /// The worker produced a BREP that fails `BRepCheck_Analyzer`. The
+    /// host surfaces this to the caller without committing the revision.
+    BrepInvalid,
+    ArtifactPromotionFailure,
+    ArtifactHashMismatch,
+    ArtifactRevisionMismatch,
+    ArtifactRequestMismatch,
+    ArtifactCacheKeyMismatch,
 }
 
 /// One structured diagnostic entry. The JSON shape is fixed:
@@ -52,6 +63,70 @@ impl Diagnostic {
     pub fn integrity_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::IntegrityFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn worker_failure(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::WorkerFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn unsupported_geometry(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::UnsupportedGeometry,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn brep_invalid(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::BrepInvalid,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn artifact_promotion_failure(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ArtifactPromotionFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn artifact_hash_mismatch(expected: &str, actual: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ArtifactHashMismatch,
+            arg: format!("expected={expected};actual={actual}"),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn artifact_revision_mismatch(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ArtifactRevisionMismatch,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn artifact_request_mismatch(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ArtifactRequestMismatch,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn artifact_cache_key_mismatch(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::ArtifactCacheKeyMismatch,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

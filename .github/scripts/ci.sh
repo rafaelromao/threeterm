@@ -30,6 +30,15 @@ if ! command -v cc >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
     pacman -Syu --noconfirm gcc
 fi
 
+# Install the pinned OCCT development package so the disposable OCCT
+# worker binary builds against the system library. Archlinux's
+# community `opencascade` package ships the OCCT 7.x headers and
+# runtime libraries the build.rs probes for.
+if command -v pacman >/dev/null 2>&1; then
+    echo "==> Installing opencascade (OCCT) via pacman"
+    pacman -Syu --noconfirm opencascade
+fi
+
 if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then
     echo "==> Installing toolchain ${CHANNEL} via rustup"
     rustup toolchain install "${CHANNEL}" \

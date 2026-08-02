@@ -20,6 +20,7 @@
 //! Anything outside this subset is treated as "no constraint" so the
 //! validator can keep pace with the schema documents as the registry grows.
 
+use regex::Regex;
 use serde_json::Value;
 
 /// Validate `value` against the structural `schema`. Returns `Ok(())` on
@@ -47,103 +48,19 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
             "object" => validate_object_type(schema_object, value)?,
             "array" => validate_array_type(schema_object, value)?,
             "string" => {
-                if !value.is_string() {
-                    return Err(format!("expected string, got {value}"));
-                }
-                if let Some(min_length) = schema_object.get("minLength") {
-                    let min_length = min_length.as_u64().ok_or_else(|| {
-                        format!("`minLength` must be a non-negative integer, got {min_length}")
-                    })?;
-                    let actual = value
-                        .as_str()
-                        .expect("value is a string after the type check")
-                        .chars()
-                        .count();
-                    if actual < min_length as usize {
-                        return Err(format!(
-                            "string is shorter than the schema's `minLength`: {actual} < {min_length}"
-                        ));
-                    }
-                }
-                if let Some(pattern) = schema_object.get("pattern") {
-                    let pattern = pattern
-                        .as_str()
-                        .ok_or_else(|| format!("`pattern` must be a string, got {pattern}"))?;
-                    let actual = value
-                        .as_str()
-                        .expect("value is a string after the type check");
-                    if !matches_pattern(pattern, actual) {
-                        return Err(format!(
-                            "string does not match the schema's `pattern`: {pattern:?}"
-                        ));
-                    }
-                }
+                validate_string(schema_object, value)?;
             }
             "number" => {
                 if !value.is_number() {
                     return Err(format!("expected number, got {value}"));
                 }
-                if let Some(minimum) = schema_object.get("minimum") {
-                    let minimum = minimum
-                        .as_f64()
-                        .ok_or_else(|| format!("`minimum` must be a number, got {minimum}"))?;
-                    let actual = value
-                        .as_f64()
-                        .expect("value is a number after the type check");
-                    if actual < minimum {
-                        return Err(format!(
-                            "number is below the schema's `minimum`: {actual} < {minimum}"
-                        ));
-                    }
-                }
-                if let Some(exclusive_minimum) = schema_object.get("exclusiveMinimum") {
-                    let exclusive_minimum = exclusive_minimum.as_f64().ok_or_else(|| {
-                        format!("`exclusiveMinimum` must be a number, got {exclusive_minimum}")
-                    })?;
-                    let actual = value
-                        .as_f64()
-                        .expect("value is a number after the type check");
-                    if actual <= exclusive_minimum {
-                        return Err(format!(
-                            "number is not greater than the schema's `exclusiveMinimum`: {actual} <= {exclusive_minimum}"
-                        ));
-                    }
-                }
+                validate_number(schema_object, value)?;
             }
             "integer" => {
                 if !value.is_i64() && !value.is_u64() {
                     return Err(format!("expected integer, got {value}"));
                 }
-                if let Some(minimum) = schema_object.get("minimum") {
-                    let minimum = minimum
-                        .as_f64()
-                        .ok_or_else(|| format!("`minimum` must be a number, got {minimum}"))?;
-                    let actual = if value.is_i64() {
-                        value.as_i64().expect("value is i64") as f64
-                    } else {
-                        value.as_u64().expect("value is u64") as f64
-                    };
-                    if actual < minimum {
-                        return Err(format!(
-                            "integer is below the schema's `minimum`: {actual} < {minimum}"
-                        ));
-                    }
-                }
-                if let Some(exclusive_minimum) = schema_object.get("exclusiveMinimum") {
-                    let exclusive_minimum = exclusive_minimum.as_f64().ok_or_else(|| {
-                        format!("`exclusiveMinimum` must be a number, got {exclusive_minimum}")
-                    })?;
-                    let actual = if value.is_i64() {
-                        value.as_i64().expect("value is i64") as f64
-                    } else {
-                        value.as_u64().expect("value is u64") as f64
-                    };
-                    if actual <= exclusive_minimum {
-                        return Err(format!(
-                            "integer is not greater than the schema's `exclusiveMinimum`: {actual} <= {exclusive_minimum}"
-                        ));
-                    }
-                }
+                validate_number(schema_object, value)?;
             }
             "boolean" => {
                 if !value.is_boolean() {
@@ -162,90 +79,57 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Minimal pattern matcher: anchored `^[0-9a-f]{64}$`-style patterns are
-/// the only ones declared in the registered schemas. The implementation
-/// translates `^`/`$` anchors and `{n}`/`{n,m}` quantifiers into a small
-/// regex without pulling in the `regex` crate.
-fn matches_pattern(pattern: &str, value: &str) -> bool {
-    let anchored_left = pattern.starts_with('^');
-    let anchored_right = pattern.ends_with('$');
-    let body = if anchored_left {
-        if anchored_right {
-            &pattern[1..pattern.len() - 1]
-        } else {
-            &pattern[1..]
+fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {
+    let string = value
+        .as_str()
+        .ok_or_else(|| format!("expected string, got {value}"))?;
+    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+        && string.chars().count() < min_length as usize
+    {
+        return Err(format!("string must have at least {min_length} characters"));
+    }
+    if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+        let regex =
+            Regex::new(pattern).map_err(|error| format!("invalid pattern {pattern:?}: {error}"))?;
+        if !regex.is_match(string) {
+            return Err(format!(
+                "string {string:?} does not match pattern {pattern:?}"
+            ));
         }
-    } else if anchored_right {
-        &pattern[..pattern.len() - 1]
-    } else {
-        pattern
-    };
-
-    anchored_left && anchored_right && char_class_matches(body, value).unwrap_or(false)
+    }
+    Ok(())
 }
 
-fn char_class_matches(body: &str, value: &str) -> Option<bool> {
-    if let Some(stripped) = body.strip_prefix('[') {
-        let end = stripped.find(']')?;
-        let chars_in_class = &stripped[..end];
-        let mut rest = &stripped[end + 1..];
-        let (min, max) = parse_quantifier(&mut rest)?;
-        let chars: Vec<char> = value.chars().collect();
-        if chars.len() < min || chars.len() > max {
-            return Some(false);
-        }
-        Some(chars.iter().all(|ch| char_in_class(chars_in_class, *ch)))
-    } else {
-        None
-    }
-}
-
-fn parse_quantifier(s: &mut &str) -> Option<(usize, usize)> {
-    if !s.starts_with('{') {
-        return Some((1, usize::MAX));
-    }
-    let end = s.find('}')?;
-    let inner = &s[1..end];
-    *s = &s[end + 1..];
-    if let Some((lo, hi)) = inner.split_once(',') {
-        let lo: usize = lo.parse().ok()?;
-        let hi: usize = hi.parse().ok()?;
-        Some((lo, hi))
-    } else {
-        let n: usize = inner.parse().ok()?;
-        Some((n, n))
-    }
-}
-
-fn char_in_class(class: &str, ch: char) -> bool {
-    let mut chars = class.chars().peekable();
-    let mut negated = false;
-    if chars.peek() == Some(&'^') {
-        negated = true;
-        chars.next();
-    }
-    let mut matched = false;
-    let mut iter = chars.peekable();
-    while let Some(c) = iter.next() {
-        if c == '\\' {
-            iter.next();
-            continue;
-        }
-        if iter.peek() == Some(&'-') {
-            iter.next();
-            if let Some(end) = iter.next()
-                && ch >= c
-                && ch <= end
-            {
-                matched = true;
-                break;
-            }
-        } else if c == ch {
-            matched = true;
-            break;
+fn validate_number(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {
+    let number = value.as_f64().expect("number checked by caller");
+    for (keyword, valid) in [
+        (
+            "minimum",
+            schema
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .is_none_or(|minimum| number >= minimum),
+        ),
+        (
+            "maximum",
+            schema
+                .get("maximum")
+                .and_then(Value::as_f64)
+                .is_none_or(|maximum| number <= maximum),
+        ),
+        (
+            "exclusiveMinimum",
+            schema
+                .get("exclusiveMinimum")
+                .and_then(Value::as_f64)
+                .is_none_or(|minimum| number > minimum),
+        ),
+    ] {
+        if !valid {
+            return Err(format!("number {number} violates {keyword}"));
         }
     }
-    matched ^ negated
+    Ok(())
 }
 
 fn validate_object_type(
@@ -307,6 +191,17 @@ fn validate_array_type(
     let array = value
         .as_array()
         .ok_or_else(|| format!("expected array, got {value}"))?;
+
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
+        && array.len() < min_items as usize
+    {
+        return Err(format!("array must have at least {min_items} items"));
+    }
+    if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64)
+        && array.len() > max_items as usize
+    {
+        return Err(format!("array must have at most {max_items} items"));
+    }
 
     if let Some(items) = schema.get("items") {
         for (index, item) in array.iter().enumerate() {

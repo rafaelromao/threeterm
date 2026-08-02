@@ -24,6 +24,7 @@ pub const BREP_SUBDIR: &str = "brep";
 pub struct SnapshotView {
     pub feature_graph_hash: String,
     pub revision_hash: String,
+    pub recovered_from_previous: bool,
 }
 
 impl From<&LoadedBundle> for SnapshotView {
@@ -31,6 +32,7 @@ impl From<&LoadedBundle> for SnapshotView {
         Self {
             feature_graph_hash: bundle.feature_graph_hash_hex().to_string(),
             revision_hash: bundle.revision_hash_hex().to_string(),
+            recovered_from_previous: bundle.recovered_from_previous,
         }
     }
 }
@@ -226,11 +228,37 @@ impl Host {
                     path: root.to_path_buf(),
                 });
             }
+            // `load` owns schema migration. Appending through `Bundle::open`
+            // alone would reject a recoverable v0 generation.
+            self.load_preflight(root)?;
             Bundle::at(root)
         } else {
-            Bundle::create(root)?
+            let mut previous = root.to_path_buf();
+            previous.set_file_name(format!(
+                "{}.previous-generation",
+                root.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if previous.exists() {
+                // A missing root can retain a v0 source after an interrupted
+                // migration. Recover/migrate it before attempting an append.
+                self.load_preflight(root)?;
+                Bundle::at(root)
+            } else {
+                Bundle::create(root)?
+            }
         };
-        let loaded = bundle.append_feature(feature_id, kind)?;
+        let loaded = match bundle.append_feature(feature_id, kind) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Publication can promote before its final parent sync
+                // reports an error. Re-open so in-memory state never lags
+                // the selected generation on disk.
+                if let Ok(loaded) = bundle.open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -238,20 +266,54 @@ impl Host {
 
     pub fn load(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
-        if !root.exists() {
-            return Err(HostError::BundlePathMissing {
-                path: root.to_path_buf(),
-            });
-        }
-        if !root.is_dir() {
+        if root.exists() && !root.is_dir() {
             return Err(HostError::BundlePathNotDirectory {
                 path: root.to_path_buf(),
             });
         }
-        let loaded = load(root)?;
+        if !root.exists() {
+            let mut previous = root.to_path_buf();
+            previous.set_file_name(format!(
+                "{}.previous-generation",
+                root.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if !previous.exists() {
+                return Err(HostError::BundlePathMissing {
+                    path: root.to_path_buf(),
+                });
+            }
+        }
+        let loaded = match load(root) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Migration can promote before its final parent sync reports
+                // an error. Re-open the selected generation before returning
+                // so an existing Host never retains a stale snapshot.
+                if let Ok(loaded) = Bundle::at(root).open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    /// Runs `load` as a schema-migration preflight and reconciles `Host` state
+    /// when migration promotes a generation before reporting a late parent-sync
+    /// error. `save` reuses this so it never retains a stale snapshot.
+    fn load_preflight(&self, root: &Path) -> Result<(), HostError> {
+        if let Err(error) = load(root) {
+            // Migration can promote before its final parent sync reports an
+            // error. Re-open so in-memory state never lags the selected
+            // generation on disk.
+            if let Ok(loaded) = Bundle::at(root).open() {
+                self.current.replace(Some(loaded));
+            }
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     pub fn current(&self) -> Option<SnapshotView> {
@@ -423,6 +485,13 @@ impl Host {
         }
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
+        if !root.exists() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepIo {
+                detail: "cannot commit a BREP while recovering a sealed previous generation"
+                    .to_string(),
+            });
+        }
         let prior_view = SnapshotView::from(&loaded);
         let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
         let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
@@ -459,6 +528,16 @@ impl Host {
         let updated = match bundle.append_feature(feature_id, &kind) {
             Ok(loaded) => loaded,
             Err(error) => {
+                if let (Ok(manifest), Ok(log)) = (
+                    read_bundle_file(&bundle_root(root), "manifest.json"),
+                    read_bundle_file(&bundle_root(root), "transactions.log"),
+                ) && (manifest != prior_manifest || log != prior_log)
+                {
+                    if let Ok(committed) = bundle.open() {
+                        self.current.replace(Some(committed));
+                    }
+                    return Err(HostError::from(error));
+                }
                 // Restore the prior BREP bytes (or remove the new file if
                 // there was no prior) and verify the canonical state
                 // survived. The prior manifest and log are untouched
@@ -467,13 +546,6 @@ impl Host {
                 // Fail-closed: if the canonical state was not preserved
                 // by the append, surface the persistence error so the
                 // diagnostic taxonomy sees the failure.
-                if let (Ok(m), Ok(l)) = (
-                    read_bundle_file(&bundle_root(root), "manifest.json"),
-                    read_bundle_file(&bundle_root(root), "transactions.log"),
-                ) && (m != prior_manifest || l != prior_log)
-                {
-                    return Err(HostError::from(error));
-                }
                 self.current.replace(Some(loaded));
                 return Err(HostError::from(error));
             }
@@ -523,7 +595,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -564,7 +635,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -605,7 +675,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -646,7 +715,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -687,7 +755,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -728,7 +795,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -769,7 +835,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -811,7 +876,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -853,7 +917,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -894,7 +957,6 @@ impl Host {
         let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.current.replace(Some(loaded));
                 return Err(error);
             }
         };
@@ -932,13 +994,7 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(error);
-            }
-        };
+        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
         let _ = prior_view;
         Ok(DraftCommitView { snapshot, result })
     }
@@ -973,13 +1029,7 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(error);
-            }
-        };
+        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
         let _ = prior_view;
         Ok(LoftCommitView { snapshot, result })
     }
@@ -1007,7 +1057,15 @@ fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
 }
 
 fn bundle_root(root: &Path) -> PathBuf {
-    root.to_path_buf()
+    if root.exists() {
+        return root.to_path_buf();
+    }
+    let mut previous = root.to_path_buf();
+    previous.set_file_name(format!(
+        "{}.previous-generation",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    previous
 }
 
 fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
@@ -1076,8 +1134,9 @@ mod tests {
     use super::*;
     use threeterm_domain::ProjectGeneration;
     use threeterm_persistence::{
-        Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX, schema_epoch,
-        write_fresh, write_v0_fixture,
+        Bundle, BundleError, MANIFEST_FILENAME, PRE_MIGRATION_BACKUP_SUFFIX,
+        PublicationFailurePoint, fail_next_publication_at, schema_epoch, write_fresh,
+        write_v0_fixture,
     };
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -1129,6 +1188,84 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(valid_root);
         let _ = std::fs::remove_dir_all(tampered_root);
+    }
+
+    #[test]
+    fn save_reconciles_current_snapshot_after_post_promotion_sync_failure() {
+        let root = temp_root("save-parent-sync");
+        let host = Host::new();
+        host.save(&root, "box-1", "box").expect("first save");
+
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.save(&root, "box-2", "box").is_err());
+
+        let on_disk = Bundle::at(&root).open().expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&on_disk)));
+        assert_eq!(on_disk.log.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root.with_file_name(format!(
+            "{}.previous-generation",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        )));
+    }
+
+    #[test]
+    fn migration_sync_failure_reconciles_current_snapshot_after_promotion() {
+        let existing_root = temp_root("existing-snapshot");
+        let migration_root = temp_root("migration-parent-sync");
+        let existing = Bundle::create_for_test(&existing_root, "00".repeat(16).as_str())
+            .expect("existing bundle creates");
+        existing
+            .append_feature("box-1", "box")
+            .expect("existing feature appends");
+        write_v0_fixture(
+            &migration_root,
+            ProjectGeneration::with_id("migration-generation"),
+        )
+        .expect("v0 fixture writes");
+
+        let host = Host::new();
+        host.load(&existing_root).expect("existing bundle loads");
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.load(&migration_root).is_err());
+
+        let promoted = Bundle::at(&migration_root)
+            .open()
+            .expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&promoted)));
+
+        let _ = std::fs::remove_dir_all(existing_root);
+        let _ = std::fs::remove_dir_all(migration_root);
+    }
+
+    #[test]
+    fn save_preflight_reconciles_current_snapshot_after_migration_parent_sync_failure() {
+        let existing_root = temp_root("save-existing-snapshot");
+        let migration_root = temp_root("save-migration-parent-sync");
+        let existing = Bundle::create_for_test(&existing_root, "00".repeat(16).as_str())
+            .expect("existing bundle creates");
+        existing
+            .append_feature("box-1", "box")
+            .expect("existing feature appends");
+        write_v0_fixture(
+            &migration_root,
+            ProjectGeneration::with_id("save-migration-generation"),
+        )
+        .expect("v0 fixture writes");
+
+        let host = Host::new();
+        host.load(&existing_root).expect("existing bundle loads");
+        fail_next_publication_at(PublicationFailurePoint::ParentSync);
+        assert!(host.save(&migration_root, "box-1", "box").is_err());
+
+        let promoted = Bundle::at(&migration_root)
+            .open()
+            .expect("promoted generation opens");
+        assert_eq!(host.current(), Some(SnapshotView::from(&promoted)));
+
+        let _ = std::fs::remove_dir_all(existing_root);
+        let _ = std::fs::remove_dir_all(migration_root);
     }
 
     #[test]

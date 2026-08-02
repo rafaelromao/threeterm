@@ -48,13 +48,14 @@ fn save_then_separate_load_preserves_feature_graph_and_revision_hashes() {
             .as_object()
             .expect("load response is an object")
             .len(),
-        3
+        4
     );
     assert_eq!(saved["schema_version"], "threeterm.command.save.response/1");
     assert_eq!(
         loaded["schema_version"],
-        "threeterm.command.load.response/1"
+        "threeterm.command.load.response/2"
     );
+    assert_eq!(loaded["recovered_from_previous"], false);
     for key in ["feature_graph_hash", "revision_hash"] {
         let saved_hash = saved[key].as_str().expect("save response hash is a string");
         let loaded_hash = loaded[key]

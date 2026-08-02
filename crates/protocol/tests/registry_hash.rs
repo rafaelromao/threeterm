@@ -33,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "150d41ed09a999a1e809db5b976b79360aaea241eaedfde94d84917cc3da2503",
+        "0087663b76e4a0a0b6aac6842b18cb0da3e51f6616b16e705097823b69dff552",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -65,7 +65,7 @@ fn registry_contains_versioned_save_and_load_contracts() {
     let load = find(LOAD_COMMAND_ID).expect("load is registered");
     assert_eq!(
         load.response_schema_version,
-        "threeterm.command.load.response/1"
+        "threeterm.command.load.response/2"
     );
     assert_eq!(
         load.request_schema["required"],

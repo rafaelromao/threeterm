@@ -325,6 +325,12 @@ impl OcctWorker {
                     stderr.trim().to_string(),
                 )));
             }
+            Some(4) => {
+                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
+                    "unsupported_geometry",
+                    stderr.trim().to_string(),
+                )));
+            }
             Some(code) => {
                 return Err(WorkerError::NonZeroExit {
                     code: Some(code),

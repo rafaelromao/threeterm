@@ -1023,6 +1023,49 @@ fn fillet_then_chamfer_chain_commits_two_revisions() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn unsupported_chamfer_preserves_the_preceding_fillet_revision() {
+    let root = fresh_bundle_with_feature("unsupported-chamfer", "l-bracket-fillet-1", "brep");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads preceding fillet revision");
+
+    let script = std::env::temp_dir().join(format!(
+        "threeterm-host-unsupported-chamfer-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' 'unsupported_geometry: selected edges include fillet curves' >&2\nexit 4\n",
+    )
+    .expect("script writes");
+    let mut permissions = fs::metadata(&script).expect("stat").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("chmod");
+
+    let worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let request = chamfer_request(
+        "unsupported-chamfer",
+        "l-bracket-chamfer-1",
+        &root.join("brep/l-bracket-fillet-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "l-bracket-chamfer.brep");
+    let result = host.chamfer(&root, request, &worker);
+    assert!(
+        matches!(result, Err(HostError::UnsupportedGeometry { .. })),
+        "got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+    assert!(!root.join("brep/l-bracket-chamfer-1.brep").exists());
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
 #[allow(dead_code)]
 fn _unused_command_marker() {
     let _ = Command::new("true").stdin(Stdio::null()).status();

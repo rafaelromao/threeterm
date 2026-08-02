@@ -22,6 +22,8 @@ pub enum DiagnosticCode {
     PersistenceFailure,
     IntegrityFailure,
     WorkerFailure,
+    /// OCCT cannot apply the requested operation to the selected geometry.
+    UnsupportedGeometry,
     /// The worker produced a BREP that fails `BRepCheck_Analyzer`. The
     /// host surfaces this to the caller without committing the revision.
     BrepInvalid,
@@ -69,6 +71,14 @@ impl Diagnostic {
     pub fn worker_failure(detail: &str) -> Self {
         Self {
             code: DiagnosticCode::WorkerFailure,
+            arg: detail.to_string(),
+            schema_version: crate::schema_version(),
+        }
+    }
+
+    pub fn unsupported_geometry(detail: &str) -> Self {
+        Self {
+            code: DiagnosticCode::UnsupportedGeometry,
             arg: detail.to_string(),
             schema_version: crate::schema_version(),
         }

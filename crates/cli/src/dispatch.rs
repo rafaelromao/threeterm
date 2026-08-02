@@ -2931,6 +2931,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::Persistence(error) => error.diagnostic_detail().to_string(),
         HostError::WorkerFailure { detail } => detail.clone(),
         HostError::WorkerUnavailable { detail } => detail.clone(),
+        HostError::UnsupportedGeometry { detail } => detail.clone(),
         HostError::BrepInvalid { detail } => detail.clone(),
         HostError::BrepFileMissing { path } => {
             format!("brep file missing: {}", path.display())
@@ -2944,6 +2945,10 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::WorkerFailure { .. } | HostError::WorkerUnavailable { .. } => {
             (Diagnostic::worker_failure(&detail), EXIT_WORKER_FAILURE)
         }
+        HostError::UnsupportedGeometry { .. } => (
+            Diagnostic::unsupported_geometry(&detail),
+            EXIT_WORKER_FAILURE,
+        ),
         _ => (
             Diagnostic::integrity_failure(&detail),
             EXIT_INTEGRITY_FAILURE,
@@ -3014,6 +3019,21 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unknown_command");
         assert_eq!(parsed["arg"], "bogus");
+    }
+
+    #[test]
+    fn unsupported_geometry_writes_a_machine_readable_diagnostic() {
+        let mut stderr = Vec::new();
+        let exit = emit_host_error(
+            &HostError::UnsupportedGeometry {
+                detail: "selected edges include fillet curves".to_string(),
+            },
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_WORKER_FAILURE);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "unsupported_geometry");
+        assert_eq!(parsed["arg"], "selected edges include fillet curves");
     }
 
     #[test]

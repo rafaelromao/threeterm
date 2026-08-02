@@ -828,7 +828,7 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
         }
         chamfer.Build();
         if (!chamfer.IsDone()) {
-            error = "BRepFilletAPI_MakeChamfer did not complete";
+            error = "unsupported_geometry: BRepFilletAPI_MakeChamfer did not complete";
             return false;
         }
         result = chamfer.Shape();
@@ -866,11 +866,11 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
         write_stdout_line(out.str());
         return status == "ok";
     } catch (const Standard_Failure& e) {
-        error = "OCCT exception during chamfer: ";
+        error = "unsupported_geometry: OCCT exception during chamfer: ";
         error += e.GetMessageString();
         return false;
     } catch (const std::exception& e) {
-        error = "std::exception during chamfer: ";
+        error = "unsupported_geometry: std::exception during chamfer: ";
         error += e.what();
         return false;
     }
@@ -2118,10 +2118,12 @@ hole, revolve, mirror, linear_pattern, circular_pattern, shell, draft, or loft")
         }
         // The handle_* functions seed `error` with the literal
         // "brep_invalid:" prefix when the BREP fails BRepCheck_Analyzer.
-        // Everything else routes through request_malformed.
+        // A builder rejection identifies geometry that OCCT cannot support.
         bool is_brep_invalid = error.find("brep_invalid:") == 0;
-        std::string status = is_brep_invalid ? "brep_invalid" : "request_malformed";
-        int exit_code = is_brep_invalid ? 3 : 2;
+        bool is_unsupported_geometry = error.find("unsupported_geometry:") == 0;
+        std::string status = is_brep_invalid ? "brep_invalid"
+            : (is_unsupported_geometry ? "unsupported_geometry" : "request_malformed");
+        int exit_code = is_brep_invalid ? 3 : (is_unsupported_geometry ? 4 : 2);
         write_stderr_line(error_response(request_id, operation, feature_id, status, error));
         return exit_code;
     }

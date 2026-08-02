@@ -1,12 +1,8 @@
 //! End-to-end subprocess test for the L-bracket demoable: an L-shaped
 //! extrude + a fillet + a chamfer, all chained through the public CLI
-//! surface. The chain meets the issue #254 demoable: "Run fillet then
-//! chamfer on the L-bracket solid; both commands commit; the resulting
-//! solids are visible in the viewport." The viewport render is
-//! unchanged by this slice (the committed BREP is the same DBRep
-//! shape the existing extrude path already renders), so the test
-//! asserts the canonical commit path end-to-end and the resulting
-//! solids have the OCCT DBRep shape marker the viewport consumes.
+//! surface. OCCT rejects the selected chamfer edge set after the fillet,
+//! so the chain must report that limitation without silently substituting
+//! the pre-fillet extrusion or partially committing a chamfer.
 //!
 //! The chamfer consumes the preceding fillet's committed BREP. The
 //! production command must never silently substitute the pre-fillet
@@ -24,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
-use threeterm_protocol::schema::{CHAMFER_COMMAND_ID, FILLET_COMMAND_ID, find};
+use threeterm_protocol::schema::{FILLET_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
 fn temp_root(label: &str) -> PathBuf {
@@ -127,8 +123,14 @@ fn fillet(bin: &str, root: &Path, feature_id: &str, base: &str, radius: f64) -> 
     parsed
 }
 
-fn chamfer(bin: &str, root: &Path, feature_id: &str, base: &str, distance: f64) -> Value {
-    let output = Command::new(bin)
+fn chamfer(
+    bin: &str,
+    root: &Path,
+    feature_id: &str,
+    base: &str,
+    distance: f64,
+) -> std::process::Output {
+    Command::new(bin)
         .args([
             "--machine",
             "chamfer",
@@ -142,25 +144,7 @@ fn chamfer(bin: &str, root: &Path, feature_id: &str, base: &str, distance: f64) 
             &format!("{distance}"),
         ])
         .output()
-        .expect("chamfer runs");
-    assert!(
-        output.status.success(),
-        "chamfer failed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "stderr must be empty on success, got: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
-    let parsed: Value = serde_json::from_str(&stdout).expect("response is JSON");
-    let entry = find(CHAMFER_COMMAND_ID).expect("chamfer is registered");
-    validate(&entry.response_schema, &parsed).expect("chamfer response validates");
-    assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "chamfer");
-    assert_eq!(parsed["feature_id"], feature_id);
-    parsed
+        .expect("chamfer runs")
 }
 
 fn assert_brep_is_real_occt_shape(path: &Path) {
@@ -175,7 +159,7 @@ fn assert_brep_is_real_occt_shape(path: &Path) {
 }
 
 #[test]
-fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
+fn l_bracket_fillet_then_chamfer_reports_an_atomic_geometry_limitation() {
     if OcctWorker::locate().is_err() {
         eprintln!(
             "l_bracket_fillet_then_chamfer: no OCCT worker binary found; set \
@@ -217,31 +201,46 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         .unwrap()
         .to_string();
 
-    let chamfer_response = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.25);
-    assert_ne!(
-        chamfer_response["revision_hash"].as_str().unwrap(),
-        fillet_revision,
-        "chamfer must advance the revision hash"
+    let manifest_before_chamfer = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let log_before_chamfer = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+
+    let chamfer_output = chamfer(bin, &root, "l-bracket-chamfer", "l-bracket-fillet", 0.25);
+    assert!(
+        !chamfer_output.status.success(),
+        "chamfer must reject this edge set"
     );
+    assert!(
+        chamfer_output.stdout.is_empty(),
+        "failed chamfer must not write stdout"
+    );
+    let diagnostic: Value =
+        serde_json::from_slice(&chamfer_output.stderr).expect("diagnostic is JSON");
+    assert_eq!(diagnostic["code"], "unsupported_geometry");
+    assert_eq!(diagnostic["schema_version"], "threeterm.protocol/1");
 
     let reloaded = Bundle::at(&root)
         .open()
-        .expect("bundle reopens after the chain");
+        .expect("bundle reopens after rejected chamfer");
+    assert_eq!(reloaded.revision_hash_hex(), fillet_revision);
     assert_eq!(
-        reloaded.revision_hash_hex(),
-        chamfer_response["revision_hash"]
+        fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads"),
+        manifest_before_chamfer
     );
     assert_eq!(
-        reloaded.feature_graph_hash_hex(),
-        chamfer_response["feature_graph_hash"]
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads"),
+        log_before_chamfer
     );
 
-    let committed = ["l-bracket-base", "l-bracket-fillet", "l-bracket-chamfer"];
+    let committed = ["l-bracket-base", "l-bracket-fillet"];
     for feature_id in committed {
         let brep = root.join(format!("brep/{feature_id}.brep"));
         assert!(brep.is_file(), "committed BREP missing at {brep:?}");
         assert_brep_is_real_occt_shape(&brep);
     }
+    assert!(
+        !root.join("brep/l-bracket-chamfer.brep").exists(),
+        "rejected chamfer must not write a BREP"
+    );
 
     let log_path = root.join(TRANSACTIONS_LOG_FILENAME);
     let log = fs::read_to_string(&log_path).expect("log reads");
@@ -252,19 +251,13 @@ fn l_bracket_fillet_then_chamfer_commits_through_the_cli() {
         }
         let entry: Value = serde_json::from_str(line).expect("log line is JSON");
         let kind = entry["kind"].as_str().unwrap_or("");
-        if [
-            "brep:l-bracket-base",
-            "brep:l-bracket-fillet",
-            "brep:l-bracket-chamfer",
-        ]
-        .contains(&kind)
-        {
+        if ["brep:l-bracket-base", "brep:l-bracket-fillet"].contains(&kind) {
             line_count += 1;
         }
     }
     assert_eq!(
-        line_count, 3,
-        "expected exactly three 3D commits in the transaction log; got {line_count}"
+        line_count, 2,
+        "expected exactly two 3D commits in the transaction log; got {line_count}"
     );
 
     let manifest_path = root.join(MANIFEST_FILENAME);

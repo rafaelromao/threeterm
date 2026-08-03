@@ -1015,24 +1015,11 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
 }
 
 fn staging_path_for_migration(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    let suffix = format!(".migrate-tmp-{}", std::process::id());
-    staging.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".migrate-tmp-{}", std::process::id()))
 }
 
 fn staging_path_for_publish(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    staging.set_file_name(format!(
-        "{}.publish-tmp-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".publish-tmp-{}", std::process::id()))
 }
 
 fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
@@ -1040,23 +1027,40 @@ fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
     if !staging.exists() {
         return staging;
     }
-    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut fresh = staging.clone();
-    fresh.set_file_name(format!(
-        "{}-{sequence}",
-        staging.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    fresh
+    // A process restart can leave both the PID-based candidate and earlier
+    // sequence candidates on disk. Keep advancing until an actually absent
+    // candidate is found, so an interrupted save can never block the next
+    // one on a stale directory.
+    loop {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let fresh = sibling_path_with_suffix(
+            path,
+            &format!(".publish-tmp-{}-{sequence}", std::process::id()),
+        );
+        if !fresh.exists() {
+            return fresh;
+        }
+    }
 }
 
 fn previous_generation_path(path: &Path) -> PathBuf {
-    let mut previous = path.to_path_buf();
-    previous.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        PREVIOUS_GENERATION_SUFFIX
-    ));
-    previous
+    sibling_path_with_suffix(path, PREVIOUS_GENERATION_SUFFIX)
+}
+
+/// Append `suffix` to `path`'s file name, preserving the raw `OsStr` bytes.
+///
+/// Deriving sibling names through `to_string_lossy()` would map a non-UTF-8
+/// bundle name and a UTF-8 name containing U+FFFD onto the same sibling
+/// path, so two distinct roots could share a staging, previous, retired, or
+/// backup slot and race each other.
+fn sibling_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut sibling = path.to_path_buf();
+    if let Some(file_name) = path.file_name() {
+        let mut name = file_name.to_os_string();
+        name.push(suffix);
+        sibling.set_file_name(name);
+    }
+    sibling
 }
 
 /// Serialize a mutation of `root` against every other writer of the same
@@ -1118,12 +1122,7 @@ fn write_lock_path(root: &Path) -> Option<PathBuf> {
 }
 
 fn retired_generation_path(path: &Path) -> PathBuf {
-    let mut retired = path.to_path_buf();
-    retired.set_file_name(format!(
-        "{}.retired-generation",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    retired
+    sibling_path_with_suffix(path, ".retired-generation")
 }
 
 fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError> {
@@ -1164,14 +1163,15 @@ fn write_v1_into(
 }
 
 fn backup_path_for(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    name.push_str(PRE_MIGRATION_BACKUP_SUFFIX);
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
-        _ => PathBuf::from(name),
+    let name = path.file_name().map(|name| {
+        let mut name = name.to_os_string();
+        name.push(PRE_MIGRATION_BACKUP_SUFFIX);
+        name
+    });
+    match (path.parent(), name) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent.join(name),
+        (_, Some(name)) => PathBuf::from(name),
+        (_, None) => PathBuf::from(PRE_MIGRATION_BACKUP_SUFFIX),
     }
 }
 
@@ -1390,14 +1390,7 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
 }
 
 fn staging_path(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    let suffix = format!(".tmp-{}", std::process::id());
-    staging.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".tmp-{}", std::process::id()))
 }
 
 fn read_required(path: &Path, missing: BundleError) -> Result<Vec<u8>, BundleError> {

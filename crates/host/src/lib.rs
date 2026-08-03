@@ -246,7 +246,11 @@ impl Host {
                 self.load_preflight(root)?;
                 Bundle::at(root)
             } else {
-                Bundle::create(root)?
+                // The locked append path stages and atomically promotes the
+                // empty baseline itself, so a concurrent first save on the
+                // same missing root serializes instead of failing with
+                // "destination already exists".
+                Bundle::at(root)
             }
         };
         let loaded = match bundle.append_feature(feature_id, kind) {
@@ -320,7 +324,10 @@ impl Host {
             }
             Bundle::at(root)
         } else {
-            Bundle::create(root)?
+            // The locked append path stages and atomically promotes the
+            // empty baseline itself, so a concurrent first save serializes
+            // instead of failing with "destination already exists".
+            Bundle::at(root)
         };
         let vertical_id = format!("{bracket_id}-plate-vertical");
         let horizontal_id = format!("{bracket_id}-plate-horizontal");

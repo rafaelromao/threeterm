@@ -684,3 +684,113 @@ fn fresh_creation_with_a_bare_relative_root_succeeds() {
     std::env::set_current_dir(&cwd).expect("restore the original current dir");
     let _ = fs::remove_dir_all(&parent);
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_and_lossy_colliding_roots_keep_distinct_sibling_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent = unique_temp_dir("lossy-collision");
+    fs::create_dir_all(&parent).expect("parent creates");
+    // `b"project-\xff"` and "project-\u{FFFD}" collapse onto the same name
+    // under `to_string_lossy()`, so their derived sibling paths must be
+    // built from the raw `OsStr` bytes or the two bundles race on shared
+    // staging, previous, and retired slots.
+    let raw_root = parent.join(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+    let utf8_root = parent.join("project-\u{FFFD}");
+
+    let raw_bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&raw_root, "00".repeat(16).as_str()).expect("raw bundle creates"),
+    );
+    let utf8_bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&utf8_root, "11".repeat(16).as_str()).expect("utf8 bundle creates"),
+    );
+
+    const THREADS: usize = 4;
+    const APPENDS_PER_THREAD: usize = 3;
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let raw_bundle = raw_bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..APPENDS_PER_THREAD {
+                raw_bundle
+                    .append_feature(&format!("raw-{thread}-{i}"), "box")
+                    .expect("raw bundle append serializes");
+            }
+        }));
+    }
+    for thread in 0..THREADS {
+        let utf8_bundle = utf8_bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..APPENDS_PER_THREAD {
+                utf8_bundle
+                    .append_feature(&format!("utf8-{thread}-{i}"), "box")
+                    .expect("utf8 bundle append serializes");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("append thread completes");
+    }
+
+    for (bundle, prefix) in [(raw_bundle, "raw"), (utf8_bundle, "utf8")] {
+        let loaded = bundle.open().expect("bundle reopens");
+        assert_eq!(
+            loaded.log.len(),
+            THREADS * APPENDS_PER_THREAD,
+            "{prefix} bundle keeps its own linear log"
+        );
+        let entries = loaded.log.entries();
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.log_index, index);
+            assert!(
+                entry.feature_id.starts_with(prefix),
+                "no cross-contamination between colliding roots"
+            );
+            let expected_previous = if index == 0 {
+                EMPTY_LOG_DIGEST_HEX
+            } else {
+                entries[index - 1].terminal_digest.as_str()
+            };
+            assert_eq!(entry.previous_digest, expected_previous);
+        }
+    }
+
+    let _ = fs::remove_dir_all(parent);
+}
+
+#[test]
+fn first_save_recovers_with_stale_staging_candidates() {
+    let root = unique_temp_dir("stale-staging");
+    let bundle = std::sync::Arc::new(Bundle::at(&root));
+
+    // Simulate interrupted saves from a prior process lifetime: the
+    // PID-based staging candidate and its first sequence candidate both
+    // remain on disk.
+    let mut base = root.clone();
+    base.set_file_name(format!(
+        "{}.publish-tmp-{}",
+        root.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    fs::create_dir_all(&base).expect("stale base staging creates");
+    let mut sequence = base.clone();
+    sequence.set_file_name(format!(
+        "{}-0",
+        base.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fs::create_dir_all(&sequence).expect("stale sequence staging creates");
+
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first save selects an absent staging candidate");
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(loaded.log.len(), 1);
+    assert_eq!(
+        loaded.log.entries()[0].previous_digest,
+        EMPTY_LOG_DIGEST_HEX
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}

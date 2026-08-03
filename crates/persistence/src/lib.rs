@@ -59,6 +59,7 @@ pub mod bundle {
 
 pub const PRE_MIGRATION_BACKUP_SUFFIX: &str = ".pre-migration-backup";
 pub const PREVIOUS_GENERATION_SUFFIX: &str = ".previous-generation";
+pub const WRITE_LOCK_SUFFIX: &str = ".write-lock";
 
 pub fn schema_epoch() -> &'static str {
     "threeterm.persistence/1"
@@ -574,6 +575,19 @@ impl Bundle {
         if entries.is_empty() {
             return self.open();
         }
+        // The read-modify-publish cycle is serialized per bundle root so
+        // concurrent writers cannot fork the Canonical Transaction Log:
+        // every entry is staged from the same sealed base, so log positions
+        // stay unique, predecessor digests chain, and no writer observes a
+        // half-published rotation. The OS releases the lock if the holder
+        // crashes, so an interrupted writer never leaves a stale lock.
+        with_bundle_write_lock(&self.root, || self.append_features_locked(entries))
+    }
+
+    fn append_features_locked(
+        &self,
+        entries: &[(&str, &str)],
+    ) -> Result<LoadedBundle, BundleError> {
         let mut loaded = self.open()?;
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
@@ -945,6 +959,46 @@ fn previous_generation_path(path: &Path) -> PathBuf {
         PREVIOUS_GENERATION_SUFFIX
     ));
     previous
+}
+
+/// Serialize a mutation of `root` against every other writer of the same
+/// bundle, in this process and across processes.
+///
+/// The lock file is a sibling of the bundle root so generation rotation
+/// never renames it, and it is never deleted: unlinking a locked file would
+/// let a third writer lock a fresh inode and race the two-generation
+/// publication. If the holder dies, the OS releases the lock, so a crashed
+/// writer cannot strand subsequent saves.
+fn with_bundle_write_lock<T>(
+    root: &Path,
+    operation: impl FnOnce() -> Result<T, BundleError>,
+) -> Result<T, BundleError> {
+    let Some(lock_path) = write_lock_path(root) else {
+        return operation();
+    };
+    if let Some(parent) = lock_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_file = File::create(&lock_path)?;
+    lock_file.lock().map_err(|error| {
+        BundleError::Io(format!("failed to lock {}: {error}", lock_path.display()))
+    })?;
+    let result = operation();
+    let _ = lock_file.unlock();
+    result
+}
+
+fn write_lock_path(root: &Path) -> Option<PathBuf> {
+    let name = root.file_name()?.to_str()?;
+    if name.is_empty() {
+        return None;
+    }
+    let mut lock = root.to_path_buf();
+    lock.set_file_name(format!("{name}{WRITE_LOCK_SUFFIX}"));
+    Some(lock)
 }
 
 fn retired_generation_path(path: &Path) -> PathBuf {

@@ -26,12 +26,44 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::artifact::ArtifactHeader;
-use crate::frame::FrameParser;
+use crate::frame::{FrameParser, MAX_FRAME_BUFFER};
 
 /// Maximum size of a staged artifact payload, in bytes. Artifacts exceeding
 /// this limit emit `ArtifactError::PayloadTooLarge` so a malicious or buggy
 /// worker cannot exhaust the host's memory.
 pub const MAX_ARTIFACT_BYTES: usize = 1 << 20;
+
+/// Maximum cumulative stdout bytes the host accepts from one worker
+/// before failing closed. A flooding worker that exceeds this bound is
+/// terminated and reported as a structured `StreamOverflow` error.
+pub const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum cumulative stderr bytes the host retains for diagnostics
+/// from one worker. The bounded tail is preserved so structured
+/// diagnostic context survives a flooding worker.
+pub const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// Poll interval used while waiting for a worker envelope. The
+/// subprocess transport re-checks its stream overflow flags every slice
+/// so a flood on a quiet stream is observed well before the deadline.
+const OVERFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Byte bounds applied to a worker's standard streams. The host fails
+/// closed when a stream exceeds its bound, terminating the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    pub stdout_bytes: usize,
+    pub stderr_bytes: usize,
+}
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        Self {
+            stdout_bytes: MAX_STDOUT_BYTES,
+            stderr_bytes: MAX_STDERR_BYTES,
+        }
+    }
+}
 
 /// The versioned envelope exchanged between host and worker.
 ///
@@ -212,6 +244,12 @@ impl WorkerHost for FramedWorkerHost {
     fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
         let frame = encode_frame(envelope)
             .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))?;
+        if frame.len() > MAX_FRAME_BUFFER {
+            return Err(WorkerError::Protocol(format!(
+                "host frame of {} bytes exceeds the {MAX_FRAME_BUFFER} byte bound",
+                frame.len()
+            )));
+        }
         self.outbound.send(frame).map_err(|_| WorkerError::Closed)
     }
 
@@ -258,14 +296,30 @@ impl WorkerHost for FramedWorkerHost {
 
 /// Production transport binding a subprocess's standard streams to the
 /// deadline-aware newline-frame transport.
+///
+/// The stdout and stderr streams are read by bounded threads: each
+/// stream has a byte cap (see [`StreamLimits`]) and a worker that
+/// exceeds its cap fails the host closed with a structured
+/// [`WorkerError::StreamOverflow`] instead of exhausting host memory.
+/// The captured stderr tail is preserved for diagnostics.
 #[derive(Debug)]
 pub struct SubprocessWorkerHost {
     child: Child,
     transport: FramedWorkerHost,
+    limits: StreamLimits,
+    stdout_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl SubprocessWorkerHost {
-    pub fn new(mut child: Child) -> Result<Self, WorkerError> {
+    /// Wrap a spawned worker process with default stream bounds.
+    pub fn new(child: Child) -> Result<Self, WorkerError> {
+        Self::with_limits(child, StreamLimits::default())
+    }
+
+    /// Wrap a spawned worker process with explicit stream bounds.
+    pub fn with_limits(mut child: Child, limits: StreamLimits) -> Result<Self, WorkerError> {
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => return Err(missing_pipe_error(&mut child, "stdin")),
@@ -274,18 +328,65 @@ impl SubprocessWorkerHost {
             Some(stdout) => stdout,
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
+        let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
+        let stdout_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let stdout_cap = limits.stdout_bytes;
+        let stdout_overflow_flag = std::sync::Arc::clone(&stdout_overflow);
         std::thread::spawn(move || {
             let mut stdout = stdout;
             let mut buffer = [0; 4096];
+            let mut total: usize = 0;
             while let Ok(read) = stdout.read(&mut buffer) {
                 if read == 0 || inbound_tx.send(buffer[..read].to_vec()).is_err() {
                     break;
                 }
+                total += read;
+                if total > stdout_cap {
+                    stdout_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
             }
         });
+
+        if let Some(stderr) = stderr {
+            let stderr_cap = limits.stderr_bytes;
+            let stderr_overflow_flag = std::sync::Arc::clone(&stderr_overflow);
+            let stderr_tail_shared = std::sync::Arc::clone(&stderr_tail);
+            std::thread::spawn(move || {
+                let mut stderr = stderr;
+                let mut buffer = [0; 4096];
+                while let Ok(read) = stderr.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    let chunk = &buffer[..read];
+                    let mut tail = stderr_tail_shared.lock().expect("stderr tail mutex");
+                    if tail.len() + chunk.len() <= stderr_cap {
+                        tail.extend_from_slice(chunk);
+                    } else {
+                        stderr_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Keep the newest bytes so the diagnostic tail
+                        // survives the overflow.
+                        let keep = stderr_cap.saturating_sub(chunk.len());
+                        if keep == 0 {
+                            tail.clear();
+                            tail.extend_from_slice(&chunk[chunk.len() - stderr_cap..]);
+                        } else {
+                            let drop = tail.len().saturating_sub(keep);
+                            tail.drain(..drop);
+                            tail.extend_from_slice(chunk);
+                        }
+                    }
+                }
+            });
+        }
+
         std::thread::spawn(move || {
             let mut stdin = stdin;
             while let Ok(frame) = outbound_rx.recv() {
@@ -298,7 +399,41 @@ impl SubprocessWorkerHost {
         Ok(Self {
             child,
             transport: FramedWorkerHost::new(inbound_rx, outbound_tx),
+            limits,
+            stdout_overflow,
+            stderr_overflow,
+            stderr_tail,
         })
+    }
+
+    /// Returns the bounded stderr tail captured so far. The tail never
+    /// exceeds the configured `stderr_bytes` cap.
+    pub fn stderr_tail(&self) -> Vec<u8> {
+        self.stderr_tail.lock().expect("stderr tail mutex").clone()
+    }
+
+    /// Fail closed with a structured `StreamOverflow` error when either
+    /// standard stream exceeded its configured bound.
+    fn fail_closed_on_overflow(&self) -> Result<(), WorkerError> {
+        if self
+            .stdout_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(WorkerError::StreamOverflow {
+                stream: "stdout",
+                limit: self.limits.stdout_bytes,
+            });
+        }
+        if self
+            .stderr_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(WorkerError::StreamOverflow {
+                stream: "stderr",
+                limit: self.limits.stderr_bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -317,7 +452,22 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
-        self.transport.recv(deadline)
+        // Poll in short slices so an overflow on a silent stream (e.g. a
+        // stderr flood while stdout goes quiet) is observed before the
+        // deadline instead of blocking until `deadline` and being
+        // misreported as a timeout.
+        loop {
+            self.fail_closed_on_overflow()?;
+            if Instant::now() >= deadline {
+                return Err(WorkerError::TimedOut);
+            }
+            let slice = deadline.min(Instant::now() + OVERFLOW_POLL_INTERVAL);
+            match self.transport.recv(slice) {
+                Ok(envelope) => return Ok(envelope),
+                Err(WorkerError::TimedOut) => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -375,6 +525,10 @@ pub enum WorkerError {
     Closed,
     /// The worker emitted a frame that the host could not parse.
     Protocol(String),
+    /// The worker emitted more bytes on a standard stream than the
+    /// configured bound. The host fails closed: the worker is
+    /// terminated and no partial output is accepted.
+    StreamOverflow { stream: &'static str, limit: usize },
     /// The worker emitted an envelope with a schema_version the host
     /// does not recognize.
     SchemaMismatch { received: String, expected: String },
@@ -388,6 +542,9 @@ impl fmt::Display for WorkerError {
             Self::TimedOut => formatter.write_str("worker receive deadline exceeded"),
             Self::Closed => formatter.write_str("worker closed before delivering envelope"),
             Self::Protocol(detail) => write!(formatter, "worker protocol violation: {detail}"),
+            Self::StreamOverflow { stream, limit } => {
+                write!(formatter, "worker {stream} exceeded the {limit} byte bound")
+            }
             Self::SchemaMismatch { received, expected } => write!(
                 formatter,
                 "worker schema mismatch: received {received:?}, expected {expected:?}"

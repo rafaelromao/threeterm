@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use threeterm_domain::ProjectGeneration;
+use threeterm_persistence::PREVIOUS_GENERATION_SUFFIX;
 use threeterm_persistence::bundle::{
     Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, PublicationFailurePoint,
     TRANSACTIONS_LOG_FILENAME, fail_next_publication_at, load, write_v0_fixture,
 };
-use threeterm_persistence::{PREVIOUS_GENERATION_SUFFIX, WRITE_LOCK_SUFFIX};
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -288,21 +288,13 @@ fn reader_reconcile_waits_for_the_writer_lock() {
     let current_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("current log reads");
     fs::rename(&previous, &retired).expect("simulates the mid-rotation crash state");
 
-    // The test plays the writer: it holds the per-root write lock while the
-    // rotation is between `previous → retired` and `destination → previous`,
-    // the exact state in which a lock-free reconciler would restore the
-    // previous slot and fail the writer's replacement.
-    let mut lock_path = root.clone();
-    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
-    lock_name.push(WRITE_LOCK_SUFFIX);
-    lock_path.set_file_name(lock_name);
-    let lock_file = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .expect("lock file opens");
+    // The test plays the writer: it holds the per-root write lock (the
+    // flock on the containing directory) while the rotation is between
+    // `previous → retired` and `destination → previous`, the exact state in
+    // which a lock-free reconciler would restore the previous slot and fail
+    // the writer's replacement.
+    let lock_file = std::fs::File::open(root.parent().expect("temp root has a parent"))
+        .expect("lock directory opens");
     lock_file.lock().expect("writer lock is exclusive");
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -569,21 +561,13 @@ fn load_waits_for_an_in_flight_publication() {
     };
     let current_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("current manifest reads");
 
-    // The test plays the writer: it holds the per-root write lock while the
-    // rotation is between `destination → previous` and `staging →
-    // destination`, the exact window in which an unlocked loader could
-    // observe a missing manifest and fail instead of waiting.
-    let mut lock_path = root.clone();
-    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
-    lock_name.push(WRITE_LOCK_SUFFIX);
-    lock_path.set_file_name(lock_name);
-    let lock_file = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .expect("lock file opens");
+    // The test plays the writer: it holds the per-root write lock (the
+    // flock on the containing directory) while the rotation is between
+    // `destination → previous` and `staging → destination`, the exact
+    // window in which an unlocked loader could observe a missing manifest
+    // and fail instead of waiting.
+    let lock_file = std::fs::File::open(root.parent().expect("temp root has a parent"))
+        .expect("lock directory opens");
     lock_file.lock().expect("writer lock is exclusive");
     fs::rename(&previous, &retired).expect("preceding generation retires");
     fs::rename(&root, &previous).expect("simulates the mid-rotation window");
@@ -795,64 +779,6 @@ fn first_save_recovers_with_stale_staging_candidates() {
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }
 
-#[test]
-fn pre_existing_lock_files_are_not_truncated_or_followed() {
-    let root = unique_temp_dir("lock-safety");
-    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
-    let mut lock_path = root.clone();
-    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
-    lock_name.push(WRITE_LOCK_SUFFIX);
-    lock_path.set_file_name(lock_name);
-    fs::write(&lock_path, b"pre-existing lock content").expect("lock content writes");
-    let original = fs::read(&lock_path).expect("lock content reads");
-
-    bundle
-        .append_feature("box-1", "box")
-        .expect("append succeeds with a pre-existing lock file");
-    assert_eq!(
-        fs::read(&lock_path).unwrap(),
-        original,
-        "the lock file is opened without truncation"
-    );
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let target = unique_temp_dir("lock-target");
-        fs::create_dir_all(&target).expect("lock target creates");
-        // Replace the writer-created lock file with a symlink, as a
-        // concurrent process could, and verify the next acquisition refuses
-        // to follow it instead of silently locking the target.
-        let swapped = unique_temp_dir("lock-swapped");
-        fs::rename(&lock_path, &swapped).expect("lock file moves aside");
-        symlink(&target, &lock_path).expect("symlink lock creates");
-        assert!(
-            bundle.append_feature("box-2", "box").is_err(),
-            "a replaced symlink lock path is rejected instead of followed"
-        );
-        assert!(
-            fs::symlink_metadata(&lock_path)
-                .expect("lock metadata reads")
-                .file_type()
-                .is_symlink(),
-            "the lock symlink is neither followed nor clobbered"
-        );
-        assert!(
-            !fs::read_dir(&target)
-                .expect("target reads")
-                .next()
-                .is_some(),
-            "no write reaches the symlink target"
-        );
-        let _ = fs::remove_file(&lock_path);
-        let _ = fs::remove_dir_all(target);
-        let _ = fs::remove_dir_all(swapped);
-    }
-
-    let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
-}
-
 #[cfg(unix)]
 #[test]
 fn symlinked_bundle_root_serializes_with_its_target() {
@@ -985,8 +911,8 @@ fn interrupted_backup_creation_is_repaired_on_retry() {
 }
 
 #[test]
-fn lock_path_replacement_after_open_reserializes_writers() {
-    let root = unique_temp_dir("lock-replacement");
+fn lock_identity_survives_bundle_path_replacement() {
+    let root = unique_temp_dir("lock-identity-replacement");
     let bundle = std::sync::Arc::new(
         Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates"),
     );
@@ -994,62 +920,57 @@ fn lock_path_replacement_after_open_reserializes_writers() {
         .append_feature("box-1", "box")
         .expect("first publish");
 
-    // The test plays the adversarial replacer: it holds the current lock
-    // inode, then swaps the lock path out from under the next writer so the
-    // writer's locked descriptor no longer names the path it acquired.
-    let mut lock_path = root.clone();
-    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
-    lock_name.push(WRITE_LOCK_SUFFIX);
-    lock_path.set_file_name(lock_name);
-    let replaced = {
-        let mut replaced = lock_path.clone();
-        replaced.set_file_name(format!(
-            "{}.replaced",
-            lock_path.file_name().unwrap_or_default().to_string_lossy()
+    // The lock identity is the containing directory, which generation
+    // rotation never renames. Replacing the bundle root itself — the
+    // strongest replacement a concurrent writer could perform — cannot
+    // split serialization across lock identities.
+    let lock_file = std::fs::File::open(root.parent().expect("temp root has a parent"))
+        .expect("lock directory opens");
+    lock_file.lock().expect("writer lock is exclusive");
+    let previous = previous_generation_sibling(&root);
+    let retired = {
+        let mut retired = previous.clone();
+        retired.set_file_name(format!(
+            "{}.retired-generation",
+            previous.file_name().unwrap_or_default().to_string_lossy()
         ));
-        replaced
+        retired
     };
-    let old_lock = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .expect("current lock inode opens");
-    old_lock.lock().expect("old lock held");
+    fs::rename(&previous, &retired).expect("preceding generation retires");
+    fs::rename(&root, &previous).expect("bundle root replaced mid-operation");
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let writer = {
         let bundle = bundle.clone();
         std::thread::spawn(move || {
             started_tx.send(()).expect("started signal sends");
-            bundle.append_feature("box-w1", "box")
+            let result = bundle.append_feature("box-w1", "box");
+            done_tx.send(()).expect("completion signal sends");
+            result
         })
     };
     started_rx
         .recv()
         .expect("writer is running before the replacement");
-    // The writer has opened the current lock inode and is blocked on it.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    fs::rename(&lock_path, &replaced).expect("lock path replaced");
-    std::fs::File::create(&lock_path).expect("replacement lock inode creates");
-    old_lock.unlock().expect("old lock releases");
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "a writer must block while the lock identity is held"
+    );
 
-    let writer_2 = {
-        let bundle = bundle.clone();
-        std::thread::spawn(move || bundle.append_feature("box-w2", "box"))
-    };
+    fs::rename(&previous, &root).expect("bundle root restored");
+    lock_file.unlock().expect("writer releases the lock");
     writer
         .join()
-        .expect("first writer completes")
-        .expect("first writer reserializes on the replacement lock");
-    writer_2
-        .join()
-        .expect("second writer completes")
-        .expect("second writer serializes");
+        .expect("writer completes")
+        .expect("writer serializes against the held lock identity");
 
     let loaded = bundle.open().expect("bundle opens");
     assert_eq!(
         loaded.log.len(),
-        3,
+        2,
         "every accepted save lands in one canonical log"
     );
     let entries = loaded.log.entries();
@@ -1066,6 +987,55 @@ fn lock_path_replacement_after_open_reserializes_writers() {
         assert_eq!(entry.previous_digest, expected_previous);
     }
 
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+    let _ = fs::remove_dir_all(retired);
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_existing_migration_staging_symlink_is_skipped() {
+    use std::os::unix::fs::symlink;
+
+    use threeterm_persistence::bundle::schema_epoch;
+
+    let root = unique_temp_dir("migration-staging-symlink");
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-staging-symlink"))
+        .expect("v0 fixture writes");
+    let staging = root.with_file_name(format!(
+        "{}.migrate-tmp-{}",
+        root.file_name().expect("root has a name").to_string_lossy(),
+        std::process::id()
+    ));
+    let target = unique_temp_dir("staging-target");
+    fs::create_dir_all(&target).expect("target creates");
+    symlink(&target, &staging).expect("planted staging symlink creates");
+
+    let loaded = load(&root).expect("migration skips the symlinked staging candidate");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+    assert!(
+        fs::symlink_metadata(&staging)
+            .expect("staging metadata reads")
+            .file_type()
+            .is_symlink(),
+        "the planted staging symlink is left untouched"
+    );
+    assert!(
+        !fs::symlink_metadata(root.join(MANIFEST_FILENAME))
+            .expect("manifest metadata reads")
+            .file_type()
+            .is_symlink(),
+        "the canonical manifest is a real file, not the symlink target"
+    );
+    assert!(
+        fs::read_dir(&target)
+            .expect("target reads")
+            .next()
+            .is_none(),
+        "migration writes nothing through the symlink into the target"
+    );
+
+    let _ = fs::remove_dir_all(target);
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }

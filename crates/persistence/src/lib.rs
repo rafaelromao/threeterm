@@ -59,7 +59,6 @@ pub mod bundle {
 
 pub const PRE_MIGRATION_BACKUP_SUFFIX: &str = ".pre-migration-backup";
 pub const PREVIOUS_GENERATION_SUFFIX: &str = ".previous-generation";
-pub const WRITE_LOCK_SUFFIX: &str = ".write-lock";
 
 pub fn schema_epoch() -> &'static str {
     "threeterm.persistence/1"
@@ -835,7 +834,7 @@ fn load_v0_with_migration(
         });
     }
 
-    let staging = staging_path_for_migration(path);
+    let staging = fresh_staging_path_for_migration(path);
     if let Err(error) = write_v1_into(&staging, &manifest, transactions.as_bytes()) {
         let _ = fs::remove_dir_all(&staging);
         let _ = fs::remove_dir_all(&backup_path);
@@ -1075,6 +1074,35 @@ fn staging_path_for_migration(path: &Path) -> PathBuf {
     sibling_path_with_suffix(path, &format!(".migrate-tmp-{}", std::process::id()))
 }
 
+/// Select an absent migration staging candidate.
+///
+/// A pre-existing entry at the deterministic candidate — a stale directory
+/// from an interrupted migration or a planted symlink — is skipped rather
+/// than reused: `write_v1_into` would otherwise follow a symlink and the
+/// final publish would rename the symlink itself into the canonical root.
+fn fresh_staging_path_for_migration(path: &Path) -> PathBuf {
+    let base = staging_path_for_migration(path);
+    if !path_entry_exists(&base) {
+        return base;
+    }
+    loop {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = sibling_path_with_suffix(
+            path,
+            &format!(".migrate-tmp-{}-{sequence}", std::process::id()),
+        );
+        if !path_entry_exists(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+/// Whether any filesystem entry (including a dangling symlink) exists at
+/// `path`.
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 fn staging_path_for_publish(path: &Path) -> PathBuf {
     sibling_path_with_suffix(path, &format!(".publish-tmp-{}", std::process::id()))
 }
@@ -1150,16 +1178,15 @@ fn sibling_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// Serialize a mutation of `root` against every other writer of the same
 /// bundle, in this process and across processes.
 ///
-/// The lock file is a sibling of the bundle root so generation rotation
-/// never renames it, and it is never deleted: unlinking a locked file would
-/// let a third writer lock a fresh inode and race the two-generation
-/// publication. If the holder dies, the OS releases the lock, so a crashed
-/// writer cannot strand subsequent saves.
-///
-/// The lock is derived purely from the root's file name as an `OsString`,
-/// so it also serializes bundles whose names are not UTF-8; a lock path
-/// built from `to_str()` would silently skip locking and let concurrent
-/// writers fork the Canonical Transaction Log.
+/// The lock identity is the bundle's containing directory, opened and
+/// flocked as a directory descriptor. Generation rotation renames only the
+/// bundle root and its siblings, never the containing directory, so the
+/// locked identity cannot be replaced while it is held: there is no
+/// pathname window in which a second writer could lock a different inode.
+/// Aliases of one bundle resolve to the same canonical directory through
+/// `canonical_bundle_root`, and writers of different bundles in the same
+/// directory serialize on the same lock. If the holder dies, the OS
+/// releases the lock, so a crashed writer cannot strand subsequent saves.
 ///
 /// Pure reads (`open_sealed`) stay lock-free by design. `Bundle::open`
 /// takes the same lock because its interrupted-rotation reconciliation
@@ -1170,131 +1197,35 @@ fn with_bundle_write_lock<T>(
     root: &Path,
     operation: impl FnOnce() -> Result<T, BundleError>,
 ) -> Result<T, BundleError> {
-    let Some(lock_path) = write_lock_path(root) else {
-        // Only a root with no name at all (e.g. the filesystem root) has no
-        // derivable sibling lock path; such a path cannot be a bundle.
-        return operation();
-    };
-    if let Some(parent) = lock_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    // Open the lock file without truncation and without following a
-    // symlink, so a pre-existing sibling cannot be silently destroyed or
-    // redirected before the lock is taken. The descriptor is locked and
-    // its identity re-checked before it is accepted, so a replacement of
-    // the lock path cannot split serialization across two inodes.
-    let lock_file = acquire_lock_file(&lock_path)?;
+    let lock_directory = lock_directory_for(root)?;
+    let lock_descriptor = File::open(&lock_directory)?;
+    lock_descriptor.lock().map_err(|error| {
+        BundleError::Io(format!(
+            "failed to lock {}: {error}",
+            lock_directory.display()
+        ))
+    })?;
     let result = operation();
-    let _ = lock_file.unlock();
+    let _ = lock_descriptor.unlock();
     result
 }
 
-/// Acquire the per-root write lock descriptor.
+/// The canonical containing directory whose descriptor is the per-bundle
+/// write lock.
 ///
-/// The candidate is opened atomically (`O_NOFOLLOW | O_CREAT`), locked
-/// immediately, and only then checked against the path's current identity.
-/// If the path was replaced between the open and the lock, the locked
-/// inode is stale: the lock is dropped and acquisition retried against the
-/// replacement. Two writers therefore never hold different inodes of the
-/// same lock path at the same time.
-fn acquire_lock_file(lock_path: &Path) -> Result<File, BundleError> {
-    for _ in 0..8 {
-        let file = open_lock_candidate(lock_path)?;
-        file.lock().map_err(|error| {
-            BundleError::Io(format!("failed to lock {}: {error}", lock_path.display()))
-        })?;
-        if lock_path_names(&file, lock_path)? {
-            return Ok(file);
+/// An empty parent (a bare relative root) resolves to the current working
+/// directory, so every writer of that bundle locks the same inode.
+fn lock_directory_for(root: &Path) -> Result<PathBuf, BundleError> {
+    match root.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => {
+            Ok(fs::canonicalize(".").map_err(BundleError::from)?)
         }
-        let _ = file.unlock();
-    }
-    Err(BundleError::Io(format!(
-        "could not acquire lock {} after repeated path replacements",
-        lock_path.display()
-    )))
-}
-
-/// Whether `lock_path` still names the inode behind `file`.
-///
-/// `symlink_metadata` compares the path entry itself, so a symlink or a
-/// removed lock path also counts as a mismatch and forces a retry.
-fn lock_path_names(file: &File, lock_path: &Path) -> Result<bool, BundleError> {
-    let Ok(path_metadata) = fs::symlink_metadata(lock_path) else {
-        return Ok(false);
-    };
-    let file_metadata = file.metadata().map_err(BundleError::from)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(
-            path_metadata.dev() == file_metadata.dev()
-                && path_metadata.ino() == file_metadata.ino(),
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(true)
-    }
-}
-
-/// Open a lock file without truncating it and without ever following a
-/// symlink at the lock path.
-///
-/// The open is atomic: `O_NOFOLLOW | O_CREAT` either opens the regular file
-/// that is at the path at open time or fails with `ELOOP` when the path is a
-/// symlink — there is no probe-then-open window a replacement could slip
-/// into. The opened descriptor is verified to be a regular file before it is
-/// locked.
-fn open_lock_candidate(lock_path: &Path) -> Result<File, BundleError> {
-    let mut options = File::options();
-    options.read(true).write(true).create(true);
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // O_NOFOLLOW (00400000) from Linux's asm-generic/fcntl.h. std has no
-        // named constant for it, and opening through a symlink would lock a
-        // different file than the one being serialized.
-        options.custom_flags(0o400000);
-    }
-    let file = options.open(lock_path).map_err(|error| {
-        if error.raw_os_error() == Some(40) {
-            // ELOOP: the lock path is a symlink.
-            BundleError::Io(format!(
-                "refusing to lock through a symlink: {}",
-                lock_path.display()
-            ))
-        } else {
-            BundleError::Io(format!(
-                "failed to open lock file {}: {error}",
-                lock_path.display()
-            ))
+        Some(parent) => {
+            fs::create_dir_all(parent)?;
+            Ok(fs::canonicalize(parent).map_err(BundleError::from)?)
         }
-    })?;
-    if !file.metadata().map_err(BundleError::from)?.is_file() {
-        return Err(BundleError::Io(format!(
-            "refusing to lock a non-regular file: {}",
-            lock_path.display()
-        )));
+        None => Ok(fs::canonicalize(".").map_err(BundleError::from)?),
     }
-    Ok(file)
-}
-
-fn write_lock_path(root: &Path) -> Option<PathBuf> {
-    let file_name = root.file_name()?;
-    if file_name.is_empty() {
-        return None;
-    }
-    // Built from the raw `OsStr` so a non-UTF-8 bundle name still gets a
-    // real sibling lock file; converting to `str` here would silently
-    // disable serialization for such bundles.
-    let mut lock_name = file_name.to_os_string();
-    lock_name.push(WRITE_LOCK_SUFFIX);
-    let mut lock = root.to_path_buf();
-    lock.set_file_name(lock_name);
-    Some(lock)
 }
 
 fn retired_generation_path(path: &Path) -> PathBuf {
@@ -1915,40 +1846,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(previous_generation_path(&root));
-    }
-
-    #[test]
-    fn lock_open_verifies_the_probed_identity_and_rejects_swaps() {
-        let root = temp_root("lock-identity");
-        fs::create_dir_all(&root).expect("dir creates");
-        let lock = root.join("bundle.write-lock");
-
-        let first = open_lock_candidate(&lock).expect("lock opens");
-        let second = open_lock_candidate(&lock).expect("lock reopens");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(
-                first.metadata().unwrap().ino(),
-                second.metadata().unwrap().ino(),
-                "the reopened descriptor refers to the probed file, not a recreated one"
-            );
-        }
-        drop(first);
-        drop(second);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            let _ = fs::remove_file(&lock);
-            symlink(root.join("elsewhere"), &lock).expect("symlink creates");
-            assert!(
-                open_lock_candidate(&lock).is_err(),
-                "a swapped symlink at the lock path is rejected"
-            );
-        }
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

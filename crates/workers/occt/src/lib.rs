@@ -30,7 +30,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use threeterm_protocol::supervisor::{Request as SupervisorRequest, Supervisor, SupervisorOutcome};
+use threeterm_protocol::supervisor::{
+    Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
+};
 use threeterm_protocol::worker::{
     SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
     WorkerProcess,
@@ -87,6 +89,14 @@ pub enum WorkerError {
     Malformed { detail: String },
     /// The worker emitted a JSON diagnostic instead of a response.
     Diagnostic(OcctDiagnostic),
+    /// The request was cooperatively cancelled and the worker
+    /// acknowledged the cancellation inside the grace period.
+    Cancelled { request_id: String },
+    /// The supervised lifecycle ended with a structured termination
+    /// record that does not map to a typed failure: the record's stage,
+    /// elapsed time, last progress, and stderr tail are preserved so
+    /// callers retain the diagnostic context.
+    Supervised { record: Box<TerminationRecord> },
 }
 
 impl std::fmt::Display for WorkerError {
@@ -113,6 +123,16 @@ impl std::fmt::Display for WorkerError {
                 "worker diagnostic {} {}: {}",
                 diagnostic.code, diagnostic.arg, diagnostic.schema_version
             ),
+            Self::Cancelled { request_id } => {
+                write!(formatter, "worker request {request_id} cancelled")
+            }
+            Self::Supervised { record } => {
+                write!(
+                    formatter,
+                    "supervised worker termination at stage {:?} after {:?}",
+                    record.stage, record.elapsed
+                )
+            }
         }
     }
 }
@@ -202,6 +222,22 @@ impl OcctWorker {
             detail: format!("extrude request serialization failed: {error}"),
         })?;
         self.invoke(&bytes)?.into_extrude()
+    }
+
+    /// Extrude `request` with a cooperative cancellation token. The
+    /// caller sets the token to request cancellation; the supervisor
+    /// sends `Cancel`, waits the grace period for the worker's
+    /// acknowledgement, and force-terminates the worker's process group
+    /// if the worker does not cooperate.
+    pub fn extrude_with_cancel(
+        &self,
+        request: &ExtrudeRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<ExtrudeResult, WorkerError> {
+        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
+            detail: format!("extrude request serialization failed: {error}"),
+        })?;
+        self.invoke_with_cancel(&bytes, cancel)?.into_extrude()
     }
 
     /// Boolean-fuse `request` by spawning the worker process. See
@@ -358,6 +394,64 @@ impl OcctWorker {
         });
         map_outcome(outcome)
     }
+
+    /// Run `envelope` through the supervised lifecycle with a
+    /// cooperative cancellation token. The token's `cancel()` triggers
+    /// the supervisor's cancellation lifecycle: the worker receives a
+    /// `Cancel` envelope and, if it does not acknowledge inside the
+    /// grace period, is force-terminated and reaped with its process
+    /// group.
+    fn invoke_with_cancel(
+        &self,
+        envelope: &[u8],
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<RawResult, WorkerError> {
+        let args: serde_json::Value =
+            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
+                detail: format!("request serialization failed: {error}"),
+            })?;
+        let request_id = args
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if request_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing request_id".to_string(),
+            });
+        }
+        let command_id = args
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if command_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing operation".to_string(),
+            });
+        }
+
+        let host = <Self as WorkerProcess>::spawn(WorkerConfig {
+            worker_id: "occt",
+            schema_version: threeterm_protocol::schema_version(),
+            command_line: vec![self.binary_path.display().to_string()],
+        })
+        .map_err(|error| WorkerError::Spawn {
+            binary: self.binary_path.clone(),
+            detail: error.to_string(),
+        })?;
+        let mut supervisor = Supervisor::new(self.grace, host, None);
+        let outcome = supervisor.request_with_cancel(
+            SupervisorRequest {
+                request_id,
+                command_id,
+                args,
+                revision_id: String::new(),
+            },
+            cancel,
+        );
+        map_outcome(outcome)
+    }
 }
 
 /// Maps a supervised outcome to the typed-result boundary: a completed
@@ -367,11 +461,19 @@ impl OcctWorker {
 fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
     match outcome {
         SupervisorOutcome::Completed { result, .. } => Ok(RawResult { value: result }),
-        SupervisorOutcome::Acknowledged { .. } => Err(WorkerError::Malformed {
-            detail: "worker acknowledged a cancellation without a request".to_string(),
+        SupervisorOutcome::Acknowledged {
+            request_id, reason, ..
+        } => Err(WorkerError::Cancelled {
+            request_id: if request_id.is_empty() {
+                reason
+            } else {
+                request_id
+            },
         }),
         SupervisorOutcome::ForceTerminated { record } => {
-            if let (Some(code), Some(detail)) = (record.failed_code, record.failed_detail) {
+            if let (Some(code), Some(detail)) =
+                (record.failed_code.clone(), record.failed_detail.clone())
+            {
                 return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
             }
             if record.stage.starts_with("handshake_schema_mismatch") {
@@ -379,15 +481,11 @@ fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
                     detail: record.stage,
                 });
             }
-            if let Some(signal) = record.exit_signal {
-                return Err(WorkerError::Signalled {
-                    signal,
-                    stderr: record.stderr_tail,
-                });
-            }
-            Err(WorkerError::NonZeroExit {
-                code: None,
-                stderr: record.stderr_tail,
+            // Preserve the structured termination context: request id,
+            // stage, elapsed time, last progress, artifact errors, and
+            // stderr tail all remain available to callers.
+            Err(WorkerError::Supervised {
+                record: Box::new(record),
             })
         }
     }
@@ -420,8 +518,10 @@ struct RawResult {
 
 impl RawResult {
     /// Fail closed when the worker's staged output exceeds the staged
-    /// artifact bound. The host never sees a Derived Result whose
-    /// payload could exhaust the promotion path.
+    /// artifact bound. The bound is enforced on the ACTUAL staged file
+    /// (its on-disk size), not on the worker's advertised `brep_bytes`
+    /// metadata, so a worker that under-reports its output cannot smuggle
+    /// an oversized artifact past the host.
     fn bounded<T>(self) -> Result<T, WorkerError>
     where
         T: serde::de::DeserializeOwned,
@@ -431,11 +531,29 @@ impl RawResult {
             .get("brep_bytes")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        if brep_bytes > threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64 {
+        let brep_path = value
+            .get("brep_path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from);
+        let actual_bytes = match brep_path.as_deref().map(std::fs::metadata) {
+            Some(Ok(metadata)) => metadata.len(),
+            // A staged path that does not exist yet cannot be verified;
+            // fall back to the worker's advertised count so the bound
+            // still fails closed on the metadata.
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => brep_bytes,
+            Some(Err(error)) => {
+                return Err(WorkerError::Malformed {
+                    detail: format!("worker output at {brep_path:?} could not be stat'd: {error}"),
+                });
+            }
+            None => brep_bytes,
+        };
+        let bound = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
+        let largest = actual_bytes.max(brep_bytes);
+        if largest > bound {
             return Err(WorkerError::Malformed {
                 detail: format!(
-                    "worker staged output of {brep_bytes} bytes exceeds the {} byte bound",
-                    threeterm_protocol::worker::MAX_ARTIFACT_BYTES
+                    "worker staged output of {largest} bytes (advertised {brep_bytes}) exceeds the {bound} byte bound"
                 ),
             });
         }
@@ -997,8 +1115,11 @@ mod tests {
         };
         let error = map_outcome(outcome).expect_err("signal exit must not map to success");
         match error {
-            WorkerError::Signalled { signal, .. } => assert_eq!(signal, 11),
-            other => panic!("expected Signalled; got {other:?}"),
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.exit_signal, Some(11));
+                assert_eq!(record.stage, "grace_exceeded");
+            }
+            other => panic!("expected Supervised; got {other:?}"),
         }
     }
 
@@ -1046,10 +1167,11 @@ mod tests {
         };
         let error = map_outcome(outcome).expect_err("closed worker must fail closed");
         match error {
-            WorkerError::NonZeroExit { stderr, .. } => {
-                assert_eq!(stderr, "worker trace");
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.stderr_tail, "worker trace");
+                assert_eq!(record.request_id, "req-1");
             }
-            other => panic!("expected NonZeroExit; got {other:?}"),
+            other => panic!("expected Supervised; got {other:?}"),
         }
     }
 }

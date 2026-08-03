@@ -126,12 +126,16 @@ fn terminate_kills_and_reaps_descendants_in_the_process_group() {
 
     host.terminate().expect("terminate kills the process group");
 
+    // SIGKILL delivery is asynchronous; wait for both processes to die
+    // (descendants become zombies, state Z, which the container's PID 1
+    // may never reap).
+    let death_deadline = Instant::now() + Duration::from_secs(5);
     assert!(
-        !pid_alive(worker_pid),
+        wait_until(death_deadline, || !pid_alive(worker_pid)),
         "worker must be reaped after terminate (pid {worker_pid})"
     );
     assert!(
-        !pid_alive(descendant_pid),
+        wait_until(death_deadline, || !pid_alive(descendant_pid)),
         "descendant must be killed with the worker (pid {descendant_pid})"
     );
     let _ = std::fs::remove_file(&desc_marker);
@@ -172,4 +176,52 @@ fn clean_worker_exit_reports_no_signal() {
     let _ = host.recv(deadline).expect("completed envelope arrives");
     host.terminate().expect("clean worker terminates");
     assert_eq!(host.exit_signal(), None, "a clean exit carries no signal");
+}
+
+#[test]
+fn terminate_kills_descendants_even_after_the_leader_exits_first() {
+    // The leader emits WorkerReady, spawns a background descendant, and
+    // exits cleanly. Termination must still kill the process group so
+    // the descendant does not survive the reaped leader.
+    let desc_marker = PathBuf::from(format!(
+        "{}/threeterm-desc-leader-{}.pid",
+        std::env::temp_dir().display(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&desc_marker);
+    let fixture = format!(
+        "printf '%s\\n' '{worker}'; sleep 300 & echo $! > {marker}; exit 0",
+        worker = worker_ready_line(),
+        marker = desc_marker.display()
+    );
+    let child = spawn_in_group(&fixture);
+    let mut host =
+        SubprocessWorkerHost::with_limits(child, SMALL_LIMITS).expect("transport starts");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert!(
+        wait_until(deadline, || desc_marker.exists()),
+        "fixture must record its descendant pid"
+    );
+    let descendant_pid: u32 = std::fs::read_to_string(&desc_marker)
+        .expect("descendant pid file reads")
+        .trim()
+        .parse()
+        .expect("descendant pid parses");
+    assert!(
+        pid_alive(descendant_pid),
+        "descendant must be alive before terminate"
+    );
+
+    host.terminate().expect("terminate kills the process group");
+
+    // SIGKILL delivery is asynchronous; wait for the descendant to die
+    // (it becomes a zombie, state Z, which the container's PID 1 may
+    // never reap).
+    let death_deadline = Instant::now() + Duration::from_secs(5);
+    assert!(
+        wait_until(death_deadline, || !pid_alive(descendant_pid)),
+        "descendant must be killed with the group (pid {descendant_pid})"
+    );
+    let _ = std::fs::remove_file(&desc_marker);
 }

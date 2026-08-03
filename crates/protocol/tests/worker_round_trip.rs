@@ -971,3 +971,49 @@ fn mismatched_progress_fails_the_request_closed_immediately() {
     );
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
 }
+
+#[test]
+fn request_with_cancel_acknowledges_a_cooperative_worker() {
+    // The request loop hands over to the cancellation lifecycle when
+    // the cancel flag is set; a worker that acks yields Acknowledged.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Cancelled {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            reason: "cancelled by host".to_string(),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+
+    let outcome = supervisor.request_with_cancel(sample_request(), &cancel);
+    let SupervisorOutcome::Acknowledged {
+        request_id, reason, ..
+    } = outcome
+    else {
+        panic!("expected Acknowledged; got {outcome:?}");
+    };
+    assert_eq!(request_id, "req-1");
+    assert_eq!(reason, "cancelled by host");
+}
+
+#[test]
+fn request_with_cancel_force_terminates_a_worker_that_never_acks() {
+    // The worker never acks the cooperative Cancel; the cancellation
+    // lifecycle force-terminates after the grace period.
+    let worker = PipeHost::new(vec![ready_envelope()]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+
+    let outcome = supervisor.request_with_cancel(sample_request(), &cancel);
+    let SupervisorOutcome::ForceTerminated { record } = outcome else {
+        panic!("expected ForceTerminated; got {outcome:?}");
+    };
+    assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+    assert!(
+        record.stage.starts_with("cancel_") || record.stage.starts_with("worker_closed"),
+        "stage: {:?}",
+        record.stage
+    );
+}

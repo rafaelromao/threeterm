@@ -48,6 +48,13 @@ pub const MAX_STDERR_BYTES: usize = 64 * 1024;
 /// so a flood on a quiet stream is observed well before the deadline.
 const OVERFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How long `terminate` waits for a SIGKILLed leader to become reaped
+/// before giving up on recording its exit status.
+const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Poll interval while waiting for the leader to reap after a kill.
+const REAP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Byte bounds applied to a worker's standard streams. The host fails
 /// closed when a stream exceeds its bound, terminating the worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,15 +517,10 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
-        // Reap first: an already-exited worker needs no kill.
-        self.reap_if_exited()?;
-        if self.reaped_status.is_some() {
-            return Ok(());
-        }
-        // SIGKILL the worker's process group so descendants die with it.
-        // A process spawned with `process_group(0)` is the group leader;
-        // its PID is the group ID. Fall back to a direct kill if the
-        // worker was not spawned into its own group.
+        // SIGKILL the worker's process group so the worker AND any
+        // descendants die together. The group kill is attempted even
+        // when the leader has already exited: a descendant can outlive
+        // its leader and would otherwise survive the reap.
         let pid = self.child.id() as i32;
         match nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(pid),
@@ -526,13 +528,25 @@ impl WorkerHost for SubprocessWorkerHost {
         ) {
             Ok(()) => {}
             Err(nix::errno::Errno::ESRCH) => {
-                // No such process group: the worker is not a group
-                // leader. Kill the direct child instead.
-                self.child.kill()?;
+                // No such process group: the worker was not spawned as a
+                // group leader. Kill the direct child instead, unless it
+                // has already been reaped (a clean exit needs no kill).
+                if self.reaped_status.is_none() {
+                    self.child.kill()?;
+                }
             }
             Err(error) => return Err(WorkerError::Io(error.into())),
         }
-        self.reaped_status = Some(self.child.wait()?);
+        // Reap the leader, waiting briefly for the SIGKILL to land so
+        // the exit status (including the kill signal) is recorded.
+        self.reap_if_exited()?;
+        if self.reaped_status.is_none() {
+            let deadline = Instant::now() + REAP_WAIT;
+            while self.reaped_status.is_none() && Instant::now() < deadline {
+                std::thread::sleep(REAP_POLL);
+                self.reap_if_exited()?;
+            }
+        }
         Ok(())
     }
 

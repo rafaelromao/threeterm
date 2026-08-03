@@ -162,10 +162,15 @@ fn typed_extrude_fails_closed_when_the_worker_never_completes() {
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("hanging worker must fail closed");
     match error {
-        WorkerError::Signalled { signal, .. } => {
-            assert_eq!(signal, 9, "force-terminated worker reports SIGKILL");
+        WorkerError::Supervised { record } => {
+            assert_eq!(
+                record.exit_signal,
+                Some(9),
+                "force-terminated worker reports SIGKILL"
+            );
+            assert_eq!(record.stage, "grace_exceeded");
         }
-        other => panic!("expected Signalled; got {other:?}"),
+        other => panic!("expected Supervised; got {other:?}"),
     }
 }
 
@@ -208,5 +213,91 @@ fn typed_extrude_fails_closed_on_oversized_staged_output() {
             );
         }
         other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_fails_closed_when_the_actual_staged_file_is_oversized() {
+    // The worker under-reports brep_bytes but writes an oversized file
+    // on disk; the typed boundary must verify the ACTUAL size, not the
+    // advertised metadata.
+    let dir = FixtureDir::new("actual-oversized");
+    let oversized_path = dir.root.join("out.brep");
+    let mut body = Vec::new();
+    body.resize(threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1, b'x');
+    std::fs::write(&oversized_path, &body).expect("oversized staged file writes");
+    let small = format!("{}", threeterm_protocol::worker::MAX_ARTIFACT_BYTES - 1);
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"brep_bytes\":{small},\"feature_id\":\"box-1\"}}}}'\n",
+            path = oversized_path.display()
+        ),
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("actual oversized staged output must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("exceeds the"),
+                "detail must name the bound; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_with_cancel_acknowledges_cooperative_worker() {
+    // The fixture worker emits WorkerReady, reads the request line and
+    // the Cancel line, and acknowledges with a Cancelled envelope. The
+    // cancellable typed path must surface the cooperative cancellation.
+    let dir = FixtureDir::new("cancel-ack");
+    let worker = dir.worker_script(
+        "worker.sh",
+        "#!/bin/sh\n\
+         printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
+         read line\n\
+         read line\n\
+         printf '%s\\n' '{\"kind\":\"cancelled\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"reason\":\"cancelled by host\"}'\n",
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
+        .expect_err("cancellable extrude must surface the cancellation");
+    match error {
+        WorkerError::Cancelled { request_id } => {
+            assert_eq!(request_id, "req-1");
+        }
+        other => panic!("expected Cancelled; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_with_cancel_force_terminates_an_uncooperative_worker() {
+    // The fixture worker never acks the Cancel; the cancellation
+    // lifecycle must force-terminate the worker after the grace period
+    // and report the kill signal in the structured record.
+    let dir = FixtureDir::new("cancel-force");
+    let worker = dir
+        .worker_script(
+            "worker.sh",
+            "#!/bin/sh\n\
+             printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
+             read line\n\
+             sleep 30\n",
+        )
+        .with_grace(Duration::from_millis(300));
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
+        .expect_err("uncooperative cancellable extrude must fail closed");
+    match error {
+        WorkerError::Supervised { record } => {
+            assert_eq!(record.exit_signal, Some(9), "SIGKILL after grace");
+        }
+        other => panic!("expected Supervised; got {other:?}"),
     }
 }

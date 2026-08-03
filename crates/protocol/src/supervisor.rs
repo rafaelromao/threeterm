@@ -260,9 +260,38 @@ impl Supervisor {
                         };
                     }
                 }
-                Ok(Envelope::Progress { .. }) => {}
+                Ok(Envelope::Progress {
+                    request_id: progress_request_id,
+                    ..
+                }) => {
+                    // Progress bound to a foreign request is a protocol
+                    // violation; cancellation fails closed rather than
+                    // accepting misbound progress.
+                    if progress_request_id != request_id {
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            &format!(
+                                "protocol_violation:mismatched_request_id:{progress_request_id}"
+                            ),
+                            None,
+                            None,
+                        );
+                    }
+                }
                 Ok(Envelope::Artifact { header, .. }) => {
-                    let _ = header.staging_name;
+                    if header.request_id != request_id {
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            &format!(
+                                "protocol_violation:mismatched_request_id:{}",
+                                header.request_id
+                            ),
+                            None,
+                            None,
+                        );
+                    }
                 }
                 Ok(_) => {}
                 Err(WorkerError::Closed) => {
@@ -313,6 +342,19 @@ impl Supervisor {
     /// caller; on `Failed` / unsolicited `Cancelled` / force termination
     /// every staged artifact is discarded.
     pub fn request(&mut self, request: Request) -> SupervisorOutcome {
+        self.request_with_cancel(request, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Request lifecycle with a cooperative cancellation trigger. The
+    /// request loop polls `cancel` between receive slices; when it is
+    /// set, the supervisor runs the cooperative cancellation lifecycle
+    /// (send `Cancel`, await `Cancelled` inside the grace period, then
+    /// force-terminate if the worker does not acknowledge).
+    pub fn request_with_cancel(
+        &mut self,
+        request: Request,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> SupervisorOutcome {
         let started = Instant::now();
 
         // Phase 1: consume one WorkerReady handshake. The worker must
@@ -355,6 +397,13 @@ impl Supervisor {
         let mut last_progress: Option<Progress> = None;
 
         loop {
+            // Cooperative cancellation trigger: when the flag is set the
+            // request lifecycle hands over to the cancellation lifecycle
+            // (send `Cancel`, await `Cancelled` inside the grace period,
+            // then force-terminate if the worker does not acknowledge).
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.cancel(&request.request_id, "cancelled by host");
+            }
             match self.host.recv(deadline) {
                 Ok(envelope) if envelope.schema_version() != crate::schema_version() => {
                     // Every post-handshake envelope must carry the

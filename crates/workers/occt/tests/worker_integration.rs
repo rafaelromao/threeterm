@@ -1252,8 +1252,7 @@ fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str
     // `args` carry the OCCT request, and reports malformed input as a
     // `failed` envelope. The raw request is compacted so it embeds into
     // one line (the worker reads exactly one envelope line).
-    let args: serde_json::Value =
-        serde_json::from_str(request).expect("raw request is valid JSON");
+    let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
     let envelope = format!(
         "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{args},\"revision_id\":\"\"}}\n"
     );

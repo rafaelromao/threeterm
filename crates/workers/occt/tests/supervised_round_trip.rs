@@ -161,3 +161,27 @@ fn diagnostics_round_trip_with_schema_version() {
     let diagnostic = OcctDiagnostic::new("request_malformed", "empty profile");
     assert_eq!(diagnostic.schema_version, "threeterm.workers.occt/1");
 }
+
+#[test]
+fn typed_extrude_fails_closed_on_oversized_staged_output() {
+    // The worker reports a brep_bytes count above the staged artifact
+    // bound; the typed boundary must fail closed before the host could
+    // promote the oversized payload.
+    let oversized = format!("{}", threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1);
+    let reply = format!(
+        r#"printf '%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"/tmp/out.brep","brep_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","brep_bytes":{oversized},"feature_id":"box-1"}}}}'"#
+    );
+    let worker = fixture_worker_named("oversized", &reply);
+    let error = worker
+        .extrude(&sample_extrude_request())
+        .expect_err("oversized staged output must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("exceeds the"),
+                "detail must name the bound; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}

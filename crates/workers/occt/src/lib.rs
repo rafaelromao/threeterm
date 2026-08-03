@@ -406,148 +406,77 @@ struct RawResult {
 }
 
 impl RawResult {
-    fn into_extrude(self) -> Result<ExtrudeResult, WorkerError> {
-        match serde_json::from_value::<ExtrudeResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
+    /// Fail closed when the worker's staged output exceeds the staged
+    /// artifact bound. The host never sees a Derived Result whose
+    /// payload could exhaust the promotion path.
+    fn bounded<T>(self) -> Result<T, WorkerError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let value = self.value;
+        let brep_bytes = value
+            .get("brep_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if brep_bytes > threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64 {
+            return Err(WorkerError::Malformed {
                 detail: format!(
-                    "into_extrude response could not be parsed: {error}; value={}",
-                    self.value
+                    "worker staged output of {brep_bytes} bytes exceeds the {} byte bound",
+                    threeterm_protocol::worker::MAX_ARTIFACT_BYTES
                 ),
-            }),
+            });
         }
+        serde_json::from_value::<T>(value).map_err(|error| WorkerError::Malformed {
+            detail: format!("worker response could not be parsed: {error}"),
+        })
+    }
+
+    fn into_extrude(self) -> Result<ExtrudeResult, WorkerError> {
+        self.bounded()
     }
 
     fn into_boolean_fuse(self) -> Result<BooleanFuseResult, WorkerError> {
-        match serde_json::from_value::<BooleanFuseResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_boolean_fuse response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_fillet(self) -> Result<FilletResult, WorkerError> {
-        match serde_json::from_value::<FilletResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_fillet response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_chamfer(self) -> Result<ChamferResult, WorkerError> {
-        match serde_json::from_value::<ChamferResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_chamfer response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_hole(self) -> Result<HoleResult, WorkerError> {
-        match serde_json::from_value::<HoleResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_hole response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_revolve(self) -> Result<RevolveResult, WorkerError> {
-        match serde_json::from_value::<RevolveResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_revolve response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_mirror(self) -> Result<MirrorResult, WorkerError> {
-        match serde_json::from_value::<MirrorResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_mirror response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_linear_pattern(self) -> Result<LinearPatternResult, WorkerError> {
-        match serde_json::from_value::<LinearPatternResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_linear_pattern response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_circular_pattern(self) -> Result<CircularPatternResult, WorkerError> {
-        match serde_json::from_value::<CircularPatternResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_circular_pattern response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_shell(self) -> Result<ShellResult, WorkerError> {
-        match serde_json::from_value::<ShellResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_shell response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_draft(self) -> Result<DraftResult, WorkerError> {
-        match serde_json::from_value::<DraftResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_draft response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 
     fn into_loft(self) -> Result<LoftResult, WorkerError> {
-        match serde_json::from_value::<LoftResult>(self.value.clone()) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(WorkerError::Malformed {
-                detail: format!(
-                    "into_loft response could not be parsed: {error}; value={}",
-                    self.value
-                ),
-            }),
-        }
+        self.bounded()
     }
 }
 

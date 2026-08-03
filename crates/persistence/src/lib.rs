@@ -877,9 +877,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
             destination,
             PublicationFailurePoint::PromoteStaging,
         )?;
-        if let Some(parent) = destination.parent() {
-            sync_directory(parent, PublicationFailurePoint::ParentSync)?;
-        }
+        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
@@ -923,10 +921,21 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // Cleanup is outside the two-generation publication boundary. A failed
     // cleanup is retained for the next publication to reconcile.
     let _ = remove_retired_generation(&retired);
-    if let Some(parent) = destination.parent() {
-        sync_directory(parent, PublicationFailurePoint::ParentSync)?;
-    }
+    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
     Ok(())
+}
+
+/// Sync the directory containing `path` after a generation rename.
+///
+/// A bare relative destination such as `"project"` has an empty `parent()`
+/// component, which `File::open` cannot open; the containing directory is
+/// the current working directory in that case.
+fn sync_parent_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => sync_directory(Path::new("."), point),
+        Some(parent) => sync_directory(parent, point),
+        None => Ok(()),
+    }
 }
 
 fn rename_generation(

@@ -663,3 +663,24 @@ fn first_save_setup_failures_leave_no_partial_root() {
         let _ = fs::remove_dir_all(previous_generation_sibling(&root));
     }
 }
+
+#[test]
+fn fresh_creation_with_a_bare_relative_root_succeeds() {
+    let parent = unique_temp_dir("relative-root");
+    fs::create_dir_all(&parent).expect("temp parent creates");
+    let cwd = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(&parent).expect("chdir into the temp parent");
+
+    let result = Bundle::create_for_test("project", "00".repeat(16).as_str());
+    let bundle = result.expect("a bare relative root creates and publishes");
+    let loaded = bundle.open().expect("relative bundle opens");
+    assert_eq!(loaded.log.len(), 0);
+    bundle
+        .append_feature("box-1", "box")
+        .expect("a relative append publishes");
+    let loaded = bundle.open().expect("bundle reopens");
+    assert_eq!(loaded.log.len(), 1);
+
+    std::env::set_current_dir(&cwd).expect("restore the original current dir");
+    let _ = fs::remove_dir_all(&parent);
+}

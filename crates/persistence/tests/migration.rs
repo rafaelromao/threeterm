@@ -387,3 +387,53 @@ fn v2_reader_boundary_refuses_unbacked_v0_layout() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn migration_retry_failure_preserves_an_authenticated_pre_existing_backup() {
+    let root = unique_temp_dir("backup-preserved");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-backup-keep"))
+        .expect("v0 fixture writes");
+    let backup_path = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+
+    // Attempt one seals the backup and fails only at the final promotion.
+    fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+    assert!(
+        load(&root).is_err(),
+        "the first attempt's promotion failure is surfaced"
+    );
+    assert!(
+        backup_path.is_dir(),
+        "the first attempt leaves a sealed recovery backup"
+    );
+    let sealed_fingerprint = fingerprint(&backup_path);
+
+    // Attempt two retains the authenticated pre-existing backup and fails
+    // later, while writing the new staging generation.
+    fail_next_publication_at(PublicationFailurePoint::StagingSync);
+    assert!(
+        load(&root).is_err(),
+        "the retry's staging failure is surfaced"
+    );
+    assert_eq!(
+        fingerprint(&backup_path),
+        sealed_fingerprint,
+        "a retry that fails after retaining the backup must not delete it"
+    );
+    assert!(
+        read_v0(&backup_path).is_ok(),
+        "the retained backup still authenticates as a complete v0 bundle"
+    );
+
+    let loaded = load(&root).expect("a later attempt migrates with the retained backup");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+    assert!(
+        read_v0(&backup_path).is_ok(),
+        "the authenticated backup survives the successful migration"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(backup_path);
+}

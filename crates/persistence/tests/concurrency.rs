@@ -1039,3 +1039,46 @@ fn pre_existing_migration_staging_symlink_is_skipped() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }
+
+#[test]
+fn failed_migration_retry_preserves_an_authenticated_existing_backup() {
+    use threeterm_persistence::PRE_MIGRATION_BACKUP_SUFFIX;
+    use threeterm_persistence::bundle::{PublicationFailurePoint, read_v0};
+
+    let root = unique_temp_dir("preserve-backup");
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-preserve-backup"))
+        .expect("v0 fixture writes");
+    let backup = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().expect("root has a name").to_string_lossy()
+    ));
+
+    // An authenticated backup already exists from an earlier attempt.
+    fs::create_dir_all(backup.join("canonical")).expect("backup dirs create");
+    fs::copy(root.join(MANIFEST_FILENAME), backup.join(MANIFEST_FILENAME))
+        .expect("backup manifest copies");
+    fs::copy(
+        root.join("canonical/transactions.ndjson"),
+        backup.join("canonical/transactions.ndjson"),
+    )
+    .expect("backup transactions copy");
+    assert!(
+        read_v0(&backup).is_ok(),
+        "pre-existing backup authenticates"
+    );
+
+    fail_next_publication_at(PublicationFailurePoint::StagingSync);
+    assert!(load(&root).is_err(), "injected staging failure is surfaced");
+
+    assert!(
+        backup.exists(),
+        "a failed retry must not delete an authenticated pre-existing backup"
+    );
+    assert!(
+        read_v0(&backup).is_ok(),
+        "the preserved backup still authenticates"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(backup);
+}

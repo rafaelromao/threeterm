@@ -827,17 +827,21 @@ fn load_v0_with_migration(
     let transactions = v0.transactions.clone();
 
     let backup_path = backup_path_for(path);
-    if let Err(source) = publish_sealed_backup(path, &backup_path) {
-        return Err(BundleError::Backup {
-            path: backup_path,
+    let backup_created =
+        publish_sealed_backup(path, &backup_path).map_err(|source| BundleError::Backup {
+            path: backup_path.clone(),
             source,
-        });
-    }
+        })?;
 
     let staging = fresh_staging_path_for_migration(path);
     if let Err(error) = write_v1_into(&staging, &manifest, transactions.as_bytes()) {
         let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&backup_path);
+        // Only artifacts this attempt created are discarded. An
+        // authenticated backup retained from an earlier attempt is a valid
+        // recovery copy and must survive a retry that fails later.
+        if backup_created {
+            let _ = fs::remove_dir_all(&backup_path);
+        }
         return Err(BundleError::Migration {
             source: Box::new(error),
         });
@@ -848,7 +852,9 @@ fn load_v0_with_migration(
         Ok(loaded) => loaded,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_dir_all(&backup_path);
+            if backup_created {
+                let _ = fs::remove_dir_all(&backup_path);
+            }
             return Err(BundleError::Migration {
                 source: Box::new(error),
             });
@@ -1005,10 +1011,14 @@ fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
 /// v0 bundle; a partial backup is replaced from a fresh staged copy. The
 /// staged copy is fully synced (files, directory, and containing directory)
 /// and validated before it is renamed into place.
-fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
+///
+/// Returns whether this call created or replaced the backup: `false` when
+/// an authenticated pre-existing backup was retained untouched, so failure
+/// cleanup can remove only the artifacts this attempt produced.
+fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<bool> {
     if backup.exists() {
         if read_v0(backup).is_ok() {
-            return Ok(());
+            return Ok(false);
         }
         fs::remove_dir_all(backup)?;
     }
@@ -1035,7 +1045,7 @@ fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
     {
         File::open(parent)?.sync_all()?;
     }
-    Ok(())
+    Ok(true)
 }
 
 fn fresh_backup_staging_path(backup: &Path) -> PathBuf {

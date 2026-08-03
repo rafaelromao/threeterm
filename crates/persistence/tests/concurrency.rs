@@ -140,3 +140,46 @@ fn concurrent_appends_serialize_into_one_linear_log() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }
+
+#[test]
+fn concurrent_first_saves_serialize_creation_and_appends() {
+    let root = unique_temp_dir("concurrent-first-saves");
+    let bundle = std::sync::Arc::new(Bundle::at(&root));
+
+    const THREADS: usize = 8;
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let bundle = bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            bundle
+                .append_feature(&format!("box-{thread}"), "box")
+                .expect("concurrent first save succeeds");
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("save thread completes");
+    }
+
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(
+        loaded.log.len(),
+        THREADS,
+        "every concurrent first save lands in one canonical log"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}

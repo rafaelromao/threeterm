@@ -456,6 +456,20 @@ impl Bundle {
         generation_id: &str,
         revision_id: &str,
     ) -> Result<Self, BundleError> {
+        let root = root.into();
+        with_bundle_write_lock(&root, || {
+            Self::create_inner(&root, generation_id, revision_id)
+        })
+    }
+
+    /// Create the bundle directory structure without acquiring the write
+    /// lock. Callers must already hold the per-root lock; `append_features`
+    /// uses this to fold a concurrent first save into a plain append.
+    fn create_inner(
+        root: &Path,
+        generation_id: &str,
+        revision_id: &str,
+    ) -> Result<Self, BundleError> {
         let bundle = Self::at(root);
         if bundle.root.exists() {
             return Err(BundleError::Invalid(format!(
@@ -588,7 +602,14 @@ impl Bundle {
         &self,
         entries: &[(&str, &str)],
     ) -> Result<LoadedBundle, BundleError> {
-        let mut loaded = self.open()?;
+        // A save against a brand-new bundle path creates the sealed empty
+        // generation first, so concurrent first saves serialize into one
+        // bundle instead of racing a create against an append.
+        let mut loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
+            self.open()?
+        } else {
+            Self::create_inner(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open()?
+        };
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;

@@ -300,6 +300,9 @@ impl LoadedBundle {
 pub enum BundleError {
     ManifestMissing,
     LogMissing,
+    BundlePathMissing {
+        path: PathBuf,
+    },
     SchemaGenerationUnsupported {
         found: u32,
     },
@@ -345,6 +348,7 @@ impl BundleError {
         match self {
             Self::ManifestMissing => "manifest_missing",
             Self::LogMissing => "log_missing",
+            Self::BundlePathMissing { .. } => "bundle_path_missing",
             Self::SchemaGenerationUnsupported { .. } => "schema_generation_unsupported",
             Self::LogDigestMismatch => "log_digest_mismatch",
             Self::LogBrokenLink { .. } => "log_broken_link",
@@ -366,6 +370,9 @@ impl fmt::Display for BundleError {
         match self {
             Self::ManifestMissing => formatter.write_str("manifest missing"),
             Self::LogMissing => formatter.write_str("transaction log missing"),
+            Self::BundlePathMissing { path } => {
+                write!(formatter, "bundle path missing: {}", path.display())
+            }
             Self::SchemaGenerationUnsupported { found } => {
                 write!(formatter, "unsupported schema generation: {found}")
             }
@@ -432,7 +439,18 @@ pub struct Bundle {
 
 impl Bundle {
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: canonical_bundle_root(&root.into()),
+        }
+    }
+
+    /// The canonical root directory this bundle operates on.
+    ///
+    /// Symlink aliases of one bundle resolve to the same canonical root, so
+    /// writers addressed through an alias and writers addressed through the
+    /// target share one lock and one set of recovery siblings.
+    pub fn canonical_root(&self) -> &Path {
+        &self.root
     }
 
     pub fn create(root: impl Into<PathBuf>) -> Result<Self, BundleError> {
@@ -455,6 +473,21 @@ impl Bundle {
         generation_id: &str,
         revision_id: &str,
     ) -> Result<Self, BundleError> {
+        let root = root.into();
+        with_bundle_write_lock(&root, || {
+            Self::create_staged(&root, generation_id, revision_id)
+        })
+    }
+
+    /// Create the bundle directory structure without acquiring the write
+    /// lock. Callers must already hold the per-root lock; `create_staged`
+    /// writes into a staging directory and `append_features_locked` folds a
+    /// concurrent first save into a plain append.
+    fn create_inner(
+        root: &Path,
+        generation_id: &str,
+        revision_id: &str,
+    ) -> Result<Self, BundleError> {
         let bundle = Self::at(root);
         if bundle.root.exists() {
             return Err(BundleError::Invalid(format!(
@@ -472,10 +505,64 @@ impl Bundle {
             &serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
         )?;
+        // A fresh bundle is a new directory entry: it is only durable once
+        // the containing directory is synced.
+        if let Some(parent) = bundle
+            .root
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            File::open(parent)?.sync_all()?;
+        }
         Ok(bundle)
     }
 
+    /// Stage, validate, and atomically promote a fresh bundle.
+    ///
+    /// Callers must already hold the per-root write lock. The empty baseline
+    /// is written into a staging directory, validated as a sealed
+    /// generation, and only then promoted into the canonical root, so a
+    /// crash or I/O failure mid-creation never leaves a partial canonical
+    /// root that a later save would treat as the current source.
+    fn create_staged(
+        root: &Path,
+        generation_id: &str,
+        revision_id: &str,
+    ) -> Result<Self, BundleError> {
+        let bundle = Self::at(root);
+        if bundle.root.exists() {
+            return Err(BundleError::Invalid(format!(
+                "destination already exists: {}",
+                bundle.root.display()
+            )));
+        }
+        let staging = fresh_staging_path_for_publish(&bundle.root);
+        Self::create_inner(&staging, generation_id, revision_id)?;
+        sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+        Bundle::at(&staging).open_sealed(false)?;
+        publish_staged(&staging, &bundle.root)?;
+        Ok(bundle)
+    }
+
+    /// Open the selected canonical generation, reconciling any interrupted
+    /// rotation first.
+    ///
+    /// Reconciliation mutates the rotation slots (it can rename the retired
+    /// generation back into the previous slot), so it runs under the same
+    /// per-root write lock a publisher holds for the whole read-modify-
+    /// publish cycle. A lock-free reconcile could interleave with a writer
+    /// between `previous → retired` and `destination → previous`, restoring
+    /// the previous slot and failing the writer's replacement. Serializing
+    /// opens with publishes closes that race: a reader never observes a
+    /// half-rotated state, and a writer never sees a foreign `previous`.
     pub fn open(&self) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || self.open_locked())
+    }
+
+    /// The locked body of `open`. Callers must already hold the per-root
+    /// write lock; `append_features_locked`, `load_unlocked`, and the
+    /// migration staging validation call it from inside the lock.
+    fn open_locked(&self) -> Result<LoadedBundle, BundleError> {
         reconcile_interrupted_rotation(&self.root)?;
         match self.open_sealed(false) {
             Ok(loaded) => Ok(loaded),
@@ -574,7 +661,29 @@ impl Bundle {
         if entries.is_empty() {
             return self.open();
         }
-        let mut loaded = self.open()?;
+        // The read-modify-publish cycle is serialized per bundle root so
+        // concurrent writers cannot diverge the Canonical Transaction Log:
+        // every entry is staged from the same sealed base, so log positions
+        // stay unique, predecessor digests chain, and no writer observes a
+        // half-published rotation. The OS releases the lock if the holder
+        // crashes, so an interrupted writer never leaves a stale lock.
+        with_bundle_write_lock(&self.root, || self.append_features_locked(entries))
+    }
+
+    fn append_features_locked(
+        &self,
+        entries: &[(&str, &str)],
+    ) -> Result<LoadedBundle, BundleError> {
+        // A save against a brand-new bundle path creates the sealed empty
+        // generation first, so concurrent first saves serialize into one
+        // bundle instead of racing a create against an append. The baseline
+        // is staged and atomically promoted, so an interrupted first save
+        // never leaves a partial canonical root.
+        let mut loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
+            self.open_locked()?
+        } else {
+            Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
+        };
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
@@ -613,7 +722,7 @@ impl Bundle {
         sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
         Bundle::at(&staging).open_sealed(false)?;
         publish_staged(&staging, &self.root)?;
-        self.open()
+        self.open_locked()
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -642,6 +751,23 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
+    // The whole existence and schema classification runs under the per-root
+    // write lock. A publisher renames the canonical root into the previous
+    // slot mid-publication and promotes staging afterwards, so an unlocked
+    // preflight could observe a missing manifest exactly between those two
+    // renames and fail a load that simply waited for the writer. Serializing
+    // classification with publications makes every load linearize against
+    // them. The root is canonicalized first so a symlink alias and the
+    // target share one lock and one set of recovery siblings.
+    let root = canonical_bundle_root(path);
+    with_bundle_write_lock(&root, || load_unlocked(&root))
+}
+
+/// The lock-free body of `load`. Callers must hold the per-root write lock
+/// whenever the bundle may need mutation (migration or recovery); the
+/// classification is re-made here so a lock holder always acts on the
+/// current on-disk state.
+fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
         let previous = previous_generation_path(root);
@@ -659,10 +785,9 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
                 }),
             };
         }
-        return Err(BundleError::Invalid(format!(
-            "bundle path missing: {}",
-            root.display()
-        )));
+        return Err(BundleError::BundlePathMissing {
+            path: root.to_path_buf(),
+        });
     }
     if !root.is_dir() {
         return Err(BundleError::Invalid(format!(
@@ -672,7 +797,7 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     }
     let status = detect_schema(root)?;
     match status {
-        SchemaStatus::Current => load_v1(root),
+        SchemaStatus::Current => Bundle::at(root).open_locked(),
         SchemaStatus::Prior => load_v0_with_migration(root, false),
         SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
             found: read_schema_version_raw(root).unwrap_or_default(),
@@ -680,10 +805,6 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
             expected_prior: prior_schema_epoch(),
         }),
     }
-}
-
-fn load_v1(path: &Path) -> Result<LoadedBundle, BundleError> {
-    Bundle::at(path).open()
 }
 
 fn read_schema_version_raw(path: &Path) -> Option<String> {
@@ -706,28 +827,34 @@ fn load_v0_with_migration(
     let transactions = v0.transactions.clone();
 
     let backup_path = backup_path_for(path);
-    if let Err(source) = publish_sealed_backup(path, &backup_path) {
-        return Err(BundleError::Backup {
-            path: backup_path,
+    let backup_created =
+        publish_sealed_backup(path, &backup_path).map_err(|source| BundleError::Backup {
+            path: backup_path.clone(),
             source,
-        });
-    }
+        })?;
 
-    let staging = staging_path_for_migration(path);
+    let staging = fresh_staging_path_for_migration(path);
     if let Err(error) = write_v1_into(&staging, &manifest, transactions.as_bytes()) {
         let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&backup_path);
+        // Only artifacts this attempt created are discarded. An
+        // authenticated backup retained from an earlier attempt is a valid
+        // recovery copy and must survive a retry that fails later.
+        if backup_created {
+            let _ = fs::remove_dir_all(&backup_path);
+        }
         return Err(BundleError::Migration {
             source: Box::new(error),
         });
     }
 
-    let validate = Bundle::at(&staging).open();
+    let validate = Bundle::at(&staging).open_locked();
     let validated = match validate {
         Ok(loaded) => loaded,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_dir_all(&backup_path);
+            if backup_created {
+                let _ = fs::remove_dir_all(&backup_path);
+            }
             return Err(BundleError::Migration {
                 source: Box::new(error),
             });
@@ -774,9 +901,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
             destination,
             PublicationFailurePoint::PromoteStaging,
         )?;
-        if let Some(parent) = destination.parent() {
-            sync_directory(parent, PublicationFailurePoint::ParentSync)?;
-        }
+        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
@@ -820,10 +945,21 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // Cleanup is outside the two-generation publication boundary. A failed
     // cleanup is retained for the next publication to reconcile.
     let _ = remove_retired_generation(&retired);
-    if let Some(parent) = destination.parent() {
-        sync_directory(parent, PublicationFailurePoint::ParentSync)?;
-    }
+    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
     Ok(())
+}
+
+/// Sync the directory containing `path` after a generation rename.
+///
+/// A bare relative destination such as `"project"` has an empty `parent()`
+/// component, which `File::open` cannot open; the containing directory is
+/// the current working directory in that case.
+fn sync_parent_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => sync_directory(Path::new("."), point),
+        Some(parent) => sync_directory(parent, point),
+        None => Ok(()),
+    }
 }
 
 fn rename_generation(
@@ -867,11 +1003,66 @@ fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
-    if backup.exists() {
-        return Ok(());
+/// Copy `source` into a sealed backup at `backup`, staging the copy so an
+/// interrupted copy can never leave a partial backup that a later migration
+/// would accept as complete.
+///
+/// A pre-existing backup is retained only when it is a real directory that
+/// authenticates as a v0 bundle belonging to this source; a symlink, a
+/// non-directory, a partial copy, or a foreign generation is replaced from
+/// a fresh staged copy. The staged copy is fully synced (files, directory,
+/// and containing directory) and validated before it is renamed into place.
+/// Returns whether this call created or replaced the backup, so a failed
+/// migration retry can discard only the artifacts it produced and never an
+/// authenticated recovery copy from an earlier attempt.
+fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<bool> {
+    if let Ok(metadata) = fs::symlink_metadata(backup) {
+        // `symlink_metadata` does not follow the entry: a symlinked backup
+        // slot must never be treated as the recovery copy, and it must not
+        // be written through.
+        let authentic_source_copy = !metadata.file_type().is_symlink()
+            && metadata.is_dir()
+            && match (read_v0(backup), read_v0(source)) {
+                (Ok(backup_v0), Ok(source_v0)) => {
+                    backup_v0.manifest.generation_id == source_v0.manifest.generation_id
+                        && backup_v0.manifest.revision_id == source_v0.manifest.revision_id
+                }
+                _ => false,
+            };
+        if authentic_source_copy {
+            return Ok(false);
+        }
+        // `remove_dir_all` removes a symlink entry itself; it never writes
+        // through it.
+        fs::remove_dir_all(backup)?;
     }
-    copy_dir_recursive(source, backup)
+    let staging = fresh_backup_staging_path(backup);
+    let _ = fs::remove_dir_all(&staging);
+    copy_dir_recursive(source, &staging)?;
+    if read_v0(&staging).is_err() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(std::io::Error::other(
+            "staged migration backup does not authenticate",
+        ));
+    }
+    File::open(&staging)?.sync_all()?;
+    if let Some(parent) = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    fs::rename(&staging, backup)?;
+    if let Some(parent) = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(true)
+}
+fn fresh_backup_staging_path(backup: &Path) -> PathBuf {
+    sibling_path_with_suffix(backup, &format!(".backup-tmp-{}", std::process::id()))
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -903,57 +1094,166 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
 }
 
 fn staging_path_for_migration(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    let suffix = format!(".migrate-tmp-{}", std::process::id());
-    staging.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".migrate-tmp-{}", std::process::id()))
+}
+
+/// Select an absent migration staging candidate.
+///
+/// A pre-existing entry at the deterministic candidate — a stale directory
+/// from an interrupted migration or a planted symlink — is skipped rather
+/// than reused: `write_v1_into` would otherwise follow a symlink and the
+/// final publish would rename the symlink itself into the canonical root.
+fn fresh_staging_path_for_migration(path: &Path) -> PathBuf {
+    let base = staging_path_for_migration(path);
+    if !path_entry_exists(&base) {
+        return base;
+    }
+    loop {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = sibling_path_with_suffix(
+            path,
+            &format!(".migrate-tmp-{}-{sequence}", std::process::id()),
+        );
+        if !path_entry_exists(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+/// Whether any filesystem entry (including a dangling symlink) exists at
+/// `path`.
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn staging_path_for_publish(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    staging.set_file_name(format!(
-        "{}.publish-tmp-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".publish-tmp-{}", std::process::id()))
 }
 
 fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
     let staging = staging_path_for_publish(path);
-    if !staging.exists() {
+    if !path_entry_exists(&staging) {
         return staging;
     }
-    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut fresh = staging.clone();
-    fresh.set_file_name(format!(
-        "{}-{sequence}",
-        staging.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    fresh
+    // A process restart can leave both the PID-based candidate and earlier
+    // sequence candidates on disk, and a dangling symlink at a candidate
+    // occupies its entry even though it points nowhere. Keep advancing
+    // until an actually absent entry is found, so an interrupted save can
+    // never block the next one on a stale path.
+    loop {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let fresh = sibling_path_with_suffix(
+            path,
+            &format!(".publish-tmp-{}-{sequence}", std::process::id()),
+        );
+        if !path_entry_exists(&fresh) {
+            return fresh;
+        }
+    }
 }
 
-fn previous_generation_path(path: &Path) -> PathBuf {
-    let mut previous = path.to_path_buf();
-    previous.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        PREVIOUS_GENERATION_SUFFIX
-    ));
-    previous
+/// The sibling path that retains the immediately preceding valid generation
+/// of the bundle at `path`.
+///
+/// Built from the raw `OsStr` bytes so a non-UTF-8 bundle name still gets a
+/// real, distinct sibling slot.
+pub fn previous_generation_path(path: &Path) -> PathBuf {
+    sibling_path_with_suffix(path, PREVIOUS_GENERATION_SUFFIX)
+}
+
+/// Resolve `path` to one canonical identity for locking and recovery.
+///
+/// An existing root is canonicalized so symlink aliases of the same bundle
+/// share one lock and one set of sibling slots. A missing root cannot be
+/// canonicalized; its parent is canonicalized instead and the file name is
+/// re-joined, which converges with the full canonicalization once the root
+/// exists (unless the root name itself is a dangling symlink).
+fn canonical_bundle_root(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && let Some(file_name) = path.file_name()
+        && let Ok(canonical_parent) = fs::canonicalize(parent)
+    {
+        return canonical_parent.join(file_name);
+    }
+    path.to_path_buf()
+}
+
+/// Append `suffix` to `path`'s file name, preserving the raw `OsStr` bytes.
+///
+/// Deriving sibling names through `to_string_lossy()` would map a non-UTF-8
+/// bundle name and a UTF-8 name containing U+FFFD onto the same sibling
+/// path, so two distinct roots could share a staging, previous, retired, or
+/// backup slot and race each other.
+fn sibling_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut sibling = path.to_path_buf();
+    if let Some(file_name) = path.file_name() {
+        let mut name = file_name.to_os_string();
+        name.push(suffix);
+        sibling.set_file_name(name);
+    }
+    sibling
+}
+
+/// Serialize a mutation of `root` against every other writer of the same
+/// bundle, in this process and across processes.
+///
+/// The lock identity is the bundle's containing directory, opened and
+/// flocked as a directory descriptor. Generation rotation renames only the
+/// bundle root and its siblings, never the containing directory, so the
+/// locked identity cannot be replaced while it is held: there is no
+/// pathname window in which a second writer could lock a different inode.
+/// Aliases of one bundle resolve to the same canonical directory through
+/// `canonical_bundle_root`, and writers of different bundles in the same
+/// directory serialize on the same lock. If the holder dies, the OS
+/// releases the lock, so a crashed writer cannot strand subsequent saves.
+///
+/// Pure reads (`open_sealed`) stay lock-free by design. `Bundle::open`
+/// takes the same lock because its interrupted-rotation reconciliation
+/// mutates the rotation slots and must never interleave with a publisher's
+/// `previous → retired → destination → previous → staging → destination`
+/// sequence.
+fn with_bundle_write_lock<T>(
+    root: &Path,
+    operation: impl FnOnce() -> Result<T, BundleError>,
+) -> Result<T, BundleError> {
+    let lock_directory = lock_directory_for(root)?;
+    let lock_descriptor = File::open(&lock_directory)?;
+    lock_descriptor.lock().map_err(|error| {
+        BundleError::Io(format!(
+            "failed to lock {}: {error}",
+            lock_directory.display()
+        ))
+    })?;
+    let result = operation();
+    let _ = lock_descriptor.unlock();
+    result
+}
+
+/// The canonical containing directory whose descriptor is the per-bundle
+/// write lock.
+///
+/// An empty parent (a bare relative root) resolves to the current working
+/// directory, so every writer of that bundle locks the same inode.
+fn lock_directory_for(root: &Path) -> Result<PathBuf, BundleError> {
+    match root.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => {
+            Ok(fs::canonicalize(".").map_err(BundleError::from)?)
+        }
+        Some(parent) => {
+            fs::create_dir_all(parent)?;
+            Ok(fs::canonicalize(parent).map_err(BundleError::from)?)
+        }
+        None => Ok(fs::canonicalize(".").map_err(BundleError::from)?),
+    }
 }
 
 fn retired_generation_path(path: &Path) -> PathBuf {
-    let mut retired = path.to_path_buf();
-    retired.set_file_name(format!(
-        "{}.retired-generation",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    retired
+    sibling_path_with_suffix(path, ".retired-generation")
 }
 
 fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError> {
@@ -964,9 +1264,18 @@ fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError>
         // canonical generation. Restore the recognized previous slot before
         // allowing either reads or another publication to proceed.
         Bundle::at(&retired).open_sealed(false)?;
-        fs::rename(retired, previous)?;
+        match fs::rename(&retired, previous) {
+            Ok(()) => Ok(()),
+            // A concurrent reconciler restored the slot first, or a
+            // concurrent publisher drained the retired generation; the
+            // selected generation is unchanged, so the restore is
+            // idempotent.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn write_v1_into(
@@ -985,14 +1294,15 @@ fn write_v1_into(
 }
 
 fn backup_path_for(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    name.push_str(PRE_MIGRATION_BACKUP_SUFFIX);
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
-        _ => PathBuf::from(name),
+    let name = path.file_name().map(|name| {
+        let mut name = name.to_os_string();
+        name.push(PRE_MIGRATION_BACKUP_SUFFIX);
+        name
+    });
+    match (path.parent(), name) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent.join(name),
+        (_, Some(name)) => PathBuf::from(name),
+        (_, None) => PathBuf::from(PRE_MIGRATION_BACKUP_SUFFIX),
     }
 }
 
@@ -1072,9 +1382,24 @@ fn unknown_field_in(message: &str) -> Option<String> {
 }
 
 fn is_pre_migration_backup_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(PRE_MIGRATION_BACKUP_SUFFIX))
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    // Compare the suffix losslessly so a non-UTF-8 backup sibling is still
+    // recognized and never treated as a migratable v0 source.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        file_name
+            .as_bytes()
+            .ends_with(PRE_MIGRATION_BACKUP_SUFFIX.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        file_name
+            .to_string_lossy()
+            .ends_with(PRE_MIGRATION_BACKUP_SUFFIX)
+    }
 }
 
 /// Authenticate and read a v0 bundle on disk. Mirrors the v1 reader's
@@ -1211,14 +1536,7 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
 }
 
 fn staging_path(path: &Path) -> PathBuf {
-    let mut staging = path.to_path_buf();
-    let suffix = format!(".tmp-{}", std::process::id());
-    staging.set_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    staging
+    sibling_path_with_suffix(path, &format!(".tmp-{}", std::process::id()))
 }
 
 fn read_required(path: &Path, missing: BundleError) -> Result<Vec<u8>, BundleError> {

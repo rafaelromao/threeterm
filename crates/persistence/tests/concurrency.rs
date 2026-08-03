@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use threeterm_domain::ProjectGeneration;
-use threeterm_persistence::PREVIOUS_GENERATION_SUFFIX;
 use threeterm_persistence::bundle::{
     Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, PublicationFailurePoint,
     TRANSACTIONS_LOG_FILENAME, fail_next_publication_at, load, write_v0_fixture,
 };
+use threeterm_persistence::{PREVIOUS_GENERATION_SUFFIX, WRITE_LOCK_SUFFIX};
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -258,6 +258,188 @@ fn concurrent_opens_reconcile_the_crash_state_idempotently() {
     );
 
     let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[test]
+fn reader_reconcile_waits_for_the_writer_lock() {
+    let root = unique_temp_dir("reader-writer-lock");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first publish");
+    bundle
+        .append_feature("box-2", "box")
+        .expect("second publish");
+    let previous = previous_generation_sibling(&root);
+    let retired = {
+        let mut retired = previous.clone();
+        retired.set_file_name(format!(
+            "{}.retired-generation",
+            previous.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        retired
+    };
+    let preceding_manifest =
+        fs::read(previous.join(MANIFEST_FILENAME)).expect("preceding manifest reads");
+    let preceding_log =
+        fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).expect("preceding log reads");
+    let current_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("current manifest reads");
+    let current_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("current log reads");
+    fs::rename(&previous, &retired).expect("simulates the mid-rotation crash state");
+
+    // The test plays the writer: it holds the per-root write lock while the
+    // rotation is between `previous → retired` and `destination → previous`,
+    // the exact state in which a lock-free reconciler would restore the
+    // previous slot and fail the writer's replacement.
+    let mut lock_path = root.clone();
+    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
+    lock_name.push(WRITE_LOCK_SUFFIX);
+    lock_path.set_file_name(lock_name);
+    let lock_file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("lock file opens");
+    lock_file.lock().expect("writer lock is exclusive");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reader_root = root.clone();
+    let reader = std::thread::spawn(move || {
+        started_tx.send(()).expect("started signal sends");
+        let result = Bundle::at(&reader_root).open();
+        done_tx.send(()).expect("completion signal sends");
+        result
+    });
+    started_rx
+        .recv()
+        .expect("reader thread is running before the writer completes");
+
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "a reader's reconcile must block while the writer holds the lock"
+    );
+
+    lock_file.unlock().expect("writer releases the lock");
+    let loaded = reader
+        .join()
+        .expect("reader completes after the writer")
+        .expect("reader open succeeds");
+    assert_eq!(
+        loaded.log.len(),
+        2,
+        "the reader opens the selected canonical generation"
+    );
+    assert_eq!(
+        fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+        preceding_manifest,
+        "the restored previous slot carries the preceding generation byte-for-byte"
+    );
+    assert_eq!(
+        fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+        preceding_log
+    );
+
+    bundle
+        .append_feature("box-3", "box")
+        .expect("a writer after the reader serializes normally");
+    let reopened = bundle.open().expect("bundle opens");
+    assert_eq!(reopened.log.len(), 3);
+    let entries = reopened.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+    assert_eq!(
+        fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+        current_manifest,
+        "the preceding generation survives the writer's rotation"
+    );
+    assert_eq!(
+        fs::read(previous.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+        current_log
+    );
+    assert!(
+        !retired.exists(),
+        "no retired slot survives a completed rotation"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_appends_serialize_for_non_utf8_bundle_names() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent = unique_temp_dir("non-utf8");
+    let root = parent.join(std::ffi::OsString::from_vec(b"bundle-\xff\xfe".to_vec()));
+    let bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates"),
+    );
+
+    const THREADS: usize = 8;
+    const APPENDS_PER_THREAD: usize = 4;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let bundle = bundle.clone();
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            for i in 0..APPENDS_PER_THREAD {
+                bundle
+                    .append_feature(&format!("box-{thread}-{i}"), "box")
+                    .expect("concurrent append on a non-UTF-8 bundle serializes");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("append thread completes");
+    }
+
+    let loaded = bundle.open().expect("non-UTF-8 bundle reopens");
+    assert_eq!(
+        loaded.log.len(),
+        THREADS * APPENDS_PER_THREAD,
+        "a non-UTF-8 bundle name still serializes concurrent appends"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+    let mut previous = root.clone();
+    let mut previous_name = root
+        .file_name()
+        .expect("non-UTF-8 root has a name")
+        .to_os_string();
+    previous_name.push(PREVIOUS_GENERATION_SUFFIX);
+    previous.set_file_name(previous_name);
     let _ = fs::remove_dir_all(previous);
 }
 

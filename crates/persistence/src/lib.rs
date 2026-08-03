@@ -499,7 +499,25 @@ impl Bundle {
         Ok(bundle)
     }
 
+    /// Open the selected canonical generation, reconciling any interrupted
+    /// rotation first.
+    ///
+    /// Reconciliation mutates the rotation slots (it can rename the retired
+    /// generation back into the previous slot), so it runs under the same
+    /// per-root write lock a publisher holds for the whole read-modify-
+    /// publish cycle. A lock-free reconcile could interleave with a writer
+    /// between `previous → retired` and `destination → previous`, restoring
+    /// the previous slot and failing the writer's replacement. Serializing
+    /// opens with publishes closes that race: a reader never observes a
+    /// half-rotated state, and a writer never sees a foreign `previous`.
     pub fn open(&self) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || self.open_locked())
+    }
+
+    /// The locked body of `open`. Callers must already hold the per-root
+    /// write lock; `append_features_locked`, `load_unlocked`, and the
+    /// migration staging validation call it from inside the lock.
+    fn open_locked(&self) -> Result<LoadedBundle, BundleError> {
         reconcile_interrupted_rotation(&self.root)?;
         match self.open_sealed(false) {
             Ok(loaded) => Ok(loaded),
@@ -615,9 +633,9 @@ impl Bundle {
         // generation first, so concurrent first saves serialize into one
         // bundle instead of racing a create against an append.
         let mut loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
-            self.open()?
+            self.open_locked()?
         } else {
-            Self::create_inner(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open()?
+            Self::create_inner(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
@@ -657,7 +675,7 @@ impl Bundle {
         sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
         Bundle::at(&staging).open_sealed(false)?;
         publish_staged(&staging, &self.root)?;
-        self.open()
+        self.open_locked()
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -755,7 +773,7 @@ fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
     }
     let status = detect_schema(root)?;
     match status {
-        SchemaStatus::Current => load_v1(root),
+        SchemaStatus::Current => Bundle::at(root).open_locked(),
         SchemaStatus::Prior => load_v0_with_migration(root, false),
         SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
             found: read_schema_version_raw(root).unwrap_or_default(),
@@ -805,7 +823,7 @@ fn load_v0_with_migration(
         });
     }
 
-    let validate = Bundle::at(&staging).open();
+    let validate = Bundle::at(&staging).open_locked();
     let validated = match validate {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -1039,14 +1057,23 @@ fn previous_generation_path(path: &Path) -> PathBuf {
 /// publication. If the holder dies, the OS releases the lock, so a crashed
 /// writer cannot strand subsequent saves.
 ///
-/// Reads (`Bundle::open`) stay lock-free by design: generation rotation is
-/// atomic and the crash-state reconciler is idempotent, so a reader never
-/// blocks a publisher and never observes a half-published manifest.
+/// The lock is derived purely from the root's file name as an `OsString`,
+/// so it also serializes bundles whose names are not UTF-8; a lock path
+/// built from `to_str()` would silently skip locking and let concurrent
+/// writers fork the Canonical Transaction Log.
+///
+/// Pure reads (`open_sealed`) stay lock-free by design. `Bundle::open`
+/// takes the same lock because its interrupted-rotation reconciliation
+/// mutates the rotation slots and must never interleave with a publisher's
+/// `previous → retired → destination → previous → staging → destination`
+/// sequence.
 fn with_bundle_write_lock<T>(
     root: &Path,
     operation: impl FnOnce() -> Result<T, BundleError>,
 ) -> Result<T, BundleError> {
     let Some(lock_path) = write_lock_path(root) else {
+        // Only a root with no name at all (e.g. the filesystem root) has no
+        // derivable sibling lock path; such a path cannot be a bundle.
         return operation();
     };
     if let Some(parent) = lock_path
@@ -1065,12 +1092,17 @@ fn with_bundle_write_lock<T>(
 }
 
 fn write_lock_path(root: &Path) -> Option<PathBuf> {
-    let name = root.file_name()?.to_str()?;
-    if name.is_empty() {
+    let file_name = root.file_name()?;
+    if file_name.is_empty() {
         return None;
     }
+    // Built from the raw `OsStr` so a non-UTF-8 bundle name still gets a
+    // real sibling lock file; converting to `str` here would silently
+    // disable serialization for such bundles.
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(WRITE_LOCK_SUFFIX);
     let mut lock = root.to_path_buf();
-    lock.set_file_name(format!("{name}{WRITE_LOCK_SUFFIX}"));
+    lock.set_file_name(lock_name);
     Some(lock)
 }
 

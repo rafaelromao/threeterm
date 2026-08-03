@@ -301,3 +301,72 @@ fn typed_extrude_with_cancel_force_terminates_an_uncooperative_worker() {
         other => panic!("expected Supervised; got {other:?}"),
     }
 }
+
+#[test]
+fn typed_extrude_fails_closed_on_staged_digest_mismatch() {
+    // The worker advertises one SHA-256 but the staged file contains
+    // different bytes; the typed boundary must fail closed instead of
+    // trusting the advertisement.
+    let dir = FixtureDir::new("digest-mismatch");
+    let staged = dir.root.join("out.brep");
+    std::fs::write(&staged, b"actual worker bytes").expect("staged file writes");
+    let actual = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"{advertised}\",\"brep_bytes\":19,\"feature_id\":\"box-1\"}}}}'\n",
+            path = staged.display(),
+            advertised = {
+                let mut fake = actual.clone();
+                if fake.ends_with('0') { fake.pop(); fake.push('1'); } else { fake.pop(); fake.push('0'); }
+                fake
+            },
+        ),
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("digest mismatch must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("digest mismatch"),
+                "detail must name the digest mismatch; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_fails_closed_on_non_regular_staged_file() {
+    // A worker pointing its output at a directory (not a regular file)
+    // must fail closed: only regular files can be promoted.
+    let dir = FixtureDir::new("non-regular");
+    let staged = dir.root.join("out.brep");
+    std::fs::create_dir_all(&staged).expect("directory staged as output");
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"brep_bytes\":0,\"feature_id\":\"box-1\"}}}}'\n",
+            path = staged.display()
+        ),
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("non-regular staged output must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("not a regular file"),
+                "detail must name the file identity; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}

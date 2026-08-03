@@ -349,50 +349,11 @@ impl OcctWorker {
     }
 
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
-        // The OCCT envelope carries its own request_id (the protocol
-        // binds every message to it), so extract it for the supervisor.
-        let args: serde_json::Value =
-            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
-                detail: format!("request serialization failed: {error}"),
-            })?;
-        let request_id = args
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if request_id.is_empty() {
-            return Err(WorkerError::Malformed {
-                detail: "request envelope is missing request_id".to_string(),
-            });
-        }
-        let command_id = args
-            .get("operation")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if command_id.is_empty() {
-            return Err(WorkerError::Malformed {
-                detail: "request envelope is missing operation".to_string(),
-            });
-        }
-
-        let host = <Self as WorkerProcess>::spawn(WorkerConfig {
-            worker_id: "occt",
-            schema_version: threeterm_protocol::schema_version(),
-            command_line: vec![self.binary_path.display().to_string()],
-        })
-        .map_err(|error| WorkerError::Spawn {
-            binary: self.binary_path.clone(),
-            detail: error.to_string(),
-        })?;
-        let mut supervisor = Supervisor::new(self.grace, host, None);
-        let outcome = supervisor.request(SupervisorRequest {
-            request_id,
-            command_id,
-            args,
-            revision_id: String::new(),
-        });
-        map_outcome(outcome)
+        // Every production operation flows through the same cancellable
+        // supervised path; the synchronous variants carry a never-set
+        // token, so the deadline expiry remains the hard stop.
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        self.invoke_with_cancel(envelope, &cancel)
     }
 
     /// Run `envelope` through the supervised lifecycle with a
@@ -491,6 +452,16 @@ fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
     }
 }
 
+/// Hex SHA-256 of a file's bytes, used to verify the worker's staged
+/// artifact matches its advertised digest.
+pub fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Production `WorkerProcess` wiring: spawns the OCCT binary in its own
 /// process group with piped standard streams so the supervisor owns a
 /// contained, reapable process tree.
@@ -556,6 +527,47 @@ impl RawResult {
                     "worker staged output of {largest} bytes (advertised {brep_bytes}) exceeds the {bound} byte bound"
                 ),
             });
+        }
+        // Verify the staged file is a regular file whose SHA-256 digest
+        // matches the worker's advertisement. A non-regular file (or a
+        // digest mismatch) fails closed so a path/file TOCTOU or a
+        // tampered artifact can never reach the host's promotion path.
+        if let Some(path) = brep_path.as_deref() {
+            match std::fs::metadata(path) {
+                Ok(metadata) => {
+                    if !metadata.is_file() {
+                        return Err(WorkerError::Malformed {
+                            detail: format!("worker output at {path:?} is not a regular file"),
+                        });
+                    }
+                    let advertised = value.get("brep_sha256").and_then(serde_json::Value::as_str);
+                    if let Some(advertised) = advertised {
+                        let actual =
+                            crate::sha256_file(path).map_err(|error| WorkerError::Malformed {
+                                detail: format!(
+                                    "worker output at {path:?} could not be read: {error}"
+                                ),
+                            })?;
+                        if actual != advertised {
+                            return Err(WorkerError::Malformed {
+                                detail: format!(
+                                    "worker output at {path:?} digest mismatch: advertised {advertised}, actual {actual}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // A staged path that does not exist cannot be
+                    // verified; the size bound above already failed
+                    // closed on the advertised metadata.
+                }
+                Err(error) => {
+                    return Err(WorkerError::Malformed {
+                        detail: format!("worker output at {path:?} could not be stat'd: {error}"),
+                    });
+                }
+            }
         }
         serde_json::from_value::<T>(value).map_err(|error| WorkerError::Malformed {
             detail: format!("worker response could not be parsed: {error}"),
@@ -1079,6 +1091,7 @@ mod tests {
                 last_progress: None,
                 last_artifact_error: None,
                 exit_signal: None,
+                exit_code: None,
                 stderr_tail: String::new(),
                 failed_code: Some("brep_invalid".to_string()),
                 failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
@@ -1107,6 +1120,7 @@ mod tests {
                 last_progress: None,
                 last_artifact_error: None,
                 exit_signal: Some(11),
+                exit_code: None,
                 stderr_tail: String::new(),
                 failed_code: None,
                 failed_detail: None,
@@ -1135,6 +1149,7 @@ mod tests {
                 last_progress: None,
                 last_artifact_error: None,
                 exit_signal: Some(9),
+                exit_code: None,
                 stderr_tail: String::new(),
                 failed_code: None,
                 failed_detail: None,
@@ -1159,6 +1174,7 @@ mod tests {
                 last_progress: None,
                 last_artifact_error: None,
                 exit_signal: None,
+                exit_code: None,
                 stderr_tail: "worker trace".to_string(),
                 failed_code: None,
                 failed_detail: None,

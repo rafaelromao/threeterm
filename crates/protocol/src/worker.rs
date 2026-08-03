@@ -228,6 +228,13 @@ pub trait WorkerHost {
         None
     }
 
+    /// Returns the numeric exit code the worker process exited with, if
+    /// it exited by calling `exit(n)` rather than by a signal. `None`
+    /// for a signal exit or before the worker has been reaped.
+    fn exit_code(&mut self) -> Option<i32> {
+        None
+    }
+
     /// Returns the bounded stderr tail captured from the worker, used to
     /// preserve structured diagnostic context on a terminal record.
     /// Bounded transports return the capped tail; fakes return empty.
@@ -553,6 +560,10 @@ impl WorkerHost for SubprocessWorkerHost {
     fn exit_signal(&mut self) -> Option<i32> {
         use std::os::unix::process::ExitStatusExt;
         self.reaped_status.and_then(|status| status.signal())
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        self.reaped_status.and_then(|status| status.code())
     }
 
     fn stderr_tail(&mut self) -> String {

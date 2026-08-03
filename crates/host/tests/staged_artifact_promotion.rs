@@ -358,6 +358,7 @@ fn host_accepts_completed_worker_result_before_publishing() {
     };
     let outcome = SupervisorOutcome::Completed {
         request_id: request.request_id.clone(),
+        result: serde_json::json!({ "ok": true }),
         artifact_headers: vec![StagedArtifact {
             schema_version,
             header: *header,
@@ -547,13 +548,30 @@ fn misbound_artifact_headers_are_rejected_without_host_mutation() {
             _ => unreachable!(),
         }
 
+        // The compliant supervisor already rejects a misbound
+        // request_id upstream (see worker_round_trip), so the host's own
+        // guard is exercised directly with the misbound outcome.
+        let outcome = if case == "wrong_request" {
+            let Envelope::Artifact {
+                schema_version,
+                header,
+            } = emitted
+            else {
+                unreachable!("worker emits an artifact envelope");
+            };
+            SupervisorOutcome::Completed {
+                request_id: request.request_id.clone(),
+                result: serde_json::json!({ "ok": true }),
+                artifact_headers: vec![StagedArtifact {
+                    schema_version,
+                    header: *header,
+                }],
+            }
+        } else {
+            completed_outcome(&artifact_root, &request, wire_round_trip(&emitted))
+        };
         let diagnostic = host
-            .accept_derived_result(
-                &artifact_root,
-                &request,
-                &worker_fingerprint(),
-                completed_outcome(&artifact_root, &request, wire_round_trip(&emitted)),
-            )
+            .accept_derived_result(&artifact_root, &request, &worker_fingerprint(), outcome)
             .expect_err("misbound artifact is rejected");
 
         assert_eq!(diagnostic.code, expected_code, "case {case}");

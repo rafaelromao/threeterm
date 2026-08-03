@@ -406,6 +406,7 @@ impl Host {
         let root = artifact_root.as_ref();
         let SupervisorOutcome::Completed {
             request_id,
+            result: _,
             mut artifact_headers,
         } = outcome
         else {

@@ -246,6 +246,7 @@ fn request_consumes_worker_ready_handshake_then_returns_staged_facts() {
     let SupervisorOutcome::Completed {
         request_id,
         artifact_headers,
+        ..
     } = outcome
     else {
         panic!("expected Completed; got {outcome:?}");
@@ -471,6 +472,10 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
         elapsed,
         last_progress,
         last_artifact_error,
+        exit_signal,
+        stderr_tail,
+        failed_code,
+        failed_detail,
         exit_kind,
     } = match outcome {
         SupervisorOutcome::ForceTerminated { record } => record,
@@ -478,6 +483,10 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
     };
 
     assert_eq!(request_id, "<handshake>");
+    assert_eq!(exit_signal, None);
+    assert_eq!(stderr_tail, "");
+    assert_eq!(failed_code, None);
+    assert_eq!(failed_detail, None);
     assert_eq!(exit_kind, ExitKind::ForceAfterGrace);
     assert!(last_progress.is_none());
     assert!(last_artifact_error.is_none());
@@ -648,5 +657,201 @@ fn request_rejects_an_artifact_bound_to_another_revision() {
     assert_eq!(artifact_headers.len(), 1);
     assert!(staging_root.join("sketch-1.brep.partial").exists());
     assert!(!staging_root.join("sketch-1.brep").exists());
+    let _ = std::fs::remove_dir_all(staging_root);
+}
+
+/// Wraps a `PipeHost` and reports a scripted exit signal and stderr
+/// tail, simulating a worker that was killed by a signal while emitting
+/// diagnostics.
+struct SignalReportingWorker {
+    inner: PipeHost,
+    signal: Option<i32>,
+    stderr: String,
+}
+
+impl SignalReportingWorker {
+    fn new(script: Vec<Envelope>, signal: Option<i32>, stderr: &str) -> Self {
+        Self {
+            inner: PipeHost::new(script),
+            signal,
+            stderr: stderr.to_string(),
+        }
+    }
+}
+
+impl WorkerHost for SignalReportingWorker {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.inner.send(envelope)
+    }
+
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.inner.cancel(request_id, reason)
+    }
+
+    fn exit_signal(&mut self) -> Option<i32> {
+        self.signal
+    }
+
+    fn stderr_tail(&mut self) -> String {
+        self.stderr.clone()
+    }
+}
+
+#[test]
+fn completed_carries_the_worker_result_value() {
+    // The Completed envelope's `result` value must survive the
+    // supervisor so the typed OCCT boundary can parse it.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "status": "ok", "brep_path": "/tmp/out.brep" }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::Completed { result, .. } = supervisor.request(sample_request()) else {
+        panic!("expected Completed; got a terminal failure");
+    };
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["brep_path"], "/tmp/out.brep");
+}
+
+#[test]
+fn termination_record_carries_exit_signal_and_stderr_tail() {
+    // A worker killed by a signal (e.g. SIGKILL after force termination)
+    // must surface the actual signal and its bounded stderr tail in the
+    // structured record.
+    let worker = SignalReportingWorker::new(
+        vec![
+            ready_envelope(),
+            Envelope::Progress {
+                schema_version: schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                stage: "computing".to_string(),
+                percent: 50,
+            },
+        ],
+        Some(9),
+        "worker trace: overflow\n",
+    );
+    let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.exit_signal, Some(9));
+    assert_eq!(record.stderr_tail, "worker trace: overflow\n");
+    assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+}
+
+#[test]
+fn failed_envelope_populates_structured_failure_fields() {
+    // A cooperative Failed envelope must surface code and detail
+    // structurally instead of relying on the free-form stage string.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Failed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            code: "brep_invalid".to_string(),
+            detail: "BRepCheck_Analyzer failed".to_string(),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.exit_kind, ExitKind::Cooperative);
+    assert_eq!(record.failed_code.as_deref(), Some("brep_invalid"));
+    assert_eq!(
+        record.failed_detail.as_deref(),
+        Some("BRepCheck_Analyzer failed")
+    );
+    assert!(
+        record.stage.starts_with("failed:"),
+        "stage: {:?}",
+        record.stage
+    );
+}
+
+#[test]
+fn progress_bound_to_another_request_is_rejected() {
+    // A Progress envelope for a foreign request must not be accepted as
+    // progress for the active request; it is a protocol violation.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Progress {
+            schema_version: schema_version().to_string(),
+            request_id: "other-request".to_string(),
+            stage: "sneaky".to_string(),
+            percent: 99,
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    let progress = record
+        .last_progress
+        .expect("mismatched progress must surface as a protocol violation");
+    assert!(
+        progress
+            .stage
+            .starts_with("protocol_violation:mismatched_request_id:"),
+        "stage: {:?}",
+        progress.stage
+    );
+}
+
+#[test]
+fn artifact_bound_to_another_request_is_rejected() {
+    // An Artifact envelope whose header names a foreign request must not
+    // be recorded as a staged artifact for the active request.
+    let staging_root = std::env::temp_dir().join(format!(
+        "threeterm-pipe-stage-foreign-request-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging_root);
+    let stage = Stage::open(&staging_root).expect("stage opens");
+
+    let bytes = b"foreign worker bytes";
+    let mut header = artifact_header(&staging_root, bytes, sha256_hex(bytes));
+    header.request_id = "other-request".to_string();
+    // The worker sends only the mismatched artifact and never completes;
+    // the violation must surface and the grace period must terminate it.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Artifact {
+            schema_version: schema_version().to_string(),
+            header,
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), Some(stage));
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    let progress = record
+        .last_progress
+        .expect("mismatched artifact must surface as a protocol violation");
+    assert!(
+        progress
+            .stage
+            .starts_with("protocol_violation:mismatched_request_id:"),
+        "stage: {:?}",
+        progress.stage
+    );
+    assert!(
+        !staging_root.join("sketch-1.brep.partial").exists(),
+        "the foreign artifact must never be staged"
+    );
     let _ = std::fs::remove_dir_all(staging_root);
 }

@@ -33,11 +33,14 @@ pub struct Request {
 /// Outcome of a single `Supervisor::request` / `Supervisor::cancel` invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorOutcome {
-    /// The worker completed a request. The headers describe files that remain
-    /// staged; the Host is solely responsible for accepting and publishing
-    /// them against its current Revision Snapshot.
+    /// The worker completed a request. `result` is the worker's typed
+    /// completion value; `artifact_headers` describe files that remain
+    /// staged. The Host is solely responsible for accepting and
+    /// publishing staged artifacts against its current Revision
+    /// Snapshot.
     Completed {
         request_id: String,
+        result: Value,
         artifact_headers: Vec<StagedArtifact>,
     },
     /// The worker acknowledged the cooperative cancellation inside the
@@ -79,7 +82,35 @@ pub struct TerminationRecord {
     /// sees them (closed issue #237 AC: "Failures produce structured
     /// diagnostics and preserve the canonical host state").
     pub last_artifact_error: Option<String>,
+    /// The actual Linux signal the worker exited by, when it did not
+    /// exit cleanly (crash, forced kill). `None` for a normal exit.
+    pub exit_signal: Option<i32>,
+    /// Bounded tail of the worker's stderr, preserved so the diagnostic
+    /// surface keeps structured context on failure.
+    pub stderr_tail: String,
+    /// Stable failure identifier from a cooperative `Failed` envelope,
+    /// surfaced structurally instead of only inside the free-form
+    /// `stage` string.
+    pub failed_code: Option<String>,
+    /// Offending detail from a cooperative `Failed` envelope.
+    pub failed_detail: Option<String>,
     pub exit_kind: ExitKind,
+}
+
+/// Structured fields carried by a cooperative `Failed` envelope.
+#[derive(Debug, Clone, PartialEq)]
+struct FailedFields {
+    code: String,
+    detail: String,
+}
+
+/// Diagnostic context accumulated during a request lifecycle, threaded
+/// into every terminal record.
+#[derive(Debug, Clone, PartialEq)]
+struct TerminationContext {
+    last_progress: Option<Progress>,
+    last_artifact_error: Option<String>,
+    failed: Option<FailedFields>,
 }
 
 /// Worker exit category. `Cooperative` is reserved for a worker-emitted
@@ -190,15 +221,19 @@ impl Supervisor {
                     } else {
                         self.discard_stage();
                         if let Err(error) = self.host.terminate() {
+                            let context = TerminationContext {
+                                last_progress: None,
+                                last_artifact_error: self.last_artifact_error.take(),
+                                failed: None,
+                            };
                             return SupervisorOutcome::ForceTerminated {
-                                record: TerminationRecord {
-                                    request_id: ack_request_id,
-                                    stage: format!("cancel_reap_failed:{error}"),
-                                    elapsed: started.elapsed(),
-                                    last_progress: None,
-                                    last_artifact_error: self.last_artifact_error.take(),
-                                    exit_kind: ExitKind::ForceAfterGrace,
-                                },
+                                record: self.termination_record(
+                                    ack_request_id,
+                                    format!("cancel_reap_failed:{error}"),
+                                    started,
+                                    context,
+                                    ExitKind::ForceAfterGrace,
+                                ),
                             };
                         }
                         return SupervisorOutcome::Acknowledged {
@@ -304,14 +339,38 @@ impl Supervisor {
 
         loop {
             match self.host.recv(deadline) {
-                Ok(Envelope::Progress { stage, percent, .. }) => {
-                    last_progress = Some(Progress { stage, percent });
+                Ok(Envelope::Progress {
+                    request_id: progress_request_id,
+                    stage,
+                    percent,
+                    ..
+                }) => {
+                    if progress_request_id != request.request_id {
+                        last_progress = Some(Progress {
+                            stage: format!(
+                                "protocol_violation:mismatched_request_id:{progress_request_id}"
+                            ),
+                            percent: 0,
+                        });
+                    } else {
+                        last_progress = Some(Progress { stage, percent });
+                    }
                 }
                 Ok(Envelope::Artifact {
                     schema_version,
                     header,
                 }) => {
-                    self.record_artifact(schema_version, *header, &request);
+                    if header.request_id != request.request_id {
+                        last_progress = Some(Progress {
+                            stage: format!(
+                                "protocol_violation:mismatched_request_id:{}",
+                                header.request_id
+                            ),
+                            percent: 0,
+                        });
+                    } else {
+                        self.record_artifact(schema_version, *header, &request);
+                    }
                 }
                 // An unsolicited Cancelled envelope during the request
                 // lifecycle is a protocol violation: `request()` never
@@ -331,9 +390,12 @@ impl Supervisor {
                         percent: 0,
                     });
                 }
-                Ok(Envelope::Completed { request_id, .. }) => {
+                Ok(Envelope::Completed {
+                    request_id, result, ..
+                }) => {
                     return self.complete_with_artifact_facts(
                         request_id,
+                        result,
                         &request,
                         started,
                         last_progress,
@@ -346,13 +408,17 @@ impl Supervisor {
                     ..
                 }) => {
                     self.discard_stage();
-                    let artifact_error = self.last_artifact_error.take();
+                    let stage_label = format!("failed:{code}:{detail}");
+                    let context = TerminationContext {
+                        last_progress,
+                        last_artifact_error: self.last_artifact_error.take(),
+                        failed: Some(FailedFields { code, detail }),
+                    };
                     return self.cooperative_termination_outcome(
                         request_id,
-                        format!("failed:{code}:{detail}"),
+                        stage_label,
                         started,
-                        last_progress,
-                        artifact_error,
+                        context,
                     );
                 }
                 Ok(Envelope::WorkerReady { worker_id, .. }) => {
@@ -504,6 +570,7 @@ impl Supervisor {
     fn complete_with_artifact_facts(
         &mut self,
         request_id: String,
+        result: Value,
         request: &Request,
         started: Instant,
         last_progress: Option<Progress>,
@@ -511,30 +578,38 @@ impl Supervisor {
         if request_id != request.request_id {
             self.last_artifact_error = Some("completed_request_id_mismatch".to_string());
             self.discard_stage();
-            let artifact_error = self.last_artifact_error.take();
+            let context = TerminationContext {
+                last_progress,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
+            };
             return self.cooperative_termination_outcome(
                 request_id,
                 "protocol_violation:completed_request_id_mismatch".to_string(),
                 started,
-                last_progress,
-                artifact_error,
+                context,
             );
         }
         if let Err(error) = self.host.terminate() {
             self.discard_stage();
+            let context = TerminationContext {
+                last_progress,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
+            };
             return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
+                record: self.termination_record(
                     request_id,
-                    stage: format!("completed_reap_failed:{error}"),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: self.last_artifact_error.take(),
-                    exit_kind: ExitKind::ForceAfterGrace,
-                },
+                    format!("completed_reap_failed:{error}"),
+                    started,
+                    context,
+                    ExitKind::ForceAfterGrace,
+                ),
             };
         }
         SupervisorOutcome::Completed {
             request_id,
+            result,
             artifact_headers: std::mem::take(&mut self.artifact_headers),
         }
     }
@@ -544,27 +619,25 @@ impl Supervisor {
         request_id: String,
         stage: String,
         started: Instant,
-        last_progress: Option<Progress>,
-        last_artifact_error: Option<String>,
+        context: TerminationContext,
     ) -> SupervisorOutcome {
         let termination_error = self.host.terminate().err();
         let reaped = termination_error.is_none();
         SupervisorOutcome::ForceTerminated {
-            record: TerminationRecord {
+            record: self.termination_record(
                 request_id,
-                stage: match termination_error {
+                match termination_error {
                     Some(error) => format!("{stage}_reap_failed:{error}"),
                     None => stage,
                 },
-                elapsed: started.elapsed(),
-                last_progress,
-                last_artifact_error,
-                exit_kind: if reaped {
+                started,
+                context,
+                if reaped {
                     ExitKind::Cooperative
                 } else {
                     ExitKind::ForceAfterGrace
                 },
-            },
+            ),
         }
     }
 
@@ -589,18 +662,56 @@ impl Supervisor {
             None => stage.to_string(),
         };
         let termination_error = self.host.terminate().err();
+        let context = TerminationContext {
+            last_progress,
+            last_artifact_error: self.last_artifact_error.take(),
+            failed: None,
+        };
         SupervisorOutcome::ForceTerminated {
-            record: TerminationRecord {
-                request_id: request_id.to_string(),
-                stage: match termination_error {
+            record: self.termination_record(
+                request_id.to_string(),
+                match termination_error {
                     Some(error) => format!("{stage_label}:terminate_failed:{error}"),
                     None => stage_label,
                 },
-                elapsed: started.elapsed(),
-                last_progress,
-                last_artifact_error: self.last_artifact_error.take(),
-                exit_kind: ExitKind::ForceAfterGrace,
-            },
+                started,
+                context,
+                ExitKind::ForceAfterGrace,
+            ),
+        }
+    }
+
+    /// Assemble a structured terminal record, copying the worker's
+    /// observed exit signal and bounded stderr tail from the host so
+    /// signal-based exits keep their diagnostic context.
+    fn termination_record(
+        &mut self,
+        request_id: String,
+        stage: String,
+        started: Instant,
+        context: TerminationContext,
+        exit_kind: ExitKind,
+    ) -> TerminationRecord {
+        let TerminationContext {
+            last_progress,
+            last_artifact_error,
+            failed,
+        } = context;
+        let (failed_code, failed_detail) = match failed {
+            Some(FailedFields { code, detail }) => (Some(code), Some(detail)),
+            None => (None, None),
+        };
+        TerminationRecord {
+            request_id,
+            stage,
+            elapsed: started.elapsed(),
+            last_progress,
+            last_artifact_error,
+            exit_signal: self.host.exit_signal(),
+            stderr_tail: self.host.stderr_tail(),
+            failed_code,
+            failed_detail,
+            exit_kind,
         }
     }
 }
@@ -792,6 +903,7 @@ mod tests {
             SupervisorOutcome::Completed {
                 request_id,
                 artifact_headers,
+                ..
             } => {
                 assert_eq!(request_id, "req-1");
                 assert!(artifact_headers.is_empty());

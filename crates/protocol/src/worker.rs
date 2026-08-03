@@ -220,6 +220,13 @@ pub trait WorkerHost {
     fn exit_signal(&mut self) -> Option<i32> {
         None
     }
+
+    /// Returns the bounded stderr tail captured from the worker, used to
+    /// preserve structured diagnostic context on a terminal record.
+    /// Bounded transports return the capped tail; fakes return empty.
+    fn stderr_tail(&mut self) -> String {
+        String::new()
+    }
 }
 
 /// Newline-frame transport for a disposable worker byte stream.
@@ -525,6 +532,10 @@ impl WorkerHost for SubprocessWorkerHost {
     fn exit_signal(&mut self) -> Option<i32> {
         use std::os::unix::process::ExitStatusExt;
         self.reaped_status.and_then(|status| status.signal())
+    }
+
+    fn stderr_tail(&mut self) -> String {
+        String::from_utf8_lossy(&self.stderr_tail.lock().expect("stderr tail mutex")).into_owned()
     }
 }
 

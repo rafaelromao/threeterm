@@ -81,7 +81,7 @@ pub enum WorkerError {
     /// The worker exited with a non-zero status.
     NonZeroExit { code: Option<i32>, stderr: String },
     /// The worker exited due to a signal.
-    Signalled { signal: i32 },
+    Signalled { signal: i32, stderr: String },
     /// The worker emitted output that is not valid JSON or not a parseable
     /// envelope.
     Malformed { detail: String },
@@ -102,8 +102,8 @@ impl std::fmt::Display for WorkerError {
             Self::NonZeroExit { code, stderr } => {
                 write!(formatter, "worker exited with code {code:?}: {stderr}")
             }
-            Self::Signalled { signal } => {
-                write!(formatter, "worker signalled with {signal}")
+            Self::Signalled { signal, stderr } => {
+                write!(formatter, "worker signalled with {signal}: {stderr}")
             }
             Self::Malformed { detail } => {
                 write!(formatter, "malformed worker output: {detail}")
@@ -324,11 +324,21 @@ impl OcctWorker {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
+        if request_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing request_id".to_string(),
+            });
+        }
         let command_id = args
             .get("operation")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
+        if command_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing operation".to_string(),
+            });
+        }
 
         let host = <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
@@ -370,7 +380,10 @@ fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
                 });
             }
             if let Some(signal) = record.exit_signal {
-                return Err(WorkerError::Signalled { signal });
+                return Err(WorkerError::Signalled {
+                    signal,
+                    stderr: record.stderr_tail,
+                });
             }
             Err(WorkerError::NonZeroExit {
                 code: None,
@@ -984,7 +997,7 @@ mod tests {
         };
         let error = map_outcome(outcome).expect_err("signal exit must not map to success");
         match error {
-            WorkerError::Signalled { signal } => assert_eq!(signal, 11),
+            WorkerError::Signalled { signal, .. } => assert_eq!(signal, 11),
             other => panic!("expected Signalled; got {other:?}"),
         }
     }

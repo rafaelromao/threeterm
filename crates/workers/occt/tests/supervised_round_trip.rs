@@ -13,13 +13,46 @@ use threeterm_occt_worker::{ExtrudeRequest, OcctDiagnostic, OcctWorker, WorkerEr
 
 const PROTOCOL_SCHEMA: &str = "threeterm.protocol/1";
 
+/// Per-test fixture directories. A fresh directory per (label, test run)
+/// means parallel tests never share a script path (writing one test's
+/// script while another test's leftover process still executes it would
+/// fail with `Text file busy`). Directories are left in the temp dir,
+/// matching the repo's other `threeterm-*` test artifacts.
+struct FixtureDir {
+    root: std::path::PathBuf,
+}
+
+impl FixtureDir {
+    fn new(label: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "threeterm-fixture-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("fixture dir creates");
+        Self { root }
+    }
+
+    fn worker_script(&self, name: &str, body: &str) -> OcctWorker {
+        let script = self.root.join(name);
+        std::fs::write(&script, body).expect("fixture script writes");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("fixture script metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("fixture script chmod");
+        OcctWorker::with_binary_path(script).with_grace(Duration::from_secs(10))
+    }
+}
+
 /// A fixture worker that emits the WorkerReady handshake, reads one
 /// request line, then runs `reply` (which must emit one envelope line).
 fn fixture_worker_named(label: &str, reply: &str) -> OcctWorker {
-    let script = std::env::temp_dir().join(format!(
-        "threeterm-fixture-{label}-{}.sh",
-        std::process::id()
-    ));
+    let dir = FixtureDir::new(label);
     let fixture = format!(
         "#!/bin/sh\n\
          printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"{schema}\",\"worker_id\":\"fixture\"}}'\n\
@@ -27,14 +60,32 @@ fn fixture_worker_named(label: &str, reply: &str) -> OcctWorker {
          {reply}\n",
         schema = PROTOCOL_SCHEMA
     );
-    std::fs::write(&script, fixture).expect("fixture script writes");
-    let mut permissions = std::fs::metadata(&script)
-        .expect("fixture script metadata")
-        .permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&script, permissions).expect("fixture script chmod");
-    OcctWorker::with_binary_path(script).with_grace(Duration::from_secs(10))
+    dir.worker_script("worker.sh", &fixture)
+}
+
+/// Retries a fixture-driven call when the exec of a freshly written
+/// script hits the overlayfs `Text file busy` race (the container's
+/// `/tmp` is an overlayfs with `fsync=volatile`, where execve of a just
+/// written script can transiently fail with ETXTBSY). The retry budget
+/// is small and bounded; real failures still surface.
+fn retry_fixture<T>(mut attempt: impl FnMut() -> Result<T, WorkerError>) -> Result<T, WorkerError> {
+    let mut last = None;
+    for _ in 0..3 {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error @ WorkerError::Spawn { .. }) => {
+                let detail = error.to_string();
+                if detail.contains("Text file busy") {
+                    last = Some(error);
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
 }
 
 fn sample_extrude_request() -> ExtrudeRequest {
@@ -53,9 +104,8 @@ fn completed_reply() -> &'static str {
 #[test]
 fn typed_extrude_routes_through_the_supervised_protocol() {
     let worker = fixture_worker_named("ok", completed_reply());
-    let result = worker
-        .extrude(&sample_extrude_request())
-        .expect("extrude succeeds");
+    let result =
+        retry_fixture(|| worker.extrude(&sample_extrude_request())).expect("extrude succeeds");
     assert_eq!(result.status, "ok");
     assert_eq!(result.feature_id, "box-1");
     assert_eq!(result.brep_bytes, 42);
@@ -68,8 +118,7 @@ fn typed_extrude_surfaces_a_cooperative_failed_envelope_as_diagnostic() {
         "failed",
         r#"printf '%s\n' '{"kind":"failed","schema_version":"threeterm.protocol/1","request_id":"req-1","code":"brep_invalid","detail":"BRepCheck_Analyzer failed"}'"#,
     );
-    let error = worker
-        .extrude(&sample_extrude_request())
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("failed envelope must fail the typed call");
     match error {
         WorkerError::Diagnostic(diagnostic) => {
@@ -82,27 +131,14 @@ fn typed_extrude_surfaces_a_cooperative_failed_envelope_as_diagnostic() {
 
 #[test]
 fn typed_extrude_rejects_a_schema_mismatched_worker() {
-    let script = std::env::temp_dir().join(format!(
-        "threeterm-fixture-bad-schema-{}.sh",
-        std::process::id()
-    ));
-    std::fs::write(
-        &script,
+    let dir = FixtureDir::new("bad-schema");
+    let worker = dir.worker_script(
+        "worker.sh",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/0\",\"worker_id\":\"old\"}'\n\
          sleep 5\n",
-    )
-    .expect("fixture script writes");
-    let mut permissions = std::fs::metadata(&script)
-        .expect("fixture script metadata")
-        .permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&script, permissions).expect("fixture script chmod");
-
-    let worker = OcctWorker::with_binary_path(script).with_grace(Duration::from_millis(500));
-    let error = worker
-        .extrude(&sample_extrude_request())
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("schema-mismatched worker must fail closed");
     assert!(
         matches!(error, WorkerError::Malformed { .. }),
@@ -114,29 +150,19 @@ fn typed_extrude_rejects_a_schema_mismatched_worker() {
 fn typed_extrude_fails_closed_when_the_worker_never_completes() {
     // The fixture completes the handshake but never emits a terminal
     // envelope; the supervisor grace must force-terminate it.
-    let script =
-        std::env::temp_dir().join(format!("threeterm-fixture-hang-{}.sh", std::process::id()));
-    std::fs::write(
-        &script,
+    let dir = FixtureDir::new("hang");
+    let worker = dir.worker_script(
+        "worker.sh",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
          read line\n\
          sleep 30\n",
     )
-    .expect("fixture script writes");
-    let mut permissions = std::fs::metadata(&script)
-        .expect("fixture script metadata")
-        .permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&script, permissions).expect("fixture script chmod");
-
-    let worker = OcctWorker::with_binary_path(script).with_grace(Duration::from_millis(500));
-    let error = worker
-        .extrude(&sample_extrude_request())
+    .with_grace(Duration::from_millis(500));
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("hanging worker must fail closed");
     match error {
-        WorkerError::Signalled { signal } => {
+        WorkerError::Signalled { signal, .. } => {
             assert_eq!(signal, 9, "force-terminated worker reports SIGKILL");
         }
         other => panic!("expected Signalled; got {other:?}"),
@@ -172,8 +198,7 @@ fn typed_extrude_fails_closed_on_oversized_staged_output() {
         r#"printf '%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"/tmp/out.brep","brep_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","brep_bytes":{oversized},"feature_id":"box-1"}}}}'"#
     );
     let worker = fixture_worker_named("oversized", &reply);
-    let error = worker
-        .extrude(&sample_extrude_request())
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("oversized staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {

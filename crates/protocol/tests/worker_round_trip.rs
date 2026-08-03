@@ -855,3 +855,38 @@ fn artifact_bound_to_another_request_is_rejected() {
     );
     let _ = std::fs::remove_dir_all(staging_root);
 }
+
+#[test]
+fn failed_envelope_bound_to_another_request_is_rejected() {
+    // A Failed envelope for a foreign request must not be accepted as
+    // the terminal failure of the active request.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Failed {
+            schema_version: schema_version().to_string(),
+            request_id: "other-request".to_string(),
+            code: "brep_invalid".to_string(),
+            detail: "not this request".to_string(),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(10), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+    assert_eq!(
+        record.failed_code, None,
+        "foreign failure must not be adopted"
+    );
+    let progress = record
+        .last_progress
+        .expect("mismatched failure must surface as a protocol violation");
+    assert!(
+        progress
+            .stage
+            .starts_with("protocol_violation:mismatched_request_id:"),
+        "stage: {:?}",
+        progress.stage
+    );
+}

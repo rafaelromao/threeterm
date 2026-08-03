@@ -407,19 +407,29 @@ impl Supervisor {
                     detail,
                     ..
                 }) => {
-                    self.discard_stage();
-                    let stage_label = format!("failed:{code}:{detail}");
-                    let context = TerminationContext {
-                        last_progress,
-                        last_artifact_error: self.last_artifact_error.take(),
-                        failed: Some(FailedFields { code, detail }),
-                    };
-                    return self.cooperative_termination_outcome(
-                        request_id,
-                        stage_label,
-                        started,
-                        context,
-                    );
+                    // A Failed envelope bound to a foreign request is a
+                    // protocol violation: the failure facts must not be
+                    // accepted for the active request.
+                    if request_id != request.request_id {
+                        last_progress = Some(Progress {
+                            stage: format!("protocol_violation:mismatched_request_id:{request_id}"),
+                            percent: 0,
+                        });
+                    } else {
+                        self.discard_stage();
+                        let stage_label = format!("failed:{code}:{detail}");
+                        let context = TerminationContext {
+                            last_progress,
+                            last_artifact_error: self.last_artifact_error.take(),
+                            failed: Some(FailedFields { code, detail }),
+                        };
+                        return self.cooperative_termination_outcome(
+                            request_id,
+                            stage_label,
+                            started,
+                            context,
+                        );
+                    }
                 }
                 Ok(Envelope::WorkerReady { worker_id, .. }) => {
                     last_progress = Some(Progress {

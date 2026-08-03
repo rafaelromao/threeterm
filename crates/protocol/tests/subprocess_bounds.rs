@@ -15,13 +15,6 @@ use threeterm_protocol::worker::{
     Envelope, StreamLimits, SubprocessWorkerHost, WorkerError, WorkerHost,
 };
 
-fn ready_envelope() -> Envelope {
-    Envelope::WorkerReady {
-        schema_version: threeterm_protocol::schema_version().to_string(),
-        worker_id: "fixture".to_string(),
-    }
-}
-
 fn spawn_flooding_worker() -> std::process::Child {
     // Emits the canonical WorkerReady line, then floods stdout with
     // small valid frames forever. The worker itself never exits, so the
@@ -172,6 +165,4 @@ fn oversized_host_frame_is_rejected_at_send() {
         other => panic!("expected Protocol rejection; got {other:?}"),
     }
     host.terminate().expect("draining worker terminates");
-
-    let _ = ready_envelope();
 }

@@ -360,12 +360,17 @@ impl SubprocessWorkerHost {
             let mut buffer = [0; 4096];
             let mut total: usize = 0;
             while let Ok(read) = stdout.read(&mut buffer) {
-                if read == 0 || inbound_tx.send(buffer[..read].to_vec()).is_err() {
+                if read == 0 {
                     break;
                 }
                 total += read;
                 if total > stdout_cap {
+                    // Fail closed: the over-cap chunk is dropped, not
+                    // forwarded, so no envelope crosses the bound.
                     stdout_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                if inbound_tx.send(buffer[..read].to_vec()).is_err() {
                     break;
                 }
             }
@@ -424,9 +429,11 @@ impl SubprocessWorkerHost {
         })
     }
 
-    /// Returns the bounded stderr tail captured so far. The tail never
-    /// exceeds the configured `stderr_bytes` cap.
-    pub fn stderr_tail(&self) -> Vec<u8> {
+    /// Returns the bounded stderr tail captured so far, as raw bytes.
+    /// The tail never exceeds the configured `stderr_bytes` cap. The
+    /// `WorkerHost` trait exposes the lossy-string view the supervisor
+    /// copies into terminal records.
+    pub fn stderr_tail_bytes(&self) -> Vec<u8> {
         self.stderr_tail.lock().expect("stderr tail mutex").clone()
     }
 

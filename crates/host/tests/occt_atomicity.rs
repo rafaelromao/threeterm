@@ -50,20 +50,26 @@ fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
 }
 
 /// Shell-script fake OCCT worker speaking the versioned envelope
-/// protocol. Every fake emits the `worker_ready` handshake; `reply`
-/// lines are emitted after it. The fakes model production failure modes
-/// without an OCCT install.
+/// protocol. Every fake emits the `worker_ready` handshake, consumes the
+/// host's request envelope, and runs `reply` lines that may interpolate
+/// `$request_id` (extracted from the request envelope). The fakes model
+/// production failure modes without an OCCT install.
 fn fake_worker_script(reply: &str) -> String {
     format!(
-        "#!/bin/sh\nprintf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fake\"}}'\n{reply}\n"
+        "#!/bin/sh\n\
+         printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fake\"}}'\n\
+         read request_line\n\
+         request_id=$(printf '%s' \"$request_line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+         {reply}\n"
     )
 }
 
 /// Failed-envelope reply for a fake worker. `code`/`detail` mirror the
-/// structured `failed` envelope the real worker emits.
+/// structured `failed` envelope the real worker emits; the envelope is
+/// bound to the request the supervisor actually sent.
 fn fake_failed_reply(code: &str, detail: &str) -> String {
     format!(
-        "printf '%s\\n' '{{\"kind\":\"failed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-fake\",\"code\":\"{code}\",\"detail\":\"{detail}\"}}'"
+        "printf '%s\\n' '{{\"kind\":\"failed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"'\"$request_id\"'\",\"code\":\"{code}\",\"detail\":\"{detail}\"}}'"
     )
 }
 
@@ -188,9 +194,10 @@ fn extrude_malformed_response_preserves_canonical_state() {
     let host = Host::new();
     let prior_view = host.load(&root).expect("loads");
 
-    // Build a tiny shell script that exits 0 with empty stdout —
-    // mirrors the worker's malformed-output path. The host should
-    // classify this as a worker failure and preserve canonical state.
+    // Build a tiny shell script that exits 0 with empty stdout — the
+    // worker dies before completing the handshake. The supervisor fails
+    // closed and the host classifies the result as a worker failure,
+    // preserving canonical state.
     let mut script = std::env::temp_dir();
     script.push(format!(
         "threeterm-host-fake-occt-{}.sh",

@@ -936,3 +936,37 @@ fn non_utf8_backup_siblings_are_recognized_losslessly() {
 
     let _ = fs::remove_dir_all(parent);
 }
+
+#[test]
+fn interrupted_backup_creation_is_repaired_on_retry() {
+    use threeterm_persistence::PRE_MIGRATION_BACKUP_SUFFIX;
+    use threeterm_persistence::bundle::{V0Manifest, prior_schema_epoch, schema_epoch};
+
+    let root = unique_temp_dir("partial-backup");
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-partial-backup"))
+        .expect("v0 fixture writes");
+    let backup = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().expect("root has a name").to_string_lossy()
+    ));
+    // Simulate an interrupted backup copy: the directory exists but holds
+    // only a partial manifest.
+    fs::create_dir_all(backup.join("canonical")).expect("partial backup dirs create");
+    fs::write(backup.join(MANIFEST_FILENAME), b"partial").expect("partial manifest writes");
+
+    let loaded = load(&root).expect("migration replaces the partial backup and proceeds");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+
+    let backup_manifest_raw =
+        fs::read(backup.join(MANIFEST_FILENAME)).expect("repaired backup manifest reads");
+    let backup_manifest: V0Manifest =
+        serde_json::from_slice(&backup_manifest_raw).expect("repaired backup parses as v0");
+    assert_eq!(backup_manifest.schema_version, prior_schema_epoch());
+    assert!(
+        backup.join("canonical/transactions.ndjson").is_file(),
+        "the repaired backup is a complete v0 copy"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(backup);
+}

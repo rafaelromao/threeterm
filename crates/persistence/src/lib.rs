@@ -998,11 +998,49 @@ fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Copy `source` into a sealed backup at `backup`, staging the copy so an
+/// interrupted copy can never leave a partial backup that a later migration
+/// would accept as complete.
+///
+/// A pre-existing backup is kept only when it authenticates as a complete
+/// v0 bundle; a partial backup is replaced from a fresh staged copy. The
+/// staged copy is fully synced (files, directory, and containing directory)
+/// and validated before it is renamed into place.
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<()> {
     if backup.exists() {
-        return Ok(());
+        if read_v0(backup).is_ok() {
+            return Ok(());
+        }
+        fs::remove_dir_all(backup)?;
     }
-    copy_dir_recursive(source, backup)
+    let staging = fresh_backup_staging_path(backup);
+    let _ = fs::remove_dir_all(&staging);
+    copy_dir_recursive(source, &staging)?;
+    if read_v0(&staging).is_err() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(std::io::Error::other(
+            "staged migration backup does not authenticate",
+        ));
+    }
+    File::open(&staging)?.sync_all()?;
+    if let Some(parent) = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    fs::rename(&staging, backup)?;
+    if let Some(parent) = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn fresh_backup_staging_path(backup: &Path) -> PathBuf {
+    sibling_path_with_suffix(backup, &format!(".backup-tmp-{}", std::process::id()))
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -1159,30 +1197,11 @@ fn with_bundle_write_lock<T>(
 /// following a symlink or a non-regular file at the lock path.
 fn open_lock_file(lock_path: &Path) -> Result<File, BundleError> {
     for _ in 0..8 {
-        match fs::symlink_metadata(lock_path) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(BundleError::Io(format!(
-                        "refusing to lock through a symlink: {}",
-                        lock_path.display()
-                    )));
-                }
-                if !metadata.is_file() {
-                    return Err(BundleError::Io(format!(
-                        "refusing to lock a non-regular file: {}",
-                        lock_path.display()
-                    )));
-                }
-                return File::options()
-                    .read(true)
-                    .write(true)
-                    .open(lock_path)
-                    .map_err(BundleError::from);
-            }
+        let probe = match fs::symlink_metadata(lock_path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Reserve the lock file without following anything that a
-                // concurrent writer created between the probe and now; if
-                // the creation raced, re-probe the existing file.
+                // Reserve the lock file atomically; a concurrent writer that
+                // created it first shows up as AlreadyExists and is re-probed.
                 match File::options()
                     .read(true)
                     .write(true)
@@ -1200,12 +1219,48 @@ fn open_lock_file(lock_path: &Path) -> Result<File, BundleError> {
                 }
             }
             Err(error) => return Err(error.into()),
+        };
+        if probe.file_type().is_symlink() {
+            return Err(BundleError::Io(format!(
+                "refusing to lock through a symlink: {}",
+                lock_path.display()
+            )));
+        }
+        if !probe.is_file() {
+            return Err(BundleError::Io(format!(
+                "refusing to lock a non-regular file: {}",
+                lock_path.display()
+            )));
+        }
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(BundleError::from)?;
+        // Verify the opened descriptor is the probed file: a replacement
+        // (e.g. a symlink swap) between probe and open resolves to a
+        // different identity, so the open is retried until the path
+        // stabilizes or the replacement is exposed.
+        if same_file_identity(&probe, &file)? {
+            return Ok(file);
         }
     }
     Err(BundleError::Io(format!(
-        "could not open lock file {} after repeated races",
+        "lock file {} keeps changing under the writer",
         lock_path.display()
     )))
+}
+
+#[cfg(unix)]
+fn same_file_identity(probe: &fs::Metadata, file: &File) -> Result<bool, BundleError> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata().map_err(BundleError::from)?;
+    Ok(probe.dev() == opened.dev() && probe.ino() == opened.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_probe: &fs::Metadata, _file: &File) -> Result<bool, BundleError> {
+    Ok(true)
 }
 
 fn write_lock_path(root: &Path) -> Option<PathBuf> {
@@ -1841,6 +1896,40 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(previous_generation_path(&root));
+    }
+
+    #[test]
+    fn lock_open_verifies_the_probed_identity_and_rejects_swaps() {
+        let root = temp_root("lock-identity");
+        fs::create_dir_all(&root).expect("dir creates");
+        let lock = root.join("bundle.write-lock");
+
+        let first = open_lock_file(&lock).expect("lock opens");
+        let second = open_lock_file(&lock).expect("lock reopens");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                first.metadata().unwrap().ino(),
+                second.metadata().unwrap().ino(),
+                "the reopened descriptor refers to the probed file, not a recreated one"
+            );
+        }
+        drop(first);
+        drop(second);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = fs::remove_file(&lock);
+            symlink(root.join("elsewhere"), &lock).expect("symlink creates");
+            assert!(
+                open_lock_file(&lock).is_err(),
+                "a swapped symlink at the lock path is rejected"
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

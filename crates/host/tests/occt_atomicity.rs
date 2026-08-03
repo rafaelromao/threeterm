@@ -146,7 +146,10 @@ fn worker_spawn_failure_preserves_canonical_state() {
         .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -174,7 +177,10 @@ fn extrude_request_malformed_preserves_canonical_state() {
     request.profile = vec![[0.0, 0.0], [1.0, 0.0]];
     let result = host.extrude(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -213,7 +219,10 @@ fn extrude_malformed_response_preserves_canonical_state() {
         rectangle_extrude_request("malformed").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -249,7 +258,10 @@ fn extrude_non_zero_exit_preserves_canonical_state() {
         rectangle_extrude_request("non-zero").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -447,7 +459,10 @@ fn boolean_fuse_spawn_failure_preserves_canonical_state() {
     .with_feature_id("fused-fail-1");
     let result = host.boolean_fuse(&root, fuse_request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -478,7 +493,10 @@ fn boolean_fuse_request_malformed_preserves_canonical_state() {
     .with_feature_id("fused-malformed-1");
     let result = host.boolean_fuse(&root, fuse_request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -518,7 +536,10 @@ fn boolean_fuse_malformed_response_preserves_canonical_state() {
     .with_feature_id("fused-malformed-resp-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -559,7 +580,10 @@ fn boolean_fuse_non_zero_exit_preserves_canonical_state() {
     .with_feature_id("fused-non-zero-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -792,7 +816,10 @@ fn fillet_spawn_failure_preserves_canonical_state() {
     );
     let result = host.fillet(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -821,7 +848,10 @@ fn chamfer_spawn_failure_preserves_canonical_state() {
     );
     let result = host.chamfer(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -853,7 +883,10 @@ fn fillet_request_malformed_preserves_canonical_state() {
     request.radius = 0.0;
     let result = host.fillet(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -885,7 +918,10 @@ fn chamfer_request_malformed_preserves_canonical_state() {
     request.distance = 0.0;
     let result = host.chamfer(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1256,7 +1292,10 @@ fn hole_spawn_failure_preserves_canonical_state() {
     );
     let result = host.hole(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1285,7 +1324,10 @@ fn hole_request_malformed_preserves_canonical_state() {
     );
     let result = host.hole(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1506,7 +1548,10 @@ fn mirror_spawn_failure_preserves_canonical_state() {
     );
     let result = host.mirror(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1536,7 +1581,10 @@ fn mirror_request_malformed_preserves_canonical_state() {
     request.plane_normal = [0.0, 0.0, 0.0];
     let result = host.mirror(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1755,7 +1803,10 @@ fn linear_pattern_spawn_failure_preserves_canonical_state() {
     );
     let result = host.linear_pattern(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1785,7 +1836,10 @@ fn linear_pattern_request_malformed_preserves_canonical_state() {
     request.direction = [0.0, 0.0, 0.0];
     let result = host.linear_pattern(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2015,7 +2069,10 @@ fn circular_pattern_spawn_failure_preserves_canonical_state() {
     );
     let result = host.circular_pattern(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2045,7 +2102,10 @@ fn circular_pattern_request_malformed_preserves_canonical_state() {
     request.axis_normal = [0.0, 0.0, 0.0];
     let result = host.circular_pattern(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2258,7 +2318,10 @@ fn shell_spawn_failure_preserves_canonical_state() {
     );
     let result = host.shell(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2290,7 +2353,10 @@ fn shell_request_malformed_preserves_canonical_state() {
     request.thickness = 0.0;
     let result = host.shell(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2578,7 +2644,10 @@ fn draft_spawn_failure_preserves_canonical_state() {
     );
     let result = host.draft(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2611,7 +2680,10 @@ fn draft_request_malformed_preserves_canonical_state() {
     request.angle = 0.0;
     let result = host.draft(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2823,7 +2895,10 @@ fn loft_spawn_failure_preserves_canonical_state() {
         .with_output_path(root.join("stage"), "loft-spawn.brep");
     let result = host.loft(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 

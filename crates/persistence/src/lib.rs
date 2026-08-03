@@ -458,13 +458,14 @@ impl Bundle {
     ) -> Result<Self, BundleError> {
         let root = root.into();
         with_bundle_write_lock(&root, || {
-            Self::create_inner(&root, generation_id, revision_id)
+            Self::create_staged(&root, generation_id, revision_id)
         })
     }
 
     /// Create the bundle directory structure without acquiring the write
-    /// lock. Callers must already hold the per-root lock; `append_features`
-    /// uses this to fold a concurrent first save into a plain append.
+    /// lock. Callers must already hold the per-root lock; `create_staged`
+    /// writes into a staging directory and `append_features_locked` folds a
+    /// concurrent first save into a plain append.
     fn create_inner(
         root: &Path,
         generation_id: &str,
@@ -496,6 +497,33 @@ impl Bundle {
         {
             File::open(parent)?.sync_all()?;
         }
+        Ok(bundle)
+    }
+
+    /// Stage, validate, and atomically promote a fresh bundle.
+    ///
+    /// Callers must already hold the per-root write lock. The empty baseline
+    /// is written into a staging directory, validated as a sealed
+    /// generation, and only then promoted into the canonical root, so a
+    /// crash or I/O failure mid-creation never leaves a partial canonical
+    /// root that a later save would treat as the current source.
+    fn create_staged(
+        root: &Path,
+        generation_id: &str,
+        revision_id: &str,
+    ) -> Result<Self, BundleError> {
+        let bundle = Self::at(root);
+        if bundle.root.exists() {
+            return Err(BundleError::Invalid(format!(
+                "destination already exists: {}",
+                bundle.root.display()
+            )));
+        }
+        let staging = fresh_staging_path_for_publish(&bundle.root);
+        Self::create_inner(&staging, generation_id, revision_id)?;
+        sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+        Bundle::at(&staging).open_sealed(false)?;
+        publish_staged(&staging, &bundle.root)?;
         Ok(bundle)
     }
 
@@ -631,11 +659,13 @@ impl Bundle {
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
-        // bundle instead of racing a create against an append.
+        // bundle instead of racing a create against an append. The baseline
+        // is staged and atomically promoted, so an interrupted first save
+        // never leaves a partial canonical root.
         let mut loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
             self.open_locked()?
         } else {
-            Self::create_inner(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
+            Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
@@ -704,38 +734,14 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
-    let root = path;
-    if !root.exists() {
-        let previous = previous_generation_path(root);
-        if previous.exists() {
-            // Recovery may rename and migrate the previous slot; the whole
-            // decision is re-made under the lock so a concurrent migration
-            // cannot overtake the classification.
-            return with_bundle_write_lock(root, || load_unlocked(path));
-        }
-        return Err(BundleError::Invalid(format!(
-            "bundle path missing: {}",
-            root.display()
-        )));
-    }
-    if !root.is_dir() {
-        return Err(BundleError::Invalid(format!(
-            "bundle path is not a directory: {}",
-            root.display()
-        )));
-    }
-    let status = detect_schema(root)?;
-    match status {
-        // A current-epoch read observes only atomic generation renames, so
-        // it never takes the write lock.
-        SchemaStatus::Current => load_v1(root),
-        SchemaStatus::Prior => with_bundle_write_lock(root, || load_unlocked(path)),
-        SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
-            found: read_schema_version_raw(root).unwrap_or_default(),
-            expected_current: schema_epoch(),
-            expected_prior: prior_schema_epoch(),
-        }),
-    }
+    // The whole existence and schema classification runs under the per-root
+    // write lock. A publisher renames the canonical root into the previous
+    // slot mid-publication and promotes staging afterwards, so an unlocked
+    // preflight could observe a missing manifest exactly between those two
+    // renames and fail a load that simply waited for the writer. Serializing
+    // classification with publications makes every load linearize against
+    // them.
+    with_bundle_write_lock(path, || load_unlocked(path))
 }
 
 /// The lock-free body of `load`. Callers must hold the per-root write lock
@@ -781,10 +787,6 @@ fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
             expected_prior: prior_schema_epoch(),
         }),
     }
-}
-
-fn load_v1(path: &Path) -> Result<LoadedBundle, BundleError> {
-    Bundle::at(path).open()
 }
 
 fn read_schema_version_raw(path: &Path) -> Option<String> {

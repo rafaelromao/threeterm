@@ -547,3 +547,119 @@ fn concurrent_first_saves_serialize_creation_and_appends() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }
+
+#[test]
+fn load_waits_for_an_in_flight_publication() {
+    let root = unique_temp_dir("load-during-publication");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first publish");
+    bundle
+        .append_feature("box-2", "box")
+        .expect("second publish");
+    let previous = previous_generation_sibling(&root);
+    let retired = {
+        let mut retired = previous.clone();
+        retired.set_file_name(format!(
+            "{}.retired-generation",
+            previous.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        retired
+    };
+    let current_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("current manifest reads");
+
+    // The test plays the writer: it holds the per-root write lock while the
+    // rotation is between `destination → previous` and `staging →
+    // destination`, the exact window in which an unlocked loader could
+    // observe a missing manifest and fail instead of waiting.
+    let mut lock_path = root.clone();
+    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
+    lock_name.push(WRITE_LOCK_SUFFIX);
+    lock_path.set_file_name(lock_name);
+    let lock_file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("lock file opens");
+    lock_file.lock().expect("writer lock is exclusive");
+    fs::rename(&previous, &retired).expect("preceding generation retires");
+    fs::rename(&root, &previous).expect("simulates the mid-rotation window");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reader_root = root.clone();
+    let reader = std::thread::spawn(move || {
+        started_tx.send(()).expect("started signal sends");
+        let result = load(&reader_root);
+        done_tx.send(()).expect("completion signal sends");
+        result
+    });
+    started_rx
+        .recv()
+        .expect("reader is running before the writer completes");
+
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "a load must block while a publication holds the lock"
+    );
+
+    fs::rename(&previous, &root).expect("writer restores the canonical root");
+    lock_file.unlock().expect("writer releases the lock");
+    let loaded = reader
+        .join()
+        .expect("reader completes after the writer")
+        .expect("load succeeds after the in-flight publication");
+    assert_eq!(
+        loaded.log.len(),
+        2,
+        "the load classifies the post-publication generation"
+    );
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+        current_manifest,
+        "the canonical root carries the published generation"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+    let _ = fs::remove_dir_all(retired);
+}
+
+#[test]
+fn first_save_setup_failures_leave_no_partial_root() {
+    for point in [
+        PublicationFailurePoint::StagingSync,
+        PublicationFailurePoint::PromoteStaging,
+    ] {
+        let root = unique_temp_dir(&format!("first-save-{point:?}"));
+        let bundle = std::sync::Arc::new(Bundle::at(&root));
+
+        fail_next_publication_at(point);
+        assert!(
+            bundle.append_feature("box-1", "box").is_err(),
+            "{point:?} failure is surfaced"
+        );
+        assert!(
+            !root.exists(),
+            "no partial canonical root after an interrupted first save"
+        );
+
+        bundle
+            .append_feature("box-1", "box")
+            .expect("a later save creates the bundle cleanly");
+        let loaded = bundle.open().expect("bundle opens");
+        assert_eq!(loaded.log.len(), 1);
+        assert_eq!(
+            loaded.log.entries()[0].previous_digest,
+            EMPTY_LOG_DIGEST_HEX
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+    }
+}

@@ -23,12 +23,18 @@
 //! provides the path through the build script.
 
 use std::env;
-use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use threeterm_protocol::supervisor::{Request as SupervisorRequest, Supervisor, SupervisorOutcome};
+use threeterm_protocol::worker::{
+    SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
+    WorkerProcess,
+};
 
 pub mod envelope;
 pub use envelope::{
@@ -75,7 +81,7 @@ pub enum WorkerError {
     /// The worker exited with a non-zero status.
     NonZeroExit { code: Option<i32>, stderr: String },
     /// The worker exited due to a signal.
-    Signalled { signal: i32, stderr: String },
+    Signalled { signal: i32 },
     /// The worker emitted output that is not valid JSON or not a parseable
     /// envelope.
     Malformed { detail: String },
@@ -96,8 +102,8 @@ impl std::fmt::Display for WorkerError {
             Self::NonZeroExit { code, stderr } => {
                 write!(formatter, "worker exited with code {code:?}: {stderr}")
             }
-            Self::Signalled { signal, stderr } => {
-                write!(formatter, "worker signalled with {signal}: {stderr}")
+            Self::Signalled { signal } => {
+                write!(formatter, "worker signalled with {signal}")
             }
             Self::Malformed { detail } => {
                 write!(formatter, "malformed worker output: {detail}")
@@ -118,13 +124,23 @@ impl std::error::Error for WorkerError {}
 /// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, `shell`,
 /// and `draft`.
 ///
-/// The worker is **disposable**: each call spawns a fresh process, pipes
-/// the request to its stdin, reads one JSON line from its stdout, and
-/// kills the process on exit. The worker has no persistent state.
+/// The worker is **disposable**: each call spawns a fresh supervised
+/// worker process in its own process group, negotiates the versioned
+/// protocol handshake, pipes the request envelope in, and maps the
+/// supervised outcome to a typed result or structured failure. The
+/// worker has no persistent state.
 #[derive(Debug, Clone)]
 pub struct OcctWorker {
     binary_path: PathBuf,
+    /// Supervisor grace period: the worker must complete the handshake
+    /// and the request inside this deadline or it is force-terminated.
+    grace: Duration,
 }
+
+/// Default supervisor grace for OCCT operations. Operations complete in
+/// well under a second; this bound catches hangs without harming
+/// legitimate geometry work.
+pub const DEFAULT_SUPERVISOR_GRACE: Duration = Duration::from_secs(30);
 
 impl OcctWorker {
     /// Locate the worker binary. Prefers the path embedded at build
@@ -162,7 +178,17 @@ impl OcctWorker {
     }
 
     pub fn with_binary_path(binary_path: PathBuf) -> Self {
-        Self { binary_path }
+        Self {
+            binary_path,
+            grace: DEFAULT_SUPERVISOR_GRACE,
+        }
+    }
+
+    /// Override the supervisor grace period (deadline) for every
+    /// operation this worker executes.
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
     }
 
     pub fn binary_path(&self) -> &Path {
@@ -287,262 +313,240 @@ impl OcctWorker {
     }
 
     fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
-        let mut child = Command::new(&self.binary_path)
+        // The OCCT envelope carries its own request_id (the protocol
+        // binds every message to it), so extract it for the supervisor.
+        let args: serde_json::Value =
+            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
+                detail: format!("request serialization failed: {error}"),
+            })?;
+        let request_id = args
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let command_id = args
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let host = <Self as WorkerProcess>::spawn(WorkerConfig {
+            worker_id: "occt",
+            schema_version: threeterm_protocol::schema_version(),
+            command_line: vec![self.binary_path.display().to_string()],
+        })
+        .map_err(|error| WorkerError::Spawn {
+            binary: self.binary_path.clone(),
+            detail: error.to_string(),
+        })?;
+        let mut supervisor = Supervisor::new(self.grace, host, None);
+        let outcome = supervisor.request(SupervisorRequest {
+            request_id,
+            command_id,
+            args,
+            revision_id: String::new(),
+        });
+        map_outcome(outcome)
+    }
+}
+
+/// Maps a supervised outcome to the typed-result boundary: a completed
+/// request carries the typed result JSON, a cooperative `Failed`
+/// envelope becomes an [`OcctDiagnostic`], a signal-based exit keeps the
+/// actual signal, and everything else fails closed.
+fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
+    match outcome {
+        SupervisorOutcome::Completed { result, .. } => Ok(RawResult { value: result }),
+        SupervisorOutcome::Acknowledged { .. } => Err(WorkerError::Malformed {
+            detail: "worker acknowledged a cancellation without a request".to_string(),
+        }),
+        SupervisorOutcome::ForceTerminated { record } => {
+            if let (Some(code), Some(detail)) = (record.failed_code, record.failed_detail) {
+                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
+            }
+            if record.stage.starts_with("handshake_schema_mismatch") {
+                return Err(WorkerError::Malformed {
+                    detail: record.stage,
+                });
+            }
+            if let Some(signal) = record.exit_signal {
+                return Err(WorkerError::Signalled { signal });
+            }
+            Err(WorkerError::NonZeroExit {
+                code: None,
+                stderr: record.stderr_tail,
+            })
+        }
+    }
+}
+
+/// Production `WorkerProcess` wiring: spawns the OCCT binary in its own
+/// process group with piped standard streams so the supervisor owns a
+/// contained, reapable process tree.
+impl WorkerProcess for OcctWorker {
+    fn spawn(config: WorkerConfig) -> Result<Box<dyn WorkerHost>, ProtocolWorkerError> {
+        let binary = config
+            .command_line
+            .first()
+            .ok_or_else(|| ProtocolWorkerError::Io(std::io::Error::other("empty command line")))?;
+        let child = Command::new(binary)
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| WorkerError::Spawn {
-                binary: self.binary_path.clone(),
-                detail: error.to_string(),
-            })?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(envelope)
-                .map_err(|error| WorkerError::Spawn {
-                    binary: self.binary_path.clone(),
-                    detail: format!("stdin write failed: {error}"),
-                })?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| WorkerError::Spawn {
-                binary: self.binary_path.clone(),
-                detail: format!("wait failed: {error}"),
-            })?;
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        match output.status.code() {
-            Some(0) => {}
-            Some(2) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "request_malformed",
-                    stderr.trim().to_string(),
-                )));
-            }
-            Some(3) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "brep_invalid",
-                    stderr.trim().to_string(),
-                )));
-            }
-            Some(4) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "unsupported_geometry",
-                    error_detail(&stderr),
-                )));
-            }
-            Some(code) => {
-                return Err(WorkerError::NonZeroExit {
-                    code: Some(code),
-                    stderr,
-                });
-            }
-            None => {
-                return Err(WorkerError::Signalled { signal: 0, stderr });
-            }
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .ok_or_else(|| WorkerError::Malformed {
-                detail: "worker emitted empty stdout".to_string(),
-            })?;
-        Ok(RawResult {
-            line: line.to_string(),
-        })
+            .map_err(ProtocolWorkerError::Io)?;
+        SubprocessWorkerHost::new(child).map(|host| Box::new(host) as Box<dyn WorkerHost>)
     }
 }
 
-fn error_detail(stderr: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(stderr)
-        .ok()
-        .and_then(|response| response["diagnostic"].as_str().map(str::to_string))
-        .unwrap_or_else(|| stderr.trim().to_string())
-}
-
+#[derive(Debug)]
 struct RawResult {
-    line: String,
+    value: serde_json::Value,
 }
 
 impl RawResult {
     fn into_extrude(self) -> Result<ExtrudeResult, WorkerError> {
-        match serde_json::from_str::<ExtrudeResult>(&self.line) {
+        match serde_json::from_value::<ExtrudeResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "extrude response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_extrude response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_boolean_fuse(self) -> Result<BooleanFuseResult, WorkerError> {
-        match serde_json::from_str::<BooleanFuseResult>(&self.line) {
+        match serde_json::from_value::<BooleanFuseResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "boolean-fuse response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_boolean_fuse response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_fillet(self) -> Result<FilletResult, WorkerError> {
-        match serde_json::from_str::<FilletResult>(&self.line) {
+        match serde_json::from_value::<FilletResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "fillet response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_fillet response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_chamfer(self) -> Result<ChamferResult, WorkerError> {
-        match serde_json::from_str::<ChamferResult>(&self.line) {
+        match serde_json::from_value::<ChamferResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "chamfer response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_chamfer response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_hole(self) -> Result<HoleResult, WorkerError> {
-        match serde_json::from_str::<HoleResult>(&self.line) {
+        match serde_json::from_value::<HoleResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "hole response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_hole response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_revolve(self) -> Result<RevolveResult, WorkerError> {
-        match serde_json::from_str::<RevolveResult>(&self.line) {
+        match serde_json::from_value::<RevolveResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "revolve response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_revolve response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_mirror(self) -> Result<MirrorResult, WorkerError> {
-        match serde_json::from_str::<MirrorResult>(&self.line) {
+        match serde_json::from_value::<MirrorResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "mirror response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_mirror response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_linear_pattern(self) -> Result<LinearPatternResult, WorkerError> {
-        match serde_json::from_str::<LinearPatternResult>(&self.line) {
+        match serde_json::from_value::<LinearPatternResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "linear_pattern response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_linear_pattern response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_circular_pattern(self) -> Result<CircularPatternResult, WorkerError> {
-        match serde_json::from_str::<CircularPatternResult>(&self.line) {
+        match serde_json::from_value::<CircularPatternResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "circular_pattern response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_circular_pattern response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_shell(self) -> Result<ShellResult, WorkerError> {
-        match serde_json::from_str::<ShellResult>(&self.line) {
+        match serde_json::from_value::<ShellResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "shell response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_shell response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_draft(self) -> Result<DraftResult, WorkerError> {
-        match serde_json::from_str::<DraftResult>(&self.line) {
+        match serde_json::from_value::<DraftResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "draft response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_draft response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 
     fn into_loft(self) -> Result<LoftResult, WorkerError> {
-        match serde_json::from_str::<LoftResult>(&self.line) {
+        match serde_json::from_value::<LoftResult>(self.value.clone()) {
             Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "loft response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+            Err(error) => Err(WorkerError::Malformed {
+                detail: format!(
+                    "into_loft response could not be parsed: {error}; value={}",
+                    self.value
+                ),
+            }),
         }
     }
 }
@@ -991,5 +995,119 @@ mod tests {
             ])
         );
         assert_eq!(value["feature_id"], "loft-1");
+    }
+
+    #[test]
+    fn map_outcome_completed_carries_the_typed_result_value() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "status": "ok", "operation": "extrude" }),
+            artifact_headers: vec![],
+        };
+        let result = map_outcome(outcome).expect("completed outcome maps");
+        assert_eq!(result.value["status"], "ok");
+    }
+
+    #[test]
+    fn map_outcome_failed_envelope_becomes_a_structured_diagnostic() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                stderr_tail: String::new(),
+                failed_code: Some("brep_invalid".to_string()),
+                failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                exit_kind: ExitKind::Cooperative,
+            },
+        };
+        let error = map_outcome(outcome).expect_err("failed envelope must not map to success");
+        match error {
+            WorkerError::Diagnostic(diagnostic) => {
+                assert_eq!(diagnostic.code, "brep_invalid");
+                assert_eq!(diagnostic.arg, "BRepCheck_Analyzer failed");
+                assert_eq!(diagnostic.schema_version, SCHEMA_VERSION);
+            }
+            other => panic!("expected Diagnostic; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_signal_exit_reports_the_actual_signal() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "grace_exceeded".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(11),
+                stderr_tail: String::new(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome).expect_err("signal exit must not map to success");
+        match error {
+            WorkerError::Signalled { signal } => assert_eq!(signal, 11),
+            other => panic!("expected Signalled; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_handshake_schema_mismatch_fails_closed() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "<handshake>".to_string(),
+                stage: "handshake_schema_mismatch:received=threeterm.protocol/0 expected=threeterm.protocol/1"
+                    .to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(9),
+                stderr_tail: String::new(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome).expect_err("schema mismatch must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn map_outcome_closed_worker_preserves_stderr_tail() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                stderr_tail: "worker trace".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome).expect_err("closed worker must fail closed");
+        match error {
+            WorkerError::NonZeroExit { stderr, .. } => {
+                assert_eq!(stderr, "worker trace");
+            }
+            other => panic!("expected NonZeroExit; got {other:?}"),
+        }
     }
 }

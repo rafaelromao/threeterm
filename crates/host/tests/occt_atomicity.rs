@@ -22,7 +22,7 @@ use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    ShellRequest, schema_version,
+    ShellRequest,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -47,6 +47,24 @@ fn unique_request_id(label: &str) -> String {
 
 fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
+}
+
+/// Shell-script fake OCCT worker speaking the versioned envelope
+/// protocol. Every fake emits the `worker_ready` handshake; `reply`
+/// lines are emitted after it. The fakes model production failure modes
+/// without an OCCT install.
+fn fake_worker_script(reply: &str) -> String {
+    format!(
+        "#!/bin/sh\nprintf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fake\"}}'\n{reply}\n"
+    )
+}
+
+/// Failed-envelope reply for a fake worker. `code`/`detail` mirror the
+/// structured `failed` envelope the real worker emits.
+fn fake_failed_reply(code: &str, detail: &str) -> String {
+    format!(
+        "printf '%s\\n' '{{\"kind\":\"failed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-fake\",\"code\":\"{code}\",\"detail\":\"{detail}\"}}'"
+    )
 }
 
 fn fresh_bundle_with_feature(label: &str, feature_id: &str, kind: &str) -> PathBuf {
@@ -250,16 +268,14 @@ fn extrude_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -562,16 +578,14 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-fuse-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": threeterm_occt_worker::schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -889,16 +903,14 @@ fn fillet_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-fillet-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -940,16 +952,14 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-chamfer-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1042,7 +1052,13 @@ fn unsupported_chamfer_preserves_the_preceding_fillet_revision() {
     ));
     fs::write(
         &script,
-        "#!/bin/sh\nprintf '%s\\n' 'unsupported_geometry: selected edges include fillet curves' >&2\nexit 4\n",
+        format!(
+            "{worker}\nexit 4\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "unsupported_geometry",
+                "selected edges include fillet curves",
+            ))
+        ),
     )
     .expect("script writes");
     let mut permissions = fs::metadata(&script).expect("stat").permissions();
@@ -1289,16 +1305,14 @@ fn hole_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-hole-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1542,16 +1556,14 @@ fn mirror_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-mirror-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1793,16 +1805,14 @@ fn linear_pattern_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-linear-pattern-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2055,16 +2065,14 @@ fn circular_pattern_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-circular-pattern-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2302,16 +2310,14 @@ fn shell_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-shell-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2625,16 +2631,14 @@ fn draft_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-draft-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2839,16 +2843,14 @@ fn loft_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-loft-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");

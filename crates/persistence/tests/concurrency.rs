@@ -815,15 +815,20 @@ fn pre_existing_lock_files_are_not_truncated_or_followed() {
         "the lock file is opened without truncation"
     );
 
-    let _ = fs::remove_file(&lock_path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
         let target = unique_temp_dir("lock-target");
+        fs::create_dir_all(&target).expect("lock target creates");
+        // Replace the writer-created lock file with a symlink, as a
+        // concurrent process could, and verify the next acquisition refuses
+        // to follow it instead of silently locking the target.
+        let swapped = unique_temp_dir("lock-swapped");
+        fs::rename(&lock_path, &swapped).expect("lock file moves aside");
         symlink(&target, &lock_path).expect("symlink lock creates");
         assert!(
             bundle.append_feature("box-2", "box").is_err(),
-            "a symlinked lock path is rejected instead of followed"
+            "a replaced symlink lock path is rejected instead of followed"
         );
         assert!(
             fs::symlink_metadata(&lock_path)
@@ -832,8 +837,16 @@ fn pre_existing_lock_files_are_not_truncated_or_followed() {
                 .is_symlink(),
             "the lock symlink is neither followed nor clobbered"
         );
+        assert!(
+            !fs::read_dir(&target)
+                .expect("target reads")
+                .next()
+                .is_some(),
+            "no write reaches the symlink target"
+        );
         let _ = fs::remove_file(&lock_path);
         let _ = fs::remove_dir_all(target);
+        let _ = fs::remove_dir_all(swapped);
     }
 
     let _ = fs::remove_dir_all(&root);

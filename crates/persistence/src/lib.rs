@@ -1194,73 +1194,45 @@ fn with_bundle_write_lock<T>(
 }
 
 /// Open a lock file for exclusive locking without truncating it and without
-/// following a symlink or a non-regular file at the lock path.
+/// ever following a symlink at the lock path.
+///
+/// The open is atomic: `O_NOFOLLOW | O_CREAT` either opens the regular file
+/// that is at the path at open time or fails with `ELOOP` when the path is a
+/// symlink — there is no probe-then-open window a replacement could slip
+/// into. The opened descriptor is verified to be a regular file before it is
+/// locked.
 fn open_lock_file(lock_path: &Path) -> Result<File, BundleError> {
-    for _ in 0..8 {
-        let probe = match fs::symlink_metadata(lock_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Reserve the lock file atomically; a concurrent writer that
-                // created it first shows up as AlreadyExists and is re-probed.
-                match File::options()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .open(lock_path)
-                {
-                    Ok(file) => return Ok(file),
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::AlreadyExists
-                            || error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if probe.file_type().is_symlink() {
-            return Err(BundleError::Io(format!(
+    let mut options = File::options();
+    options.read(true).write(true).create(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW (00400000) from Linux's asm-generic/fcntl.h. std has no
+        // named constant for it, and opening through a symlink would lock a
+        // different file than the one being serialized.
+        options.custom_flags(0o400000);
+    }
+    let file = options.open(lock_path).map_err(|error| {
+        if error.raw_os_error() == Some(40) {
+            // ELOOP: the lock path is a symlink.
+            BundleError::Io(format!(
                 "refusing to lock through a symlink: {}",
                 lock_path.display()
-            )));
-        }
-        if !probe.is_file() {
-            return Err(BundleError::Io(format!(
-                "refusing to lock a non-regular file: {}",
+            ))
+        } else {
+            BundleError::Io(format!(
+                "failed to open lock file {}: {error}",
                 lock_path.display()
-            )));
+            ))
         }
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(BundleError::from)?;
-        // Verify the opened descriptor is the probed file: a replacement
-        // (e.g. a symlink swap) between probe and open resolves to a
-        // different identity, so the open is retried until the path
-        // stabilizes or the replacement is exposed.
-        if same_file_identity(&probe, &file)? {
-            return Ok(file);
-        }
+    })?;
+    if !file.metadata().map_err(BundleError::from)?.is_file() {
+        return Err(BundleError::Io(format!(
+            "refusing to lock a non-regular file: {}",
+            lock_path.display()
+        )));
     }
-    Err(BundleError::Io(format!(
-        "lock file {} keeps changing under the writer",
-        lock_path.display()
-    )))
-}
-
-#[cfg(unix)]
-fn same_file_identity(probe: &fs::Metadata, file: &File) -> Result<bool, BundleError> {
-    use std::os::unix::fs::MetadataExt;
-    let opened = file.metadata().map_err(BundleError::from)?;
-    Ok(probe.dev() == opened.dev() && probe.ino() == opened.ino())
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_probe: &fs::Metadata, _file: &File) -> Result<bool, BundleError> {
-    Ok(true)
+    Ok(file)
 }
 
 fn write_lock_path(root: &Path) -> Option<PathBuf> {

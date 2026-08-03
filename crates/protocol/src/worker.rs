@@ -52,6 +52,13 @@ const OVERFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 /// before giving up on recording its exit status.
 const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long `terminate` waits for a worker that emitted its terminal
+/// envelope to exit naturally before force-killing the process group.
+/// Cooperative workers return immediately after their terminal
+/// envelope; this window lets the reap observe the clean exit instead
+/// of a supervisor-delivered SIGKILL.
+const NATURAL_EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Poll interval while waiting for the leader to reap after a kill.
 const REAP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -525,9 +532,18 @@ impl WorkerHost for SubprocessWorkerHost {
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
         // SIGKILL the worker's process group so the worker AND any
-        // descendants die together. The group kill is attempted even
-        // when the leader has already exited: a descendant can outlive
-        // its leader and would otherwise survive the reap.
+        // descendants die together. A cooperative worker that emitted
+        // its terminal envelope is normally mid-exit, so a short
+        // natural-exit window runs first: a clean reap then means the
+        // worker is gone and only descendants (if any) need killing.
+        self.reap_if_exited()?;
+        if self.reaped_status.is_none() {
+            let grace = Instant::now() + NATURAL_EXIT_WAIT;
+            while self.reaped_status.is_none() && Instant::now() < grace {
+                std::thread::sleep(REAP_POLL);
+                self.reap_if_exited()?;
+            }
+        }
         let pid = self.child.id() as i32;
         match nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(pid),

@@ -402,10 +402,6 @@ void write_cancelled(const std::string& request_id, const std::string& reason) {
 /// a successful dispatch.
 std::string g_result_json;
 
-/// Captured typed result JSON emitted by the dispatched handler. The
-/// envelope-wrapping main loop wraps it in a `completed` envelope after
-/// a successful dispatch.
-
 const JsonParser::Value* find_field(const JsonParser::Value& object, const std::string& key) {
     if (object.kind != JsonParser::ValueKind::Object) return nullptr;
     for (const auto& pair : object.object_value) {

@@ -248,6 +248,13 @@ pub trait WorkerHost {
     fn stderr_tail(&mut self) -> String {
         String::new()
     }
+
+    /// Returns the stream that exceeded its byte bound, if any. The
+    /// supervisor re-checks this before accepting a terminal outcome so
+    /// an overflow racing a completion still fails closed.
+    fn stream_overflowed(&mut self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Newline-frame transport for a disposable worker byte stream.
@@ -568,7 +575,9 @@ impl WorkerHost for SubprocessWorkerHost {
             Err(error) => return Err(WorkerError::Io(error.into())),
         }
         // Reap the leader, waiting briefly for the SIGKILL to land so
-        // the exit status (including the kill signal) is recorded.
+        // the exit status (including the kill signal) is recorded. If
+        // the leader still cannot be reaped, fail closed: a terminal
+        // outcome must never be accepted without proof of reap.
         self.reap_if_exited()?;
         if self.reaped_status.is_none() {
             let deadline = Instant::now() + REAP_WAIT;
@@ -576,6 +585,11 @@ impl WorkerHost for SubprocessWorkerHost {
                 std::thread::sleep(REAP_POLL);
                 self.reap_if_exited()?;
             }
+        }
+        if self.reaped_status.is_none() {
+            return Err(WorkerError::Io(std::io::Error::other(
+                "worker leader could not be reaped",
+            )));
         }
         Ok(())
     }
@@ -591,6 +605,22 @@ impl WorkerHost for SubprocessWorkerHost {
 
     fn stderr_tail(&mut self) -> String {
         String::from_utf8_lossy(&self.stderr_tail.lock().expect("stderr tail mutex")).into_owned()
+    }
+
+    fn stream_overflowed(&mut self) -> Option<&'static str> {
+        if self
+            .stdout_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Some("stdout");
+        }
+        if self
+            .stderr_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Some("stderr");
+        }
+        None
     }
 }
 

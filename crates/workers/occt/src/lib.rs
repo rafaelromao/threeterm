@@ -411,14 +411,14 @@ impl OcctWorker {
         let mut supervisor = Supervisor::new(self.grace, host, None);
         let outcome = supervisor.request_with_cancel(
             SupervisorRequest {
-                request_id,
-                command_id,
+                request_id: request_id.clone(),
+                command_id: command_id.clone(),
                 args,
                 revision_id: String::new(),
             },
             cancel,
         );
-        map_outcome(outcome).map(|result| result.value)
+        map_outcome(outcome, &request_id, &command_id).map(|result| result.value)
     }
 }
 
@@ -426,9 +426,52 @@ impl OcctWorker {
 /// request carries the typed result JSON, a cooperative `Failed`
 /// envelope becomes an [`OcctDiagnostic`], a signal-based exit keeps the
 /// actual signal, and everything else fails closed.
-fn map_outcome(outcome: SupervisorOutcome) -> Result<RawResult, WorkerError> {
+///
+/// The typed result is bound to the active request: its inner
+/// `request_id`, `schema_version`, and `operation` must match the
+/// request that was sent, or the completion fails closed.
+fn map_outcome(
+    outcome: SupervisorOutcome,
+    request_id: &str,
+    command_id: &str,
+) -> Result<RawResult, WorkerError> {
     match outcome {
-        SupervisorOutcome::Completed { result, .. } => Ok(RawResult { value: result }),
+        SupervisorOutcome::Completed { result, .. } => {
+            let result_request_id = result
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let result_schema = result
+                .get("schema_version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let result_operation = result
+                .get("operation")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if result_request_id != request_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result is bound to {result_request_id:?}, expected {request_id:?}"
+                    ),
+                });
+            }
+            if result_schema != SCHEMA_VERSION {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result schema {result_schema:?}, expected {SCHEMA_VERSION:?}"
+                    ),
+                });
+            }
+            if result_operation != command_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result operation {result_operation:?}, expected {command_id:?}"
+                    ),
+                });
+            }
+            Ok(RawResult { value: result })
+        }
         SupervisorOutcome::Acknowledged {
             request_id, reason, ..
         } => Err(WorkerError::Cancelled {
@@ -1065,11 +1108,56 @@ mod tests {
     fn map_outcome_completed_carries_the_typed_result_value() {
         let outcome = SupervisorOutcome::Completed {
             request_id: "req-1".to_string(),
-            result: serde_json::json!({ "status": "ok", "operation": "extrude" }),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "status": "ok",
+            }),
             artifact_headers: vec![],
         };
-        let result = map_outcome(outcome).expect("completed outcome maps");
+        let result = map_outcome(outcome, "req-1", "extrude").expect("completed outcome maps");
         assert_eq!(result.value["status"], "ok");
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_bound_to_another_request() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "other-request",
+                "operation": "extrude",
+                "status": "ok",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(outcome, "req-1", "extrude")
+            .expect_err("foreign request_id must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_with_foreign_operation() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "boolean_fuse",
+                "status": "ok",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(outcome, "req-1", "extrude")
+            .expect_err("foreign operation must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
     }
 
     #[test]
@@ -1090,7 +1178,8 @@ mod tests {
                 exit_kind: ExitKind::Cooperative,
             },
         };
-        let error = map_outcome(outcome).expect_err("failed envelope must not map to success");
+        let error = map_outcome(outcome, "req-1", "extrude")
+            .expect_err("failed envelope must not map to success");
         match error {
             WorkerError::Diagnostic(diagnostic) => {
                 assert_eq!(diagnostic.code, "brep_invalid");
@@ -1119,7 +1208,8 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome).expect_err("signal exit must not map to success");
+        let error = map_outcome(outcome, "req-1", "extrude")
+            .expect_err("signal exit must not map to success");
         match error {
             WorkerError::Supervised { record } => {
                 assert_eq!(record.exit_signal, Some(11));
@@ -1148,7 +1238,8 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome).expect_err("schema mismatch must fail closed");
+        let error =
+            map_outcome(outcome, "req-1", "extrude").expect_err("schema mismatch must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
             "expected Malformed; got {error:?}"
@@ -1173,7 +1264,8 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome).expect_err("closed worker must fail closed");
+        let error =
+            map_outcome(outcome, "req-1", "extrude").expect_err("closed worker must fail closed");
         match error {
             WorkerError::Supervised { record } => {
                 assert_eq!(record.stderr_tail, "worker trace");

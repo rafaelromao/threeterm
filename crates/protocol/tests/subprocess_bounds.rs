@@ -168,3 +168,44 @@ fn oversized_host_frame_is_rejected_at_send() {
     }
     host.terminate().expect("draining worker terminates");
 }
+
+#[test]
+fn terminal_completion_racing_a_stdout_overflow_fails_closed() {
+    // The worker emits WorkerReady, a valid Completed, and then floods
+    // stdout past the bound. The terminal outcome must fail closed even
+    // though the completion envelope arrived first.
+    let fixture = "printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("flooding-after-completion worker starts");
+    let limits = StreamLimits {
+        stdout_bytes: 16 * 1024,
+        stderr_bytes: 1024,
+    };
+    let mut host = SubprocessWorkerHost::with_limits(child, limits).expect("transport starts");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The worker delivers a valid Completed then floods stdout past the
+    // bound. Whether the completion is delivered first or the overflow
+    // flag lands first, the host must fail closed with StreamOverflow —
+    // never a clean completion.
+    let error = loop {
+        match host.recv(deadline) {
+            Ok(_envelope) => continue,
+            Err(WorkerError::TimedOut) => continue,
+            Err(error) => break error,
+        }
+    };
+    match error {
+        WorkerError::StreamOverflow { stream, .. } => {
+            assert_eq!(stream, "stdout");
+        }
+        other => panic!("expected StreamOverflow; got {other:?}"),
+    }
+    host.terminate().expect("flooding worker terminates");
+}

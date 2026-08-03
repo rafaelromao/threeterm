@@ -813,6 +813,12 @@ impl Supervisor {
             (None, Some(code)) if code != 0 => {
                 Some(format!("{stage_prefix}:exited_with_code:{code}"))
             }
+            // A stream overflow that raced the terminal envelope also
+            // fails the outcome closed.
+            (None, None) => self
+                .host
+                .stream_overflowed()
+                .map(|stream| format!("{stage_prefix}:stream_overflow:{stream}")),
             _ => None,
         };
         unclean.map(|stage| {

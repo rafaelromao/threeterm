@@ -794,3 +794,145 @@ fn first_save_recovers_with_stale_staging_candidates() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(previous_generation_sibling(&root));
 }
+
+#[test]
+fn pre_existing_lock_files_are_not_truncated_or_followed() {
+    let root = unique_temp_dir("lock-safety");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    let mut lock_path = root.clone();
+    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
+    lock_name.push(WRITE_LOCK_SUFFIX);
+    lock_path.set_file_name(lock_name);
+    fs::write(&lock_path, b"pre-existing lock content").expect("lock content writes");
+    let original = fs::read(&lock_path).expect("lock content reads");
+
+    bundle
+        .append_feature("box-1", "box")
+        .expect("append succeeds with a pre-existing lock file");
+    assert_eq!(
+        fs::read(&lock_path).unwrap(),
+        original,
+        "the lock file is opened without truncation"
+    );
+
+    let _ = fs::remove_file(&lock_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let target = unique_temp_dir("lock-target");
+        symlink(&target, &lock_path).expect("symlink lock creates");
+        assert!(
+            bundle.append_feature("box-2", "box").is_err(),
+            "a symlinked lock path is rejected instead of followed"
+        );
+        assert!(
+            fs::symlink_metadata(&lock_path)
+                .expect("lock metadata reads")
+                .file_type()
+                .is_symlink(),
+            "the lock symlink is neither followed nor clobbered"
+        );
+        let _ = fs::remove_file(&lock_path);
+        let _ = fs::remove_dir_all(target);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_bundle_root_serializes_with_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let parent = unique_temp_dir("symlink-root");
+    fs::create_dir_all(&parent).expect("parent creates");
+    let real_root = parent.join("real");
+    let alias = parent.join("alias");
+    let real_bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&real_root, "00".repeat(16).as_str()).expect("real bundle creates"),
+    );
+    symlink(&real_root, &alias).expect("alias symlink creates");
+    let alias_bundle = std::sync::Arc::new(Bundle::at(&alias));
+
+    const THREADS: usize = 4;
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let real_bundle = real_bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            real_bundle
+                .append_feature(&format!("real-{thread}"), "box")
+                .expect("target append succeeds");
+        }));
+    }
+    for thread in 0..THREADS {
+        let alias_bundle = alias_bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            alias_bundle
+                .append_feature(&format!("alias-{thread}"), "box")
+                .expect("alias append succeeds");
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("append thread completes");
+    }
+
+    let loaded = Bundle::at(&real_root).open().expect("bundle opens");
+    assert_eq!(
+        loaded.log.len(),
+        THREADS * 2,
+        "aliases and target share one linear canonical log"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.log_index, index);
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+    assert!(
+        fs::symlink_metadata(&alias)
+            .expect("alias metadata reads")
+            .file_type()
+            .is_symlink(),
+        "the alias symlink survives publication"
+    );
+
+    let _ = fs::remove_dir_all(parent);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_backup_siblings_are_recognized_losslessly() {
+    use std::os::unix::ffi::OsStringExt;
+
+    use threeterm_persistence::PRE_MIGRATION_BACKUP_SUFFIX;
+    use threeterm_persistence::bundle::{SchemaStatus, detect_schema};
+
+    let parent = unique_temp_dir("non-utf8-backup");
+    fs::create_dir_all(&parent).expect("parent creates");
+    let root = parent.join(std::ffi::OsString::from_vec(b"backup-\xff".to_vec()));
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-non-utf8-backup"))
+        .expect("v0 fixture writes");
+    let backup = root.with_file_name({
+        let mut name = root.file_name().expect("root has a name").to_os_string();
+        name.push(PRE_MIGRATION_BACKUP_SUFFIX);
+        name
+    });
+
+    load(&root).expect("v0 migrates");
+    assert!(
+        backup.exists(),
+        "the pre-migration backup sibling is retained"
+    );
+    assert_eq!(
+        detect_schema(&backup).expect("backup classifies"),
+        SchemaStatus::Unknown,
+        "a non-UTF-8 backup is recognized as a backup and never migratable"
+    );
+
+    let _ = fs::remove_dir_all(parent);
+}

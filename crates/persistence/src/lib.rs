@@ -301,6 +301,9 @@ impl LoadedBundle {
 pub enum BundleError {
     ManifestMissing,
     LogMissing,
+    BundlePathMissing {
+        path: PathBuf,
+    },
     SchemaGenerationUnsupported {
         found: u32,
     },
@@ -346,6 +349,7 @@ impl BundleError {
         match self {
             Self::ManifestMissing => "manifest_missing",
             Self::LogMissing => "log_missing",
+            Self::BundlePathMissing { .. } => "bundle_path_missing",
             Self::SchemaGenerationUnsupported { .. } => "schema_generation_unsupported",
             Self::LogDigestMismatch => "log_digest_mismatch",
             Self::LogBrokenLink { .. } => "log_broken_link",
@@ -367,6 +371,9 @@ impl fmt::Display for BundleError {
         match self {
             Self::ManifestMissing => formatter.write_str("manifest missing"),
             Self::LogMissing => formatter.write_str("transaction log missing"),
+            Self::BundlePathMissing { path } => {
+                write!(formatter, "bundle path missing: {}", path.display())
+            }
             Self::SchemaGenerationUnsupported { found } => {
                 write!(formatter, "unsupported schema generation: {found}")
             }
@@ -433,7 +440,18 @@ pub struct Bundle {
 
 impl Bundle {
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: canonical_bundle_root(&root.into()),
+        }
+    }
+
+    /// The canonical root directory this bundle operates on.
+    ///
+    /// Symlink aliases of one bundle resolve to the same canonical root, so
+    /// writers addressed through an alias and writers addressed through the
+    /// target share one lock and one set of recovery siblings.
+    pub fn canonical_root(&self) -> &Path {
+        &self.root
     }
 
     pub fn create(root: impl Into<PathBuf>) -> Result<Self, BundleError> {
@@ -740,8 +758,10 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     // preflight could observe a missing manifest exactly between those two
     // renames and fail a load that simply waited for the writer. Serializing
     // classification with publications makes every load linearize against
-    // them.
-    with_bundle_write_lock(path, || load_unlocked(path))
+    // them. The root is canonicalized first so a symlink alias and the
+    // target share one lock and one set of recovery siblings.
+    let root = canonical_bundle_root(path);
+    with_bundle_write_lock(&root, || load_unlocked(&root))
 }
 
 /// The lock-free body of `load`. Callers must hold the per-root write lock
@@ -766,10 +786,9 @@ fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
                 }),
             };
         }
-        return Err(BundleError::Invalid(format!(
-            "bundle path missing: {}",
-            root.display()
-        )));
+        return Err(BundleError::BundlePathMissing {
+            path: root.to_path_buf(),
+        });
     }
     if !root.is_dir() {
         return Err(BundleError::Invalid(format!(
@@ -1043,8 +1062,35 @@ fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
     }
 }
 
-fn previous_generation_path(path: &Path) -> PathBuf {
+/// The sibling path that retains the immediately preceding valid generation
+/// of the bundle at `path`.
+///
+/// Built from the raw `OsStr` bytes so a non-UTF-8 bundle name still gets a
+/// real, distinct sibling slot.
+pub fn previous_generation_path(path: &Path) -> PathBuf {
     sibling_path_with_suffix(path, PREVIOUS_GENERATION_SUFFIX)
+}
+
+/// Resolve `path` to one canonical identity for locking and recovery.
+///
+/// An existing root is canonicalized so symlink aliases of the same bundle
+/// share one lock and one set of sibling slots. A missing root cannot be
+/// canonicalized; its parent is canonicalized instead and the file name is
+/// re-joined, which converges with the full canonicalization once the root
+/// exists (unless the root name itself is a dangling symlink).
+fn canonical_bundle_root(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && let Some(file_name) = path.file_name()
+        && let Ok(canonical_parent) = fs::canonicalize(parent)
+    {
+        return canonical_parent.join(file_name);
+    }
+    path.to_path_buf()
 }
 
 /// Append `suffix` to `path`'s file name, preserving the raw `OsStr` bytes.
@@ -1097,13 +1143,69 @@ fn with_bundle_write_lock<T>(
     {
         fs::create_dir_all(parent)?;
     }
-    let lock_file = File::create(&lock_path)?;
+    // Open the lock file without truncation and without following a
+    // symlink, so a pre-existing sibling cannot be silently destroyed or
+    // redirected before the lock is taken.
+    let lock_file = open_lock_file(&lock_path)?;
     lock_file.lock().map_err(|error| {
         BundleError::Io(format!("failed to lock {}: {error}", lock_path.display()))
     })?;
     let result = operation();
     let _ = lock_file.unlock();
     result
+}
+
+/// Open a lock file for exclusive locking without truncating it and without
+/// following a symlink or a non-regular file at the lock path.
+fn open_lock_file(lock_path: &Path) -> Result<File, BundleError> {
+    for _ in 0..8 {
+        match fs::symlink_metadata(lock_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(BundleError::Io(format!(
+                        "refusing to lock through a symlink: {}",
+                        lock_path.display()
+                    )));
+                }
+                if !metadata.is_file() {
+                    return Err(BundleError::Io(format!(
+                        "refusing to lock a non-regular file: {}",
+                        lock_path.display()
+                    )));
+                }
+                return File::options()
+                    .read(true)
+                    .write(true)
+                    .open(lock_path)
+                    .map_err(BundleError::from);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Reserve the lock file without following anything that a
+                // concurrent writer created between the probe and now; if
+                // the creation raced, re-probe the existing file.
+                match File::options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(lock_path)
+                {
+                    Ok(file) => return Ok(file),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::AlreadyExists
+                            || error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(BundleError::Io(format!(
+        "could not open lock file {} after repeated races",
+        lock_path.display()
+    )))
 }
 
 fn write_lock_path(root: &Path) -> Option<PathBuf> {
@@ -1251,9 +1353,24 @@ fn unknown_field_in(message: &str) -> Option<String> {
 }
 
 fn is_pre_migration_backup_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(PRE_MIGRATION_BACKUP_SUFFIX))
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    // Compare the suffix losslessly so a non-UTF-8 backup sibling is still
+    // recognized and never treated as a migratable v0 source.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        file_name
+            .as_bytes()
+            .ends_with(PRE_MIGRATION_BACKUP_SUFFIX.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        file_name
+            .to_string_lossy()
+            .ends_with(PRE_MIGRATION_BACKUP_SUFFIX)
+    }
 }
 
 /// Authenticate and read a v0 bundle on disk. Mirrors the v1 reader's

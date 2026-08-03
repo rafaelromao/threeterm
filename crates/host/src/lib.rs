@@ -11,7 +11,7 @@ use threeterm_occt_worker::{
     LoftResult, MirrorRequest, MirrorResult, OcctWorker, RevolveRequest, RevolveResult,
     ShellRequest, ShellResult, WorkerError,
 };
-use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load};
+use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
 };
@@ -224,35 +224,7 @@ impl Host {
         kind: &str,
     ) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
-        let bundle = if root.exists() {
-            if !root.is_dir() {
-                return Err(HostError::BundlePathNotDirectory {
-                    path: root.to_path_buf(),
-                });
-            }
-            // `load` owns schema migration. Appending through `Bundle::open`
-            // alone would reject a recoverable v0 generation.
-            self.load_preflight(root)?;
-            Bundle::at(root)
-        } else {
-            let mut previous = root.to_path_buf();
-            previous.set_file_name(format!(
-                "{}.previous-generation",
-                root.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            if previous.exists() {
-                // A missing root can retain a v0 source after an interrupted
-                // migration. Recover/migrate it before attempting an append.
-                self.load_preflight(root)?;
-                Bundle::at(root)
-            } else {
-                // The locked append path stages and atomically promotes the
-                // empty baseline itself, so a concurrent first save on the
-                // same missing root serializes instead of failing with
-                // "destination already exists".
-                Bundle::at(root)
-            }
-        };
+        let bundle = self.bundle_for_save(root)?;
         let loaded = match bundle.append_feature(feature_id, kind) {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -316,26 +288,25 @@ impl Host {
         }
 
         let root = root.as_ref();
-        let bundle = if root.exists() {
-            if !root.is_dir() {
-                return Err(HostError::BundlePathNotDirectory {
-                    path: root.to_path_buf(),
-                });
-            }
-            Bundle::at(root)
-        } else {
-            // The locked append path stages and atomically promotes the
-            // empty baseline itself, so a concurrent first save serializes
-            // instead of failing with "destination already exists".
-            Bundle::at(root)
-        };
+        let bundle = self.bundle_for_save(root)?;
         let vertical_id = format!("{bracket_id}-plate-vertical");
         let horizontal_id = format!("{bracket_id}-plate-horizontal");
         let entries = [
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let loaded = bundle.append_features(&entries)?;
+        let loaded = match bundle.append_features(&entries) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Publication can promote before its final parent sync
+                // reports an error. Re-open so in-memory state never lags
+                // the selected generation on disk.
+                if let Ok(loaded) = bundle.open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -348,20 +319,17 @@ impl Host {
                 path: root.to_path_buf(),
             });
         }
-        if !root.exists() {
-            let mut previous = root.to_path_buf();
-            previous.set_file_name(format!(
-                "{}.previous-generation",
-                root.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            if !previous.exists() {
+        let loaded = match load(root) {
+            Ok(loaded) => loaded,
+            Err(BundleError::BundlePathMissing { .. }) => {
+                // The missing-root classification is made under the
+                // persistence lock, so a concurrent first save either
+                // completes before the classification (and the load
+                // succeeds) or is still in flight.
                 return Err(HostError::BundlePathMissing {
                     path: root.to_path_buf(),
                 });
             }
-        }
-        let loaded = match load(root) {
-            Ok(loaded) => loaded,
             Err(error) => {
                 // Migration can promote before its final parent sync reports
                 // an error. Re-open the selected generation before returning
@@ -391,6 +359,34 @@ impl Host {
             return Err(error.into());
         }
         Ok(())
+    }
+
+    /// Resolve the bundle a save should append to.
+    ///
+    /// Every save path is migration-aware: when the bundle or its previous
+    /// sibling exists, `load` runs first so a v0 source or a v0 previous
+    /// generation is migrated before the append. The previous-sibling check
+    /// uses the persistence-derived, lossless sibling path so a non-UTF-8
+    /// bundle name is never missed. When nothing exists, the locked append
+    /// path stages and atomically promotes the empty baseline itself, so a
+    /// concurrent first save on the same missing root serializes instead of
+    /// failing with "destination already exists".
+    fn bundle_for_save(&self, root: &Path) -> Result<Bundle, HostError> {
+        let bundle = Bundle::at(root);
+        let canonical = bundle.canonical_root();
+        if canonical.exists() {
+            if !canonical.is_dir() {
+                return Err(HostError::BundlePathNotDirectory {
+                    path: root.to_path_buf(),
+                });
+            }
+            self.load_preflight(root)?;
+        } else if previous_generation_path(canonical).exists() {
+            // A missing root can retain a v0 source after an interrupted
+            // migration. Recover/migrate it before attempting an append.
+            self.load_preflight(root)?;
+        }
+        Ok(bundle)
     }
 
     pub fn current(&self) -> Option<SnapshotView> {

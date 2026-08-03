@@ -983,3 +983,89 @@ fn interrupted_backup_creation_is_repaired_on_retry() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(backup);
 }
+
+#[test]
+fn lock_path_replacement_after_open_reserializes_writers() {
+    let root = unique_temp_dir("lock-replacement");
+    let bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates"),
+    );
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first publish");
+
+    // The test plays the adversarial replacer: it holds the current lock
+    // inode, then swaps the lock path out from under the next writer so the
+    // writer's locked descriptor no longer names the path it acquired.
+    let mut lock_path = root.clone();
+    let mut lock_name = root.file_name().expect("root has a name").to_os_string();
+    lock_name.push(WRITE_LOCK_SUFFIX);
+    lock_path.set_file_name(lock_name);
+    let replaced = {
+        let mut replaced = lock_path.clone();
+        replaced.set_file_name(format!(
+            "{}.replaced",
+            lock_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        replaced
+    };
+    let old_lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("current lock inode opens");
+    old_lock.lock().expect("old lock held");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let writer = {
+        let bundle = bundle.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).expect("started signal sends");
+            bundle.append_feature("box-w1", "box")
+        })
+    };
+    started_rx
+        .recv()
+        .expect("writer is running before the replacement");
+    // The writer has opened the current lock inode and is blocked on it.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    fs::rename(&lock_path, &replaced).expect("lock path replaced");
+    std::fs::File::create(&lock_path).expect("replacement lock inode creates");
+    old_lock.unlock().expect("old lock releases");
+
+    let writer_2 = {
+        let bundle = bundle.clone();
+        std::thread::spawn(move || bundle.append_feature("box-w2", "box"))
+    };
+    writer
+        .join()
+        .expect("first writer completes")
+        .expect("first writer reserializes on the replacement lock");
+    writer_2
+        .join()
+        .expect("second writer completes")
+        .expect("second writer serializes");
+
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(
+        loaded.log.len(),
+        3,
+        "every accepted save lands in one canonical log"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}

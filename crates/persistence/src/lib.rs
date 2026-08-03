@@ -1183,25 +1183,72 @@ fn with_bundle_write_lock<T>(
     }
     // Open the lock file without truncation and without following a
     // symlink, so a pre-existing sibling cannot be silently destroyed or
-    // redirected before the lock is taken.
-    let lock_file = open_lock_file(&lock_path)?;
-    lock_file.lock().map_err(|error| {
-        BundleError::Io(format!("failed to lock {}: {error}", lock_path.display()))
-    })?;
+    // redirected before the lock is taken. The descriptor is locked and
+    // its identity re-checked before it is accepted, so a replacement of
+    // the lock path cannot split serialization across two inodes.
+    let lock_file = acquire_lock_file(&lock_path)?;
     let result = operation();
     let _ = lock_file.unlock();
     result
 }
 
-/// Open a lock file for exclusive locking without truncating it and without
-/// ever following a symlink at the lock path.
+/// Acquire the per-root write lock descriptor.
+///
+/// The candidate is opened atomically (`O_NOFOLLOW | O_CREAT`), locked
+/// immediately, and only then checked against the path's current identity.
+/// If the path was replaced between the open and the lock, the locked
+/// inode is stale: the lock is dropped and acquisition retried against the
+/// replacement. Two writers therefore never hold different inodes of the
+/// same lock path at the same time.
+fn acquire_lock_file(lock_path: &Path) -> Result<File, BundleError> {
+    for _ in 0..8 {
+        let file = open_lock_candidate(lock_path)?;
+        file.lock().map_err(|error| {
+            BundleError::Io(format!("failed to lock {}: {error}", lock_path.display()))
+        })?;
+        if lock_path_names(&file, lock_path)? {
+            return Ok(file);
+        }
+        let _ = file.unlock();
+    }
+    Err(BundleError::Io(format!(
+        "could not acquire lock {} after repeated path replacements",
+        lock_path.display()
+    )))
+}
+
+/// Whether `lock_path` still names the inode behind `file`.
+///
+/// `symlink_metadata` compares the path entry itself, so a symlink or a
+/// removed lock path also counts as a mismatch and forces a retry.
+fn lock_path_names(file: &File, lock_path: &Path) -> Result<bool, BundleError> {
+    let Ok(path_metadata) = fs::symlink_metadata(lock_path) else {
+        return Ok(false);
+    };
+    let file_metadata = file.metadata().map_err(BundleError::from)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(
+            path_metadata.dev() == file_metadata.dev()
+                && path_metadata.ino() == file_metadata.ino(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(true)
+    }
+}
+
+/// Open a lock file without truncating it and without ever following a
+/// symlink at the lock path.
 ///
 /// The open is atomic: `O_NOFOLLOW | O_CREAT` either opens the regular file
 /// that is at the path at open time or fails with `ELOOP` when the path is a
 /// symlink — there is no probe-then-open window a replacement could slip
 /// into. The opened descriptor is verified to be a regular file before it is
 /// locked.
-fn open_lock_file(lock_path: &Path) -> Result<File, BundleError> {
+fn open_lock_candidate(lock_path: &Path) -> Result<File, BundleError> {
     let mut options = File::options();
     options.read(true).write(true).create(true);
     #[cfg(target_os = "linux")]
@@ -1876,8 +1923,8 @@ mod tests {
         fs::create_dir_all(&root).expect("dir creates");
         let lock = root.join("bundle.write-lock");
 
-        let first = open_lock_file(&lock).expect("lock opens");
-        let second = open_lock_file(&lock).expect("lock reopens");
+        let first = open_lock_candidate(&lock).expect("lock opens");
+        let second = open_lock_candidate(&lock).expect("lock reopens");
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -1896,7 +1943,7 @@ mod tests {
             let _ = fs::remove_file(&lock);
             symlink(root.join("elsewhere"), &lock).expect("symlink creates");
             assert!(
-                open_lock_file(&lock).is_err(),
+                open_lock_candidate(&lock).is_err(),
                 "a swapped symlink at the lock path is rejected"
             );
         }

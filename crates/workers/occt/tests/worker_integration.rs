@@ -1248,8 +1248,15 @@ fn canonical_loft_request() -> LoftRequest {
 
 fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str) {
     // The production path speaks the versioned envelope protocol: the
-    // worker expects a `request` envelope whose `args` carry the OCCT
-    // request, and reports malformed input as a `failed` envelope.
+    // worker expects a single newline-framed `request` envelope whose
+    // `args` carry the OCCT request, and reports malformed input as a
+    // `failed` envelope. The raw request is compacted so it embeds into
+    // one line (the worker reads exactly one envelope line).
+    let args: serde_json::Value =
+        serde_json::from_str(request).expect("raw request is valid JSON");
+    let envelope = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{args},\"revision_id\":\"\"}}\n"
+    );
     let mut child = Command::new(worker.binary_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1257,9 +1264,6 @@ fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str
         .spawn()
         .expect("worker spawns");
     let mut stdin = child.stdin.take().expect("stdin open");
-    let envelope = format!(
-        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{request},\"revision_id\":\"\"}}\n"
-    );
     stdin.write_all(envelope.as_bytes()).expect("stdin writes");
     drop(stdin);
     let output = child.wait_with_output().expect("worker waits");

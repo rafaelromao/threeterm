@@ -890,3 +890,84 @@ fn failed_envelope_bound_to_another_request_is_rejected() {
         progress.stage
     );
 }
+
+#[test]
+fn request_fails_closed_on_post_handshake_schema_mismatch() {
+    // WorkerReady with the canonical schema, then a Progress envelope
+    // carrying a foreign protocol version: the request must fail closed
+    // instead of accepting the mis-versioned message.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Progress {
+            schema_version: "threeterm.protocol/0".to_string(),
+            request_id: "req-1".to_string(),
+            stage: "sneaky".to_string(),
+            percent: 1,
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert!(
+        record.stage.starts_with("envelope_schema_mismatch"),
+        "stage: {:?}",
+        record.stage
+    );
+    assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+}
+
+#[test]
+fn cancel_fails_closed_on_post_handshake_schema_mismatch() {
+    let worker = PipeHost::new(vec![Envelope::Progress {
+        schema_version: "threeterm.protocol/0".to_string(),
+        request_id: "req-1".to_string(),
+        stage: "sneaky".to_string(),
+        percent: 1,
+    }]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert!(
+        record.stage.starts_with("envelope_schema_mismatch"),
+        "stage: {:?}",
+        record.stage
+    );
+}
+
+#[test]
+fn mismatched_progress_fails_the_request_closed_immediately() {
+    // A foreign-request Progress must terminate the request immediately
+    // (not merely be marked and continue until grace).
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Progress {
+            schema_version: schema_version().to_string(),
+            request_id: "other-request".to_string(),
+            stage: "sneaky".to_string(),
+            percent: 99,
+        },
+        // Even a valid Completed afterwards must not rescue the request.
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert!(
+        record
+            .stage
+            .starts_with("protocol_violation:mismatched_request_id:"),
+        "stage: {:?}",
+        record.stage
+    );
+    assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+}

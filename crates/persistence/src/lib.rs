@@ -1047,9 +1047,17 @@ fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError>
         // canonical generation. Restore the recognized previous slot before
         // allowing either reads or another publication to proceed.
         Bundle::at(&retired).open_sealed(false)?;
-        fs::rename(retired, previous)?;
+        match fs::rename(&retired, previous) {
+            Ok(()) => Ok(()),
+            // A concurrent lock-free reader reconciled the same crash state
+            // first; the selected generation is unchanged, so the restore is
+            // idempotent.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn write_v1_into(

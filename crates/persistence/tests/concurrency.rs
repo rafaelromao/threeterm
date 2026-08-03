@@ -213,6 +213,55 @@ fn concurrent_migration_and_appends_serialize() {
 }
 
 #[test]
+fn concurrent_opens_reconcile_the_crash_state_idempotently() {
+    let root = unique_temp_dir("concurrent-reconcile");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first publish");
+    bundle
+        .append_feature("box-2", "box")
+        .expect("second publish");
+    let previous = previous_generation_sibling(&root);
+    let retired = {
+        let mut retired = previous.clone();
+        retired.set_file_name(format!(
+            "{}.retired-generation",
+            previous.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        retired
+    };
+    let preceding_manifest =
+        fs::read(previous.join(MANIFEST_FILENAME)).expect("preceding manifest reads");
+    fs::rename(&previous, &retired).expect("simulates an interrupted rotation");
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let root = root.clone();
+        handles.push(std::thread::spawn(move || {
+            let loaded = Bundle::at(&root).open().expect("concurrent open succeeds");
+            assert_eq!(loaded.log.len(), 2);
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("open thread completes");
+    }
+
+    assert_eq!(
+        fs::read(previous.join(MANIFEST_FILENAME)).unwrap(),
+        preceding_manifest,
+        "the recognized previous slot is restored exactly once"
+    );
+    assert!(
+        !retired.exists(),
+        "the retired slot is drained by reconciliation"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[test]
 fn concurrent_first_saves_serialize_creation_and_appends() {
     let root = unique_temp_dir("concurrent-first-saves");
     let bundle = std::sync::Arc::new(Bundle::at(&root));

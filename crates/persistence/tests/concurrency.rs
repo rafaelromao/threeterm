@@ -1082,3 +1082,83 @@ fn failed_migration_retry_preserves_an_authenticated_existing_backup() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(backup);
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_migration_backup_is_replaced_not_followed() {
+    use std::os::unix::fs::symlink;
+
+    use threeterm_persistence::PRE_MIGRATION_BACKUP_SUFFIX;
+    use threeterm_persistence::bundle::{read_v0, schema_epoch};
+
+    let root = unique_temp_dir("backup-symlink");
+    write_v0_fixture(&root, ProjectGeneration::with_id("g-backup-symlink"))
+        .expect("v0 fixture writes");
+    let backup = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().expect("root has a name").to_string_lossy()
+    ));
+    let external = unique_temp_dir("external-v0");
+    write_v0_fixture(&external, ProjectGeneration::with_id("g-external"))
+        .expect("external v0 fixture writes");
+    symlink(&external, &backup).expect("backup symlink creates");
+
+    let loaded = load(&root).expect("migration replaces the symlinked backup slot");
+    assert_eq!(loaded.manifest.schema_version, schema_epoch());
+    assert!(
+        fs::symlink_metadata(&backup)
+            .expect("backup metadata reads")
+            .file_type()
+            .is_dir(),
+        "the backup slot is a real directory, not the external symlink target"
+    );
+    let backup_v0 = read_v0(&backup).expect("replaced backup authenticates");
+    assert_eq!(
+        backup_v0.manifest.generation_id, "g-backup-symlink",
+        "the retained backup belongs to this source"
+    );
+    assert_eq!(
+        read_v0(&external)
+            .expect("external bundle still authenticates")
+            .manifest
+            .generation_id,
+        "g-external",
+        "the external v0 bundle is untouched"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(backup);
+    let _ = fs::remove_dir_all(external);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_publish_staging_symlink_is_skipped() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_temp_dir("publish-staging-symlink");
+    let bundle = std::sync::Arc::new(Bundle::at(&root));
+    let staging = root.with_file_name(format!(
+        "{}.publish-tmp-{}",
+        root.file_name().expect("root has a name").to_string_lossy(),
+        std::process::id()
+    ));
+    symlink(unique_temp_dir("dangling-target"), &staging)
+        .expect("dangling staging symlink creates");
+
+    bundle
+        .append_feature("box-1", "box")
+        .expect("first save skips the dangling staging symlink");
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(loaded.log.len(), 1);
+    assert!(
+        fs::symlink_metadata(&staging)
+            .expect("staging metadata reads")
+            .file_type()
+            .is_symlink(),
+        "the dangling symlink is left untouched"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}

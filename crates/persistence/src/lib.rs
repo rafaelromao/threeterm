@@ -1007,19 +1007,33 @@ fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
 /// interrupted copy can never leave a partial backup that a later migration
 /// would accept as complete.
 ///
-/// A pre-existing backup is kept only when it authenticates as a complete
-/// v0 bundle; a partial backup is replaced from a fresh staged copy. The
-/// staged copy is fully synced (files, directory, and containing directory)
-/// and validated before it is renamed into place.
-///
-/// Returns whether this call created or replaced the backup: `false` when
-/// an authenticated pre-existing backup was retained untouched, so failure
-/// cleanup can remove only the artifacts this attempt produced.
+/// A pre-existing backup is retained only when it is a real directory that
+/// authenticates as a v0 bundle belonging to this source; a symlink, a
+/// non-directory, a partial copy, or a foreign generation is replaced from
+/// a fresh staged copy. The staged copy is fully synced (files, directory,
+/// and containing directory) and validated before it is renamed into place.
+/// Returns whether this call created or replaced the backup, so a failed
+/// migration retry can discard only the artifacts it produced and never an
+/// authenticated recovery copy from an earlier attempt.
 fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<bool> {
-    if backup.exists() {
-        if read_v0(backup).is_ok() {
+    if let Ok(metadata) = fs::symlink_metadata(backup) {
+        // `symlink_metadata` does not follow the entry: a symlinked backup
+        // slot must never be treated as the recovery copy, and it must not
+        // be written through.
+        let authentic_source_copy = !metadata.file_type().is_symlink()
+            && metadata.is_dir()
+            && match (read_v0(backup), read_v0(source)) {
+                (Ok(backup_v0), Ok(source_v0)) => {
+                    backup_v0.manifest.generation_id == source_v0.manifest.generation_id
+                        && backup_v0.manifest.revision_id == source_v0.manifest.revision_id
+                }
+                _ => false,
+            };
+        if authentic_source_copy {
             return Ok(false);
         }
+        // `remove_dir_all` removes a symlink entry itself; it never writes
+        // through it.
         fs::remove_dir_all(backup)?;
     }
     let staging = fresh_backup_staging_path(backup);
@@ -1047,7 +1061,6 @@ fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<bool> 
     }
     Ok(true)
 }
-
 fn fresh_backup_staging_path(backup: &Path) -> PathBuf {
     sibling_path_with_suffix(backup, &format!(".backup-tmp-{}", std::process::id()))
 }
@@ -1119,20 +1132,21 @@ fn staging_path_for_publish(path: &Path) -> PathBuf {
 
 fn fresh_staging_path_for_publish(path: &Path) -> PathBuf {
     let staging = staging_path_for_publish(path);
-    if !staging.exists() {
+    if !path_entry_exists(&staging) {
         return staging;
     }
     // A process restart can leave both the PID-based candidate and earlier
-    // sequence candidates on disk. Keep advancing until an actually absent
-    // candidate is found, so an interrupted save can never block the next
-    // one on a stale directory.
+    // sequence candidates on disk, and a dangling symlink at a candidate
+    // occupies its entry even though it points nowhere. Keep advancing
+    // until an actually absent entry is found, so an interrupted save can
+    // never block the next one on a stale path.
     loop {
         let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let fresh = sibling_path_with_suffix(
             path,
             &format!(".publish-tmp-{}-{sequence}", std::process::id()),
         );
-        if !fresh.exists() {
+        if !path_entry_exists(&fresh) {
             return fresh;
         }
     }

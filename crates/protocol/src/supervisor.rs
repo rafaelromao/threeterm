@@ -266,6 +266,16 @@ impl Supervisor {
                             ),
                         };
                     }
+                    // The worker acknowledged cooperatively; verify it
+                    // exited cleanly (no signal, exit code 0) before
+                    // reporting an acknowledgement. A worker that acks
+                    // and then dies by signal or with a non-zero status
+                    // is surfaced as a structured termination.
+                    if let Some(outcome) =
+                        self.verify_clean_exit(&ack_request_id, started, "cancelled_reap")
+                    {
+                        return outcome;
+                    }
                     return SupervisorOutcome::Acknowledged {
                         request_id: ack_request_id,
                         reason: ack_reason,
@@ -765,11 +775,56 @@ impl Supervisor {
                 ),
             };
         }
+        // A Completed envelope must be followed by a clean worker exit.
+        // If the worker completed then died by signal or with a non-zero
+        // status, the staged artifacts are discarded and the termination
+        // is surfaced instead of a clean completion.
+        if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap") {
+            self.discard_stage();
+            return outcome;
+        }
         SupervisorOutcome::Completed {
             request_id,
             result,
             artifact_headers: std::mem::take(&mut self.artifact_headers),
         }
+    }
+
+    /// Verifies the worker exited cleanly (exit code 0, no signal)
+    /// after a cooperative terminal envelope. Returns `Some(outcome)`
+    /// with a structured termination record when the exit was not
+    /// clean, and `None` when the worker exited cleanly.
+    fn verify_clean_exit(
+        &mut self,
+        request_id: &str,
+        started: Instant,
+        stage_prefix: &str,
+    ) -> Option<SupervisorOutcome> {
+        let exit_signal = self.host.exit_signal();
+        let exit_code = self.host.exit_code();
+        let unclean = match (exit_signal, exit_code) {
+            (Some(signal), _) => Some(format!("{stage_prefix}:exited_by_signal:{signal}")),
+            (None, Some(code)) if code != 0 => {
+                Some(format!("{stage_prefix}:exited_with_code:{code}"))
+            }
+            _ => None,
+        };
+        unclean.map(|stage| {
+            let context = TerminationContext {
+                last_progress: None,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
+            };
+            SupervisorOutcome::ForceTerminated {
+                record: self.termination_record(
+                    request_id.to_string(),
+                    stage,
+                    started,
+                    context,
+                    ExitKind::ForceAfterGrace,
+                ),
+            }
+        })
     }
 
     fn cooperative_termination_outcome(

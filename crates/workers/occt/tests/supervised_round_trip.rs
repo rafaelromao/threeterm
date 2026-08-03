@@ -94,22 +94,31 @@ fn sample_extrude_request() -> ExtrudeRequest {
         .with_feature_id("box-1")
 }
 
-/// Completed-envelope reply whose `result` is a valid `ExtrudeResult`
-/// JSON object. The request_id is echoed from the request line so the
-/// supervisor's request binding holds.
-fn completed_reply() -> &'static str {
-    r#"printf '%s\n' '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"/tmp/out.brep","brep_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","brep_bytes":42,"feature_id":"box-1"}}'"#
-}
-
 #[test]
 fn typed_extrude_routes_through_the_supervised_protocol() {
-    let worker = fixture_worker_named("ok", completed_reply());
+    // The staged output must exist as a regular file whose digest
+    // matches the advertisement; write it before the worker runs.
+    let dir = FixtureDir::new("ok-real");
+    let staged = dir.root.join("out.brep");
+    let bytes = vec![b'x'; 42];
+    std::fs::write(&staged, &bytes).expect("staged file writes");
+    let digest = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
+    let reply = format!(
+        r#"printf '%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"{path}","brep_sha256":"{digest}","brep_bytes":42,"feature_id":"box-1"}}}}'"#,
+        path = staged.display()
+    );
+    let worker = dir.worker_script("worker.sh", &format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+         read line\n\
+         {reply}\n"
+    ));
     let result =
         retry_fixture(|| worker.extrude(&sample_extrude_request())).expect("extrude succeeds");
     assert_eq!(result.status, "ok");
     assert_eq!(result.feature_id, "box-1");
     assert_eq!(result.brep_bytes, 42);
-    assert_eq!(result.brep_path, std::path::PathBuf::from("/tmp/out.brep"));
+    assert_eq!(result.brep_path, staged);
 }
 
 #[test]
@@ -195,14 +204,27 @@ fn diagnostics_round_trip_with_schema_version() {
 
 #[test]
 fn typed_extrude_fails_closed_on_oversized_staged_output() {
-    // The worker reports a brep_bytes count above the staged artifact
-    // bound; the typed boundary must fail closed before the host could
-    // promote the oversized payload.
+    // The worker writes an oversized staged file and reports a matching
+    // brep_bytes count above the staged artifact bound; the typed
+    // boundary must fail closed before the host could promote the
+    // oversized payload.
+    let dir = FixtureDir::new("oversized");
+    let staged = dir.root.join("out.brep");
+    let mut body = Vec::new();
+    body.resize(threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1, b'x');
+    std::fs::write(&staged, &body).expect("oversized staged file writes");
+    let digest = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
     let oversized = format!("{}", threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1);
     let reply = format!(
-        r#"printf '%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"/tmp/out.brep","brep_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","brep_bytes":{oversized},"feature_id":"box-1"}}}}'"#
+        r#"printf '%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"extrude","status":"ok","brep_path":"{path}","brep_sha256":"{digest}","brep_bytes":{oversized},"feature_id":"box-1"}}}}'"#,
+        path = staged.display()
     );
-    let worker = fixture_worker_named("oversized", &reply);
+    let worker = dir.worker_script("worker.sh", &format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+         read line\n\
+         {reply}\n"
+    ));
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("oversized staged output must fail closed");
     match error {
@@ -365,6 +387,40 @@ fn typed_extrude_fails_closed_on_non_regular_staged_file() {
             assert!(
                 detail.contains("not a regular file"),
                 "detail must name the file identity; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_fails_closed_on_a_symlinked_staged_file() {
+    // A worker pointing its output at a symlink must fail closed: the
+    // staged artifact must be a regular file, not a redirected path.
+    let dir = FixtureDir::new("symlink");
+    let target = dir.root.join("real.brep");
+    std::fs::write(&target, b"real bytes").expect("target file writes");
+    let staged = dir.root.join("out.brep");
+    std::os::unix::fs::symlink(&target, &staged).expect("symlink creates");
+    let digest = threeterm_occt_worker::sha256_file(&target).expect("target hashes");
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"{digest}\",\"brep_bytes\":10,\"feature_id\":\"box-1\"}}}}'\n",
+            path = staged.display()
+        ),
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("symlinked staged output must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("symlink"),
+                "detail must name the symlink; got {detail:?}"
             );
         }
         other => panic!("expected Malformed; got {other:?}"),

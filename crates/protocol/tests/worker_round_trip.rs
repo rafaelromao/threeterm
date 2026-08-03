@@ -1056,3 +1056,98 @@ fn cancel_fails_closed_on_a_terminal_envelope_instead_of_an_acknowledgement() {
     assert_eq!(record.stage, "protocol_violation:expected_cancelled_ack");
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
 }
+
+/// Wraps a `PipeHost` and reports a scripted exit code and signal,
+/// simulating a worker whose reaped status is not clean.
+struct ExitStatusWorker {
+    inner: PipeHost,
+    signal: Option<i32>,
+    code: Option<i32>,
+}
+
+impl ExitStatusWorker {
+    fn new(script: Vec<Envelope>, signal: Option<i32>, code: Option<i32>) -> Self {
+        Self {
+            inner: PipeHost::new(script),
+            signal,
+            code,
+        }
+    }
+}
+
+impl WorkerHost for ExitStatusWorker {
+    fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
+        self.inner.send(envelope)
+    }
+
+    fn recv(&mut self, deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        self.inner.recv(deadline)
+    }
+
+    fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
+        self.inner.cancel(request_id, reason)
+    }
+
+    fn exit_signal(&mut self) -> Option<i32> {
+        self.signal
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        self.code
+    }
+}
+
+#[test]
+fn completed_after_nonzero_worker_exit_is_not_accepted() {
+    // The worker emits Completed then exits with code 7; the supervisor
+    // must not return a clean Completed — the unclean exit is surfaced.
+    let worker = ExitStatusWorker::new(
+        vec![
+            ready_envelope(),
+            Envelope::Completed {
+                schema_version: schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                result: serde_json::json!({ "ok": true }),
+            },
+        ],
+        None,
+        Some(7),
+    );
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.exit_code, Some(7));
+    assert!(
+        record.stage.contains("exited_with_code"),
+        "stage: {:?}",
+        record.stage
+    );
+}
+
+#[test]
+fn acknowledged_after_signal_exit_is_not_accepted() {
+    // The worker acks cancellation then dies by signal; the supervisor
+    // must surface the termination instead of an Acknowledged outcome.
+    let worker = ExitStatusWorker::new(
+        vec![Envelope::Cancelled {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            reason: "ok".to_string(),
+        }],
+        Some(11),
+        None,
+    );
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.exit_signal, Some(11));
+    assert!(
+        record.stage.contains("exited_by_signal"),
+        "stage: {:?}",
+        record.stage
+    );
+}

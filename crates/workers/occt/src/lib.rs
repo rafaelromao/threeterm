@@ -237,7 +237,10 @@ impl OcctWorker {
         let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
             detail: format!("extrude request serialization failed: {error}"),
         })?;
-        self.invoke_with_cancel(&bytes, cancel)?.into_extrude()
+        let value = self.run_with_cancel(&bytes, cancel)?;
+        serde_json::from_value::<ExtrudeResult>(value).map_err(|error| WorkerError::Malformed {
+            detail: format!("extrude response could not be parsed: {error}"),
+        })
     }
 
     /// Boolean-fuse `request` by spawning the worker process. See
@@ -353,7 +356,8 @@ impl OcctWorker {
         // supervised path; the synchronous variants carry a never-set
         // token, so the deadline expiry remains the hard stop.
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        self.invoke_with_cancel(envelope, &cancel)
+        self.run_with_cancel(envelope, &cancel)
+            .map(|value| RawResult { value })
     }
 
     /// Run `envelope` through the supervised lifecycle with a
@@ -361,12 +365,15 @@ impl OcctWorker {
     /// the supervisor's cancellation lifecycle: the worker receives a
     /// `Cancel` envelope and, if it does not acknowledge inside the
     /// grace period, is force-terminated and reaped with its process
-    /// group.
-    fn invoke_with_cancel(
+    /// group. The flag is polled every receive slice (50 ms), so an
+    /// in-flight operation observes the token well before the deadline.
+    /// Returns the raw typed-result JSON; typed callers parse it into
+    /// the operation-specific result.
+    pub fn run_with_cancel(
         &self,
         envelope: &[u8],
         cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<RawResult, WorkerError> {
+    ) -> Result<serde_json::Value, WorkerError> {
         let args: serde_json::Value =
             serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
                 detail: format!("request serialization failed: {error}"),
@@ -411,7 +418,7 @@ impl OcctWorker {
             },
             cancel,
         );
-        map_outcome(outcome)
+        map_outcome(outcome).map(|result| result.value)
     }
 }
 
@@ -506,19 +513,29 @@ impl RawResult {
             .get("brep_path")
             .and_then(serde_json::Value::as_str)
             .map(PathBuf::from);
-        let actual_bytes = match brep_path.as_deref().map(std::fs::metadata) {
-            Some(Ok(metadata)) => metadata.len(),
-            // A staged path that does not exist yet cannot be verified;
-            // fall back to the worker's advertised count so the bound
-            // still fails closed on the metadata.
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => brep_bytes,
-            Some(Err(error)) => {
-                return Err(WorkerError::Malformed {
-                    detail: format!("worker output at {brep_path:?} could not be stat'd: {error}"),
-                });
-            }
-            None => brep_bytes,
+        // The staged output must exist as a regular file that is not a
+        // symlink: a missing, dangling, or redirected path cannot be
+        // verified and fails closed instead of trusting the
+        // advertisement.
+        let Some(path) = brep_path.as_deref() else {
+            return Err(WorkerError::Malformed {
+                detail: "worker response is missing brep_path".to_string(),
+            });
         };
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| WorkerError::Malformed {
+            detail: format!("worker output at {path:?} could not be stat'd: {error}"),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(WorkerError::Malformed {
+                detail: format!("worker output at {path:?} must not be a symlink"),
+            });
+        }
+        if !metadata.is_file() {
+            return Err(WorkerError::Malformed {
+                detail: format!("worker output at {path:?} is not a regular file"),
+            });
+        }
+        let actual_bytes = metadata.len();
         let bound = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
         let largest = actual_bytes.max(brep_bytes);
         if largest > bound {
@@ -528,45 +545,20 @@ impl RawResult {
                 ),
             });
         }
-        // Verify the staged file is a regular file whose SHA-256 digest
-        // matches the worker's advertisement. A non-regular file (or a
-        // digest mismatch) fails closed so a path/file TOCTOU or a
-        // tampered artifact can never reach the host's promotion path.
-        if let Some(path) = brep_path.as_deref() {
-            match std::fs::metadata(path) {
-                Ok(metadata) => {
-                    if !metadata.is_file() {
-                        return Err(WorkerError::Malformed {
-                            detail: format!("worker output at {path:?} is not a regular file"),
-                        });
-                    }
-                    let advertised = value.get("brep_sha256").and_then(serde_json::Value::as_str);
-                    if let Some(advertised) = advertised {
-                        let actual =
-                            crate::sha256_file(path).map_err(|error| WorkerError::Malformed {
-                                detail: format!(
-                                    "worker output at {path:?} could not be read: {error}"
-                                ),
-                            })?;
-                        if actual != advertised {
-                            return Err(WorkerError::Malformed {
-                                detail: format!(
-                                    "worker output at {path:?} digest mismatch: advertised {advertised}, actual {actual}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    // A staged path that does not exist cannot be
-                    // verified; the size bound above already failed
-                    // closed on the advertised metadata.
-                }
-                Err(error) => {
-                    return Err(WorkerError::Malformed {
-                        detail: format!("worker output at {path:?} could not be stat'd: {error}"),
-                    });
-                }
+        // Verify the staged file's SHA-256 digest matches the worker's
+        // advertisement. A digest mismatch fails closed so a tampered
+        // artifact can never reach the host's promotion path.
+        let advertised = value.get("brep_sha256").and_then(serde_json::Value::as_str);
+        if let Some(advertised) = advertised {
+            let actual = crate::sha256_file(path).map_err(|error| WorkerError::Malformed {
+                detail: format!("worker output at {path:?} could not be read: {error}"),
+            })?;
+            if actual != advertised {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "worker output at {path:?} digest mismatch: advertised {advertised}, actual {actual}"
+                    ),
+                });
             }
         }
         serde_json::from_value::<T>(value).map_err(|error| WorkerError::Malformed {

@@ -124,16 +124,41 @@ pub struct LoftCommitView {
 
 #[derive(Debug)]
 pub enum HostError {
-    BundlePathMissing { path: PathBuf },
-    BundlePathNotDirectory { path: PathBuf },
-    Validation { detail: String },
+    BundlePathMissing {
+        path: PathBuf,
+    },
+    BundlePathNotDirectory {
+        path: PathBuf,
+    },
+    Validation {
+        detail: String,
+    },
     Persistence(BundleError),
-    WorkerFailure { detail: String },
-    WorkerUnavailable { detail: String },
-    UnsupportedGeometry { detail: String },
-    BrepInvalid { detail: String },
-    BrepFileMissing { path: PathBuf },
-    BrepIo { detail: String },
+    WorkerFailure {
+        detail: String,
+    },
+    WorkerUnavailable {
+        detail: String,
+    },
+    UnsupportedGeometry {
+        detail: String,
+    },
+    BrepInvalid {
+        detail: String,
+    },
+    BrepFileMissing {
+        path: PathBuf,
+    },
+    BrepIo {
+        detail: String,
+    },
+    /// A supervised worker lifecycle ended without a typed result. The
+    /// structured termination record is preserved so the diagnostic
+    /// surface keeps the request id, stage, elapsed time, exit
+    /// signal/code, last progress, artifact error, and stderr tail.
+    WorkerTerminated {
+        record: Box<threeterm_protocol::supervisor::TerminationRecord>,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -162,6 +187,17 @@ impl std::fmt::Display for HostError {
             }
             Self::BrepInvalid { detail } => {
                 write!(formatter, "occt brep invalid: {detail}")
+            }
+            Self::WorkerTerminated { record } => {
+                write!(
+                    formatter,
+                    "occt worker terminated: stage={} elapsed={:?} exit_signal={:?} exit_code={:?} request_id={}",
+                    record.stage,
+                    record.elapsed,
+                    record.exit_signal,
+                    record.exit_code,
+                    record.request_id
+                )
             }
             Self::BrepFileMissing { path } => {
                 write!(formatter, "occt brep file missing: {}", path.display())
@@ -199,6 +235,7 @@ impl From<WorkerError> for HostError {
                     }
                 }
             }
+            WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {
                 detail: other.to_string(),
             },

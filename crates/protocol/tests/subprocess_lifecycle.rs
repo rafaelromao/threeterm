@@ -75,9 +75,14 @@ fn crashed_worker_surfaces_the_actual_signal() {
         other => panic!("expected WorkerReady; got {other:?}"),
     }
 
-    let error = host
-        .recv(deadline)
-        .expect_err("crashed worker must fail the host closed");
+    // Receive slices return TimedOut as poll ticks; loop until the
+    // crashed worker's stream closure surfaces the signal.
+    let error = loop {
+        match host.recv(deadline) {
+            Err(WorkerError::TimedOut) => continue,
+            other => break other.expect_err("crashed worker must fail the host closed"),
+        }
+    };
     match error {
         WorkerError::Signalled { signal } => {
             assert_eq!(signal, 11, "SIGSEGV must be reported as signal 11");

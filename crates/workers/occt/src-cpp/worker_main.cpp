@@ -75,6 +75,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -92,19 +93,20 @@ constexpr const char* kProtocolSchemaVersion = "threeterm.protocol/1";
 constexpr std::size_t kMaxEnvelopeBytes = 4 * 1024 * 1024;
 
 /// Reads exactly ONE newline-terminated line from stdin, bounded by
-/// `kMaxEnvelopeBytes`. Never waits for EOF: the host keeps stdin open
-/// for the duration of the request lifecycle, so reading until EOF would
-/// block forever.
-std::string read_stdin_line() {
+/// `kMaxEnvelopeBytes`. Returns `nullopt` when stdin reaches EOF before
+/// a newline (malformed framing) or when the line exceeds the bound.
+/// Never waits for EOF: the host keeps stdin open for the duration of
+/// the request lifecycle, so reading until EOF would block forever.
+std::optional<std::string> read_stdin_line() {
     std::string out;
     out.reserve(256);
     while (out.size() < kMaxEnvelopeBytes) {
         int c = std::fgetc(stdin);
-        if (c == EOF) break;
+        if (c == EOF) return std::nullopt;
         if (c == '\n') return out;
         out.push_back(static_cast<char>(c));
     }
-    return out;
+    return std::nullopt;
 }
 
 /// True when a complete envelope line is already buffered on stdin
@@ -185,6 +187,19 @@ public:
         if (c == '-' || (c >= '0' && c <= '9')) return parse_number(out, error);
         error = std::string{"unexpected character in JSON: "} + c;
         return false;
+    }
+
+    /// Parses exactly one JSON value and requires the input to end
+    /// (after whitespace) once the value is consumed. Trailing garbage
+    /// after a valid value is malformed framing and fails closed.
+    bool parse_document(Value* out, std::string& error) {
+        if (!parse_value(out, error)) return false;
+        skip_ws();
+        if (!at_end()) {
+            error = "trailing data after JSON value";
+            return false;
+        }
+        return true;
     }
 
 private:
@@ -2144,10 +2159,17 @@ int main() {
     // Phase 1: advertise the protocol schema before any request.
     write_worker_ready();
 
-    // Phase 2: read exactly ONE bounded request line. The host keeps
-    // stdin open for the whole lifecycle, so reading until EOF would
-    // block forever; the supervisor's grace period then force-terminates.
-    std::string raw = read_stdin_line();
+    // Phase 2: read exactly ONE bounded newline-terminated request
+    // line. The host keeps stdin open for the whole lifecycle, so
+    // reading until EOF would block forever; the supervisor's grace
+    // period then force-terminates. EOF-before-newline or an oversized
+    // line is malformed framing and fails closed.
+    std::optional<std::string> raw_line = read_stdin_line();
+    if (!raw_line.has_value()) {
+        write_failed("", "request_malformed", "request line must be newline-terminated");
+        return 2;
+    }
+    std::string raw = *raw_line;
     if (raw.empty()) {
         write_failed("", "request_malformed", "empty request line");
         return 2;
@@ -2156,7 +2178,7 @@ int main() {
     JsonParser parser(raw);
     JsonParser::Value envelope;
     std::string error;
-    if (!parser.parse_value(&envelope, error)) {
+    if (!parser.parse_document(&envelope, error)) {
         write_failed("", "request_malformed", error);
         return 2;
     }
@@ -2195,15 +2217,19 @@ int main() {
     // operation starts; once dispatch begins the operation is
     // uninterruptible and the supervisor's grace period is the backstop.
     if (stdin_has_pending_line()) {
-        std::string cancel_line = read_stdin_line();
-        JsonParser cancel_parser(cancel_line);
-        JsonParser::Value cancel_envelope;
-        if (cancel_parser.parse_value(&cancel_envelope, error) &&
-            cancel_envelope.kind == JsonParser::ValueKind::Object &&
-            get_string(cancel_envelope, "kind") == "cancel") {
-            std::string reason = get_string(cancel_envelope, "reason");
-            write_cancelled(request_id, reason);
-            return 0;
+        std::optional<std::string> cancel_line = read_stdin_line();
+        if (cancel_line.has_value() && !cancel_line->empty()) {
+            JsonParser cancel_parser(*cancel_line);
+            JsonParser::Value cancel_envelope;
+            if (cancel_parser.parse_document(&cancel_envelope, error) &&
+                cancel_envelope.kind == JsonParser::ValueKind::Object &&
+                get_string(cancel_envelope, "kind") == "cancel" &&
+                get_string(cancel_envelope, "schema_version") == kProtocolSchemaVersion &&
+                get_string(cancel_envelope, "request_id") == request_id) {
+                std::string reason = get_string(cancel_envelope, "reason");
+                write_cancelled(request_id, reason);
+                return 0;
+            }
         }
     }
 

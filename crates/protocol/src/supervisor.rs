@@ -345,15 +345,10 @@ impl Supervisor {
                         None,
                     );
                 }
-                Err(WorkerError::TimedOut) => {
-                    return self.force_terminate_outcome(
-                        request_id,
-                        started,
-                        "cancel_grace_exceeded",
-                        None,
-                        None,
-                    );
-                }
+                // A slice-level receive timeout is a poll tick: keep
+                // waiting; the loop's deadline check below terminates
+                // the cancellation when the grace expires.
+                Err(WorkerError::TimedOut) => {}
                 Err(error) => {
                     return self.force_terminate_outcome(
                         request_id,
@@ -612,11 +607,17 @@ impl Supervisor {
                 None
             }
             Ok(Envelope::Request { .. } | Envelope::Cancel { .. }) => {
-                *last_progress = Some(Progress {
-                    stage: "protocol_violation:worker_sent_host_only_envelope".to_string(),
-                    percent: 0,
-                });
-                None
+                // Host-only envelopes are a protocol violation: the
+                // worker must never send a Request or Cancel. Fail the
+                // request closed immediately rather than allowing a
+                // host-only envelope followed by a valid completion.
+                Some(self.force_terminate_outcome(
+                    &request.request_id,
+                    started,
+                    "protocol_violation:worker_sent_host_only_envelope",
+                    None,
+                    None,
+                ))
             }
             Err(WorkerError::Closed) => Some(self.force_terminate_outcome(
                 &request.request_id,
@@ -625,13 +626,11 @@ impl Supervisor {
                 None,
                 last_progress.take(),
             )),
-            Err(WorkerError::TimedOut) => Some(self.force_terminate_outcome(
-                &request.request_id,
-                started,
-                "grace_exceeded",
-                None,
-                last_progress.take(),
-            )),
+            // A slice-level receive timeout is a poll tick: the worker
+            // has not delivered an envelope yet. Keep waiting; the
+            // caller's loop checks the deadline and terminates when it
+            // expires.
+            Err(WorkerError::TimedOut) => None,
             Err(error) => Some(self.force_terminate_outcome(
                 &request.request_id,
                 started,
@@ -660,18 +659,10 @@ impl Supervisor {
         started: Instant,
         deadline: Instant,
     ) -> Option<SupervisorOutcome> {
-        let envelope = match self.host.recv(deadline) {
-            Ok(envelope) => envelope,
-            Err(WorkerError::Closed) => {
-                return Some(self.force_terminate_outcome(
-                    request_id,
-                    started,
-                    "handshake_worker_closed",
-                    None,
-                    None,
-                ));
-            }
-            Err(WorkerError::TimedOut) => {
+        // Receive slices return `TimedOut` to hand control back to the
+        // caller; loop here until the handshake deadline expires.
+        let envelope = loop {
+            if Instant::now() >= deadline {
                 return Some(self.force_terminate_outcome(
                     request_id,
                     started,
@@ -680,14 +671,29 @@ impl Supervisor {
                     None,
                 ));
             }
-            Err(error) => {
-                return Some(self.force_terminate_outcome(
-                    request_id,
-                    started,
-                    "handshake_worker_recv_error",
-                    Some(error.to_string()),
-                    None,
-                ));
+            match self.host.recv(deadline) {
+                Ok(envelope) => break envelope,
+                Err(WorkerError::Closed) => {
+                    return Some(self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "handshake_worker_closed",
+                        None,
+                        None,
+                    ));
+                }
+                // A slice-level receive timeout is a poll tick: keep
+                // waiting for the handshake.
+                Err(WorkerError::TimedOut) => {}
+                Err(error) => {
+                    return Some(self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "handshake_worker_recv_error",
+                        Some(error.to_string()),
+                        None,
+                    ));
+                }
             }
         };
         match envelope {
@@ -1003,7 +1009,11 @@ mod tests {
         }
 
         fn recv(&mut self, _deadline: Instant) -> Result<Envelope, WorkerError> {
-            self.script.pop_front().unwrap_or(Err(WorkerError::Closed))
+            // An exhausted script behaves like the real transport's
+            // post-deadline receive: the worker has gone silent.
+            self.script
+                .pop_front()
+                .unwrap_or(Err(WorkerError::TimedOut))
         }
 
         fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -1090,9 +1100,9 @@ mod tests {
                 assert_eq!(record.request_id, "req-1");
                 assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
                 assert!(
-                    record.stage.starts_with("grace_exceeded")
+                    record.stage.starts_with("cancel_grace_exceeded")
                         || record.stage.starts_with("worker_closed"),
-                    "force-terminate stage should be grace_exceeded or worker_closed; got {:?}",
+                    "force-terminate stage should be cancel_grace_exceeded or worker_closed; got {:?}",
                     record.stage
                 );
             }

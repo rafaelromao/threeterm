@@ -31,11 +31,13 @@ fn spawn_flooding_worker() -> std::process::Child {
 }
 
 /// Drives `recv` until the worker fails closed or the deadline expires.
-/// Returns the first error the transport surfaced.
+/// Returns the first non-tick error the transport surfaced. Receive
+/// slices return `TimedOut` as poll ticks, so they are skipped.
 fn recv_until_error(host: &mut SubprocessWorkerHost, deadline: Instant) -> WorkerError {
     loop {
         match host.recv(deadline) {
             Ok(_envelope) => continue,
+            Err(WorkerError::TimedOut) => continue,
             Err(error) => return error,
         }
     }

@@ -1151,3 +1151,34 @@ fn acknowledged_after_signal_exit_is_not_accepted() {
         record.stage
     );
 }
+
+#[test]
+fn request_fails_closed_on_a_host_only_envelope_followed_by_completion() {
+    // A worker that sends a host-only Request envelope and then a valid
+    // Completed must NOT succeed: the protocol violation fails the
+    // request closed.
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Request {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            command_id: "extrude".to_string(),
+            args: serde_json::json!({}),
+            revision_id: "".to_string(),
+        },
+        Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(
+        record.stage, "protocol_violation:worker_sent_host_only_envelope",
+        "the host-only envelope must fail the request closed, not be ignored"
+    );
+}

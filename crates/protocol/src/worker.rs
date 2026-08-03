@@ -498,31 +498,38 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
-        // Poll in short slices so an overflow on a silent stream (e.g. a
-        // stderr flood while stdout goes quiet) is observed before the
-        // deadline instead of blocking until `deadline` and being
-        // misreported as a timeout.
-        loop {
-            self.fail_closed_on_overflow()?;
-            if Instant::now() >= deadline {
-                return Err(WorkerError::TimedOut);
+        // Poll in short slices: a slice that elapses without an
+        // envelope returns `TimedOut` so the caller (the supervisor)
+        // regains control to check its cancellation flag and its own
+        // deadline, instead of being held here until `deadline`.
+        self.fail_closed_on_overflow()?;
+        if Instant::now() >= deadline {
+            return Err(WorkerError::TimedOut);
+        }
+        let slice = deadline.min(Instant::now() + OVERFLOW_POLL_INTERVAL);
+        match self.transport.recv(slice) {
+            Ok(envelope) => {
+                // A stream can overflow concurrently with the
+                // receive; re-check before delivering so a terminal
+                // envelope racing a flood still fails closed.
+                self.fail_closed_on_overflow()?;
+                Ok(envelope)
             }
-            let slice = deadline.min(Instant::now() + OVERFLOW_POLL_INTERVAL);
-            match self.transport.recv(slice) {
-                Ok(envelope) => return Ok(envelope),
-                Err(WorkerError::TimedOut) => continue,
-                Err(WorkerError::Closed) => {
-                    // The worker's stdout closed. If it exited by a
-                    // signal (crash, forced kill), report the actual
-                    // signal instead of a bare closed-stream error.
-                    self.reap_if_exited()?;
-                    if let Some(signal) = self.exit_signal() {
-                        return Err(WorkerError::Signalled { signal });
-                    }
-                    return Err(WorkerError::Closed);
+            // One slice elapsed without an envelope: return control
+            // to the supervisor immediately. A subsequent recv with
+            // the same deadline continues the poll.
+            Err(WorkerError::TimedOut) => Err(WorkerError::TimedOut),
+            Err(WorkerError::Closed) => {
+                // The worker's stdout closed. If it exited by a
+                // signal (crash, forced kill), report the actual
+                // signal instead of a bare closed-stream error.
+                self.reap_if_exited()?;
+                if let Some(signal) = self.exit_signal() {
+                    return Err(WorkerError::Signalled { signal });
                 }
-                Err(error) => return Err(error),
+                Err(WorkerError::Closed)
             }
+            Err(error) => Err(error),
         }
     }
 

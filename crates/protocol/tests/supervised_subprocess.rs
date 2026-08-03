@@ -233,3 +233,48 @@ fn foreign_request_progress_is_rejected_as_protocol_violation() {
         progress.stage
     );
 }
+
+#[test]
+fn cancellation_token_is_observed_mid_flight_well_before_the_deadline() {
+    // A silent worker (never emits a terminal envelope) with a request
+    // grace of 2s. The cancel token is set 300ms after the request
+    // starts; the supervisor must observe it on a receive slice (~50ms)
+    // and enter the cancellation lifecycle, so the outcome is a
+    // cancellation (not the request grace expiring).
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let child = spawn_ready_worker("read line; sleep 100");
+    let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(2), Box::new(host), None);
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let started = Instant::now();
+    let trigger = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        trigger.store(true, Ordering::SeqCst);
+    });
+    let mut request = sample_request();
+    request.request_id = "req-1".to_string();
+    let outcome = supervisor.request_with_cancel(request, cancel.as_ref());
+    let elapsed = started.elapsed();
+    // The cancellation lifecycle runs the cancel-ack wait inside the
+    // supervisor grace; the whole exchange finishes by the 2s grace
+    // because the token was observed mid-flight.
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "cancellation must be observed mid-flight; took {elapsed:?}"
+    );
+    match outcome {
+        SupervisorOutcome::ForceTerminated { record } => {
+            assert!(
+                record.stage.starts_with("cancel_"),
+                "expected a cancellation lifecycle stage; got {:?}",
+                record.stage
+            );
+        }
+        other => panic!("expected ForceTerminated; got {other:?}"),
+    }
+}

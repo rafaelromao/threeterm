@@ -213,6 +213,13 @@ pub trait WorkerHost {
     fn terminate(&mut self) -> Result<(), WorkerError> {
         Ok(())
     }
+
+    /// Returns the actual Linux signal the worker process exited by, if
+    /// it was killed by a signal rather than exiting cleanly. `None`
+    /// when the worker exited normally or has not been reaped yet.
+    fn exit_signal(&mut self) -> Option<i32> {
+        None
+    }
 }
 
 /// Newline-frame transport for a disposable worker byte stream.
@@ -310,6 +317,9 @@ pub struct SubprocessWorkerHost {
     stdout_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// Exit status observed on the last reap. `Some` once the worker has
+    /// been reaped, `None` while it is still running.
+    reaped_status: Option<std::process::ExitStatus>,
 }
 
 impl SubprocessWorkerHost {
@@ -403,6 +413,7 @@ impl SubprocessWorkerHost {
             stdout_overflow,
             stderr_overflow,
             stderr_tail,
+            reaped_status: None,
         })
     }
 
@@ -465,6 +476,16 @@ impl WorkerHost for SubprocessWorkerHost {
             match self.transport.recv(slice) {
                 Ok(envelope) => return Ok(envelope),
                 Err(WorkerError::TimedOut) => continue,
+                Err(WorkerError::Closed) => {
+                    // The worker's stdout closed. If it exited by a
+                    // signal (crash, forced kill), report the actual
+                    // signal instead of a bare closed-stream error.
+                    self.reap_if_exited()?;
+                    if let Some(signal) = self.exit_signal() {
+                        return Err(WorkerError::Signalled { signal });
+                    }
+                    return Err(WorkerError::Closed);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -475,18 +496,48 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
-        match self.child.try_wait()? {
-            Some(_) => Ok(()),
-            None => {
-                if let Err(error) = self.child.kill()
-                    && self.child.try_wait()?.is_none()
-                {
-                    return Err(error.into());
-                }
-                self.child.wait()?;
-                Ok(())
-            }
+        // Reap first: an already-exited worker needs no kill.
+        self.reap_if_exited()?;
+        if self.reaped_status.is_some() {
+            return Ok(());
         }
+        // SIGKILL the worker's process group so descendants die with it.
+        // A process spawned with `process_group(0)` is the group leader;
+        // its PID is the group ID. Fall back to a direct kill if the
+        // worker was not spawned into its own group.
+        let pid = self.child.id() as i32;
+        match nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) => {
+                // No such process group: the worker is not a group
+                // leader. Kill the direct child instead.
+                self.child.kill()?;
+            }
+            Err(error) => return Err(WorkerError::Io(error.into())),
+        }
+        self.reaped_status = Some(self.child.wait()?);
+        Ok(())
+    }
+
+    fn exit_signal(&mut self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        self.reaped_status.and_then(|status| status.signal())
+    }
+}
+
+impl SubprocessWorkerHost {
+    /// Reap the child if it has exited, recording its exit status.
+    /// Leaves the host usable for a later `terminate` if still running.
+    fn reap_if_exited(&mut self) -> Result<(), WorkerError> {
+        if self.reaped_status.is_none()
+            && let Some(status) = self.child.try_wait()?
+        {
+            self.reaped_status = Some(status);
+        }
+        Ok(())
     }
 }
 
@@ -529,6 +580,10 @@ pub enum WorkerError {
     /// configured bound. The host fails closed: the worker is
     /// terminated and no partial output is accepted.
     StreamOverflow { stream: &'static str, limit: usize },
+    /// The worker process exited due to a signal (e.g. SIGSEGV after a
+    /// crash, or SIGKILL after force termination). `signal` is the
+    /// actual Linux signal number observed on the reaped exit status.
+    Signalled { signal: i32 },
     /// The worker emitted an envelope with a schema_version the host
     /// does not recognize.
     SchemaMismatch { received: String, expected: String },
@@ -544,6 +599,9 @@ impl fmt::Display for WorkerError {
             Self::Protocol(detail) => write!(formatter, "worker protocol violation: {detail}"),
             Self::StreamOverflow { stream, limit } => {
                 write!(formatter, "worker {stream} exceeded the {limit} byte bound")
+            }
+            Self::Signalled { signal } => {
+                write!(formatter, "worker exited by signal {signal}")
             }
             Self::SchemaMismatch { received, expected } => write!(
                 formatter,

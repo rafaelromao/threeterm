@@ -487,6 +487,15 @@ impl Bundle {
             &serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
         )?;
+        // A fresh bundle is a new directory entry: it is only durable once
+        // the containing directory is synced.
+        if let Some(parent) = bundle
+            .root
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            File::open(parent)?.sync_all()?;
+        }
         Ok(bundle)
     }
 
@@ -590,7 +599,7 @@ impl Bundle {
             return self.open();
         }
         // The read-modify-publish cycle is serialized per bundle root so
-        // concurrent writers cannot fork the Canonical Transaction Log:
+        // concurrent writers cannot diverge the Canonical Transaction Log:
         // every entry is staged from the same sealed base, so log positions
         // stay unique, predecessor digests chain, and no writer observes a
         // half-published rotation. The OS releases the lock if the holder
@@ -677,13 +686,44 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
-    // Schema classification, recovery, and migration all mutate the bundle
-    // layout, so the whole load body is serialized per root: a writer that
-    // classifies a v0 source cannot be overtaken by a migration that
-    // promoted it to v1 between classification and publication.
-    with_bundle_write_lock(path, || load_unlocked(path))
+    let root = path;
+    if !root.exists() {
+        let previous = previous_generation_path(root);
+        if previous.exists() {
+            // Recovery may rename and migrate the previous slot; the whole
+            // decision is re-made under the lock so a concurrent migration
+            // cannot overtake the classification.
+            return with_bundle_write_lock(root, || load_unlocked(path));
+        }
+        return Err(BundleError::Invalid(format!(
+            "bundle path missing: {}",
+            root.display()
+        )));
+    }
+    if !root.is_dir() {
+        return Err(BundleError::Invalid(format!(
+            "bundle path is not a directory: {}",
+            root.display()
+        )));
+    }
+    let status = detect_schema(root)?;
+    match status {
+        // A current-epoch read observes only atomic generation renames, so
+        // it never takes the write lock.
+        SchemaStatus::Current => load_v1(root),
+        SchemaStatus::Prior => with_bundle_write_lock(root, || load_unlocked(path)),
+        SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
+            found: read_schema_version_raw(root).unwrap_or_default(),
+            expected_current: schema_epoch(),
+            expected_prior: prior_schema_epoch(),
+        }),
+    }
 }
 
+/// The lock-free body of `load`. Callers must hold the per-root write lock
+/// whenever the bundle may need mutation (migration or recovery); the
+/// classification is re-made here so a lock holder always acts on the
+/// current on-disk state.
 fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
@@ -998,6 +1038,10 @@ fn previous_generation_path(path: &Path) -> PathBuf {
 /// let a third writer lock a fresh inode and race the two-generation
 /// publication. If the holder dies, the OS releases the lock, so a crashed
 /// writer cannot strand subsequent saves.
+///
+/// Reads (`Bundle::open`) stay lock-free by design: generation rotation is
+/// atomic and the crash-state reconciler is idempotent, so a reader never
+/// blocks a publisher and never observes a half-published manifest.
 fn with_bundle_write_lock<T>(
     root: &Path,
     operation: impl FnOnce() -> Result<T, BundleError>,
@@ -1049,8 +1093,9 @@ fn reconcile_interrupted_rotation(destination: &Path) -> Result<(), BundleError>
         Bundle::at(&retired).open_sealed(false)?;
         match fs::rename(&retired, previous) {
             Ok(()) => Ok(()),
-            // A concurrent lock-free reader reconciled the same crash state
-            // first; the selected generation is unchanged, so the restore is
+            // A concurrent reconciler restored the slot first, or a
+            // concurrent publisher drained the retired generation; the
+            // selected generation is unchanged, so the restore is
             // idempotent.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),

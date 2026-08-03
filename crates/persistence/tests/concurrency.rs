@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use threeterm_domain::ProjectGeneration;
 use threeterm_persistence::PREVIOUS_GENERATION_SUFFIX;
 use threeterm_persistence::bundle::{
-    Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME, load,
-    write_v0_fixture,
+    Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, PublicationFailurePoint,
+    TRANSACTIONS_LOG_FILENAME, fail_next_publication_at, load, write_v0_fixture,
 };
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -255,6 +255,68 @@ fn concurrent_opens_reconcile_the_crash_state_idempotently() {
     assert!(
         !retired.exists(),
         "the retired slot is drained by reconciliation"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous);
+}
+
+#[test]
+fn a_failed_concurrent_append_never_breaks_the_linear_log() {
+    let root = unique_temp_dir("concurrent-failure");
+    let bundle = std::sync::Arc::new(
+        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates"),
+    );
+
+    const THREADS: usize = 8;
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let bundle = bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            if thread == 0 {
+                fail_next_publication_at(PublicationFailurePoint::PromoteStaging);
+                assert!(
+                    bundle
+                        .append_feature(&format!("box-fail-{thread}"), "box")
+                        .is_err(),
+                    "injected publication failure is surfaced to its writer"
+                );
+            } else {
+                bundle
+                    .append_feature(&format!("box-{thread}"), "box")
+                    .expect("concurrent append succeeds");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("append thread completes");
+    }
+
+    let loaded = bundle
+        .open()
+        .expect("bundle opens after a failed concurrent append");
+    assert_eq!(
+        loaded.log.len(),
+        THREADS - 1,
+        "the failed append is never half-published"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+    let previous = previous_generation_sibling(&root);
+    assert!(
+        previous.is_dir(),
+        "preceding generation survives the failure"
     );
 
     let _ = fs::remove_dir_all(&root);

@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use threeterm_domain::ProjectGeneration;
 use threeterm_persistence::PREVIOUS_GENERATION_SUFFIX;
 use threeterm_persistence::bundle::{
-    Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME,
+    Bundle, EMPTY_LOG_DIGEST_HEX, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME, load,
+    write_v0_fixture,
 };
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -132,6 +134,75 @@ fn concurrent_appends_serialize_into_one_linear_log() {
                     .to_string_lossy()
                     .as_ref(),
             ) && name.contains(".publish-tmp-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(stray.is_empty(), "no staging directories remain: {stray:?}");
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(previous_generation_sibling(&root));
+}
+
+#[test]
+fn concurrent_migration_and_appends_serialize() {
+    let root = unique_temp_dir("concurrent-migration");
+    write_v0_fixture(
+        &root,
+        ProjectGeneration::with_id("generation-concurrent-migration"),
+    )
+    .expect("v0 fixture writes");
+    let bundle = std::sync::Arc::new(Bundle::at(&root));
+
+    const THREADS: usize = 8;
+    let mut handles = Vec::new();
+    for thread in 0..THREADS {
+        let root = root.clone();
+        let bundle = bundle.clone();
+        handles.push(std::thread::spawn(move || {
+            load(&root).expect("load migrates the v0 source");
+            bundle
+                .append_feature(&format!("box-{thread}"), "box")
+                .expect("append after migration succeeds");
+        }));
+    }
+    for handle in handles {
+        handle
+            .join()
+            .expect("migration and append thread completes");
+    }
+
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(
+        loaded.log.len(),
+        THREADS,
+        "every append after migration lands in one canonical log"
+    );
+    let entries = loaded.log.entries();
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.log_index, index,
+            "log positions are unique and sequential"
+        );
+        let expected_previous = if index == 0 {
+            EMPTY_LOG_DIGEST_HEX
+        } else {
+            entries[index - 1].terminal_digest.as_str()
+        };
+        assert_eq!(entry.previous_digest, expected_previous);
+    }
+
+    let parent = root.parent().expect("temp root has a parent");
+    let stray = fs::read_dir(parent)
+        .expect("parent reads")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(
+                root.file_name()
+                    .expect("root has a name")
+                    .to_string_lossy()
+                    .as_ref(),
+            ) && (name.contains(".migrate-tmp-") || name.contains(".publish-tmp-"))
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();

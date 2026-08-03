@@ -677,6 +677,14 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
+    // Schema classification, recovery, and migration all mutate the bundle
+    // layout, so the whole load body is serialized per root: a writer that
+    // classifies a v0 source cannot be overtaken by a migration that
+    // promoted it to v1 between classification and publication.
+    with_bundle_write_lock(path, || load_unlocked(path))
+}
+
+fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
         let previous = previous_generation_path(root);

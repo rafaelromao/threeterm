@@ -173,8 +173,10 @@ fn oversized_host_frame_is_rejected_at_send() {
 fn terminal_completion_racing_a_stdout_overflow_fails_closed() {
     // The worker emits WorkerReady, a valid Completed, and then floods
     // stdout past the bound. The terminal outcome must fail closed even
-    // though the completion envelope arrived first.
-    let fixture = "printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    // though the completion envelope arrived first. SIGPIPE is ignored
+    // so the flood continues after the host stops reading, keeping the
+    // worker alive until the overflow flag is observed.
+    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
     let child = Command::new("sh")
         .arg("-c")
         .arg(fixture)

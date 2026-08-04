@@ -216,8 +216,9 @@ fn terminal_completion_racing_a_stdout_overflow_fails_closed() {
 fn clean_exit_after_overflow_never_accepts_completion() {
     // The worker emits WorkerReady, floods stdout past the bound, then
     // exits cleanly. Even a clean exit must not rescue the flood: the
-    // host fails closed with a structured overflow error.
-    let fixture = "printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    // host fails closed with a structured overflow error. SIGPIPE is
+    // ignored so the flood continues after the host stops reading.
+    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
     let child = Command::new("sh")
         .arg("-c")
         .arg(fixture)

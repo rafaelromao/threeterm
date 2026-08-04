@@ -1197,8 +1197,31 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
-    let mut reader = fs::File::open(source)
+    use std::os::unix::fs::OpenOptionsExt;
+    // Open the source without following symlinks and pin the opened
+    // handle: promotion copies from one verified file identity, so a
+    // path swapped between validation and promotion cannot redirect the
+    // copy.
+    let mut options = fs::OpenOptions::new();
+    // O_NOFOLLOW = 0o400000 on Linux: refuse to open through a symlink.
+    options.read(true).custom_flags(0o400000);
+    let mut reader = options
+        .open(source)
         .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
+    let opened_metadata = reader
+        .metadata()
+        .map_err(|error| format!("stat opened BREP {} failed: {error}", source.display()))?;
+    let verified_metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("stat source BREP {} failed: {error}", source.display()))?;
+    use std::os::unix::fs::MetadataExt;
+    if opened_metadata.dev() != verified_metadata.dev()
+        || opened_metadata.ino() != verified_metadata.ino()
+    {
+        return Err(format!(
+            "source BREP {} changed identity between validation and promotion",
+            source.display()
+        ));
+    }
     let mut writer = fs::File::create(target)
         .map_err(|error| format!("create target BREP {} failed: {error}", target.display()))?;
     let mut buffer = vec![0u8; 8 * 1024];
@@ -1587,5 +1610,56 @@ mod tests {
         assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod promotion_tests {
+    use super::*;
+
+    #[test]
+    fn copy_brep_rejects_a_symlinked_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "threeterm-host-copy-nofollow-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir creates");
+        let real = dir.join("real.brep");
+        std::fs::write(&real, b"real bytes").expect("real file writes");
+        let link = dir.join("link.brep");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink creates");
+        let target = dir.join("out.brep");
+
+        let error = copy_brep(&link, &target).expect_err("symlinked source must fail closed");
+        assert!(
+            error.contains("source BREP"),
+            "error must name the source; got {error:?}"
+        );
+        assert!(
+            !target.exists(),
+            "no file may be promoted from a symlinked source"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_brep_copies_a_regular_source_byte_exactly() {
+        let dir = std::env::temp_dir().join(format!(
+            "threeterm-host-copy-regular-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir creates");
+        let source = dir.join("src.brep");
+        std::fs::write(&source, b"verified worker bytes").expect("source writes");
+        let target = dir.join("out.brep");
+
+        copy_brep(&source, &target).expect("regular source copies");
+        assert_eq!(
+            std::fs::read(&target).expect("target reads"),
+            b"verified worker bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

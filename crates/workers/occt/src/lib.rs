@@ -221,6 +221,15 @@ impl OcctWorker {
         let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
             detail: format!("extrude request serialization failed: {error}"),
         })?;
+        if bytes.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "serialized request of {} bytes exceeds the {} byte input bound",
+                    bytes.len(),
+                    threeterm_protocol::frame::MAX_FRAME_BUFFER
+                ),
+            });
+        }
         self.invoke(&bytes)?.into_extrude()
     }
 
@@ -237,6 +246,15 @@ impl OcctWorker {
         let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
             detail: format!("extrude request serialization failed: {error}"),
         })?;
+        if bytes.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "serialized request of {} bytes exceeds the {} byte input bound",
+                    bytes.len(),
+                    threeterm_protocol::frame::MAX_FRAME_BUFFER
+                ),
+            });
+        }
         let value = self.run_with_cancel(&bytes, cancel)?;
         // The cancellable path must run the same bounded, digest-verified
         // decoder as the synchronous path: oversized, symlinked, or
@@ -376,6 +394,18 @@ impl OcctWorker {
         envelope: &[u8],
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<serde_json::Value, WorkerError> {
+        // Reject the raw input length before parsing: an oversized
+        // request must never be materialized into memory past the
+        // protocol's input bound.
+        if envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "request envelope of {} bytes exceeds the {} byte input bound",
+                    envelope.len(),
+                    threeterm_protocol::frame::MAX_FRAME_BUFFER
+                ),
+            });
+        }
         let args: serde_json::Value =
             serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
                 detail: format!("request serialization failed: {error}"),

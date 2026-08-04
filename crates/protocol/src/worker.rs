@@ -613,13 +613,21 @@ impl WorkerHost for SubprocessWorkerHost {
         }
         // The worker is reaped; let the detached stdout/stderr reader
         // threads observe EOF and settle their overflow flags before
-        // the supervisor accepts or rejects the terminal outcome.
+        // the supervisor accepts or rejects the terminal outcome. If
+        // the readers do not settle inside the drain window, fail
+        // closed: a terminal outcome must never be accepted while a
+        // stream could still be delivering over-limit bytes.
         let drain_deadline = Instant::now() + STREAM_DRAIN_WAIT;
         while Instant::now() < drain_deadline {
             if self.readers_settled() {
                 break;
             }
             std::thread::sleep(REAP_POLL);
+        }
+        if !self.readers_settled() {
+            return Err(WorkerError::Io(std::io::Error::other(
+                "worker stream readers did not settle before termination",
+            )));
         }
         Ok(())
     }

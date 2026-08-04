@@ -238,9 +238,11 @@ impl OcctWorker {
             detail: format!("extrude request serialization failed: {error}"),
         })?;
         let value = self.run_with_cancel(&bytes, cancel)?;
-        serde_json::from_value::<ExtrudeResult>(value).map_err(|error| WorkerError::Malformed {
-            detail: format!("extrude response could not be parsed: {error}"),
-        })
+        // The cancellable path must run the same bounded, digest-verified
+        // decoder as the synchronous path: oversized, symlinked, or
+        // mismatched staged output fails closed before it can reach the
+        // host commit path.
+        RawResult { value }.into_extrude()
     }
 
     /// Boolean-fuse `request` by spawning the worker process. See
@@ -398,6 +400,11 @@ impl OcctWorker {
                 detail: "request envelope is missing operation".to_string(),
             });
         }
+        let feature_id = args
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
         let host = <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
@@ -418,7 +425,7 @@ impl OcctWorker {
             },
             cancel,
         );
-        map_outcome(outcome, &request_id, &command_id).map(|result| result.value)
+        map_outcome(outcome, &request_id, &command_id, &feature_id).map(|result| result.value)
     }
 }
 
@@ -434,6 +441,7 @@ fn map_outcome(
     outcome: SupervisorOutcome,
     request_id: &str,
     command_id: &str,
+    expected_feature_id: &str,
 ) -> Result<RawResult, WorkerError> {
     match outcome {
         SupervisorOutcome::Completed { result, .. } => {
@@ -467,6 +475,17 @@ fn map_outcome(
                 return Err(WorkerError::Malformed {
                     detail: format!(
                         "completed result operation {result_operation:?}, expected {command_id:?}"
+                    ),
+                });
+            }
+            let result_feature_id = result
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !expected_feature_id.is_empty() && result_feature_id != expected_feature_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result feature_id {result_feature_id:?}, expected {expected_feature_id:?}"
                     ),
                 });
             }
@@ -585,6 +604,16 @@ impl RawResult {
             return Err(WorkerError::Malformed {
                 detail: format!(
                     "worker staged output of {largest} bytes (advertised {brep_bytes}) exceeds the {bound} byte bound"
+                ),
+            });
+        }
+        // The advertised byte count must equal the actual file size: an
+        // under-reporting worker is treated as malformed rather than
+        // being trusted on either side of the comparison.
+        if actual_bytes != brep_bytes {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "worker staged output at {path:?} is {actual_bytes} bytes but advertises {brep_bytes}"
                 ),
             });
         }
@@ -1112,11 +1141,13 @@ mod tests {
                 "schema_version": SCHEMA_VERSION,
                 "request_id": "req-1",
                 "operation": "extrude",
+                "feature_id": "box-1",
                 "status": "ok",
             }),
             artifact_headers: vec![],
         };
-        let result = map_outcome(outcome, "req-1", "extrude").expect("completed outcome maps");
+        let result =
+            map_outcome(outcome, "req-1", "extrude", "box-1").expect("completed outcome maps");
         assert_eq!(result.value["status"], "ok");
     }
 
@@ -1132,7 +1163,7 @@ mod tests {
             }),
             artifact_headers: vec![],
         };
-        let error = map_outcome(outcome, "req-1", "extrude")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
             .expect_err("foreign request_id must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
@@ -1152,7 +1183,7 @@ mod tests {
             }),
             artifact_headers: vec![],
         };
-        let error = map_outcome(outcome, "req-1", "extrude")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
             .expect_err("foreign operation must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
@@ -1178,7 +1209,7 @@ mod tests {
                 exit_kind: ExitKind::Cooperative,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
             .expect_err("failed envelope must not map to success");
         match error {
             WorkerError::Diagnostic(diagnostic) => {
@@ -1208,7 +1239,7 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
             .expect_err("signal exit must not map to success");
         match error {
             WorkerError::Supervised { record } => {
@@ -1238,8 +1269,8 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error =
-            map_outcome(outcome, "req-1", "extrude").expect_err("schema mismatch must fail closed");
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+            .expect_err("schema mismatch must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
             "expected Malformed; got {error:?}"
@@ -1264,8 +1295,8 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error =
-            map_outcome(outcome, "req-1", "extrude").expect_err("closed worker must fail closed");
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+            .expect_err("closed worker must fail closed");
         match error {
             WorkerError::Supervised { record } => {
                 assert_eq!(record.stderr_tail, "worker trace");

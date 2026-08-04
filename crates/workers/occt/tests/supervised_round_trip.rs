@@ -426,3 +426,105 @@ fn typed_extrude_fails_closed_on_a_symlinked_staged_file() {
         other => panic!("expected Malformed; got {other:?}"),
     }
 }
+
+#[test]
+fn typed_extrude_with_cancel_fails_closed_on_oversized_staged_output() {
+    // The cancellable path must run the same bounded decoder: an
+    // oversized staged file fails closed even when a token is present.
+    let dir = FixtureDir::new("cancel-oversized");
+    let staged = dir.root.join("out.brep");
+    let mut body = Vec::new();
+    body.resize(threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1, b'x');
+    std::fs::write(&staged, &body).expect("oversized staged file writes");
+    let digest = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
+    let oversized = format!("{}", threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1);
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"feature_id\":\"box-1\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"{digest}\",\"brep_bytes\":{oversized},\"feature_id\":\"box-1\"}}}}'\n",
+            path = staged.display()
+        ),
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
+        .expect_err("cancellable oversized staged output must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("exceeds the"),
+                "detail must name the bound; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_with_cancel_fails_closed_on_digest_mismatch() {
+    let dir = FixtureDir::new("cancel-digest");
+    let staged = dir.root.join("out.brep");
+    std::fs::write(&staged, b"actual worker bytes").expect("staged file writes");
+    let actual = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
+    let mut advertised = actual.clone();
+    advertised.pop();
+    advertised.push('0');
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"feature_id\":\"box-1\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"{advertised}\",\"brep_bytes\":19,\"feature_id\":\"box-1\"}}}}'\n",
+            path = staged.display()
+        ),
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
+        .expect_err("cancellable digest mismatch must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("digest mismatch"),
+                "detail must name the digest mismatch; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_fails_closed_on_foreign_feature_id_in_result() {
+    // The completed result claims a different feature id than the
+    // request; the typed boundary must fail closed instead of letting
+    // the host commit a foreign identity.
+    let dir = FixtureDir::new("foreign-feature");
+    let staged = dir.root.join("out.brep");
+    std::fs::write(&staged, b"xxxx").expect("staged file writes");
+    let digest = threeterm_occt_worker::sha256_file(&staged).expect("staged file hashes");
+
+    let worker = dir.worker_script(
+        "worker.sh",
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
+             read line\n\
+             printf '%s\\n' '{{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{{\"schema_version\":\"threeterm.workers.occt/1\",\"request_id\":\"req-1\",\"operation\":\"extrude\",\"feature_id\":\"foreign-feature\",\"status\":\"ok\",\"brep_path\":\"{path}\",\"brep_sha256\":\"{digest}\",\"brep_bytes\":4,\"feature_id\":\"foreign-feature\"}}}}'\n",
+            path = staged.display()
+        ),
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("foreign feature_id must fail closed");
+    match error {
+        WorkerError::Malformed { detail } => {
+            assert!(
+                detail.contains("feature_id"),
+                "detail must name the feature id; got {detail:?}"
+            );
+        }
+        other => panic!("expected Malformed; got {other:?}"),
+    }
+}

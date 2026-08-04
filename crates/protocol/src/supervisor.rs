@@ -806,19 +806,18 @@ impl Supervisor {
         started: Instant,
         stage_prefix: &str,
     ) -> Option<SupervisorOutcome> {
+        // A stream overflow is checked independently of the exit status:
+        // a worker that exits cleanly (code 0) after flooding a stream
+        // must still fail the terminal outcome closed.
+        let overflow = self.host.stream_overflowed();
         let exit_signal = self.host.exit_signal();
         let exit_code = self.host.exit_code();
-        let unclean = match (exit_signal, exit_code) {
-            (Some(signal), _) => Some(format!("{stage_prefix}:exited_by_signal:{signal}")),
-            (None, Some(code)) if code != 0 => {
+        let unclean = match (overflow, exit_signal, exit_code) {
+            (Some(stream), _, _) => Some(format!("{stage_prefix}:stream_overflow:{stream}")),
+            (None, Some(signal), _) => Some(format!("{stage_prefix}:exited_by_signal:{signal}")),
+            (None, None, Some(code)) if code != 0 => {
                 Some(format!("{stage_prefix}:exited_with_code:{code}"))
             }
-            // A stream overflow that raced the terminal envelope also
-            // fails the outcome closed.
-            (None, None) => self
-                .host
-                .stream_overflowed()
-                .map(|stream| format!("{stage_prefix}:stream_overflow:{stream}")),
             _ => None,
         };
         unclean.map(|stage| {

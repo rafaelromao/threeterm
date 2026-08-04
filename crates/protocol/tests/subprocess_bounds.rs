@@ -209,3 +209,40 @@ fn terminal_completion_racing_a_stdout_overflow_fails_closed() {
     }
     host.terminate().expect("flooding worker terminates");
 }
+
+#[test]
+fn clean_exit_after_overflow_never_accepts_completion() {
+    // The worker emits WorkerReady, floods stdout past the bound, then
+    // exits cleanly. Even a clean exit must not rescue the flood: the
+    // host fails closed with a structured overflow error.
+    let fixture = "printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("flooding worker starts");
+    let limits = StreamLimits {
+        stdout_bytes: 16 * 1024,
+        stderr_bytes: 1024,
+    };
+    let mut host = SubprocessWorkerHost::with_limits(child, limits).expect("transport starts");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let error = loop {
+        match host.recv(deadline) {
+            Ok(_) => continue,
+            Err(WorkerError::TimedOut) => continue,
+            Err(error) => break error,
+        }
+    };
+    match error {
+        WorkerError::StreamOverflow { stream, .. } => {
+            assert_eq!(stream, "stdout");
+        }
+        other => panic!("expected StreamOverflow; got {other:?}"),
+    }
+    host.terminate().expect("flooding worker terminates");
+}

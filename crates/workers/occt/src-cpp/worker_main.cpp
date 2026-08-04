@@ -2216,21 +2216,32 @@ int main() {
     // has already arrived on stdin is acknowledged before the monolithic
     // operation starts; once dispatch begins the operation is
     // uninterruptible and the supervisor's grace period is the backstop.
+    // A pending line that is not a valid Cancel bound to the active
+    // request is malformed input and fails closed rather than being
+    // silently ignored.
     if (stdin_has_pending_line()) {
         std::optional<std::string> cancel_line = read_stdin_line();
-        if (cancel_line.has_value() && !cancel_line->empty()) {
-            JsonParser cancel_parser(*cancel_line);
-            JsonParser::Value cancel_envelope;
-            if (cancel_parser.parse_document(&cancel_envelope, error) &&
-                cancel_envelope.kind == JsonParser::ValueKind::Object &&
-                get_string(cancel_envelope, "kind") == "cancel" &&
-                get_string(cancel_envelope, "schema_version") == kProtocolSchemaVersion &&
-                get_string(cancel_envelope, "request_id") == request_id) {
-                std::string reason = get_string(cancel_envelope, "reason");
-                write_cancelled(request_id, reason);
-                return 0;
-            }
+        if (!cancel_line.has_value() || cancel_line->empty()) {
+            write_failed(request_id, "request_malformed",
+                         "pending line before dispatch is not newline-terminated");
+            return 2;
         }
+        JsonParser cancel_parser(*cancel_line);
+        JsonParser::Value cancel_envelope;
+        if (cancel_parser.parse_document(&cancel_envelope, error) &&
+            cancel_envelope.kind == JsonParser::ValueKind::Object &&
+            get_string(cancel_envelope, "kind") == "cancel" &&
+            get_string(cancel_envelope, "schema_version") == kProtocolSchemaVersion &&
+            get_string(cancel_envelope, "request_id") == request_id) {
+            std::string reason = get_string(cancel_envelope, "reason");
+            write_cancelled(request_id, reason);
+            return 0;
+        }
+        // Malformed, wrong-schema, or foreign pending input is a
+        // protocol violation: fail closed before dispatch.
+        write_failed(request_id, "request_malformed",
+                     "pending line before dispatch is not a valid cancel envelope");
+        return 2;
     }
 
     write_progress(request_id, "computing");

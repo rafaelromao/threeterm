@@ -75,25 +75,50 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
+#include <poll.h>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace {
 
 constexpr const char* kSchemaVersion = "threeterm.workers.occt/1";
+constexpr const char* kProtocolSchemaVersion = "threeterm.protocol/1";
 
-std::string read_stdin() {
+/// Maximum bytes accepted for a single newline-framed envelope line.
+/// Mirrors the host's `MAX_FRAME_BUFFER`; oversized input fails closed.
+constexpr std::size_t kMaxEnvelopeBytes = 4 * 1024 * 1024;
+
+/// Reads exactly ONE newline-terminated line from stdin, bounded by
+/// `kMaxEnvelopeBytes`. Returns `nullopt` when stdin reaches EOF before
+/// a newline (malformed framing) or when the line exceeds the bound.
+/// Never waits for EOF: the host keeps stdin open for the duration of
+/// the request lifecycle, so reading until EOF would block forever.
+std::optional<std::string> read_stdin_line() {
     std::string out;
-    char buffer[4096];
-    while (true) {
-        std::size_t read = std::fread(buffer, 1, sizeof(buffer), stdin);
-        if (read == 0) break;
-        out.append(buffer, read);
-        if (read < sizeof(buffer)) break;
+    out.reserve(256);
+    while (out.size() < kMaxEnvelopeBytes) {
+        int c = std::fgetc(stdin);
+        if (c == EOF) return std::nullopt;
+        if (c == '\n') return out;
+        out.push_back(static_cast<char>(c));
     }
-    return out;
+    return std::nullopt;
+}
+
+/// True when a complete envelope line is already buffered on stdin
+/// without blocking. Used to observe a cooperative Cancel before the
+/// monolithic operation starts.
+bool stdin_has_pending_line() {
+    struct pollfd descriptor;
+    descriptor.fd = STDIN_FILENO;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    int ready = poll(&descriptor, 1, 0);
+    return ready > 0 && (descriptor.revents & POLLIN) != 0;
 }
 
 void write_stdout_line(const std::string& line) {
@@ -135,6 +160,7 @@ std::string json_escape(const std::string& input) {
 }
 
 class JsonParser {
+
 public:
     enum class ValueKind { Object, Array, String, Number, Bool, Null };
 
@@ -161,6 +187,19 @@ public:
         if (c == '-' || (c >= '0' && c <= '9')) return parse_number(out, error);
         error = std::string{"unexpected character in JSON: "} + c;
         return false;
+    }
+
+    /// Parses exactly one JSON value and requires the input to end
+    /// (after whitespace) once the value is consumed. Trailing garbage
+    /// after a valid value is malformed framing and fails closed.
+    bool parse_document(Value* out, std::string& error) {
+        if (!parse_value(out, error)) return false;
+        skip_ws();
+        if (!at_end()) {
+            error = "trailing data after JSON value";
+            return false;
+        }
+        return true;
     }
 
 private:
@@ -335,6 +374,49 @@ private:
     }
 };
 
+void write_worker_ready() {
+    std::ostringstream out;
+    out << "{\"kind\":\"worker_ready\","
+        << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
+        << "\"worker_id\":\"occt\"}";
+    write_stdout_line(out.str());
+}
+
+void write_progress(const std::string& request_id, const std::string& stage) {
+    std::ostringstream out;
+    out << "{\"kind\":\"progress\","
+        << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"stage\":\"" << json_escape(stage) << "\","
+        << "\"percent\":0}";
+    write_stdout_line(out.str());
+}
+
+void write_failed(const std::string& request_id, const std::string& code,
+                  const std::string& detail) {
+    std::ostringstream out;
+    out << "{\"kind\":\"failed\","
+        << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"code\":\"" << json_escape(code) << "\","
+        << "\"detail\":\"" << json_escape(detail) << "\"}";
+    write_stdout_line(out.str());
+}
+
+void write_cancelled(const std::string& request_id, const std::string& reason) {
+    std::ostringstream out;
+    out << "{\"kind\":\"cancelled\","
+        << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"reason\":\"" << json_escape(reason) << "\"}";
+    write_stdout_line(out.str());
+}
+
+/// Captured typed result JSON emitted by the dispatched handler. The
+/// envelope-wrapping main loop wraps it in a `completed` envelope after
+/// a successful dispatch.
+std::string g_result_json;
+
 const JsonParser::Value* find_field(const JsonParser::Value& object, const std::string& key) {
     if (object.kind != JsonParser::ValueKind::Object) return nullptr;
     for (const auto& pair : object.object_value) {
@@ -506,6 +588,20 @@ std::string sha256_hex(const std::string& bytes) {
 }
 
 bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, std::string& error) {
+    // Fail closed before writing: an existing output path (including a
+    // symlink planted by a malicious or stale worker) must never be
+    // followed or overwritten. The host verifies the staged artifact
+    // again before promotion.
+    std::error_code ec;
+    std::filesystem::file_status st = std::filesystem::symlink_status(path, ec);
+    if (!ec && std::filesystem::exists(st)) {
+        error = "output path already exists (refusing to follow or overwrite): " + path.string();
+        return false;
+    }
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        error = "output path stat failed: " + path.string() + ": " + ec.message();
+        return false;
+    }
     if (!BRepTools::Write(shape, path.string().c_str())) {
         error = "BRepTools::Write failed for " + path.string();
         return false;
@@ -517,21 +613,6 @@ bool analyze_brep(const TopoDS_Shape& shape) {
     BRepCheck_Analyzer analyzer(shape);
     analyzer.SetParallel(false);
     return analyzer.IsValid() != 0;
-}
-
-std::string error_response(const std::string& request_id, const std::string& operation,
-                           const std::string& feature_id, const std::string& status,
-                           const std::string& message) {
-    std::ostringstream out;
-    out << "{"
-        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
-        << "\"request_id\":\"" << json_escape(request_id) << "\","
-        << "\"operation\":\"" << json_escape(operation) << "\","
-        << "\"status\":\"" << json_escape(status) << "\","
-        << "\"diagnostic\":\"" << json_escape(message) << "\","
-        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
-        << "}";
-    return out.str();
 }
 
 bool handle_extrude(const JsonParser::Value& request, std::string& error) {
@@ -617,7 +698,7 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
         << "\"brep_bytes\":" << bytes.str().size() << ","
         << "\"feature_id\":\"" << json_escape(feature_id) << "\""
         << "}";
-    write_stdout_line(out.str());
+    g_result_json = out.str();
     return status == "ok";
 }
 
@@ -694,7 +775,7 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         << "\"brep_bytes\":" << bytes.str().size() << ","
         << "\"feature_id\":\"" << json_escape(feature_id) << "\""
         << "}";
-    write_stdout_line(out.str());
+    g_result_json = out.str();
     return status == "ok";
 }
 
@@ -775,7 +856,7 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during fillet: ";
@@ -875,7 +956,7 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during chamfer: ";
@@ -1042,7 +1123,7 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             out << ",\"removed_volume\":" << removed_volume;
         }
         out << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during hole: ";
@@ -1166,7 +1247,7 @@ bool handle_mirror(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during mirror: ";
@@ -1288,7 +1369,7 @@ bool handle_revolve(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during revolve: ";
@@ -1415,7 +1496,7 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during linear_pattern: ";
@@ -1551,7 +1632,7 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during circular_pattern: ";
@@ -1718,7 +1799,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during shell: ";
@@ -1959,7 +2040,7 @@ bool handle_draft(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during draft: ";
@@ -2073,7 +2154,7 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
-        write_stdout_line(out.str());
+        g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
         error = "OCCT exception during loft: ";
@@ -2089,62 +2170,123 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
 }  // namespace
 
 int main() {
-    std::string raw = read_stdin();
+    // Phase 1: advertise the protocol schema before any request.
+    write_worker_ready();
+
+    // Phase 2: read exactly ONE bounded newline-terminated request
+    // line. The host keeps stdin open for the whole lifecycle, so
+    // reading until EOF would block forever; the supervisor's grace
+    // period then force-terminates. EOF-before-newline or an oversized
+    // line is malformed framing and fails closed.
+    std::optional<std::string> raw_line = read_stdin_line();
+    if (!raw_line.has_value()) {
+        write_failed("", "request_malformed", "request line must be newline-terminated");
+        return 2;
+    }
+    std::string raw = *raw_line;
     if (raw.empty()) {
-        write_stderr_line("request_malformed: empty stdin");
+        write_failed("", "request_malformed", "empty request line");
         return 2;
     }
 
     JsonParser parser(raw);
     JsonParser::Value envelope;
     std::string error;
-    if (!parser.parse_value(&envelope, error)) {
-        write_stderr_line("request_malformed: " + error);
+    if (!parser.parse_document(&envelope, error)) {
+        write_failed("", "request_malformed", error);
         return 2;
     }
     if (envelope.kind != JsonParser::ValueKind::Object) {
-        write_stderr_line("request_malformed: top-level must be an object");
+        write_failed("", "request_malformed", "request envelope must be an object");
         return 2;
     }
-    std::string schema_version = get_string(envelope, "schema_version");
-    if (schema_version != kSchemaVersion) {
-        write_stderr_line("request_malformed: schema_version mismatch (received " +
-                          schema_version + ")");
+    std::string kind = get_string(envelope, "kind");
+    if (kind != "request") {
+        write_failed("", "request_malformed", "expected a request envelope");
+        return 2;
+    }
+    std::string protocol_schema = get_string(envelope, "schema_version");
+    if (protocol_schema != kProtocolSchemaVersion) {
+        write_failed("", "request_malformed", "protocol schema_version mismatch (received " +
+                                                 protocol_schema + ")");
         return 2;
     }
     std::string request_id = get_string(envelope, "request_id");
-    std::string operation = get_string(envelope, "operation");
-    std::string feature_id = get_string(envelope, "feature_id");
+    std::string command_id = get_string(envelope, "command_id");
+
+    const JsonParser::Value* args = find_field(envelope, "args");
+    if (args == nullptr || args->kind != JsonParser::ValueKind::Object) {
+        write_failed(request_id, "request_malformed", "request envelope is missing args");
+        return 2;
+    }
+    std::string worker_schema = get_string(*args, "schema_version");
+    if (worker_schema != kSchemaVersion) {
+        write_failed(request_id, "request_malformed", "worker schema_version mismatch (received " +
+                                                         worker_schema + ")");
+        return 2;
+    }
+
+    // Phase 3: cooperative cancellation window. A Cancel envelope that
+    // has already arrived on stdin is acknowledged before the monolithic
+    // operation starts; once dispatch begins the operation is
+    // uninterruptible and the supervisor's grace period is the backstop.
+    // A pending line that is not a valid Cancel bound to the active
+    // request is malformed input and fails closed rather than being
+    // silently ignored.
+    if (stdin_has_pending_line()) {
+        std::optional<std::string> cancel_line = read_stdin_line();
+        if (!cancel_line.has_value() || cancel_line->empty()) {
+            write_failed(request_id, "request_malformed",
+                         "pending line before dispatch is not newline-terminated");
+            return 2;
+        }
+        JsonParser cancel_parser(*cancel_line);
+        JsonParser::Value cancel_envelope;
+        if (cancel_parser.parse_document(&cancel_envelope, error) &&
+            cancel_envelope.kind == JsonParser::ValueKind::Object &&
+            get_string(cancel_envelope, "kind") == "cancel" &&
+            get_string(cancel_envelope, "schema_version") == kProtocolSchemaVersion &&
+            get_string(cancel_envelope, "request_id") == request_id) {
+            std::string reason = get_string(cancel_envelope, "reason");
+            write_cancelled(request_id, reason);
+            return 0;
+        }
+        // Malformed, wrong-schema, or foreign pending input is a
+        // protocol violation: fail closed before dispatch.
+        write_failed(request_id, "request_malformed",
+                     "pending line before dispatch is not a valid cancel envelope");
+        return 2;
+    }
+
+    write_progress(request_id, "computing");
 
     bool success = false;
-    if (operation == "extrude") {
-        success = handle_extrude(envelope, error);
-    } else if (operation == "boolean_fuse") {
-        success = handle_boolean_fuse(envelope, error);
-    } else if (operation == "fillet") {
-        success = handle_fillet(envelope, error);
-    } else if (operation == "chamfer") {
-        success = handle_chamfer(envelope, error);
-    } else if (operation == "hole") {
-        success = handle_hole(envelope, error);
-    } else if (operation == "revolve") {
-        success = handle_revolve(envelope, error);
-    } else if (operation == "mirror") {
-        success = handle_mirror(envelope, error);
-    } else if (operation == "linear_pattern") {
-        success = handle_linear_pattern(envelope, error);
-    } else if (operation == "circular_pattern") {
-        success = handle_circular_pattern(envelope, error);
-    } else if (operation == "shell") {
-        success = handle_shell(envelope, error);
-    } else if (operation == "draft") {
-        success = handle_draft(envelope, error);
-    } else if (operation == "loft") {
-        success = handle_loft(envelope, error);
+    if (command_id == "extrude") {
+        success = handle_extrude(*args, error);
+    } else if (command_id == "boolean_fuse") {
+        success = handle_boolean_fuse(*args, error);
+    } else if (command_id == "fillet") {
+        success = handle_fillet(*args, error);
+    } else if (command_id == "chamfer") {
+        success = handle_chamfer(*args, error);
+    } else if (command_id == "hole") {
+        success = handle_hole(*args, error);
+    } else if (command_id == "revolve") {
+        success = handle_revolve(*args, error);
+    } else if (command_id == "mirror") {
+        success = handle_mirror(*args, error);
+    } else if (command_id == "linear_pattern") {
+        success = handle_linear_pattern(*args, error);
+    } else if (command_id == "circular_pattern") {
+        success = handle_circular_pattern(*args, error);
+    } else if (command_id == "shell") {
+        success = handle_shell(*args, error);
+    } else if (command_id == "draft") {
+        success = handle_draft(*args, error);
+    } else if (command_id == "loft") {
+        success = handle_loft(*args, error);
     } else {
-        write_stderr_line(
-            "request_malformed: operation must be extrude, boolean_fuse, fillet, chamfer, \
-hole, revolve, mirror, linear_pattern, circular_pattern, shell, draft, or loft");
+        write_failed(request_id, "request_malformed", "unknown command_id " + command_id);
         return 2;
     }
 
@@ -2153,15 +2295,27 @@ hole, revolve, mirror, linear_pattern, circular_pattern, shell, draft, or loft")
             error = "operation returned a non-ok status";
         }
         // The handle_* functions seed `error` with the literal
-        // "brep_invalid:" prefix when the BREP fails BRepCheck_Analyzer.
-        // A builder rejection identifies geometry that OCCT cannot support.
+        // "brep_invalid:" / "unsupported_geometry:" prefixes; the Failed
+        // envelope carries the classifier structurally, so the detail is
+        // the message without the prefix.
         bool is_brep_invalid = error.find("brep_invalid:") == 0;
         bool is_unsupported_geometry = error.find("unsupported_geometry:") == 0;
-        std::string status = is_brep_invalid ? "brep_invalid"
+        std::string code = is_brep_invalid ? "brep_invalid"
             : (is_unsupported_geometry ? "unsupported_geometry" : "request_malformed");
         int exit_code = is_brep_invalid ? 3 : (is_unsupported_geometry ? 4 : 2);
-        write_stderr_line(error_response(request_id, operation, feature_id, status, error));
+        std::string detail = error;
+        if (is_brep_invalid || is_unsupported_geometry) {
+            detail = error.substr(error.find(':') + 2);
+        }
+        write_failed(request_id, code, detail);
+        write_stderr_line(error);
         return exit_code;
     }
+
+    // Phase 4: wrap the typed result in a `completed` envelope.
+    std::string completed =
+        "{\"kind\":\"completed\",\"schema_version\":\"" + std::string(kProtocolSchemaVersion) +
+        "\",\"request_id\":\"" + json_escape(request_id) + "\",\"result\":" + g_result_json + "}";
+    write_stdout_line(completed);
     return 0;
 }

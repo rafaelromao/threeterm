@@ -22,7 +22,7 @@ use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    ShellRequest, schema_version,
+    ShellRequest,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -47,6 +47,30 @@ fn unique_request_id(label: &str) -> String {
 
 fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
+}
+
+/// Shell-script fake OCCT worker speaking the versioned envelope
+/// protocol. Every fake emits the `worker_ready` handshake, consumes the
+/// host's request envelope, and runs `reply` lines that may interpolate
+/// `$request_id` (extracted from the request envelope). The fakes model
+/// production failure modes without an OCCT install.
+fn fake_worker_script(reply: &str) -> String {
+    format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fake\"}}'\n\
+         read request_line\n\
+         request_id=$(printf '%s' \"$request_line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+         {reply}\n"
+    )
+}
+
+/// Failed-envelope reply for a fake worker. `code`/`detail` mirror the
+/// structured `failed` envelope the real worker emits; the envelope is
+/// bound to the request the supervisor actually sent.
+fn fake_failed_reply(code: &str, detail: &str) -> String {
+    format!(
+        "printf '%s\\n' '{{\"kind\":\"failed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"'\"$request_id\"'\",\"code\":\"{code}\",\"detail\":\"{detail}\"}}'"
+    )
 }
 
 fn fresh_bundle_with_feature(label: &str, feature_id: &str, kind: &str) -> PathBuf {
@@ -122,7 +146,10 @@ fn worker_spawn_failure_preserves_canonical_state() {
         .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -150,7 +177,10 @@ fn extrude_request_malformed_preserves_canonical_state() {
     request.profile = vec![[0.0, 0.0], [1.0, 0.0]];
     let result = host.extrude(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -170,9 +200,10 @@ fn extrude_malformed_response_preserves_canonical_state() {
     let host = Host::new();
     let prior_view = host.load(&root).expect("loads");
 
-    // Build a tiny shell script that exits 0 with empty stdout —
-    // mirrors the worker's malformed-output path. The host should
-    // classify this as a worker failure and preserve canonical state.
+    // Build a tiny shell script that exits 0 with empty stdout — the
+    // worker dies before completing the handshake. The supervisor fails
+    // closed and the host classifies the result as a worker failure,
+    // preserving canonical state.
     let mut script = std::env::temp_dir();
     script.push(format!(
         "threeterm-host-fake-occt-{}.sh",
@@ -188,7 +219,10 @@ fn extrude_malformed_response_preserves_canonical_state() {
         rectangle_extrude_request("malformed").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -224,7 +258,10 @@ fn extrude_non_zero_exit_preserves_canonical_state() {
         rectangle_extrude_request("non-zero").with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -250,16 +287,14 @@ fn extrude_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -424,7 +459,10 @@ fn boolean_fuse_spawn_failure_preserves_canonical_state() {
     .with_feature_id("fused-fail-1");
     let result = host.boolean_fuse(&root, fuse_request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -455,7 +493,10 @@ fn boolean_fuse_request_malformed_preserves_canonical_state() {
     .with_feature_id("fused-malformed-1");
     let result = host.boolean_fuse(&root, fuse_request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -495,7 +536,10 @@ fn boolean_fuse_malformed_response_preserves_canonical_state() {
     .with_feature_id("fused-malformed-resp-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -536,7 +580,10 @@ fn boolean_fuse_non_zero_exit_preserves_canonical_state() {
     .with_feature_id("fused-non-zero-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -562,16 +609,14 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-fuse-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": threeterm_occt_worker::schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -771,7 +816,10 @@ fn fillet_spawn_failure_preserves_canonical_state() {
     );
     let result = host.fillet(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -800,7 +848,10 @@ fn chamfer_spawn_failure_preserves_canonical_state() {
     );
     let result = host.chamfer(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -832,7 +883,10 @@ fn fillet_request_malformed_preserves_canonical_state() {
     request.radius = 0.0;
     let result = host.fillet(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -864,7 +918,10 @@ fn chamfer_request_malformed_preserves_canonical_state() {
     request.distance = 0.0;
     let result = host.chamfer(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -889,16 +946,14 @@ fn fillet_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-fillet-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -940,16 +995,14 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-chamfer-brep-{}.sh",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1042,7 +1095,13 @@ fn unsupported_chamfer_preserves_the_preceding_fillet_revision() {
     ));
     fs::write(
         &script,
-        "#!/bin/sh\nprintf '%s\\n' 'unsupported_geometry: selected edges include fillet curves' >&2\nexit 4\n",
+        format!(
+            "{worker}\nexit 4\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "unsupported_geometry",
+                "selected edges include fillet curves",
+            ))
+        ),
     )
     .expect("script writes");
     let mut permissions = fs::metadata(&script).expect("stat").permissions();
@@ -1233,7 +1292,10 @@ fn hole_spawn_failure_preserves_canonical_state() {
     );
     let result = host.hole(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1262,7 +1324,10 @@ fn hole_request_malformed_preserves_canonical_state() {
     );
     let result = host.hole(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1289,16 +1354,14 @@ fn hole_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-hole-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1485,7 +1548,10 @@ fn mirror_spawn_failure_preserves_canonical_state() {
     );
     let result = host.mirror(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1515,7 +1581,10 @@ fn mirror_request_malformed_preserves_canonical_state() {
     request.plane_normal = [0.0, 0.0, 0.0];
     let result = host.mirror(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1542,16 +1611,14 @@ fn mirror_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-mirror-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1736,7 +1803,10 @@ fn linear_pattern_spawn_failure_preserves_canonical_state() {
     );
     let result = host.linear_pattern(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1766,7 +1836,10 @@ fn linear_pattern_request_malformed_preserves_canonical_state() {
     request.direction = [0.0, 0.0, 0.0];
     let result = host.linear_pattern(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -1793,16 +1866,14 @@ fn linear_pattern_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-linear-pattern-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -1998,7 +2069,10 @@ fn circular_pattern_spawn_failure_preserves_canonical_state() {
     );
     let result = host.circular_pattern(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2028,7 +2102,10 @@ fn circular_pattern_request_malformed_preserves_canonical_state() {
     request.axis_normal = [0.0, 0.0, 0.0];
     let result = host.circular_pattern(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2055,16 +2132,14 @@ fn circular_pattern_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-circular-pattern-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2243,7 +2318,10 @@ fn shell_spawn_failure_preserves_canonical_state() {
     );
     let result = host.shell(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2275,7 +2353,10 @@ fn shell_request_malformed_preserves_canonical_state() {
     request.thickness = 0.0;
     let result = host.shell(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2302,16 +2383,14 @@ fn shell_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-shell-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2565,7 +2644,10 @@ fn draft_spawn_failure_preserves_canonical_state() {
     );
     let result = host.draft(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2598,7 +2680,10 @@ fn draft_request_malformed_preserves_canonical_state() {
     request.angle = 0.0;
     let result = host.draft(&root, request, &worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2625,16 +2710,14 @@ fn draft_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-draft-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");
@@ -2812,7 +2895,10 @@ fn loft_spawn_failure_preserves_canonical_state() {
         .with_output_path(root.join("stage"), "loft-spawn.brep");
     let result = host.loft(&root, request, &bad_worker);
     assert!(
-        matches!(result, Err(HostError::WorkerFailure { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerFailure { .. } | HostError::WorkerTerminated { .. })
+        ),
         "got {result:?}"
     );
 
@@ -2839,16 +2925,14 @@ fn loft_brep_invalid_preserves_canonical_state() {
         "threeterm-host-fake-occt-loft-brep-{}",
         std::process::id()
     ));
-    let diagnostic = serde_json::json!({
-        "schema_version": schema_version(),
-        "code": "brep_invalid",
-        "arg": "BRepCheck_Analyzer failed"
-    });
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat <<'JSON'\n{diagnostic}\nJSON\nexit 3\n",
-            diagnostic = serde_json::to_string(&diagnostic).unwrap()
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
         ),
     )
     .expect("script writes");

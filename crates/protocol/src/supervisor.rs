@@ -33,11 +33,14 @@ pub struct Request {
 /// Outcome of a single `Supervisor::request` / `Supervisor::cancel` invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorOutcome {
-    /// The worker completed a request. The headers describe files that remain
-    /// staged; the Host is solely responsible for accepting and publishing
-    /// them against its current Revision Snapshot.
+    /// The worker completed a request. `result` is the worker's typed
+    /// completion value; `artifact_headers` describe files that remain
+    /// staged. The Host is solely responsible for accepting and
+    /// publishing staged artifacts against its current Revision
+    /// Snapshot.
     Completed {
         request_id: String,
+        result: Value,
         artifact_headers: Vec<StagedArtifact>,
     },
     /// The worker acknowledged the cooperative cancellation inside the
@@ -79,7 +82,39 @@ pub struct TerminationRecord {
     /// sees them (closed issue #237 AC: "Failures produce structured
     /// diagnostics and preserve the canonical host state").
     pub last_artifact_error: Option<String>,
+    /// The actual Linux signal the worker exited by, when it did not
+    /// exit cleanly (crash, forced kill). `None` for a normal exit.
+    pub exit_signal: Option<i32>,
+    /// The worker's numeric exit code, when it exited by calling
+    /// `exit(n)` rather than by a signal. `None` for a signal exit or
+    /// before the worker has been reaped.
+    pub exit_code: Option<i32>,
+    /// Bounded tail of the worker's stderr, preserved so the diagnostic
+    /// surface keeps structured context on failure.
+    pub stderr_tail: String,
+    /// Stable failure identifier from a cooperative `Failed` envelope,
+    /// surfaced structurally instead of only inside the free-form
+    /// `stage` string.
+    pub failed_code: Option<String>,
+    /// Offending detail from a cooperative `Failed` envelope.
+    pub failed_detail: Option<String>,
     pub exit_kind: ExitKind,
+}
+
+/// Structured fields carried by a cooperative `Failed` envelope.
+#[derive(Debug, Clone, PartialEq)]
+struct FailedFields {
+    code: String,
+    detail: String,
+}
+
+/// Diagnostic context accumulated during a request lifecycle, threaded
+/// into every terminal record.
+#[derive(Debug, Clone, PartialEq)]
+struct TerminationContext {
+    last_progress: Option<Progress>,
+    last_artifact_error: Option<String>,
+    failed: Option<FailedFields>,
 }
 
 /// Worker exit category. `Cooperative` is reserved for a worker-emitted
@@ -178,41 +213,129 @@ impl Supervisor {
         let deadline = started + self.grace;
         loop {
             match self.host.recv(deadline) {
+                Ok(envelope) if envelope.schema_version() != crate::schema_version() => {
+                    // Every post-handshake envelope must carry the
+                    // canonical protocol version, or cancellation fails
+                    // closed (the version is part of the message
+                    // binding contract).
+                    return self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "envelope_schema_mismatch",
+                        Some(format!(
+                            "received={:?} expected={:?}",
+                            envelope.schema_version(),
+                            crate::schema_version()
+                        )),
+                        None,
+                    );
+                }
                 Ok(Envelope::Cancelled {
                     request_id: ack_request_id,
                     reason: ack_reason,
                     ..
                 }) => {
                     if ack_request_id != request_id {
-                        // A buffered stream of acknowledgements for other
-                        // requests must not keep cancellation alive past its
-                        // deadline.
-                    } else {
-                        self.discard_stage();
-                        if let Err(error) = self.host.terminate() {
-                            return SupervisorOutcome::ForceTerminated {
-                                record: TerminationRecord {
-                                    request_id: ack_request_id,
-                                    stage: format!("cancel_reap_failed:{error}"),
-                                    elapsed: started.elapsed(),
-                                    last_progress: None,
-                                    last_artifact_error: self.last_artifact_error.take(),
-                                    exit_kind: ExitKind::ForceAfterGrace,
-                                },
-                            };
-                        }
-                        return SupervisorOutcome::Acknowledged {
-                            request_id: ack_request_id,
-                            reason: ack_reason,
-                            elapsed: started.elapsed(),
+                        // A cancellation acknowledgement bound to a
+                        // foreign request is a protocol violation; the
+                        // staged output is discarded and the cancellation
+                        // fails closed rather than being kept alive by a
+                        // stream of misbound acknowledgements.
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            &format!("protocol_violation:mismatched_request_id:{ack_request_id}"),
+                            None,
+                            None,
+                        );
+                    }
+                    self.discard_stage();
+                    if let Err(error) = self.host.terminate() {
+                        let context = TerminationContext {
+                            last_progress: None,
+                            last_artifact_error: self.last_artifact_error.take(),
+                            failed: None,
+                        };
+                        return SupervisorOutcome::ForceTerminated {
+                            record: self.termination_record(
+                                ack_request_id,
+                                format!("cancel_reap_failed:{error}"),
+                                started,
+                                context,
+                                ExitKind::ForceAfterGrace,
+                            ),
                         };
                     }
+                    // The worker acknowledged cooperatively; verify it
+                    // exited cleanly (no signal, exit code 0) before
+                    // reporting an acknowledgement. A worker that acks
+                    // and then dies by signal or with a non-zero status
+                    // is surfaced as a structured termination.
+                    if let Some(outcome) =
+                        self.verify_clean_exit(&ack_request_id, started, "cancelled_reap")
+                    {
+                        return outcome;
+                    }
+                    return SupervisorOutcome::Acknowledged {
+                        request_id: ack_request_id,
+                        reason: ack_reason,
+                        elapsed: started.elapsed(),
+                    };
                 }
-                Ok(Envelope::Progress { .. }) => {}
+                Ok(Envelope::Progress {
+                    request_id: progress_request_id,
+                    ..
+                }) => {
+                    // Progress bound to a foreign request is a protocol
+                    // violation; cancellation fails closed rather than
+                    // accepting misbound progress.
+                    if progress_request_id != request_id {
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            &format!(
+                                "protocol_violation:mismatched_request_id:{progress_request_id}"
+                            ),
+                            None,
+                            None,
+                        );
+                    }
+                }
                 Ok(Envelope::Artifact { header, .. }) => {
-                    let _ = header.staging_name;
+                    if header.request_id != request_id {
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            &format!(
+                                "protocol_violation:mismatched_request_id:{}",
+                                header.request_id
+                            ),
+                            None,
+                            None,
+                        );
+                    }
                 }
-                Ok(_) => {}
+                // A request-bearing terminal envelope while waiting for
+                // a Cancelled acknowledgement is a protocol violation:
+                // the worker neither acked the cancellation nor is it
+                // talking about the active request. Fail closed and
+                // discard the staged output. A WorkerReady left over
+                // from the handshake is tolerated.
+                Ok(
+                    Envelope::Completed { .. }
+                    | Envelope::Failed { .. }
+                    | Envelope::Request { .. }
+                    | Envelope::Cancel { .. },
+                ) => {
+                    return self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "protocol_violation:expected_cancelled_ack",
+                        None,
+                        None,
+                    );
+                }
+                Ok(Envelope::WorkerReady { .. }) => {}
                 Err(WorkerError::Closed) => {
                     return self.force_terminate_outcome(
                         request_id,
@@ -222,15 +345,10 @@ impl Supervisor {
                         None,
                     );
                 }
-                Err(WorkerError::TimedOut) => {
-                    return self.force_terminate_outcome(
-                        request_id,
-                        started,
-                        "cancel_grace_exceeded",
-                        None,
-                        None,
-                    );
-                }
+                // A slice-level receive timeout is a poll tick: keep
+                // waiting; the loop's deadline check below terminates
+                // the cancellation when the grace expires.
+                Err(WorkerError::TimedOut) => {}
                 Err(error) => {
                     return self.force_terminate_outcome(
                         request_id,
@@ -261,6 +379,19 @@ impl Supervisor {
     /// caller; on `Failed` / unsolicited `Cancelled` / force termination
     /// every staged artifact is discarded.
     pub fn request(&mut self, request: Request) -> SupervisorOutcome {
+        self.request_with_cancel(request, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Request lifecycle with a cooperative cancellation trigger. The
+    /// request loop polls `cancel` between receive slices; when it is
+    /// set, the supervisor runs the cooperative cancellation lifecycle
+    /// (send `Cancel`, await `Cancelled` inside the grace period, then
+    /// force-terminate if the worker does not acknowledge).
+    pub fn request_with_cancel(
+        &mut self,
+        request: Request,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> SupervisorOutcome {
         let started = Instant::now();
 
         // Phase 1: consume one WorkerReady handshake. The worker must
@@ -303,97 +434,17 @@ impl Supervisor {
         let mut last_progress: Option<Progress> = None;
 
         loop {
-            match self.host.recv(deadline) {
-                Ok(Envelope::Progress { stage, percent, .. }) => {
-                    last_progress = Some(Progress { stage, percent });
-                }
-                Ok(Envelope::Artifact {
-                    schema_version,
-                    header,
-                }) => {
-                    self.record_artifact(schema_version, *header, &request);
-                }
-                // An unsolicited Cancelled envelope during the request
-                // lifecycle is a protocol violation: `request()` never
-                // sends a `Cancel`, so a `Cancelled` arriving here
-                // means the worker is misbehaving. Record it as a
-                // protocol violation via the `last_progress` workaround
-                // so the diagnostic surface sees it; do not classify it
-                // as a cooperative ack.
-                Ok(Envelope::Cancelled {
-                    request_id: cancelled_request_id,
-                    ..
-                }) => {
-                    last_progress = Some(Progress {
-                        stage: format!(
-                            "protocol_violation:unsolicited_cancelled:{cancelled_request_id}"
-                        ),
-                        percent: 0,
-                    });
-                }
-                Ok(Envelope::Completed { request_id, .. }) => {
-                    return self.complete_with_artifact_facts(
-                        request_id,
-                        &request,
-                        started,
-                        last_progress,
-                    );
-                }
-                Ok(Envelope::Failed {
-                    request_id,
-                    code,
-                    detail,
-                    ..
-                }) => {
-                    self.discard_stage();
-                    let artifact_error = self.last_artifact_error.take();
-                    return self.cooperative_termination_outcome(
-                        request_id,
-                        format!("failed:{code}:{detail}"),
-                        started,
-                        last_progress,
-                        artifact_error,
-                    );
-                }
-                Ok(Envelope::WorkerReady { worker_id, .. }) => {
-                    last_progress = Some(Progress {
-                        stage: format!("unexpected_worker_ready:{worker_id}"),
-                        percent: 0,
-                    });
-                }
-                Ok(Envelope::Request { .. } | Envelope::Cancel { .. }) => {
-                    last_progress = Some(Progress {
-                        stage: "protocol_violation:worker_sent_host_only_envelope".to_string(),
-                        percent: 0,
-                    });
-                }
-                Err(WorkerError::Closed) => {
-                    return self.force_terminate_outcome(
-                        &request.request_id,
-                        started,
-                        "worker_closed",
-                        None,
-                        last_progress.take(),
-                    );
-                }
-                Err(WorkerError::TimedOut) => {
-                    return self.force_terminate_outcome(
-                        &request.request_id,
-                        started,
-                        "grace_exceeded",
-                        None,
-                        last_progress.take(),
-                    );
-                }
-                Err(error) => {
-                    return self.force_terminate_outcome(
-                        &request.request_id,
-                        started,
-                        "worker_recv_error",
-                        Some(error.to_string()),
-                        last_progress.take(),
-                    );
-                }
+            // Cooperative cancellation trigger: when the flag is set the
+            // request lifecycle hands over to the cancellation lifecycle
+            // (send `Cancel`, await `Cancelled` inside the grace period,
+            // then force-terminate if the worker does not acknowledge).
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.cancel(&request.request_id, "cancelled by host");
+            }
+            if let Some(outcome) =
+                self.receive_request_envelope(&request, started, deadline, &mut last_progress)
+            {
+                return outcome;
             }
 
             if Instant::now() >= deadline {
@@ -405,6 +456,188 @@ impl Supervisor {
                     last_progress.take(),
                 );
             }
+        }
+    }
+
+    /// Receives the next envelope for the active request and dispatches
+    /// it. Returns `Some(outcome)` when the envelope terminates the
+    /// request lifecycle; returns `None` to keep waiting. Progress
+    /// facts are recorded into `last_progress` in place.
+    fn receive_request_envelope(
+        &mut self,
+        request: &Request,
+        started: Instant,
+        deadline: Instant,
+        last_progress: &mut Option<Progress>,
+    ) -> Option<SupervisorOutcome> {
+        match self.host.recv(deadline) {
+            Ok(envelope) if envelope.schema_version() != crate::schema_version() => {
+                // Every post-handshake envelope must carry the
+                // canonical protocol version, or the request fails
+                // closed (the version is part of the message
+                // binding contract).
+                Some(self.force_terminate_outcome(
+                    &request.request_id,
+                    started,
+                    "envelope_schema_mismatch",
+                    Some(format!(
+                        "received={:?} expected={:?}",
+                        envelope.schema_version(),
+                        crate::schema_version()
+                    )),
+                    None,
+                ))
+            }
+            Ok(Envelope::Progress {
+                request_id: progress_request_id,
+                stage,
+                percent,
+                ..
+            }) => {
+                // A message bound to a foreign request is a protocol
+                // violation: the active request fails closed rather
+                // than accepting misbound progress.
+                if progress_request_id != request.request_id {
+                    return Some(self.force_terminate_outcome(
+                        &request.request_id,
+                        started,
+                        &format!("protocol_violation:mismatched_request_id:{progress_request_id}"),
+                        None,
+                        Some(Progress {
+                            stage: format!(
+                                "protocol_violation:mismatched_request_id:{progress_request_id}"
+                            ),
+                            percent: 0,
+                        }),
+                    ));
+                }
+                *last_progress = Some(Progress { stage, percent });
+                None
+            }
+            Ok(Envelope::Artifact {
+                schema_version,
+                header,
+            }) => {
+                if header.request_id != request.request_id {
+                    return Some(self.force_terminate_outcome(
+                        &request.request_id,
+                        started,
+                        &format!(
+                            "protocol_violation:mismatched_request_id:{}",
+                            header.request_id
+                        ),
+                        None,
+                        Some(Progress {
+                            stage: format!(
+                                "protocol_violation:mismatched_request_id:{}",
+                                header.request_id
+                            ),
+                            percent: 0,
+                        }),
+                    ));
+                }
+                self.record_artifact(schema_version, *header, request);
+                None
+            }
+            // An unsolicited Cancelled envelope during the request
+            // lifecycle is a protocol violation: `request()` never
+            // sends a `Cancel`, so a `Cancelled` arriving here means
+            // the worker is misbehaving. Fail closed immediately:
+            // the staged output is discarded and the request is
+            // terminated rather than waiting out the grace period.
+            Ok(Envelope::Cancelled {
+                request_id: cancelled_request_id,
+                ..
+            }) => Some(self.force_terminate_outcome(
+                &request.request_id,
+                started,
+                &format!("protocol_violation:unsolicited_cancelled:{cancelled_request_id}"),
+                None,
+                None,
+            )),
+            Ok(Envelope::Completed {
+                request_id, result, ..
+            }) => Some(self.complete_with_artifact_facts(
+                request_id,
+                result,
+                request,
+                started,
+                last_progress.take(),
+            )),
+            Ok(Envelope::Failed {
+                request_id,
+                code,
+                detail,
+                ..
+            }) => {
+                // A Failed envelope bound to a foreign request is a
+                // protocol violation: the failure facts must not be
+                // accepted for the active request.
+                if request_id != request.request_id {
+                    return Some(self.force_terminate_outcome(
+                        &request.request_id,
+                        started,
+                        &format!("protocol_violation:mismatched_request_id:{request_id}"),
+                        None,
+                        Some(Progress {
+                            stage: format!("protocol_violation:mismatched_request_id:{request_id}"),
+                            percent: 0,
+                        }),
+                    ));
+                }
+                self.discard_stage();
+                let stage_label = format!("failed:{code}:{detail}");
+                let context = TerminationContext {
+                    last_progress: last_progress.take(),
+                    last_artifact_error: self.last_artifact_error.take(),
+                    failed: Some(FailedFields { code, detail }),
+                };
+                Some(self.cooperative_termination_outcome(
+                    request_id,
+                    stage_label,
+                    started,
+                    context,
+                ))
+            }
+            Ok(Envelope::WorkerReady { worker_id, .. }) => {
+                *last_progress = Some(Progress {
+                    stage: format!("unexpected_worker_ready:{worker_id}"),
+                    percent: 0,
+                });
+                None
+            }
+            Ok(Envelope::Request { .. } | Envelope::Cancel { .. }) => {
+                // Host-only envelopes are a protocol violation: the
+                // worker must never send a Request or Cancel. Fail the
+                // request closed immediately rather than allowing a
+                // host-only envelope followed by a valid completion.
+                Some(self.force_terminate_outcome(
+                    &request.request_id,
+                    started,
+                    "protocol_violation:worker_sent_host_only_envelope",
+                    None,
+                    None,
+                ))
+            }
+            Err(WorkerError::Closed) => Some(self.force_terminate_outcome(
+                &request.request_id,
+                started,
+                "worker_closed",
+                None,
+                last_progress.take(),
+            )),
+            // A slice-level receive timeout is a poll tick: the worker
+            // has not delivered an envelope yet. Keep waiting; the
+            // caller's loop checks the deadline and terminates when it
+            // expires.
+            Err(WorkerError::TimedOut) => None,
+            Err(error) => Some(self.force_terminate_outcome(
+                &request.request_id,
+                started,
+                "worker_recv_error",
+                Some(error.to_string()),
+                last_progress.take(),
+            )),
         }
     }
 
@@ -426,18 +659,10 @@ impl Supervisor {
         started: Instant,
         deadline: Instant,
     ) -> Option<SupervisorOutcome> {
-        let envelope = match self.host.recv(deadline) {
-            Ok(envelope) => envelope,
-            Err(WorkerError::Closed) => {
-                return Some(self.force_terminate_outcome(
-                    request_id,
-                    started,
-                    "handshake_worker_closed",
-                    None,
-                    None,
-                ));
-            }
-            Err(WorkerError::TimedOut) => {
+        // Receive slices return `TimedOut` to hand control back to the
+        // caller; loop here until the handshake deadline expires.
+        let envelope = loop {
+            if Instant::now() >= deadline {
                 return Some(self.force_terminate_outcome(
                     request_id,
                     started,
@@ -446,14 +671,29 @@ impl Supervisor {
                     None,
                 ));
             }
-            Err(error) => {
-                return Some(self.force_terminate_outcome(
-                    request_id,
-                    started,
-                    "handshake_worker_recv_error",
-                    Some(error.to_string()),
-                    None,
-                ));
+            match self.host.recv(deadline) {
+                Ok(envelope) => break envelope,
+                Err(WorkerError::Closed) => {
+                    return Some(self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "handshake_worker_closed",
+                        None,
+                        None,
+                    ));
+                }
+                // A slice-level receive timeout is a poll tick: keep
+                // waiting for the handshake.
+                Err(WorkerError::TimedOut) => {}
+                Err(error) => {
+                    return Some(self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "handshake_worker_recv_error",
+                        Some(error.to_string()),
+                        None,
+                    ));
+                }
             }
         };
         match envelope {
@@ -504,6 +744,7 @@ impl Supervisor {
     fn complete_with_artifact_facts(
         &mut self,
         request_id: String,
+        result: Value,
         request: &Request,
         started: Instant,
         last_progress: Option<Progress>,
@@ -511,32 +752,90 @@ impl Supervisor {
         if request_id != request.request_id {
             self.last_artifact_error = Some("completed_request_id_mismatch".to_string());
             self.discard_stage();
-            let artifact_error = self.last_artifact_error.take();
+            let context = TerminationContext {
+                last_progress,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
+            };
             return self.cooperative_termination_outcome(
                 request_id,
                 "protocol_violation:completed_request_id_mismatch".to_string(),
                 started,
-                last_progress,
-                artifact_error,
+                context,
             );
         }
         if let Err(error) = self.host.terminate() {
             self.discard_stage();
-            return SupervisorOutcome::ForceTerminated {
-                record: TerminationRecord {
-                    request_id,
-                    stage: format!("completed_reap_failed:{error}"),
-                    elapsed: started.elapsed(),
-                    last_progress,
-                    last_artifact_error: self.last_artifact_error.take(),
-                    exit_kind: ExitKind::ForceAfterGrace,
-                },
+            let context = TerminationContext {
+                last_progress,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
             };
+            return SupervisorOutcome::ForceTerminated {
+                record: self.termination_record(
+                    request_id,
+                    format!("completed_reap_failed:{error}"),
+                    started,
+                    context,
+                    ExitKind::ForceAfterGrace,
+                ),
+            };
+        }
+        // A Completed envelope must be followed by a clean worker exit.
+        // If the worker completed then died by signal or with a non-zero
+        // status, the staged artifacts are discarded and the termination
+        // is surfaced instead of a clean completion.
+        if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap") {
+            self.discard_stage();
+            return outcome;
         }
         SupervisorOutcome::Completed {
             request_id,
+            result,
             artifact_headers: std::mem::take(&mut self.artifact_headers),
         }
+    }
+
+    /// Verifies the worker exited cleanly (exit code 0, no signal)
+    /// after a cooperative terminal envelope. Returns `Some(outcome)`
+    /// with a structured termination record when the exit was not
+    /// clean, and `None` when the worker exited cleanly.
+    fn verify_clean_exit(
+        &mut self,
+        request_id: &str,
+        started: Instant,
+        stage_prefix: &str,
+    ) -> Option<SupervisorOutcome> {
+        // A stream overflow is checked independently of the exit status:
+        // a worker that exits cleanly (code 0) after flooding a stream
+        // must still fail the terminal outcome closed.
+        let overflow = self.host.stream_overflowed();
+        let exit_signal = self.host.exit_signal();
+        let exit_code = self.host.exit_code();
+        let unclean = match (overflow, exit_signal, exit_code) {
+            (Some(stream), _, _) => Some(format!("{stage_prefix}:stream_overflow:{stream}")),
+            (None, Some(signal), _) => Some(format!("{stage_prefix}:exited_by_signal:{signal}")),
+            (None, None, Some(code)) if code != 0 => {
+                Some(format!("{stage_prefix}:exited_with_code:{code}"))
+            }
+            _ => None,
+        };
+        unclean.map(|stage| {
+            let context = TerminationContext {
+                last_progress: None,
+                last_artifact_error: self.last_artifact_error.take(),
+                failed: None,
+            };
+            SupervisorOutcome::ForceTerminated {
+                record: self.termination_record(
+                    request_id.to_string(),
+                    stage,
+                    started,
+                    context,
+                    ExitKind::ForceAfterGrace,
+                ),
+            }
+        })
     }
 
     fn cooperative_termination_outcome(
@@ -544,27 +843,25 @@ impl Supervisor {
         request_id: String,
         stage: String,
         started: Instant,
-        last_progress: Option<Progress>,
-        last_artifact_error: Option<String>,
+        context: TerminationContext,
     ) -> SupervisorOutcome {
         let termination_error = self.host.terminate().err();
         let reaped = termination_error.is_none();
         SupervisorOutcome::ForceTerminated {
-            record: TerminationRecord {
+            record: self.termination_record(
                 request_id,
-                stage: match termination_error {
+                match termination_error {
                     Some(error) => format!("{stage}_reap_failed:{error}"),
                     None => stage,
                 },
-                elapsed: started.elapsed(),
-                last_progress,
-                last_artifact_error,
-                exit_kind: if reaped {
+                started,
+                context,
+                if reaped {
                     ExitKind::Cooperative
                 } else {
                     ExitKind::ForceAfterGrace
                 },
-            },
+            ),
         }
     }
 
@@ -589,18 +886,57 @@ impl Supervisor {
             None => stage.to_string(),
         };
         let termination_error = self.host.terminate().err();
+        let context = TerminationContext {
+            last_progress,
+            last_artifact_error: self.last_artifact_error.take(),
+            failed: None,
+        };
         SupervisorOutcome::ForceTerminated {
-            record: TerminationRecord {
-                request_id: request_id.to_string(),
-                stage: match termination_error {
+            record: self.termination_record(
+                request_id.to_string(),
+                match termination_error {
                     Some(error) => format!("{stage_label}:terminate_failed:{error}"),
                     None => stage_label,
                 },
-                elapsed: started.elapsed(),
-                last_progress,
-                last_artifact_error: self.last_artifact_error.take(),
-                exit_kind: ExitKind::ForceAfterGrace,
-            },
+                started,
+                context,
+                ExitKind::ForceAfterGrace,
+            ),
+        }
+    }
+
+    /// Assemble a structured terminal record, copying the worker's
+    /// observed exit signal and bounded stderr tail from the host so
+    /// signal-based exits keep their diagnostic context.
+    fn termination_record(
+        &mut self,
+        request_id: String,
+        stage: String,
+        started: Instant,
+        context: TerminationContext,
+        exit_kind: ExitKind,
+    ) -> TerminationRecord {
+        let TerminationContext {
+            last_progress,
+            last_artifact_error,
+            failed,
+        } = context;
+        let (failed_code, failed_detail) = match failed {
+            Some(FailedFields { code, detail }) => (Some(code), Some(detail)),
+            None => (None, None),
+        };
+        TerminationRecord {
+            request_id,
+            stage,
+            elapsed: started.elapsed(),
+            last_progress,
+            last_artifact_error,
+            exit_signal: self.host.exit_signal(),
+            exit_code: self.host.exit_code(),
+            stderr_tail: self.host.stderr_tail(),
+            failed_code,
+            failed_detail,
+            exit_kind,
         }
     }
 }
@@ -678,7 +1014,11 @@ mod tests {
         }
 
         fn recv(&mut self, _deadline: Instant) -> Result<Envelope, WorkerError> {
-            self.script.pop_front().unwrap_or(Err(WorkerError::Closed))
+            // An exhausted script behaves like the real transport's
+            // post-deadline receive: the worker has gone silent.
+            self.script
+                .pop_front()
+                .unwrap_or(Err(WorkerError::TimedOut))
         }
 
         fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -765,9 +1105,9 @@ mod tests {
                 assert_eq!(record.request_id, "req-1");
                 assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
                 assert!(
-                    record.stage.starts_with("grace_exceeded")
+                    record.stage.starts_with("cancel_grace_exceeded")
                         || record.stage.starts_with("worker_closed"),
-                    "force-terminate stage should be grace_exceeded or worker_closed; got {:?}",
+                    "force-terminate stage should be cancel_grace_exceeded or worker_closed; got {:?}",
                     record.stage
                 );
             }
@@ -792,6 +1132,7 @@ mod tests {
             SupervisorOutcome::Completed {
                 request_id,
                 artifact_headers,
+                ..
             } => {
                 assert_eq!(request_id, "req-1");
                 assert!(artifact_headers.is_empty());
@@ -1089,7 +1430,13 @@ mod tests {
         else {
             panic!("expected force termination");
         };
-        assert_eq!(record.stage, "cancel_grace_exceeded");
+        assert!(
+            record
+                .stage
+                .starts_with("protocol_violation:mismatched_request_id:"),
+            "a foreign acknowledgement must fail cancellation closed; got {:?}",
+            record.stage
+        );
         assert_eq!(*recv_calls.lock().expect("receive count mutex"), 1);
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
     }
@@ -1122,20 +1469,17 @@ mod tests {
         let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
 
         let outcome = supervisor.request(sample_request());
-        // The unsolicited Cancelled is recorded as a protocol violation;
-        // the loop continues until grace expires.
+        // The unsolicited Cancelled fails the request closed immediately;
+        // it is never classified as a cooperative ack.
         match outcome {
             SupervisorOutcome::ForceTerminated { record } => {
                 assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
-                let progress = record
-                    .last_progress
-                    .expect("unsolicited Cancelled must surface in last_progress");
                 assert!(
-                    progress
+                    record
                         .stage
                         .starts_with("protocol_violation:unsolicited_cancelled:"),
                     "expected protocol_violation:unsolicited_cancelled: stage; got {:?}",
-                    progress.stage
+                    record.stage
                 );
             }
             other => panic!("expected ForceTerminated; got {other:?}"),

@@ -26,12 +26,63 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::artifact::ArtifactHeader;
-use crate::frame::FrameParser;
+use crate::frame::{FrameParser, MAX_FRAME_BUFFER};
 
 /// Maximum size of a staged artifact payload, in bytes. Artifacts exceeding
 /// this limit emit `ArtifactError::PayloadTooLarge` so a malicious or buggy
 /// worker cannot exhaust the host's memory.
 pub const MAX_ARTIFACT_BYTES: usize = 1 << 20;
+
+/// Maximum cumulative stdout bytes the host accepts from one worker
+/// before failing closed. A flooding worker that exceeds this bound is
+/// terminated and reported as a structured `StreamOverflow` error.
+pub const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum cumulative stderr bytes the host retains for diagnostics
+/// from one worker. The bounded tail is preserved so structured
+/// diagnostic context survives a flooding worker.
+pub const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// Poll interval used while waiting for a worker envelope. The
+/// subprocess transport re-checks its stream overflow flags every slice
+/// so a flood on a quiet stream is observed well before the deadline.
+const OVERFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long `terminate` waits for a SIGKILLed leader to become reaped
+/// before giving up on recording its exit status.
+const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long `terminate` waits for a worker that emitted its terminal
+/// envelope to exit naturally before force-killing the process group.
+/// Cooperative workers return immediately after their terminal
+/// envelope; this window lets the reap observe the clean exit instead
+/// of a supervisor-delivered SIGKILL.
+const NATURAL_EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long `terminate` waits for the detached stream readers to drain
+/// after the worker is reaped, so overflow flags are settled before a
+/// terminal outcome is accepted or rejected.
+const STREAM_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Poll interval while waiting for the leader to reap after a kill.
+const REAP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Byte bounds applied to a worker's standard streams. The host fails
+/// closed when a stream exceeds its bound, terminating the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    pub stdout_bytes: usize,
+    pub stderr_bytes: usize,
+}
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        Self {
+            stdout_bytes: MAX_STDOUT_BYTES,
+            stderr_bytes: MAX_STDERR_BYTES,
+        }
+    }
+}
 
 /// The versioned envelope exchanged between host and worker.
 ///
@@ -181,6 +232,34 @@ pub trait WorkerHost {
     fn terminate(&mut self) -> Result<(), WorkerError> {
         Ok(())
     }
+
+    /// Returns the actual Linux signal the worker process exited by, if
+    /// it was killed by a signal rather than exiting cleanly. `None`
+    /// when the worker exited normally or has not been reaped yet.
+    fn exit_signal(&mut self) -> Option<i32> {
+        None
+    }
+
+    /// Returns the numeric exit code the worker process exited with, if
+    /// it exited by calling `exit(n)` rather than by a signal. `None`
+    /// for a signal exit or before the worker has been reaped.
+    fn exit_code(&mut self) -> Option<i32> {
+        None
+    }
+
+    /// Returns the bounded stderr tail captured from the worker, used to
+    /// preserve structured diagnostic context on a terminal record.
+    /// Bounded transports return the capped tail; fakes return empty.
+    fn stderr_tail(&mut self) -> String {
+        String::new()
+    }
+
+    /// Returns the stream that exceeded its byte bound, if any. The
+    /// supervisor re-checks this before accepting a terminal outcome so
+    /// an overflow racing a completion still fails closed.
+    fn stream_overflowed(&mut self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Newline-frame transport for a disposable worker byte stream.
@@ -212,6 +291,12 @@ impl WorkerHost for FramedWorkerHost {
     fn send(&mut self, envelope: &Envelope) -> Result<(), WorkerError> {
         let frame = encode_frame(envelope)
             .map_err(|error| WorkerError::Protocol(format!("encode_frame failed: {error}")))?;
+        if frame.len() > MAX_FRAME_BUFFER {
+            return Err(WorkerError::Protocol(format!(
+                "host frame of {} bytes exceeds the {MAX_FRAME_BUFFER} byte bound",
+                frame.len()
+            )));
+        }
         self.outbound.send(frame).map_err(|_| WorkerError::Closed)
     }
 
@@ -258,14 +343,39 @@ impl WorkerHost for FramedWorkerHost {
 
 /// Production transport binding a subprocess's standard streams to the
 /// deadline-aware newline-frame transport.
+///
+/// The stdout and stderr streams are read by bounded threads: each
+/// stream has a byte cap (see [`StreamLimits`]) and a worker that
+/// exceeds its cap fails the host closed with a structured
+/// [`WorkerError::StreamOverflow`] instead of exhausting host memory.
+/// The captured stderr tail is preserved for diagnostics.
 #[derive(Debug)]
 pub struct SubprocessWorkerHost {
     child: Child,
     transport: FramedWorkerHost,
+    limits: StreamLimits,
+    stdout_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// Count of reader threads that have finished draining their stream
+    /// (observed EOF or an overflow). `terminate` waits for this to
+    /// reach the number of active readers so overflow flags are settled
+    /// before a terminal outcome is accepted.
+    readers_finished: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    readers_total: usize,
+    /// Exit status observed on the last reap. `Some` once the worker has
+    /// been reaped, `None` while it is still running.
+    reaped_status: Option<std::process::ExitStatus>,
 }
 
 impl SubprocessWorkerHost {
-    pub fn new(mut child: Child) -> Result<Self, WorkerError> {
+    /// Wrap a spawned worker process with default stream bounds.
+    pub fn new(child: Child) -> Result<Self, WorkerError> {
+        Self::with_limits(child, StreamLimits::default())
+    }
+
+    /// Wrap a spawned worker process with explicit stream bounds.
+    pub fn with_limits(mut child: Child, limits: StreamLimits) -> Result<Self, WorkerError> {
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => return Err(missing_pipe_error(&mut child, "stdin")),
@@ -274,18 +384,77 @@ impl SubprocessWorkerHost {
             Some(stdout) => stdout,
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
+        let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
+        let stdout_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let readers_finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut readers_total: usize = 1;
+
+        let stdout_cap = limits.stdout_bytes;
+        let stdout_overflow_flag = std::sync::Arc::clone(&stdout_overflow);
+        let stdout_finished = std::sync::Arc::clone(&readers_finished);
         std::thread::spawn(move || {
             let mut stdout = stdout;
             let mut buffer = [0; 4096];
+            let mut total: usize = 0;
             while let Ok(read) = stdout.read(&mut buffer) {
-                if read == 0 || inbound_tx.send(buffer[..read].to_vec()).is_err() {
+                if read == 0 {
+                    break;
+                }
+                total += read;
+                if total > stdout_cap {
+                    // Fail closed: the over-cap chunk is dropped, not
+                    // forwarded, so no envelope crosses the bound.
+                    stdout_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                if inbound_tx.send(buffer[..read].to_vec()).is_err() {
                     break;
                 }
             }
+            stdout_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
+
+        if let Some(stderr) = stderr {
+            readers_total += 1;
+            let stderr_cap = limits.stderr_bytes;
+            let stderr_overflow_flag = std::sync::Arc::clone(&stderr_overflow);
+            let stderr_tail_shared = std::sync::Arc::clone(&stderr_tail);
+            let stderr_finished = std::sync::Arc::clone(&readers_finished);
+            std::thread::spawn(move || {
+                let mut stderr = stderr;
+                let mut buffer = [0; 4096];
+                while let Ok(read) = stderr.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    let chunk = &buffer[..read];
+                    let mut tail = stderr_tail_shared.lock().expect("stderr tail mutex");
+                    if tail.len() + chunk.len() <= stderr_cap {
+                        tail.extend_from_slice(chunk);
+                    } else {
+                        stderr_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Keep the newest bytes so the diagnostic tail
+                        // survives the overflow.
+                        let keep = stderr_cap.saturating_sub(chunk.len());
+                        if keep == 0 {
+                            tail.clear();
+                            tail.extend_from_slice(&chunk[chunk.len() - stderr_cap..]);
+                        } else {
+                            let drop = tail.len().saturating_sub(keep);
+                            tail.drain(..drop);
+                            tail.extend_from_slice(chunk);
+                        }
+                    }
+                }
+                stderr_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+
         std::thread::spawn(move || {
             let mut stdin = stdin;
             while let Ok(frame) = outbound_rx.recv() {
@@ -298,7 +467,46 @@ impl SubprocessWorkerHost {
         Ok(Self {
             child,
             transport: FramedWorkerHost::new(inbound_rx, outbound_tx),
+            limits,
+            stdout_overflow,
+            stderr_overflow,
+            stderr_tail,
+            readers_finished,
+            readers_total,
+            reaped_status: None,
         })
+    }
+
+    /// Returns the bounded stderr tail captured so far, as raw bytes.
+    /// The tail never exceeds the configured `stderr_bytes` cap. The
+    /// `WorkerHost` trait exposes the lossy-string view the supervisor
+    /// copies into terminal records.
+    pub fn stderr_tail_bytes(&self) -> Vec<u8> {
+        self.stderr_tail.lock().expect("stderr tail mutex").clone()
+    }
+
+    /// Fail closed with a structured `StreamOverflow` error when either
+    /// standard stream exceeded its configured bound.
+    fn fail_closed_on_overflow(&self) -> Result<(), WorkerError> {
+        if self
+            .stdout_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(WorkerError::StreamOverflow {
+                stream: "stdout",
+                limit: self.limits.stdout_bytes,
+            });
+        }
+        if self
+            .stderr_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(WorkerError::StreamOverflow {
+                stream: "stderr",
+                limit: self.limits.stderr_bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -317,7 +525,39 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Envelope, WorkerError> {
-        self.transport.recv(deadline)
+        // Poll in short slices: a slice that elapses without an
+        // envelope returns `TimedOut` so the caller (the supervisor)
+        // regains control to check its cancellation flag and its own
+        // deadline, instead of being held here until `deadline`.
+        self.fail_closed_on_overflow()?;
+        if Instant::now() >= deadline {
+            return Err(WorkerError::TimedOut);
+        }
+        let slice = deadline.min(Instant::now() + OVERFLOW_POLL_INTERVAL);
+        match self.transport.recv(slice) {
+            Ok(envelope) => {
+                // A stream can overflow concurrently with the
+                // receive; re-check before delivering so a terminal
+                // envelope racing a flood still fails closed.
+                self.fail_closed_on_overflow()?;
+                Ok(envelope)
+            }
+            // One slice elapsed without an envelope: return control
+            // to the supervisor immediately. A subsequent recv with
+            // the same deadline continues the poll.
+            Err(WorkerError::TimedOut) => Err(WorkerError::TimedOut),
+            Err(WorkerError::Closed) => {
+                // The worker's stdout closed. If it exited by a
+                // signal (crash, forced kill), report the actual
+                // signal instead of a bare closed-stream error.
+                self.reap_if_exited()?;
+                if let Some(signal) = self.exit_signal() {
+                    return Err(WorkerError::Signalled { signal });
+                }
+                Err(WorkerError::Closed)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -325,18 +565,123 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
-        match self.child.try_wait()? {
-            Some(_) => Ok(()),
-            None => {
-                if let Err(error) = self.child.kill()
-                    && self.child.try_wait()?.is_none()
-                {
-                    return Err(error.into());
-                }
-                self.child.wait()?;
-                Ok(())
+        // SIGKILL the worker's process group so the worker AND any
+        // descendants die together. A cooperative worker that emitted
+        // its terminal envelope is normally mid-exit, so a short
+        // natural-exit window runs first: a clean reap then means the
+        // worker is gone and only descendants (if any) need killing.
+        self.reap_if_exited()?;
+        if self.reaped_status.is_none() {
+            let grace = Instant::now() + NATURAL_EXIT_WAIT;
+            while self.reaped_status.is_none() && Instant::now() < grace {
+                std::thread::sleep(REAP_POLL);
+                self.reap_if_exited()?;
             }
         }
+        let pid = self.child.id() as i32;
+        match nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) => {
+                // No such process group: the worker was not spawned as a
+                // group leader. Kill the direct child instead, unless it
+                // has already been reaped (a clean exit needs no kill).
+                if self.reaped_status.is_none() {
+                    self.child.kill()?;
+                }
+            }
+            Err(error) => return Err(WorkerError::Io(error.into())),
+        }
+        // Reap the leader, waiting briefly for the SIGKILL to land so
+        // the exit status (including the kill signal) is recorded. If
+        // the leader still cannot be reaped, fail closed: a terminal
+        // outcome must never be accepted without proof of reap.
+        self.reap_if_exited()?;
+        if self.reaped_status.is_none() {
+            let deadline = Instant::now() + REAP_WAIT;
+            while self.reaped_status.is_none() && Instant::now() < deadline {
+                std::thread::sleep(REAP_POLL);
+                self.reap_if_exited()?;
+            }
+        }
+        if self.reaped_status.is_none() {
+            return Err(WorkerError::Io(std::io::Error::other(
+                "worker leader could not be reaped",
+            )));
+        }
+        // The worker is reaped; let the detached stdout/stderr reader
+        // threads observe EOF and settle their overflow flags before
+        // the supervisor accepts or rejects the terminal outcome. If
+        // the readers do not settle inside the drain window, fail
+        // closed: a terminal outcome must never be accepted while a
+        // stream could still be delivering over-limit bytes.
+        let drain_deadline = Instant::now() + STREAM_DRAIN_WAIT;
+        while Instant::now() < drain_deadline {
+            if self.readers_settled() {
+                break;
+            }
+            std::thread::sleep(REAP_POLL);
+        }
+        if !self.readers_settled() {
+            return Err(WorkerError::Io(std::io::Error::other(
+                "worker stream readers did not settle before termination",
+            )));
+        }
+        Ok(())
+    }
+
+    fn exit_signal(&mut self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        self.reaped_status.and_then(|status| status.signal())
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        self.reaped_status.and_then(|status| status.code())
+    }
+
+    fn stderr_tail(&mut self) -> String {
+        String::from_utf8_lossy(&self.stderr_tail.lock().expect("stderr tail mutex")).into_owned()
+    }
+
+    fn stream_overflowed(&mut self) -> Option<&'static str> {
+        if self
+            .stdout_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Some("stdout");
+        }
+        if self
+            .stderr_overflow
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Some("stderr");
+        }
+        None
+    }
+}
+
+impl SubprocessWorkerHost {
+    /// True once every active stream reader has finished draining its
+    /// stream (observed EOF or an overflow). The reader count is fixed
+    /// at construction time, so a reader that never starts is counted
+    /// as settled only when it exits.
+    fn readers_settled(&self) -> bool {
+        self.readers_finished
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= self.readers_total
+    }
+
+    /// Reap the child if it has exited, recording its exit status.
+    /// Leaves the host usable for a later `terminate` if still running.
+    fn reap_if_exited(&mut self) -> Result<(), WorkerError> {
+        if self.reaped_status.is_none()
+            && let Some(status) = self.child.try_wait()?
+        {
+            self.reaped_status = Some(status);
+        }
+        Ok(())
     }
 }
 
@@ -375,6 +720,14 @@ pub enum WorkerError {
     Closed,
     /// The worker emitted a frame that the host could not parse.
     Protocol(String),
+    /// The worker emitted more bytes on a standard stream than the
+    /// configured bound. The host fails closed: the worker is
+    /// terminated and no partial output is accepted.
+    StreamOverflow { stream: &'static str, limit: usize },
+    /// The worker process exited due to a signal (e.g. SIGSEGV after a
+    /// crash, or SIGKILL after force termination). `signal` is the
+    /// actual Linux signal number observed on the reaped exit status.
+    Signalled { signal: i32 },
     /// The worker emitted an envelope with a schema_version the host
     /// does not recognize.
     SchemaMismatch { received: String, expected: String },
@@ -388,6 +741,12 @@ impl fmt::Display for WorkerError {
             Self::TimedOut => formatter.write_str("worker receive deadline exceeded"),
             Self::Closed => formatter.write_str("worker closed before delivering envelope"),
             Self::Protocol(detail) => write!(formatter, "worker protocol violation: {detail}"),
+            Self::StreamOverflow { stream, limit } => {
+                write!(formatter, "worker {stream} exceeded the {limit} byte bound")
+            }
+            Self::Signalled { signal } => {
+                write!(formatter, "worker exited by signal {signal}")
+            }
             Self::SchemaMismatch { received, expected } => write!(
                 formatter,
                 "worker schema mismatch: received {received:?}, expected {expected:?}"
@@ -409,9 +768,48 @@ impl From<std::io::Error> for WorkerError {
 /// The host and worker speak newline-framed JSON; every line carries one
 /// envelope (closed issue #49).
 pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
-    let mut bytes = serde_json::to_vec(envelope)?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    // Serialize through a capped writer so an oversized frame is
+    // rejected during encoding instead of being fully materialized in
+    // memory first (the input bound is enforced, not checked after).
+    let mut writer = BoundedWriter {
+        bytes: Vec::with_capacity(256),
+        limit: MAX_FRAME_BUFFER,
+        exceeded: false,
+    };
+    serde_json::to_writer(&mut writer, envelope)?;
+    if writer.exceeded {
+        return Err(serde_json::Error::io(std::io::Error::other(format!(
+            "frame exceeds the {MAX_FRAME_BUFFER} byte bound"
+        ))));
+    }
+    writer.bytes.push(b'\n');
+    Ok(writer.bytes)
+}
+
+/// Writer that aborts once `limit` bytes have been written, so a frame
+/// cannot be fully materialized past the protocol's input bound.
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.exceeded {
+            return Err(std::io::Error::other("frame bound exceeded"));
+        }
+        if self.bytes.len() + buf.len() > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::other("frame bound exceeded"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

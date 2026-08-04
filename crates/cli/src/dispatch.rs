@@ -3233,12 +3233,20 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
+        HostError::WorkerTerminated { record } => {
+            format!(
+                "worker terminated: stage={} elapsed={:?} exit_signal={:?} exit_code={:?}",
+                record.stage, record.elapsed, record.exit_signal, record.exit_code
+            )
+        }
     };
     let (diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
         }
-        HostError::WorkerFailure { .. } | HostError::WorkerUnavailable { .. } => {
+        HostError::WorkerFailure { .. }
+        | HostError::WorkerUnavailable { .. }
+        | HostError::WorkerTerminated { .. } => {
             (Diagnostic::worker_failure(&detail), EXIT_WORKER_FAILURE)
         }
         HostError::UnsupportedGeometry { .. } => (

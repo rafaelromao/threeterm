@@ -1247,26 +1247,32 @@ fn canonical_loft_request() -> LoftRequest {
 }
 
 fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str) {
+    // The production path speaks the versioned envelope protocol: the
+    // worker expects a single newline-framed `request` envelope whose
+    // `args` carry the OCCT request, and reports malformed input as a
+    // `failed` envelope. The raw request is compacted so it embeds into
+    // one line (the worker reads exactly one envelope line).
+    let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
+    let envelope = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{args},\"revision_id\":\"\"}}\n"
+    );
     let mut child = Command::new(worker.binary_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("worker spawns");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin open")
-        .write_all(request.as_bytes())
-        .expect("stdin writes");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin.write_all(envelope.as_bytes()).expect("stdin writes");
+    drop(stdin);
     let output = child.wait_with_output().expect("worker waits");
-    assert!(
-        !output.status.success(),
-        "worker must reject malformed loft requests"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("request_malformed"), "got {stderr}");
-    assert!(stderr.contains(detail), "got {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let failed = stdout
+        .lines()
+        .find(|line| line.contains("\"kind\":\"failed\""))
+        .expect("worker must emit a failed envelope");
+    assert!(failed.contains("request_malformed"), "got {stdout}");
+    assert!(failed.contains(detail), "got {stdout}");
 }
 
 #[test]

@@ -278,3 +278,48 @@ fn cancellation_token_is_observed_mid_flight_well_before_the_deadline() {
         other => panic!("expected ForceTerminated; got {other:?}"),
     }
 }
+
+#[test]
+fn completed_after_stdout_flood_never_returns_success() {
+    // The worker emits WorkerReady and a valid Completed, then floods
+    // stdout past the bound and exits cleanly. The supervisor must
+    // settle the reader state and fail the terminal outcome closed —
+    // never return Completed.
+    use threeterm_protocol::supervisor::{Request, SupervisorOutcome};
+    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; read line; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    let child = spawn_shell(fixture);
+    let host = SubprocessWorkerHost::with_limits(
+        child,
+        StreamLimits {
+            stdout_bytes: 16 * 1024,
+            stderr_bytes: 2048,
+        },
+    )
+    .expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(5), Box::new(host), None);
+
+    let outcome = supervisor.request(Request {
+        request_id: "req-1".to_string(),
+        command_id: "extrude".to_string(),
+        args: serde_json::json!({}),
+        revision_id: String::new(),
+    });
+    match outcome {
+        SupervisorOutcome::ForceTerminated { record } => {
+            // The overflow surfaces either as a stream_overflow stage
+            // (settled before terminal acceptance) or as a
+            // worker_recv_error naming the bound (caught mid-receive).
+            // Both fail closed; the invariant is that Completed is
+            // never returned.
+            assert!(
+                record.stage.contains("overflow") || record.stage.contains("worker_recv_error"),
+                "stage must name the overflow; got {:?}",
+                record.stage
+            );
+        }
+        SupervisorOutcome::Completed { .. } => {
+            panic!("Completed must never be returned after a stream overflow");
+        }
+        other => panic!("expected ForceTerminated; got {other:?}"),
+    }
+}

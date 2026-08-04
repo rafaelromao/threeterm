@@ -59,6 +59,11 @@ const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 /// of a supervisor-delivered SIGKILL.
 const NATURAL_EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// How long `terminate` waits for the detached stream readers to drain
+/// after the worker is reaped, so overflow flags are settled before a
+/// terminal outcome is accepted or rejected.
+const STREAM_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Poll interval while waiting for the leader to reap after a kill.
 const REAP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -352,6 +357,12 @@ pub struct SubprocessWorkerHost {
     stdout_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// Count of reader threads that have finished draining their stream
+    /// (observed EOF or an overflow). `terminate` waits for this to
+    /// reach the number of active readers so overflow flags are settled
+    /// before a terminal outcome is accepted.
+    readers_finished: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    readers_total: usize,
     /// Exit status observed on the last reap. `Some` once the worker has
     /// been reaped, `None` while it is still running.
     reaped_status: Option<std::process::ExitStatus>,
@@ -380,9 +391,12 @@ impl SubprocessWorkerHost {
         let stdout_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stderr_overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let readers_finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut readers_total: usize = 1;
 
         let stdout_cap = limits.stdout_bytes;
         let stdout_overflow_flag = std::sync::Arc::clone(&stdout_overflow);
+        let stdout_finished = std::sync::Arc::clone(&readers_finished);
         std::thread::spawn(move || {
             let mut stdout = stdout;
             let mut buffer = [0; 4096];
@@ -402,12 +416,15 @@ impl SubprocessWorkerHost {
                     break;
                 }
             }
+            stdout_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
 
         if let Some(stderr) = stderr {
+            readers_total += 1;
             let stderr_cap = limits.stderr_bytes;
             let stderr_overflow_flag = std::sync::Arc::clone(&stderr_overflow);
             let stderr_tail_shared = std::sync::Arc::clone(&stderr_tail);
+            let stderr_finished = std::sync::Arc::clone(&readers_finished);
             std::thread::spawn(move || {
                 let mut stderr = stderr;
                 let mut buffer = [0; 4096];
@@ -434,6 +451,7 @@ impl SubprocessWorkerHost {
                         }
                     }
                 }
+                stderr_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
 
@@ -453,6 +471,8 @@ impl SubprocessWorkerHost {
             stdout_overflow,
             stderr_overflow,
             stderr_tail,
+            readers_finished,
+            readers_total,
             reaped_status: None,
         })
     }
@@ -591,6 +611,16 @@ impl WorkerHost for SubprocessWorkerHost {
                 "worker leader could not be reaped",
             )));
         }
+        // The worker is reaped; let the detached stdout/stderr reader
+        // threads observe EOF and settle their overflow flags before
+        // the supervisor accepts or rejects the terminal outcome.
+        let drain_deadline = Instant::now() + STREAM_DRAIN_WAIT;
+        while Instant::now() < drain_deadline {
+            if self.readers_settled() {
+                break;
+            }
+            std::thread::sleep(REAP_POLL);
+        }
         Ok(())
     }
 
@@ -625,6 +655,16 @@ impl WorkerHost for SubprocessWorkerHost {
 }
 
 impl SubprocessWorkerHost {
+    /// True once every active stream reader has finished draining its
+    /// stream (observed EOF or an overflow). The reader count is fixed
+    /// at construction time, so a reader that never starts is counted
+    /// as settled only when it exits.
+    fn readers_settled(&self) -> bool {
+        self.readers_finished
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= self.readers_total
+    }
+
     /// Reap the child if it has exited, recording its exit status.
     /// Leaves the host usable for a later `terminate` if still running.
     fn reap_if_exited(&mut self) -> Result<(), WorkerError> {
@@ -720,9 +760,48 @@ impl From<std::io::Error> for WorkerError {
 /// The host and worker speak newline-framed JSON; every line carries one
 /// envelope (closed issue #49).
 pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
-    let mut bytes = serde_json::to_vec(envelope)?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    // Serialize through a capped writer so an oversized frame is
+    // rejected during encoding instead of being fully materialized in
+    // memory first (the input bound is enforced, not checked after).
+    let mut writer = BoundedWriter {
+        bytes: Vec::with_capacity(256),
+        limit: MAX_FRAME_BUFFER,
+        exceeded: false,
+    };
+    serde_json::to_writer(&mut writer, envelope)?;
+    if writer.exceeded {
+        return Err(serde_json::Error::io(std::io::Error::other(format!(
+            "frame exceeds the {MAX_FRAME_BUFFER} byte bound"
+        ))));
+    }
+    writer.bytes.push(b'\n');
+    Ok(writer.bytes)
+}
+
+/// Writer that aborts once `limit` bytes have been written, so a frame
+/// cannot be fully materialized past the protocol's input bound.
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.exceeded {
+            return Err(std::io::Error::other("frame bound exceeded"));
+        }
+        if self.bytes.len() + buf.len() > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::other("frame bound exceeded"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

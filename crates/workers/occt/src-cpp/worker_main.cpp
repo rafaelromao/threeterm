@@ -588,6 +588,20 @@ std::string sha256_hex(const std::string& bytes) {
 }
 
 bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, std::string& error) {
+    // Fail closed before writing: an existing output path (including a
+    // symlink planted by a malicious or stale worker) must never be
+    // followed or overwritten. The host verifies the staged artifact
+    // again before promotion.
+    std::error_code ec;
+    std::filesystem::file_status st = std::filesystem::symlink_status(path, ec);
+    if (!ec && std::filesystem::exists(st)) {
+        error = "output path already exists (refusing to follow or overwrite): " + path.string();
+        return false;
+    }
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        error = "output path stat failed: " + path.string() + ": " + ec.message();
+        return false;
+    }
     if (!BRepTools::Write(shape, path.string().c_str())) {
         error = "BRepTools::Write failed for " + path.string();
         return false;

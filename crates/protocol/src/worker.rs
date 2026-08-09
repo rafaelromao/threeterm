@@ -550,6 +550,7 @@ impl WorkerHost for SubprocessWorkerHost {
                 // The worker's stdout closed. If it exited by a
                 // signal (crash, forced kill), report the actual
                 // signal instead of a bare closed-stream error.
+                self.fail_closed_on_overflow()?;
                 self.reap_if_exited()?;
                 if let Some(signal) = self.exit_signal() {
                     return Err(WorkerError::Signalled { signal });

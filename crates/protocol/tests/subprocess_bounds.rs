@@ -10,6 +10,8 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use std::os::unix::process::CommandExt;
+
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::worker::{
     Envelope, StreamLimits, SubprocessWorkerHost, WorkerError, WorkerHost,
@@ -218,10 +220,11 @@ fn clean_exit_after_overflow_never_accepts_completion() {
     // exits cleanly. Even a clean exit must not rescue the flood: the
     // host fails closed with a structured overflow error. SIGPIPE is
     // ignored so the flood continues after the host stops reading.
-    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; printf '%65536s\\n' ''; sleep 1; exit 0";
     let child = Command::new("sh")
         .arg("-c")
         .arg(fixture)
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

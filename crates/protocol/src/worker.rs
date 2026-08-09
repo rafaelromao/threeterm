@@ -592,9 +592,6 @@ impl WorkerHost for SubprocessWorkerHost {
         } else {
             descendant_pids(pid)
         };
-        if leader_reaped && let Some(group_id) = self.process_group_id {
-            contained.extend(process_group_pids(group_id));
-        }
         if let Some(identity) = &self.stdout_pipe_identity {
             let inherited = inherited_pipe_pids(identity);
             for descendant in &inherited {
@@ -708,12 +705,12 @@ impl WorkerHost for SubprocessWorkerHost {
 /// delegated cgroup write access use the process-group fallback below.
 #[cfg(target_os = "linux")]
 fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
-    // Cgroup delegation is runtime-dependent. Prefer the durable boundary
-    // whenever the parent cgroup grants it, while retaining the process-group
-    // fallback for constrained runtimes. Operators can disable the attempt
-    // explicitly when a container exposes a misleading writable hierarchy.
-    if std::env::var_os("THREETERM_DISABLE_WORKER_CGROUP").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
+    // Cgroup delegation is runtime-dependent and some rootless containers
+    // expose a hierarchy whose kill operation is not safely delegated. Keep
+    // the tested process-group boundary as the default; production runtimes
+    // with an explicitly delegated cgroup can opt into the durable boundary.
+    if std::env::var_os("THREETERM_ENABLE_WORKER_CGROUP").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
     {
         return None;
     }
@@ -821,48 +818,6 @@ fn descendant_pids(root: i32) -> Vec<i32> {
         }
     }
     descendants
-}
-
-/// Return members of a validated private process group without relying on the
-/// leader PID as a parent relationship. This is needed after the leader has
-/// been reaped: ordinary descendants have been reparented, but group members
-/// still provide a safe fallback boundary when cgroups are unavailable.
-#[cfg(target_os = "linux")]
-fn process_group_pids(group_id: i32) -> Vec<i32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    let current = std::process::id() as i32;
-    let mut members = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|value| value.parse::<i32>().ok()) else {
-            continue;
-        };
-        if pid == current {
-            continue;
-        }
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        let Some((_, fields)) = stat.rsplit_once(") ") else {
-            continue;
-        };
-        let is_member = fields
-            .split_whitespace()
-            .nth(2)
-            .and_then(|value| value.parse::<i32>().ok())
-            .is_some_and(|process_group| process_group == group_id);
-        if is_member {
-            members.push(pid);
-        }
-    }
-    members
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_group_pids(_group_id: i32) -> Vec<i32> {
-    Vec::new()
 }
 
 #[cfg(target_os = "linux")]

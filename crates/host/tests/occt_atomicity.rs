@@ -1889,7 +1889,12 @@ fn linear_pattern_brep_invalid_preserves_canonical_state() {
     );
     let result = host.linear_pattern(&root, request, &fake_worker);
     assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
+        matches!(
+            result,
+            Err(HostError::WorkerTerminated { ref record })
+                if record.failed_code.as_deref() == Some("brep_invalid")
+                    && record.failed_detail.as_deref() == Some("BRepCheck_Analyzer failed")
+        ),
         "got {result:?}"
     );
 

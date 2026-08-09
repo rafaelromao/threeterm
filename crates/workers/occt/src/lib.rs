@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use threeterm_protocol::supervisor::{
-    Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
+    ExitKind, Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
 };
 use threeterm_protocol::worker::{
     SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
@@ -581,7 +581,7 @@ fn map_outcome(
             {
                 // Keep the structured termination facts when a domain failure
                 // is followed by a signal-bearing worker termination.
-                if record.exit_signal.is_none() {
+                if record.exit_kind == ExitKind::Cooperative || record.exit_signal.is_none() {
                     return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
                 }
             }

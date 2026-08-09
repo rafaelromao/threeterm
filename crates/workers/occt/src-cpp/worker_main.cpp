@@ -2170,6 +2170,10 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
 }  // namespace
 
 int main() {
+    // The cancellation probe uses poll(2) after reading the request. Keep
+    // stdio from hiding a queued Cancel line in its user-space buffer.
+    std::setvbuf(stdin, nullptr, _IONBF, 0);
+
     // Phase 1: advertise the protocol schema before any request.
     write_worker_ready();
 

@@ -1253,8 +1253,10 @@ fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str
     // `failed` envelope. The raw request is compacted so it embeds into
     // one line (the worker reads exactly one envelope line).
     let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
+    let request_id = args["request_id"].as_str().expect("raw request id");
+    let command_id = args["operation"].as_str().expect("raw operation");
     let envelope = format!(
-        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{args},\"revision_id\":\"\"}}\n"
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"{command_id}\",\"args\":{args},\"revision_id\":\"\"}}\n"
     );
     let mut child = Command::new(worker.binary_path())
         .stdin(std::process::Stdio::piped())

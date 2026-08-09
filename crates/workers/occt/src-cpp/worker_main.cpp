@@ -2213,6 +2213,11 @@ int main() {
     }
     std::string request_id = get_string(envelope, "request_id");
     std::string command_id = get_string(envelope, "command_id");
+    if (request_id.empty() || command_id.empty()) {
+        write_failed(request_id, "request_malformed",
+                     "request envelope requires non-empty request_id and command_id");
+        return 2;
+    }
 
     const JsonParser::Value* args = find_field(envelope, "args");
     if (args == nullptr || args->kind != JsonParser::ValueKind::Object) {
@@ -2223,6 +2228,14 @@ int main() {
     if (worker_schema != kSchemaVersion) {
         write_failed(request_id, "request_malformed", "worker schema_version mismatch (received " +
                                                          worker_schema + ")");
+        return 2;
+    }
+    std::string args_request_id = get_string(*args, "request_id");
+    std::string args_operation = get_string(*args, "operation");
+    if (args_request_id.empty() || args_operation.empty() || args_request_id != request_id ||
+        args_operation != command_id) {
+        write_failed(request_id, "request_malformed",
+                     "request envelope identity does not match typed arguments");
         return 2;
     }
 
@@ -2242,13 +2255,15 @@ int main() {
         }
         JsonParser cancel_parser(*cancel_line);
         JsonParser::Value cancel_envelope;
+        const JsonParser::Value* reason = nullptr;
         if (cancel_parser.parse_document(&cancel_envelope, error) &&
             cancel_envelope.kind == JsonParser::ValueKind::Object &&
             get_string(cancel_envelope, "kind") == "cancel" &&
             get_string(cancel_envelope, "schema_version") == kProtocolSchemaVersion &&
-            get_string(cancel_envelope, "request_id") == request_id) {
-            std::string reason = get_string(cancel_envelope, "reason");
-            write_cancelled(request_id, reason);
+            get_string(cancel_envelope, "request_id") == request_id &&
+            (reason = find_field(cancel_envelope, "reason")) != nullptr &&
+            reason->kind == JsonParser::ValueKind::String) {
+            write_cancelled(request_id, get_string(cancel_envelope, "reason"));
             return 0;
         }
         // Malformed, wrong-schema, or foreign pending input is a

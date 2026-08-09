@@ -1382,3 +1382,54 @@ fn loft_with_non_boolean_flag_returns_request_malformed() {
         "is_solid must be a boolean",
     );
 }
+
+#[test]
+fn worker_rejects_outer_and_typed_request_identity_mismatch() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_raw_loft_is_malformed(
+        &worker,
+        r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "typed-request",
+            "operation": "loft",
+            "feature_id": "loft-1",
+            "output_dir": "/tmp",
+            "output_filename": "loft.brep",
+            "profiles": [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]], [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]]
+        }"#,
+        "identity does not match",
+    );
+}
+
+#[test]
+fn worker_rejects_pending_cancel_without_a_reason() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = r#"{"schema_version":"threeterm.workers.occt/1","request_id":"req-raw","operation":"loft","feature_id":"loft-1","output_dir":"/tmp","output_filename":"loft.brep","profiles":[[[0.0,0.0,0.0],[10.0,0.0,0.0],[10.0,10.0,0.0]],[[0.0,0.0,5.0],[10.0,0.0,5.0],[10.0,10.0,5.0]]]}"#;
+    let envelope = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{request},\"revision_id\":\"\"}}\n"
+    );
+    let cancel = b"{\"kind\":\"cancel\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\"}\n";
+    let mut child = Command::new(worker.binary_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("worker spawns");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin
+        .write_all(envelope.as_bytes())
+        .expect("request writes");
+    stdin.write_all(cancel).expect("cancel writes");
+    drop(stdin);
+    let output = child.wait_with_output().expect("worker waits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
+    assert!(
+        stdout.contains("not a valid cancel envelope"),
+        "got {stdout}"
+    );
+}

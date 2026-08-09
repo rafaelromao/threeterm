@@ -49,6 +49,16 @@ fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
 }
 
+fn is_brep_invalid<T>(result: &Result<T, HostError>) -> bool {
+    match result {
+        Err(HostError::BrepInvalid { .. }) => true,
+        Err(HostError::WorkerTerminated { record }) => {
+            record.failed_code.as_deref() == Some("brep_invalid")
+        }
+        _ => false,
+    }
+}
+
 /// Shell-script fake OCCT worker speaking the versioned envelope
 /// protocol. Every fake emits the `worker_ready` handshake, consumes the
 /// host's request envelope, and runs `reply` lines that may interpolate
@@ -306,10 +316,7 @@ fn extrude_brep_invalid_preserves_canonical_state() {
     let request = rectangle_extrude_request("brep-invalid")
         .with_output_path(root.join("stage"), "extrude.brep");
     let result = host.extrude(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -633,10 +640,7 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
     .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-brep-invalid-1");
     let result = host.boolean_fuse(&root, fuse_request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -968,10 +972,7 @@ fn fillet_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.fillet(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -1017,10 +1018,7 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.chamfer(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -1376,10 +1374,7 @@ fn hole_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.hole(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -1633,10 +1628,7 @@ fn mirror_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.mirror(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -2159,10 +2151,7 @@ fn circular_pattern_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.circular_pattern(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -2410,10 +2399,7 @@ fn shell_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.shell(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -2738,10 +2724,7 @@ fn draft_brep_invalid_preserves_canonical_state() {
         std::f64::consts::FRAC_PI_2 / 6.0,
     );
     let result = host.draft(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);
@@ -2949,10 +2932,7 @@ fn loft_brep_invalid_preserves_canonical_state() {
     let request = loft_request("loft-brep-invalid", "loft-brep-invalid-1")
         .with_output_path(root.join("stage"), "loft-brep.brep");
     let result = host.loft(&root, request, &fake_worker);
-    assert!(
-        matches!(result, Err(HostError::BrepInvalid { .. })),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);

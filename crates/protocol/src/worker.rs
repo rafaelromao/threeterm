@@ -61,6 +61,11 @@ const STREAM_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(
 /// Poll interval while waiting for the leader to reap after a kill.
 const REAP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// Reader threads only perform bounded pipe I/O and do not need the platform
+/// default stack. Keeping their stacks small prevents parallel worker startup
+/// from exhausting the container before the supervisor can enforce limits.
+const STREAM_THREAD_STACK_BYTES: usize = 256 * 1024;
+
 /// Byte bounds applied to a worker's standard streams. The host fails
 /// closed when a stream exceeds its bound, terminating the worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,27 +408,30 @@ impl SubprocessWorkerHost {
         let stdout_cap = limits.stdout_bytes;
         let stdout_overflow_flag = std::sync::Arc::clone(&stdout_overflow);
         let stdout_finished = std::sync::Arc::clone(&readers_finished);
-        std::thread::spawn(move || {
-            let mut stdout = stdout;
-            let mut buffer = [0; 4096];
-            let mut total: usize = 0;
-            while let Ok(read) = stdout.read(&mut buffer) {
-                if read == 0 {
-                    break;
+        std::thread::Builder::new()
+            .stack_size(STREAM_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let mut stdout = stdout;
+                let mut buffer = [0; 4096];
+                let mut total: usize = 0;
+                while let Ok(read) = stdout.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    total += read;
+                    if total > stdout_cap {
+                        // Fail closed: the over-cap chunk is dropped, not
+                        // forwarded, so no envelope crosses the bound.
+                        stdout_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    if inbound_tx.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
                 }
-                total += read;
-                if total > stdout_cap {
-                    // Fail closed: the over-cap chunk is dropped, not
-                    // forwarded, so no envelope crosses the bound.
-                    stdout_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    break;
-                }
-                if inbound_tx.send(buffer[..read].to_vec()).is_err() {
-                    break;
-                }
-            }
-            stdout_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
+                stdout_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("stdout reader thread starts");
 
         if let Some(stderr) = stderr {
             readers_total += 1;
@@ -431,44 +439,50 @@ impl SubprocessWorkerHost {
             let stderr_overflow_flag = std::sync::Arc::clone(&stderr_overflow);
             let stderr_tail_shared = std::sync::Arc::clone(&stderr_tail);
             let stderr_finished = std::sync::Arc::clone(&readers_finished);
-            std::thread::spawn(move || {
-                let mut stderr = stderr;
-                let mut buffer = [0; 4096];
-                while let Ok(read) = stderr.read(&mut buffer) {
-                    if read == 0 {
-                        break;
-                    }
-                    let chunk = &buffer[..read];
-                    let mut tail = stderr_tail_shared.lock().expect("stderr tail mutex");
-                    if tail.len() + chunk.len() <= stderr_cap {
-                        tail.extend_from_slice(chunk);
-                    } else {
-                        stderr_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                        // Keep the newest bytes so the diagnostic tail
-                        // survives the overflow.
-                        let keep = stderr_cap.saturating_sub(chunk.len());
-                        if keep == 0 {
-                            tail.clear();
-                            tail.extend_from_slice(&chunk[chunk.len() - stderr_cap..]);
-                        } else {
-                            let drop = tail.len().saturating_sub(keep);
-                            tail.drain(..drop);
+            std::thread::Builder::new()
+                .stack_size(STREAM_THREAD_STACK_BYTES)
+                .spawn(move || {
+                    let mut stderr = stderr;
+                    let mut buffer = [0; 4096];
+                    while let Ok(read) = stderr.read(&mut buffer) {
+                        if read == 0 {
+                            break;
+                        }
+                        let chunk = &buffer[..read];
+                        let mut tail = stderr_tail_shared.lock().expect("stderr tail mutex");
+                        if tail.len() + chunk.len() <= stderr_cap {
                             tail.extend_from_slice(chunk);
+                        } else {
+                            stderr_overflow_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            // Keep the newest bytes so the diagnostic tail
+                            // survives the overflow.
+                            let keep = stderr_cap.saturating_sub(chunk.len());
+                            if keep == 0 {
+                                tail.clear();
+                                tail.extend_from_slice(&chunk[chunk.len() - stderr_cap..]);
+                            } else {
+                                let drop = tail.len().saturating_sub(keep);
+                                tail.drain(..drop);
+                                tail.extend_from_slice(chunk);
+                            }
                         }
                     }
-                }
-                stderr_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            });
+                    stderr_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .expect("stderr reader thread starts");
         }
 
-        std::thread::spawn(move || {
-            let mut stdin = stdin;
-            while let Ok(frame) = outbound_rx.recv() {
-                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
-                    break;
+        std::thread::Builder::new()
+            .stack_size(STREAM_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let mut stdin = stdin;
+                while let Ok(frame) = outbound_rx.recv() {
+                    if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            })
+            .expect("stdin writer thread starts");
 
         Ok(Self {
             child,

@@ -281,12 +281,13 @@ fn cancellation_token_is_observed_mid_flight_well_before_the_deadline() {
 
 #[test]
 fn completed_after_stdout_flood_never_returns_success() {
-    // The worker emits WorkerReady and a valid Completed, then floods
-    // stdout past the bound and exits cleanly. The supervisor must
-    // settle the reader state and fail the terminal outcome closed —
-    // never return Completed.
+    // The worker emits WorkerReady, then writes a valid Completed and a
+    // stdout flood in one shell write. The supervisor must settle the
+    // reader state and fail the terminal outcome closed — never return
+    // Completed. Keeping both records in the same write makes the race
+    // deterministic without delaying production termination.
     use threeterm_protocol::supervisor::{Request, SupervisorOutcome};
-    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; read line; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; while true; do printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"flood\",\"percent\":1}'; done";
+    let fixture = "trap '' PIPE; printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; read line; printf '%s\\n%65536s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}' ''; sleep 1";
     let child = spawn_shell(fixture);
     let host = SubprocessWorkerHost::with_limits(
         child,

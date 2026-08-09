@@ -154,8 +154,6 @@ fn revolve_cli_drives_host_to_commit_a_revolved_brep() {
     let brep_bytes = parsed["brep_bytes"]
         .as_u64()
         .expect("brep_bytes is a number");
-    let on_disk_bytes = fs::metadata(&brep_pathbuf).expect("brep metadata").len();
-    assert_eq!(brep_bytes, on_disk_bytes);
 
     let loaded = Bundle::at(&root).open().expect("bundle reopens");
     assert_eq!(
@@ -169,6 +167,10 @@ fn revolve_cli_drives_host_to_commit_a_revolved_brep() {
         committed.is_file(),
         "committed revolved BREP missing at {committed:?}"
     );
+    let on_disk_bytes = fs::metadata(&committed)
+        .expect("committed BREP metadata")
+        .len();
+    assert_eq!(brep_bytes, on_disk_bytes);
 
     let _ = fs::remove_dir_all(root);
 }

@@ -494,7 +494,7 @@ impl OcctWorker {
         if mapped.is_err()
             && let Some(path) = cleanup_path
         {
-            let _ = std::fs::remove_file(path);
+            cleanup_worker_output(&path);
         }
         mapped.map(|result| result.value)
     }
@@ -579,7 +579,11 @@ fn map_outcome(
             if let (Some(code), Some(detail)) =
                 (record.failed_code.clone(), record.failed_detail.clone())
             {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
+                // Keep the structured termination facts when a domain failure
+                // is followed by a signal-bearing worker termination.
+                if record.exit_signal.is_none() {
+                    return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
+                }
             }
             if record.stage.starts_with("handshake_schema_mismatch") {
                 return Err(WorkerError::Malformed {
@@ -619,6 +623,32 @@ fn expected_output_path(output_dir: &Path, output_filename: &str) -> Option<Path
         return None;
     }
     Some(output_dir.join(output_filename))
+}
+
+/// Remove the final output and any interrupted sibling temporary files. The
+/// C++ worker writes `<name>.tmp-<pid>` before its final rename; force
+/// termination can interrupt that write before the worker can clean it.
+fn cleanup_worker_output(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let temporary_prefix = format!("{file_name}.tmp-");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(&temporary_prefix))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Hex SHA-256 of a file's bytes, used to verify the worker's staged
@@ -677,7 +707,7 @@ impl RawResult {
         if result.is_err()
             && let Some(path) = cleanup_path
         {
-            let _ = std::fs::remove_file(path);
+            cleanup_worker_output(&path);
         }
         result
     }
@@ -1418,6 +1448,36 @@ mod tests {
                 assert_eq!(diagnostic.schema_version, SCHEMA_VERSION);
             }
             other => panic!("expected Diagnostic; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_failed_envelope_with_signal_preserves_termination_context() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(9),
+                exit_code: None,
+                stderr_tail: "worker crashed".to_string(),
+                failed_code: Some("brep_invalid".to_string()),
+                failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("signal-bearing failure must not lose termination context");
+        match error {
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.exit_signal, Some(9));
+                assert_eq!(record.failed_code.as_deref(), Some("brep_invalid"));
+                assert_eq!(record.stderr_tail, "worker crashed");
+            }
+            other => panic!("expected Supervised; got {other:?}"),
         }
     }
 

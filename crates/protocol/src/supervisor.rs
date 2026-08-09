@@ -200,7 +200,7 @@ impl Supervisor {
     /// method does not re-consume it.
     pub fn cancel(&mut self, request_id: &str, reason: &str) -> SupervisorOutcome {
         let started = Instant::now();
-        self.cancel_with_deadline(request_id, reason, started, started + self.grace)
+        self.cancel_with_deadline(request_id, reason, started, started + self.grace, None)
     }
 
     fn cancel_with_deadline(
@@ -209,6 +209,7 @@ impl Supervisor {
         reason: &str,
         started: Instant,
         deadline: Instant,
+        mut last_progress: Option<Progress>,
     ) -> SupervisorOutcome {
         if Instant::now() >= deadline {
             return self.force_terminate_outcome(
@@ -216,7 +217,7 @@ impl Supervisor {
                 started,
                 "cancel_grace_exceeded",
                 None,
-                None,
+                last_progress.take(),
             );
         }
         if let Err(error) = self.host.cancel(request_id, reason) {
@@ -225,7 +226,7 @@ impl Supervisor {
                 started,
                 "host_cancel_failed",
                 Some(error.to_string()),
-                None,
+                last_progress.take(),
             );
         }
 
@@ -245,7 +246,7 @@ impl Supervisor {
                             envelope.schema_version(),
                             crate::schema_version()
                         )),
-                        None,
+                        last_progress.take(),
                     );
                 }
                 Ok(Envelope::Cancelled {
@@ -264,13 +265,13 @@ impl Supervisor {
                             started,
                             &format!("protocol_violation:mismatched_request_id:{ack_request_id}"),
                             None,
-                            None,
+                            last_progress.take(),
                         );
                     }
                     self.discard_stage();
                     if let Err(error) = self.host.terminate() {
                         let context = TerminationContext {
-                            last_progress: None,
+                            last_progress: last_progress.take(),
                             last_artifact_error: self.last_artifact_error.take(),
                             failed: None,
                         };
@@ -289,9 +290,12 @@ impl Supervisor {
                     // reporting an acknowledgement. A worker that acks
                     // and then dies by signal or with a non-zero status
                     // is surfaced as a structured termination.
-                    if let Some(outcome) =
-                        self.verify_clean_exit(&ack_request_id, started, "cancelled_reap")
-                    {
+                    if let Some(outcome) = self.verify_clean_exit(
+                        &ack_request_id,
+                        started,
+                        "cancelled_reap",
+                        last_progress.take(),
+                    ) {
                         return outcome;
                     }
                     return SupervisorOutcome::Acknowledged {
@@ -302,6 +306,8 @@ impl Supervisor {
                 }
                 Ok(Envelope::Progress {
                     request_id: progress_request_id,
+                    stage,
+                    percent,
                     ..
                 }) => {
                     // Progress bound to a foreign request is a protocol
@@ -315,9 +321,10 @@ impl Supervisor {
                                 "protocol_violation:mismatched_request_id:{progress_request_id}"
                             ),
                             None,
-                            None,
+                            last_progress.take(),
                         );
                     }
+                    last_progress = Some(Progress { stage, percent });
                 }
                 Ok(Envelope::Artifact { header, .. }) => {
                     if header.request_id != request_id {
@@ -329,7 +336,7 @@ impl Supervisor {
                                 header.request_id
                             ),
                             None,
-                            None,
+                            last_progress.take(),
                         );
                     }
                 }
@@ -350,7 +357,7 @@ impl Supervisor {
                         started,
                         "protocol_violation:expected_cancelled_ack",
                         None,
-                        None,
+                        last_progress.take(),
                     );
                 }
                 Ok(Envelope::WorkerReady { .. }) => {}
@@ -360,7 +367,7 @@ impl Supervisor {
                         started,
                         "worker_closed",
                         None,
-                        None,
+                        last_progress.take(),
                     );
                 }
                 // A slice-level receive timeout is a poll tick: keep
@@ -373,7 +380,7 @@ impl Supervisor {
                         started,
                         "worker_recv_error",
                         Some(error.to_string()),
-                        None,
+                        last_progress.take(),
                     );
                 }
             }
@@ -384,7 +391,7 @@ impl Supervisor {
                     started,
                     "cancel_grace_exceeded",
                     None,
-                    None,
+                    last_progress.take(),
                 );
             }
         }
@@ -462,6 +469,7 @@ impl Supervisor {
                     "cancelled by host",
                     started,
                     deadline,
+                    last_progress.take(),
                 );
             }
             if let Some(outcome) =
@@ -808,7 +816,8 @@ impl Supervisor {
         // protocol terminal envelope and the validated stream/reap state are
         // authoritative; a worker may report a useful result before exiting
         // with a domain-specific status code.
-        if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap") {
+        if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap", None)
+        {
             self.discard_stage();
             return outcome;
         }
@@ -827,6 +836,7 @@ impl Supervisor {
         request_id: &str,
         started: Instant,
         stage_prefix: &str,
+        last_progress: Option<Progress>,
     ) -> Option<SupervisorOutcome> {
         // A stream overflow is checked independently of the exit status:
         // a worker that exits cleanly (code 0) after flooding a stream
@@ -835,7 +845,7 @@ impl Supervisor {
         let unclean = overflow.map(|stream| format!("{stage_prefix}:stream_overflow:{stream}"));
         unclean.map(|stage| {
             let context = TerminationContext {
-                last_progress: None,
+                last_progress,
                 last_artifact_error: self.last_artifact_error.take(),
                 failed: None,
             };

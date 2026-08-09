@@ -213,6 +213,26 @@ fn cooperative_cancellation_returns_structured_acknowledgement() {
 }
 
 #[test]
+fn cancellation_preserves_the_last_progress_context_on_force_termination() {
+    let worker = FakeWorker::new(vec![Envelope::Progress {
+        schema_version: schema_version().to_string(),
+        request_id: "req-1".to_string(),
+        stage: "writing staged output".to_string(),
+        percent: 72,
+    }]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    let progress = record
+        .last_progress
+        .expect("cancellation termination must retain the last progress");
+    assert_eq!(progress.stage, "writing staged output");
+    assert_eq!(progress.percent, 72);
+}
+
+#[test]
 fn request_consumes_worker_ready_handshake_then_returns_staged_facts() {
     // Worker handshake + a valid staged artifact + Completed. The
     // supervisor must consume WorkerReady and return the staged artifact

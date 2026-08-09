@@ -72,6 +72,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -92,22 +93,31 @@ constexpr const char* kProtocolSchemaVersion = "threeterm.protocol/1";
 /// Maximum bytes accepted for a single newline-framed envelope line.
 /// Mirrors the host's `MAX_FRAME_BUFFER`; oversized input fails closed.
 constexpr std::size_t kMaxEnvelopeBytes = 4 * 1024 * 1024;
+constexpr std::uintmax_t kMaxArtifactBytes = 1 * 1024 * 1024;
 
 /// Reads exactly ONE newline-terminated line from stdin, bounded by
-/// `kMaxEnvelopeBytes`. Returns `nullopt` when stdin reaches EOF before
-/// a newline (malformed framing) or when the line exceeds the bound.
-/// Never waits for EOF: the host keeps stdin open for the duration of
-/// the request lifecycle, so reading until EOF would block forever.
-std::optional<std::string> read_stdin_line() {
+/// `kMaxEnvelopeBytes`. The returned `terminated` flag is false when stdin
+/// reaches EOF before a newline or when the line exceeds the bound. Never
+/// waits for EOF: the host keeps stdin open for the duration of the request
+/// lifecycle, so reading until EOF would block forever.
+struct InputLine {
+    std::string value;
+    bool terminated;
+};
+
+InputLine read_stdin_line() {
     std::string out;
     out.reserve(256);
     while (out.size() < kMaxEnvelopeBytes) {
         int c = std::fgetc(stdin);
-        if (c == EOF) return std::nullopt;
-        if (c == '\n') return out;
+        if (c == EOF) return {std::move(out), false};
+        if (c == '\n') return {std::move(out), true};
         out.push_back(static_cast<char>(c));
     }
-    return std::nullopt;
+    // Preserve the bounded prefix so request_id_hint can still bind a
+    // malformed oversized frame. Do not consume the unbounded remainder.
+    int next = std::fgetc(stdin);
+    return {std::move(out), next == '\n'};
 }
 
 // Recover the outer request identity before full JSON validation so malformed
@@ -425,6 +435,13 @@ void write_progress(const std::string& request_id, const std::string& stage) {
 
 void write_failed(const std::string& request_id, const std::string& code,
                   const std::string& detail) {
+    if (request_id.empty()) {
+        // An unbound failure envelope is itself invalid at the supervisor
+        // boundary. Emit the diagnostic on stderr and let the host report the
+        // closed worker instead.
+        write_stderr_line(code + ": " + detail);
+        return;
+    }
     std::ostringstream out;
     out << "{\"kind\":\"failed\","
         << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
@@ -618,6 +635,59 @@ std::string sha256_hex(const std::string& bytes) {
     return out.str();
 }
 
+class CappedFileBuffer final : public std::streambuf {
+public:
+    CappedFileBuffer(const std::filesystem::path& path, std::size_t limit)
+        : file_(path, std::ios::binary | std::ios::out), limit_(limit) {}
+
+    bool is_open() const { return file_.is_open(); }
+    bool exceeded() const { return exceeded_; }
+    bool close() {
+        file_.close();
+        return !file_.fail();
+    }
+
+protected:
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
+        const std::streamsize available = static_cast<std::streamsize>(limit_ - written_);
+        const std::streamsize accepted = std::min(count, available);
+        if (accepted > 0) {
+            file_.write(data, accepted);
+            if (!file_) return 0;
+            written_ += static_cast<std::size_t>(accepted);
+        }
+        if (accepted != count) {
+            exceeded_ = true;
+        }
+        return accepted;
+    }
+
+    int_type overflow(int_type character = traits_type::eof()) override {
+        if (traits_type::eq_int_type(character, traits_type::eof())) {
+            return sync() == 0 ? traits_type::not_eof(character) : character;
+        }
+        if (written_ >= limit_) {
+            exceeded_ = true;
+            return traits_type::eof();
+        }
+        file_.put(traits_type::to_char_type(character));
+        if (!file_) return traits_type::eof();
+        ++written_;
+        return character;
+    }
+
+    int sync() override {
+        file_.flush();
+        return file_ ? 0 : -1;
+    }
+
+private:
+    std::ofstream file_;
+    std::size_t limit_;
+    std::size_t written_ = 0;
+    bool exceeded_ = false;
+};
+
 bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, std::string& error) {
     // Fail closed before writing: an existing output path (including a
     // symlink planted by a malicious or stale worker) must never be
@@ -639,7 +709,27 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
     std::filesystem::path temporary = path;
     temporary += ".tmp-" + std::to_string(static_cast<long long>(getpid()));
     std::filesystem::remove(temporary, ec);
-    if (!BRepTools::Write(shape, temporary.string().c_str())) {
+    CappedFileBuffer output_buffer(temporary, kMaxArtifactBytes);
+    if (!output_buffer.is_open()) {
+        error = "staged BREP could not be opened for writing: " + temporary.string();
+        return false;
+    }
+    std::ostream output(&output_buffer);
+    try {
+        BRepTools::Write(shape, output);
+    } catch (...) {
+        output_buffer.close();
+        std::filesystem::remove(temporary, ec);
+        throw;
+    }
+    const bool flushed = output.flush().good();
+    const bool closed = output_buffer.close();
+    if (output_buffer.exceeded()) {
+        error = "staged BREP exceeds the " + std::to_string(kMaxArtifactBytes) + " byte bound";
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+    if (!flushed || !closed) {
         error = "BRepTools::Write failed for " + path.string();
         std::filesystem::remove(temporary, ec);
         return false;
@@ -2226,13 +2316,14 @@ int main() {
     // reading until EOF would block forever; the supervisor's grace
     // period then force-terminates. EOF-before-newline or an oversized
     // line is malformed framing and fails closed.
-    std::optional<std::string> raw_line = read_stdin_line();
-    if (!raw_line.has_value()) {
-        write_failed("", "request_malformed", "request line must be newline-terminated");
+    InputLine raw_line = read_stdin_line();
+    const std::string hinted_request_id = request_id_hint(raw_line.value);
+    if (!raw_line.terminated) {
+        write_failed(hinted_request_id, "request_malformed",
+                     "request line must be newline-terminated and within the byte bound");
         return 2;
     }
-    std::string raw = *raw_line;
-    const std::string hinted_request_id = request_id_hint(raw);
+    std::string raw = std::move(raw_line.value);
     if (raw.empty()) {
         write_failed(hinted_request_id, "request_malformed", "empty request line");
         return 2;
@@ -2296,13 +2387,13 @@ int main() {
     // request is malformed input and fails closed rather than being
     // silently ignored.
     if (stdin_has_pending_line()) {
-        std::optional<std::string> cancel_line = read_stdin_line();
-        if (!cancel_line.has_value() || cancel_line->empty()) {
+        InputLine cancel_line = read_stdin_line();
+        if (!cancel_line.terminated || cancel_line.value.empty()) {
             write_failed(request_id, "request_malformed",
                          "pending line before dispatch is not newline-terminated");
             return 2;
         }
-        JsonParser cancel_parser(*cancel_line);
+        JsonParser cancel_parser(cancel_line.value);
         JsonParser::Value cancel_envelope;
         const JsonParser::Value* reason = nullptr;
         if (cancel_parser.parse_document(&cancel_envelope, error) &&

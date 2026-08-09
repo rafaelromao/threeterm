@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Instant;
@@ -351,6 +352,10 @@ pub struct SubprocessWorkerHost {
     stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     stdout_pipe_identity: Option<String>,
+    /// Linux cgroup-v2 containment boundary, when the runtime grants the
+    /// worker's parent cgroup delegation. Descendants inherit membership,
+    /// including descendants that call `setsid` or close worker pipes.
+    containment_cgroup: Option<PathBuf>,
     /// Count of reader threads that have finished draining their stream
     /// (observed EOF or an overflow). `terminate` waits for this to
     /// reach the number of active readers so overflow flags are settled
@@ -379,6 +384,7 @@ impl SubprocessWorkerHost {
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
         let stdout_pipe_identity = pipe_identity(&stdout);
+        let containment_cgroup = create_process_cgroup(child.id() as i32);
         let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -467,6 +473,7 @@ impl SubprocessWorkerHost {
             stderr_overflow,
             stderr_tail,
             stdout_pipe_identity,
+            containment_cgroup,
             readers_finished,
             readers_total,
             reaped_status: None,
@@ -572,6 +579,10 @@ impl WorkerHost for SubprocessWorkerHost {
         }
         contained.sort_unstable();
         contained.dedup();
+        let cgroup_killed = self
+            .containment_cgroup
+            .as_deref()
+            .is_some_and(kill_process_cgroup);
         for descendant in contained {
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(descendant),
@@ -583,6 +594,7 @@ impl WorkerHost for SubprocessWorkerHost {
             nix::sys::signal::Signal::SIGKILL,
         ) {
             Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) if cgroup_killed => {}
             Err(nix::errno::Errno::ESRCH) => {
                 // No such process group: the worker was not spawned as a
                 // group leader. Kill the direct child instead, unless it
@@ -628,6 +640,9 @@ impl WorkerHost for SubprocessWorkerHost {
                 "worker stream readers did not settle before termination",
             )));
         }
+        if let Some(path) = self.containment_cgroup.take() {
+            let _ = std::fs::remove_dir(path);
+        }
         Ok(())
     }
 
@@ -659,6 +674,63 @@ impl WorkerHost for SubprocessWorkerHost {
         }
         None
     }
+}
+
+/// Create a private cgroup-v2 child of the current cgroup and move the worker
+/// into it. Cgroup membership is inherited by every descendant, which closes
+/// the escape window left by process-group-only cleanup. Runtimes without
+/// delegated cgroup write access use the process-group fallback below.
+#[cfg(target_os = "linux")]
+fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
+    let cgroup_file = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let relative = cgroup_file
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?;
+    let parent = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    let path = parent.join(format!(".threeterm-worker-{pid}"));
+    if std::fs::create_dir(&path).is_err() {
+        return None;
+    }
+    if std::fs::write(path.join("cgroup.procs"), pid.to_string()).is_err() {
+        let _ = std::fs::remove_dir(&path);
+        return None;
+    }
+    Some(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_process_cgroup(_pid: i32) -> Option<PathBuf> {
+    None
+}
+
+/// Kill every process in a worker cgroup. `cgroup.kill` is atomic with respect
+/// to fork: unlike a `/proc` snapshot it also catches descendants created
+/// after termination begins.
+#[cfg(target_os = "linux")]
+fn kill_process_cgroup(path: &Path) -> bool {
+    if std::fs::write(path.join("cgroup.kill"), b"1").is_ok() {
+        return true;
+    }
+    let Ok(members) = std::fs::read_to_string(path.join("cgroup.procs")) else {
+        return false;
+    };
+    let mut attempted = false;
+    for member in members.lines().filter_map(|line| line.parse::<i32>().ok()) {
+        attempted = true;
+        match nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(member),
+            nix::sys::signal::Signal::SIGKILL,
+        ) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+            Err(_) => return false,
+        }
+    }
+    attempted
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_process_cgroup(_path: &Path) -> bool {
+    false
 }
 
 /// Return the worker's currently observable descendants from `/proc`.

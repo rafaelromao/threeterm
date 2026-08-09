@@ -1337,6 +1337,13 @@ fn copy_brep_verified(
             source.display()
         ));
     }
+    let artifact_limit = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
+    if opened_metadata.len() > artifact_limit {
+        return Err(format!(
+            "source BREP {} exceeds the {artifact_limit} byte bound",
+            source.display()
+        ));
+    }
     let mut buffer = vec![0u8; 8 * 1024];
     let mut content = Vec::new();
     loop {
@@ -1345,6 +1352,12 @@ fn copy_brep_verified(
             .map_err(|error| format!("read source BREP failed: {error}"))?;
         if read == 0 {
             break;
+        }
+        if content.len() + read > artifact_limit as usize {
+            return Err(format!(
+                "source BREP {} exceeds the {artifact_limit} byte bound",
+                source.display()
+            ));
         }
         content.extend_from_slice(&buffer[..read]);
     }
@@ -1361,24 +1374,67 @@ fn copy_brep_verified(
             ));
         }
     }
-    let mut writer = fs::File::create(target)
-        .map_err(|error| format!("create target BREP {} failed: {error}", target.display()))?;
-    writer
-        .write_all(&content)
-        .map_err(|error| format!("write target BREP failed: {error}"))?;
-    writer
-        .flush()
-        .map_err(|error| format!("flush target BREP failed: {error}"))?;
-    writer
-        .sync_all()
-        .map_err(|error| format!("sync target BREP failed: {error}"))?;
+    // Never create the canonical target before the complete replacement is
+    // durable: File::create(target) would truncate a prior BREP before a
+    // later write or sync failure could be reported.
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| format!("target BREP {} has no file name", target.display()))?;
+    let temporary = target.with_file_name(format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    let mut writer = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            format!(
+                "create temporary BREP {} failed: {error}",
+                temporary.display()
+            )
+        })?;
+    if let Err(error) = writer.write_all(&content) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("write temporary BREP failed: {error}"));
+    }
+    if let Err(error) = writer.flush() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("flush temporary BREP failed: {error}"));
+    }
+    if let Err(error) = writer.sync_all() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("sync temporary BREP failed: {error}"));
+    }
+    if let Err(error) = fs::rename(&temporary, target) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("rename temporary BREP failed: {error}"));
+    }
     Ok(())
 }
 
 fn cleanup_worker_stage(root: &Path, path: &Path) {
     let stage = root.join("stage");
-    if path.starts_with(&stage) {
-        let _ = fs::remove_file(path);
+    if !path.starts_with(&stage) {
+        return;
+    }
+    let _ = fs::remove_file(path);
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let temporary_prefix = format!("{file_name}.tmp-");
+    let Ok(entries) = fs::read_dir(&stage) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(&temporary_prefix))
+        {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -1396,9 +1452,26 @@ impl Drop for WorkerStageCleanup<'_> {
 fn restore_brep(target: &Path, prior_bytes: Option<&[u8]>) {
     match prior_bytes {
         Some(bytes) => {
-            if let Ok(mut writer) = fs::File::create(target) {
-                let _ = writer.write_all(bytes);
-                let _ = writer.sync_all();
+            let Some(file_name) = target.file_name() else {
+                return;
+            };
+            let temporary = target.with_file_name(format!(
+                ".{}.restore-tmp-{}",
+                file_name.to_string_lossy(),
+                std::process::id()
+            ));
+            if let Ok(mut writer) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                if writer.write_all(bytes).is_ok()
+                    && writer.sync_all().is_ok()
+                    && fs::rename(&temporary, target).is_ok()
+                {
+                    return;
+                }
+                let _ = fs::remove_file(&temporary);
             }
         }
         None => {

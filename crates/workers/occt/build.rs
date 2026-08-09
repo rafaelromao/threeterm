@@ -87,6 +87,7 @@ fn main() {
     command
         .arg("-std=c++17")
         .arg("-O2")
+        .arg("-pthread")
         .arg("-Wall")
         .arg("-Wno-unused-parameter")
         .arg("-I")

@@ -716,6 +716,7 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
     }
     std::ostream output(&output_buffer);
     try {
+        output << "DBRep_DrawableShape\n";
         BRepTools::Write(shape, output);
     } catch (...) {
         output_buffer.close();

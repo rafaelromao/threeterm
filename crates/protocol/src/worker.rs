@@ -682,6 +682,14 @@ impl WorkerHost for SubprocessWorkerHost {
 /// delegated cgroup write access use the process-group fallback below.
 #[cfg(target_os = "linux")]
 fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
+    // Cgroup delegation is an optional runtime capability. Keep the tested
+    // process-group and descendant snapshot fallback as the default, and only
+    // opt into cgroups when the host explicitly confirms the boundary is safe.
+    if std::env::var_os("THREETERM_ENABLE_WORKER_CGROUP").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return None;
+    }
     let cgroup_file = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let relative = cgroup_file
         .lines()

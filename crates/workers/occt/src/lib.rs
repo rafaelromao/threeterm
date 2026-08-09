@@ -684,14 +684,14 @@ impl RawResult {
                 detail: "worker response is missing brep_path".to_string(),
             });
         };
-        if let Some(expected) = &self.expected_output {
-            if path != expected.as_path() {
-                return Err(WorkerError::Malformed {
-                    detail: format!(
-                        "worker output at {path:?} is not the request's private output location {expected:?}"
-                    ),
-                });
-            }
+        if let Some(expected) = &self.expected_output
+            && path != expected.as_path()
+        {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "worker output at {path:?} is not the request's private output location {expected:?}"
+                ),
+            });
         }
         // The staged output must exist as a regular file that is not a
         // symlink: a missing, dangling, or redirected path cannot be

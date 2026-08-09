@@ -254,13 +254,10 @@ fn clean_exit_after_overflow_never_accepts_completion() {
 }
 
 #[test]
-fn worker_whose_stdout_stays_open_past_the_drain_window_fails_closed() {
+fn worker_whose_stdout_stays_open_past_the_drain_window_is_contained() {
     // The worker emits WorkerReady and Completed, then exits cleanly,
-    // but leaves a daemonized (setsid) descendant holding stdout open.
-    // The stream readers cannot observe EOF inside the drain window, so
-    // terminate must fail closed: a terminal outcome must never be
-    // accepted while stream state is still unsettled (an over-limit
-    // chunk could land after the supervisor's overflow snapshot).
+    // but leaves a daemonized (setsid) descendant holding stdout open. The
+    // host must contain the inherited pipe even after the leader exits.
     let fixture = "printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'; printf '%s\\n' '{\"kind\":\"completed\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"result\":{\"ok\":true}}'; setsid sh -c 'sleep 5' >&1 & exit 0";
     let child = Command::new("sh")
         .arg("-c")
@@ -282,16 +279,6 @@ fn worker_whose_stdout_stays_open_past_the_drain_window_fails_closed() {
         "completion must arrive"
     );
 
-    // The leader exited cleanly, but the daemonized descendant keeps
-    // stdout open past the drain window: the readers never settle, so
-    // termination must fail closed instead of returning success.
-    match host.terminate() {
-        Err(WorkerError::Io(error)) => {
-            assert!(
-                error.to_string().contains("settle"),
-                "error must name the unsettled readers; got {error:?}"
-            );
-        }
-        other => panic!("expected Io failure; got {other:?}"),
-    }
+    host.terminate()
+        .expect("termination must contain the daemonized descendant");
 }

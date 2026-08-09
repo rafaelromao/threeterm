@@ -3269,12 +3269,24 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
-        HostError::WorkerTerminated { record } => {
-            format!(
-                "worker terminated: stage={} elapsed={:?} exit_signal={:?} exit_code={:?}",
-                record.stage, record.elapsed, record.exit_signal, record.exit_code
-            )
-        }
+        HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
+            "kind": "worker_terminated",
+            "request_id": record.request_id,
+            "stage": record.stage,
+            "elapsed_ms": record.elapsed.as_millis(),
+            "last_progress": record.last_progress.as_ref().map(|progress| json!({
+                "stage": progress.stage,
+                "percent": progress.percent,
+            })),
+            "last_artifact_error": record.last_artifact_error,
+            "exit_signal": record.exit_signal,
+            "exit_code": record.exit_code,
+            "stderr_tail": record.stderr_tail,
+            "failed_code": record.failed_code,
+            "failed_detail": record.failed_detail,
+            "exit_kind": record.exit_kind.as_str(),
+        }))
+        .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
     };
     let (diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {

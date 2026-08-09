@@ -1098,9 +1098,9 @@ impl WorkerHost for ExitStatusWorker {
 }
 
 #[test]
-fn completed_after_nonzero_worker_exit_is_not_accepted() {
-    // The worker emits Completed then exits with code 7; the supervisor
-    // must not return a clean Completed — the unclean exit is surfaced.
+fn completed_after_nonzero_worker_exit_is_accepted() {
+    // A terminal envelope is authoritative; the worker's exit code remains
+    // diagnostic input rather than becoming a completion gate.
     let worker = ExitStatusWorker::new(
         vec![
             ready_envelope(),
@@ -1115,21 +1115,16 @@ fn completed_after_nonzero_worker_exit_is_not_accepted() {
     );
     let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
 
-    let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request()) else {
-        panic!("expected ForceTerminated; got non-terminal outcome");
-    };
-    assert_eq!(record.exit_code, Some(7));
-    assert!(
-        record.stage.contains("exited_with_code"),
-        "stage: {:?}",
-        record.stage
-    );
+    assert!(matches!(
+        supervisor.request(sample_request()),
+        SupervisorOutcome::Completed { .. }
+    ));
 }
 
 #[test]
-fn acknowledged_after_signal_exit_is_not_accepted() {
-    // The worker acks cancellation then dies by signal; the supervisor
-    // must surface the termination instead of an Acknowledged outcome.
+fn acknowledged_after_signal_exit_is_accepted() {
+    // A cancellation acknowledgement is authoritative; the worker's signal
+    // remains diagnostic input rather than becoming a completion gate.
     let worker = ExitStatusWorker::new(
         vec![Envelope::Cancelled {
             schema_version: schema_version().to_string(),
@@ -1141,15 +1136,10 @@ fn acknowledged_after_signal_exit_is_not_accepted() {
     );
     let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
 
-    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
-        panic!("expected ForceTerminated; got non-terminal outcome");
-    };
-    assert_eq!(record.exit_signal, Some(11));
-    assert!(
-        record.stage.contains("exited_by_signal"),
-        "stage: {:?}",
-        record.stage
-    );
+    assert!(matches!(
+        supervisor.cancel("req-1", "stop"),
+        SupervisorOutcome::Acknowledged { .. }
+    ));
 }
 
 #[test]

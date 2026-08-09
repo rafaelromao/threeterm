@@ -67,6 +67,7 @@
 #include <TopoDS_Face.hxx>
 
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -107,6 +108,36 @@ std::optional<std::string> read_stdin_line() {
         out.push_back(static_cast<char>(c));
     }
     return std::nullopt;
+}
+
+// Recover the outer request identity before full JSON validation so malformed
+// requests can still produce a supervisor-bindable failure. This deliberately
+// accepts only a simple JSON string field, which is sufficient for the
+// protocol's opaque request identifiers; malformed or absent fields return an
+// empty hint and are reported without a Failed envelope.
+std::string request_id_hint(const std::string& raw) {
+    const std::string key = "\"request_id\"";
+    const std::size_t key_position = raw.find(key);
+    if (key_position == std::string::npos) return {};
+    std::size_t cursor = raw.find(':', key_position + key.size());
+    if (cursor == std::string::npos) return {};
+    ++cursor;
+    while (cursor < raw.size() && std::isspace(static_cast<unsigned char>(raw[cursor]))) {
+        ++cursor;
+    }
+    if (cursor >= raw.size() || raw[cursor] != '"') return {};
+    ++cursor;
+    std::string value;
+    while (cursor < raw.size()) {
+        const char character = raw[cursor++];
+        if (character == '"') return value;
+        if (character == '\\' && cursor < raw.size()) {
+            value.push_back(raw[cursor++]);
+        } else {
+            value.push_back(character);
+        }
+    }
+    return {};
 }
 
 /// True when a complete envelope line is already buffered on stdin
@@ -602,8 +633,21 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
         error = "output path stat failed: " + path.string() + ": " + ec.message();
         return false;
     }
-    if (!BRepTools::Write(shape, path.string().c_str())) {
+    // Write to a private sibling and atomically rename it into place. The
+    // rename replaces a symlink itself rather than following it, closing the
+    // check-then-write window around the worker-selected output path.
+    std::filesystem::path temporary = path;
+    temporary += ".tmp-" + std::to_string(static_cast<long long>(getpid()));
+    std::filesystem::remove(temporary, ec);
+    if (!BRepTools::Write(shape, temporary.string().c_str())) {
         error = "BRepTools::Write failed for " + path.string();
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        error = "atomic BREP promotion failed for " + path.string() + ": " + ec.message();
+        std::filesystem::remove(temporary, ec);
         return false;
     }
     return true;
@@ -2188,8 +2232,9 @@ int main() {
         return 2;
     }
     std::string raw = *raw_line;
+    const std::string hinted_request_id = request_id_hint(raw);
     if (raw.empty()) {
-        write_failed("", "request_malformed", "empty request line");
+        write_failed(hinted_request_id, "request_malformed", "empty request line");
         return 2;
     }
 
@@ -2197,21 +2242,21 @@ int main() {
     JsonParser::Value envelope;
     std::string error;
     if (!parser.parse_document(&envelope, error)) {
-        write_failed("", "request_malformed", error);
+        write_failed(hinted_request_id, "request_malformed", error);
         return 2;
     }
     if (envelope.kind != JsonParser::ValueKind::Object) {
-        write_failed("", "request_malformed", "request envelope must be an object");
+        write_failed(hinted_request_id, "request_malformed", "request envelope must be an object");
         return 2;
     }
     std::string kind = get_string(envelope, "kind");
     if (kind != "request") {
-        write_failed("", "request_malformed", "expected a request envelope");
+        write_failed(hinted_request_id, "request_malformed", "expected a request envelope");
         return 2;
     }
     std::string protocol_schema = get_string(envelope, "schema_version");
     if (protocol_schema != kProtocolSchemaVersion) {
-        write_failed("", "request_malformed", "protocol schema_version mismatch (received " +
+        write_failed(hinted_request_id, "request_malformed", "protocol schema_version mismatch (received " +
                                                  protocol_schema + ")");
         return 2;
     }

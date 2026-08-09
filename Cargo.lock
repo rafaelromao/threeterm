@@ -245,6 +245,7 @@ name = "threeterm-host"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sha2",
  "threeterm-domain",
  "threeterm-occt-worker",
  "threeterm-persistence",

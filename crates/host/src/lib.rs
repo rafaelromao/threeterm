@@ -588,12 +588,43 @@ impl Host {
         feature_id: &str,
         brep_path: &Path,
     ) -> Result<SnapshotView, HostError> {
-        let root = root.as_ref();
+        self.commit_brep_feature_inner(root.as_ref(), feature_id, brep_path, None)
+    }
+
+    /// Commit a worker artifact while verifying the advertised size and
+    /// digest from the same no-follow file handle used for promotion.
+    pub fn commit_brep_feature_verified(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        brep_path: &Path,
+        expected_bytes: usize,
+        expected_sha256: &str,
+    ) -> Result<SnapshotView, HostError> {
+        self.commit_brep_feature_inner(
+            root.as_ref(),
+            feature_id,
+            brep_path,
+            Some((expected_bytes, expected_sha256)),
+        )
+    }
+
+    fn commit_brep_feature_inner(
+        &self,
+        root: &Path,
+        feature_id: &str,
+        brep_path: &Path,
+        expected: Option<(usize, &str)>,
+    ) -> Result<SnapshotView, HostError> {
         if !brep_path.is_file() {
             return Err(HostError::BrepFileMissing {
                 path: brep_path.to_path_buf(),
             });
         }
+        let _stage_cleanup = WorkerStageCleanup {
+            root,
+            path: brep_path,
+        };
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
         if !root.exists() {
@@ -630,7 +661,8 @@ impl Host {
         } else {
             None
         };
-        if let Err(detail) = copy_brep(brep_path, &target) {
+        if let Err(detail) = copy_brep_verified(brep_path, &target, expected) {
+            cleanup_worker_stage(root, brep_path);
             self.current.replace(Some(loaded));
             return Err(HostError::BrepIo { detail });
         }
@@ -654,6 +686,7 @@ impl Host {
                 // survived. The prior manifest and log are untouched
                 // because we never reached a successful append.
                 restore_brep(&target, prior_brep.as_deref());
+                cleanup_worker_stage(root, brep_path);
                 // Fail-closed: if the canonical state was not preserved
                 // by the append, surface the persistence error so the
                 // diagnostic taxonomy sees the failure.
@@ -664,6 +697,7 @@ impl Host {
         let _ = prior_view;
         let view = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
+        cleanup_worker_stage(root, brep_path);
         Ok(view)
     }
 
@@ -703,7 +737,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -743,7 +783,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -783,7 +829,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -823,7 +875,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -863,7 +921,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -903,7 +967,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -943,7 +1013,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -984,7 +1060,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -1025,7 +1107,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -1065,7 +1153,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature(root, &feature_id, &result.brep_path) {
+        let snapshot = match self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return Err(error);
@@ -1105,7 +1199,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
+        let snapshot = self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        )?;
         let _ = prior_view;
         Ok(DraftCommitView { snapshot, result })
     }
@@ -1140,7 +1240,13 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature(root, &feature_id, &result.brep_path)?;
+        let snapshot = self.commit_brep_feature_verified(
+            root,
+            &feature_id,
+            &result.brep_path,
+            result.brep_bytes,
+            &result.brep_sha256,
+        )?;
         let _ = prior_view;
         Ok(LoftCommitView { snapshot, result })
     }
@@ -1196,7 +1302,16 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("create_dir_all failed: {error}"))
 }
 
+#[cfg(test)]
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
+    copy_brep_verified(source, target, None)
+}
+
+fn copy_brep_verified(
+    source: &Path,
+    target: &Path,
+    expected: Option<(usize, &str)>,
+) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     // Open the source without following symlinks and pin the opened
     // handle: promotion copies from one verified file identity, so a
@@ -1222,9 +1337,8 @@ fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
             source.display()
         ));
     }
-    let mut writer = fs::File::create(target)
-        .map_err(|error| format!("create target BREP {} failed: {error}", target.display()))?;
     let mut buffer = vec![0u8; 8 * 1024];
+    let mut content = Vec::new();
     loop {
         let read = reader
             .read(&mut buffer)
@@ -1232,10 +1346,26 @@ fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
         if read == 0 {
             break;
         }
-        writer
-            .write_all(&buffer[..read])
-            .map_err(|error| format!("write target BREP failed: {error}"))?;
+        content.extend_from_slice(&buffer[..read]);
     }
+    if let Some((expected_bytes, expected_sha256)) = expected {
+        use sha2::{Digest, Sha256};
+        let actual_sha256 = format!("{:x}", Sha256::digest(&content));
+        if content.len() != expected_bytes || actual_sha256 != expected_sha256 {
+            return Err(format!(
+                "source BREP content does not match the worker advertisement: bytes={} expected_bytes={} sha256={} expected_sha256={}",
+                content.len(),
+                expected_bytes,
+                actual_sha256,
+                expected_sha256
+            ));
+        }
+    }
+    let mut writer = fs::File::create(target)
+        .map_err(|error| format!("create target BREP {} failed: {error}", target.display()))?;
+    writer
+        .write_all(&content)
+        .map_err(|error| format!("write target BREP failed: {error}"))?;
     writer
         .flush()
         .map_err(|error| format!("flush target BREP failed: {error}"))?;
@@ -1243,6 +1373,24 @@ fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
         .sync_all()
         .map_err(|error| format!("sync target BREP failed: {error}"))?;
     Ok(())
+}
+
+fn cleanup_worker_stage(root: &Path, path: &Path) {
+    let stage = root.join("stage");
+    if path.starts_with(&stage) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+struct WorkerStageCleanup<'a> {
+    root: &'a Path,
+    path: &'a Path,
+}
+
+impl Drop for WorkerStageCleanup<'_> {
+    fn drop(&mut self) {
+        cleanup_worker_stage(self.root, self.path);
+    }
 }
 
 fn restore_brep(target: &Path, prior_bytes: Option<&[u8]>) {

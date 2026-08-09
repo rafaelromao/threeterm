@@ -52,13 +52,6 @@ const OVERFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 /// before giving up on recording its exit status.
 const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// How long `terminate` waits for a worker that emitted its terminal
-/// envelope to exit naturally before force-killing the process group.
-/// Cooperative workers return immediately after their terminal
-/// envelope; this window lets the reap observe the clean exit instead
-/// of a supervisor-delivered SIGKILL.
-const NATURAL_EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-
 /// How long `terminate` waits for the detached stream readers to drain
 /// after the worker is reaped, so overflow flags are settled before a
 /// terminal outcome is accepted or rejected.
@@ -357,6 +350,7 @@ pub struct SubprocessWorkerHost {
     stdout_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stdout_pipe_identity: Option<String>,
     /// Count of reader threads that have finished draining their stream
     /// (observed EOF or an overflow). `terminate` waits for this to
     /// reach the number of active readers so overflow flags are settled
@@ -384,6 +378,7 @@ impl SubprocessWorkerHost {
             Some(stdout) => stdout,
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
+        let stdout_pipe_identity = pipe_identity(&stdout);
         let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -471,6 +466,7 @@ impl SubprocessWorkerHost {
             stdout_overflow,
             stderr_overflow,
             stderr_tail,
+            stdout_pipe_identity,
             readers_finished,
             readers_total,
             reaped_status: None,
@@ -566,20 +562,22 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
-        // SIGKILL the worker's process group so the worker AND any
-        // descendants die together. A cooperative worker that emitted
-        // its terminal envelope is normally mid-exit, so a short
-        // natural-exit window runs first: a clean reap then means the
-        // worker is gone and only descendants (if any) need killing.
-        self.reap_if_exited()?;
-        if self.reaped_status.is_none() {
-            let grace = Instant::now() + NATURAL_EXIT_WAIT;
-            while self.reaped_status.is_none() && Instant::now() < grace {
-                std::thread::sleep(REAP_POLL);
-                self.reap_if_exited()?;
-            }
-        }
+        // Capture descendants before killing the leader. This closes the
+        // race where a child creates a new session and would otherwise be
+        // reparented before process-group termination reaches it.
         let pid = self.child.id() as i32;
+        let mut contained = descendant_pids(pid);
+        if let Some(identity) = &self.stdout_pipe_identity {
+            contained.extend(inherited_pipe_pids(identity));
+        }
+        contained.sort_unstable();
+        contained.dedup();
+        for descendant in contained {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(descendant),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
         match nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(pid),
             nix::sys::signal::Signal::SIGKILL,
@@ -661,6 +659,101 @@ impl WorkerHost for SubprocessWorkerHost {
         }
         None
     }
+}
+
+/// Return the worker's currently observable descendants from `/proc`.
+/// Process-group containment handles ordinary descendants; this snapshot is
+/// the additional containment layer for a child that calls `setsid` before
+/// the worker leader is reaped.
+#[cfg(target_os = "linux")]
+fn descendant_pids(root: i32) -> Vec<i32> {
+    use std::collections::HashMap;
+
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let Some(ppid) = fields
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    let mut pending = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop() {
+        for child in children.remove(&parent).unwrap_or_default() {
+            pending.push(child);
+            descendants.push(child);
+        }
+    }
+    descendants
+}
+
+#[cfg(target_os = "linux")]
+fn pipe_identity(file: &impl std::os::fd::AsRawFd) -> Option<String> {
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pipe_identity(_file: &impl std::os::fd::AsRawFd) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn inherited_pipe_pids(identity: &str) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let current = std::process::id() as i32;
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pid == current {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        if fds.flatten().any(|fd| {
+            std::fs::read_link(fd.path())
+                .ok()
+                .is_some_and(|path| path.to_string_lossy() == identity)
+        }) {
+            matches.push(pid);
+        }
+    }
+    matches
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inherited_pipe_pids(_identity: &str) -> Vec<i32> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descendant_pids(_root: i32) -> Vec<i32> {
+    Vec::new()
 }
 
 impl SubprocessWorkerHost {

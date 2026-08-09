@@ -200,6 +200,25 @@ impl Supervisor {
     /// method does not re-consume it.
     pub fn cancel(&mut self, request_id: &str, reason: &str) -> SupervisorOutcome {
         let started = Instant::now();
+        self.cancel_with_deadline(request_id, reason, started, started + self.grace)
+    }
+
+    fn cancel_with_deadline(
+        &mut self,
+        request_id: &str,
+        reason: &str,
+        started: Instant,
+        deadline: Instant,
+    ) -> SupervisorOutcome {
+        if Instant::now() >= deadline {
+            return self.force_terminate_outcome(
+                request_id,
+                started,
+                "cancel_grace_exceeded",
+                None,
+                None,
+            );
+        }
         if let Err(error) = self.host.cancel(request_id, reason) {
             return self.force_terminate_outcome(
                 request_id,
@@ -210,7 +229,6 @@ impl Supervisor {
             );
         }
 
-        let deadline = started + self.grace;
         loop {
             match self.host.recv(deadline) {
                 Ok(envelope) if envelope.schema_version() != crate::schema_version() => {
@@ -439,7 +457,12 @@ impl Supervisor {
             // (send `Cancel`, await `Cancelled` inside the grace period,
             // then force-terminate if the worker does not acknowledge).
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
-                return self.cancel(&request.request_id, "cancelled by host");
+                return self.cancel_with_deadline(
+                    &request.request_id,
+                    "cancelled by host",
+                    started,
+                    deadline,
+                );
             }
             if let Some(outcome) =
                 self.receive_request_envelope(&request, started, deadline, &mut last_progress)
@@ -781,10 +804,10 @@ impl Supervisor {
                 ),
             };
         }
-        // A Completed envelope must be followed by a clean worker exit.
-        // If the worker completed then died by signal or with a non-zero
-        // status, the staged artifacts are discarded and the termination
-        // is surfaced instead of a clean completion.
+        // Exit status is diagnostic context, not a completion gate. The
+        // protocol terminal envelope and the validated stream/reap state are
+        // authoritative; a worker may report a useful result before exiting
+        // with a domain-specific status code.
         if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap") {
             self.discard_stage();
             return outcome;
@@ -796,10 +819,9 @@ impl Supervisor {
         }
     }
 
-    /// Verifies the worker exited cleanly (exit code 0, no signal)
-    /// after a cooperative terminal envelope. Returns `Some(outcome)`
-    /// with a structured termination record when the exit was not
-    /// clean, and `None` when the worker exited cleanly.
+    /// Verifies that no stream overflow occurred after a cooperative terminal
+    /// envelope. Exit codes and signals remain available through the host's
+    /// structured diagnostics, but are not completion gates.
     fn verify_clean_exit(
         &mut self,
         request_id: &str,
@@ -810,16 +832,7 @@ impl Supervisor {
         // a worker that exits cleanly (code 0) after flooding a stream
         // must still fail the terminal outcome closed.
         let overflow = self.host.stream_overflowed();
-        let exit_signal = self.host.exit_signal();
-        let exit_code = self.host.exit_code();
-        let unclean = match (overflow, exit_signal, exit_code) {
-            (Some(stream), _, _) => Some(format!("{stage_prefix}:stream_overflow:{stream}")),
-            (None, Some(signal), _) => Some(format!("{stage_prefix}:exited_by_signal:{signal}")),
-            (None, None, Some(code)) if code != 0 => {
-                Some(format!("{stage_prefix}:exited_with_code:{code}"))
-            }
-            _ => None,
-        };
+        let unclean = overflow.map(|stream| format!("{stage_prefix}:stream_overflow:{stream}"));
         unclean.map(|stage| {
             let context = TerminationContext {
                 last_progress: None,
@@ -1424,7 +1437,7 @@ mod tests {
             recv_calls: Arc::clone(&recv_calls),
             terminated: Arc::clone(&terminated),
         };
-        let mut supervisor = Supervisor::new(Duration::ZERO, Box::new(worker), None);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
 
         let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop")
         else {

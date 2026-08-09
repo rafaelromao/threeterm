@@ -483,14 +483,20 @@ impl OcctWorker {
             },
             cancel,
         );
-        map_outcome(
+        let cleanup_path = expected_output.clone();
+        let mapped = map_outcome(
             outcome,
             &request_id,
             &command_id,
             &feature_id,
             expected_output,
-        )
-        .map(|result| result.value)
+        );
+        if mapped.is_err()
+            && let Some(path) = cleanup_path
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        mapped.map(|result| result.value)
     }
 }
 
@@ -663,6 +669,20 @@ impl RawResult {
     /// metadata, so a worker that under-reports its output cannot smuggle
     /// an oversized artifact past the host.
     fn bounded<T>(self) -> Result<T, WorkerError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let cleanup_path = self.expected_output.clone();
+        let result = self.bounded_inner();
+        if result.is_err()
+            && let Some(path) = cleanup_path
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        result
+    }
+
+    fn bounded_inner<T>(self) -> Result<T, WorkerError>
     where
         T: serde::de::DeserializeOwned,
     {

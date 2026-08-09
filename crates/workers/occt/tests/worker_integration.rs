@@ -1255,6 +1255,17 @@ fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str
     let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
     let request_id = args["request_id"].as_str().expect("raw request id");
     let command_id = args["operation"].as_str().expect("raw operation");
+    assert_raw_loft_with_outer_identity(worker, request, request_id, command_id, detail);
+}
+
+fn assert_raw_loft_with_outer_identity(
+    worker: &OcctWorker,
+    request: &str,
+    request_id: &str,
+    command_id: &str,
+    detail: &str,
+) {
+    let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
     let envelope = format!(
         "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"{command_id}\",\"args\":{args},\"revision_id\":\"\"}}\n"
     );
@@ -1390,7 +1401,7 @@ fn worker_rejects_outer_and_typed_request_identity_mismatch() {
     let Some(worker) = locate_worker() else {
         return;
     };
-    assert_raw_loft_is_malformed(
+    assert_raw_loft_with_outer_identity(
         &worker,
         r#"{
             "schema_version": "threeterm.workers.occt/1",
@@ -1401,6 +1412,8 @@ fn worker_rejects_outer_and_typed_request_identity_mismatch() {
             "output_filename": "loft.brep",
             "profiles": [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]], [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]]
         }"#,
+        "req-raw",
+        "loft",
         "identity does not match",
     );
 }

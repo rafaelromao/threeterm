@@ -352,6 +352,10 @@ pub struct SubprocessWorkerHost {
     stderr_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     stdout_pipe_identity: Option<String>,
+    /// The worker's process-group ID when spawning established the required
+    /// group-leader invariant. `None` means the caller supplied a plain child
+    /// and termination must not guess a process group from its PID.
+    process_group_id: Option<i32>,
     /// Linux cgroup-v2 containment boundary, when the runtime grants the
     /// worker's parent cgroup delegation. Descendants inherit membership,
     /// including descendants that call `setsid` or close worker pipes.
@@ -384,6 +388,7 @@ impl SubprocessWorkerHost {
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
         let stdout_pipe_identity = pipe_identity(&stdout);
+        let process_group_id = worker_process_group_id(child.id() as i32);
         let containment_cgroup = create_process_cgroup(child.id() as i32);
         let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
@@ -473,6 +478,7 @@ impl SubprocessWorkerHost {
             stderr_overflow,
             stderr_tail,
             stdout_pipe_identity,
+            process_group_id,
             containment_cgroup,
             readers_finished,
             readers_total,
@@ -569,13 +575,34 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn terminate(&mut self) -> Result<(), WorkerError> {
+        // Reap before addressing the process group. Once the leader has been
+        // reaped its PID may be reused by an unrelated worker, so killpg on
+        // the stale PID could terminate a concurrent request.
+        self.reap_if_exited()?;
+        let leader_reaped = self.reaped_status.is_some();
         // Capture descendants before killing the leader. This closes the
         // race where a child creates a new session and would otherwise be
         // reparented before process-group termination reaches it.
         let pid = self.child.id() as i32;
-        let mut contained = descendant_pids(pid);
+        // Once the leader is reaped, its PID may already belong to another
+        // process. Do not walk a stale /proc parent relationship in that
+        // case; the pipe identity and cgroup boundaries remain authoritative.
+        let mut contained = if leader_reaped {
+            Vec::new()
+        } else {
+            descendant_pids(pid)
+        };
+        if leader_reaped && let Some(group_id) = self.process_group_id {
+            contained.extend(process_group_pids(group_id));
+        }
         if let Some(identity) = &self.stdout_pipe_identity {
-            contained.extend(inherited_pipe_pids(identity));
+            let inherited = inherited_pipe_pids(identity);
+            for descendant in &inherited {
+                // A daemonized holder may have already forked a second
+                // generation after leaving the worker's process group.
+                contained.extend(descendant_pids(*descendant));
+            }
+            contained.extend(inherited);
         }
         contained.sort_unstable();
         contained.dedup();
@@ -589,21 +616,20 @@ impl WorkerHost for SubprocessWorkerHost {
                 nix::sys::signal::Signal::SIGKILL,
             );
         }
-        match nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGKILL,
-        ) {
-            Ok(()) => {}
-            Err(nix::errno::Errno::ESRCH) if cgroup_killed => {}
-            Err(nix::errno::Errno::ESRCH) => {
-                // No such process group: the worker was not spawned as a
-                // group leader. Kill the direct child instead, unless it
-                // has already been reaped (a clean exit needs no kill).
-                if self.reaped_status.is_none() {
-                    self.child.kill()?;
+        if !leader_reaped && !cgroup_killed {
+            if let Some(group_id) = self.process_group_id {
+                match nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(group_id),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(error) => return Err(WorkerError::Io(error.into())),
                 }
+            } else {
+                // The caller did not establish a private process group. Kill
+                // only the direct child instead of guessing from its PID.
+                self.child.kill()?;
             }
-            Err(error) => return Err(WorkerError::Io(error.into())),
         }
         // Reap the leader, waiting briefly for the SIGKILL to land so
         // the exit status (including the kill signal) is recorded. If
@@ -682,11 +708,12 @@ impl WorkerHost for SubprocessWorkerHost {
 /// delegated cgroup write access use the process-group fallback below.
 #[cfg(target_os = "linux")]
 fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
-    // Cgroup delegation is an optional runtime capability. Keep the tested
-    // process-group and descendant snapshot fallback as the default, and only
-    // opt into cgroups when the host explicitly confirms the boundary is safe.
-    if std::env::var_os("THREETERM_ENABLE_WORKER_CGROUP").as_deref()
-        != Some(std::ffi::OsStr::new("1"))
+    // Cgroup delegation is runtime-dependent. Prefer the durable boundary
+    // whenever the parent cgroup grants it, while retaining the process-group
+    // fallback for constrained runtimes. Operators can disable the attempt
+    // explicitly when a container exposes a misleading writable hierarchy.
+    if std::env::var_os("THREETERM_DISABLE_WORKER_CGROUP").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
     {
         return None;
     }
@@ -704,6 +731,17 @@ fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
         return None;
     }
     Some(path)
+}
+
+#[cfg(unix)]
+fn worker_process_group_id(pid: i32) -> Option<i32> {
+    let process_group = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))).ok()?;
+    (process_group.as_raw() == pid).then_some(process_group.as_raw())
+}
+
+#[cfg(not(unix))]
+fn worker_process_group_id(_pid: i32) -> Option<i32> {
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -783,6 +821,48 @@ fn descendant_pids(root: i32) -> Vec<i32> {
         }
     }
     descendants
+}
+
+/// Return members of a validated private process group without relying on the
+/// leader PID as a parent relationship. This is needed after the leader has
+/// been reaped: ordinary descendants have been reparented, but group members
+/// still provide a safe fallback boundary when cgroups are unavailable.
+#[cfg(target_os = "linux")]
+fn process_group_pids(group_id: i32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let current = std::process::id() as i32;
+    let mut members = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pid == current {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let is_member = fields
+            .split_whitespace()
+            .nth(2)
+            .and_then(|value| value.parse::<i32>().ok())
+            .is_some_and(|process_group| process_group == group_id);
+        if is_member {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_group_pids(_group_id: i32) -> Vec<i32> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]

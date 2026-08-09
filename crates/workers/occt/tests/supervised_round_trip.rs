@@ -188,6 +188,33 @@ fn typed_extrude_fails_closed_when_the_worker_never_completes() {
 }
 
 #[test]
+fn typed_extrude_cleans_interrupted_worker_temporary_output() {
+    let dir = FixtureDir::new("cleanup-temporary-output");
+    let temporary = dir.root.join("out.brep.tmp-stale-worker");
+    std::fs::write(&temporary, b"partial worker output").expect("temporary output writes");
+    let worker = dir
+        .worker_script(
+            "worker.sh",
+            "#!/bin/sh\n\
+             printf '%s\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
+             read line\n\
+             sleep 30\n",
+        )
+        .with_grace(Duration::from_millis(300));
+
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
+        .expect_err("hanging worker must fail closed");
+    assert!(
+        matches!(error, WorkerError::Supervised { .. }),
+        "got {error:?}"
+    );
+    assert!(
+        !temporary.exists(),
+        "interrupted worker temporary output must be removed"
+    );
+}
+
+#[test]
 fn locate_missing_binary_fails_closed() {
     let worker = OcctWorker::with_binary_path(std::path::PathBuf::from("/no/such/worker"))
         .with_grace(Duration::from_millis(100));

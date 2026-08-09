@@ -1883,4 +1883,35 @@ mod promotion_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn copy_brep_rejects_an_oversized_source_without_truncating_the_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "threeterm-host-copy-atomic-bound-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir creates");
+        let source = dir.join("src.brep");
+        let target = dir.join("out.brep");
+        std::fs::write(
+            &source,
+            vec![b'x'; threeterm_protocol::worker::MAX_ARTIFACT_BYTES + 1],
+        )
+        .expect("oversized source writes");
+        std::fs::write(&target, b"prior canonical bytes").expect("prior target writes");
+
+        let error = copy_brep(&source, &target).expect_err("oversized source must fail closed");
+
+        assert!(
+            error.contains("exceeds"),
+            "error must name the bound: {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("prior target reads"),
+            b"prior canonical bytes",
+            "a rejected promotion must preserve the prior target"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

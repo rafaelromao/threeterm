@@ -120,32 +120,67 @@ InputLine read_stdin_line() {
     return {std::move(out), next == '\n'};
 }
 
-// Recover the outer request identity before full JSON validation so malformed
-// requests can still produce a supervisor-bindable failure. This deliberately
-// accepts only a simple JSON string field, which is sufficient for the
-// protocol's opaque request identifiers; malformed or absent fields return an
-// empty hint and are reported without a Failed envelope.
-std::string request_id_hint(const std::string& raw) {
-    const std::string key = "\"request_id\"";
-    const std::size_t key_position = raw.find(key);
-    if (key_position == std::string::npos) return {};
-    std::size_t cursor = raw.find(':', key_position + key.size());
-    if (cursor == std::string::npos) return {};
+bool read_json_string(const std::string& raw, std::size_t& cursor, std::string& value) {
+    if (cursor >= raw.size() || raw[cursor] != '"') return false;
     ++cursor;
-    while (cursor < raw.size() && std::isspace(static_cast<unsigned char>(raw[cursor]))) {
-        ++cursor;
-    }
-    if (cursor >= raw.size() || raw[cursor] != '"') return {};
-    ++cursor;
-    std::string value;
+    value.clear();
     while (cursor < raw.size()) {
         const char character = raw[cursor++];
-        if (character == '"') return value;
-        if (character == '\\' && cursor < raw.size()) {
-            value.push_back(raw[cursor++]);
-        } else {
+        if (character == '"') return true;
+        if (character != '\\') {
             value.push_back(character);
+            continue;
         }
+        if (cursor >= raw.size()) return false;
+        const char escaped = raw[cursor++];
+        switch (escaped) {
+            case '"': value.push_back('"'); break;
+            case '\\': value.push_back('\\'); break;
+            case '/': value.push_back('/'); break;
+            case 'b': value.push_back('\b'); break;
+            case 'f': value.push_back('\f'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            default:
+                // A hint is only safe when the opaque identifier's string
+                // syntax is fully decoded. Reject unicode escapes rather than
+                // guessing at a potentially different request identity.
+                return false;
+        }
+    }
+    return false;
+}
+
+// Recover the outer request identity before full JSON validation so malformed
+// requests can still produce a supervisor-bindable failure. The bounded
+// prefix is walked as JSON rather than searched textually, so a nested
+// request_id or a malformed escape cannot bind a failure to the wrong request.
+std::string request_id_hint(const std::string& raw) {
+    std::size_t cursor = 0;
+    int depth = 0;
+    while (cursor < raw.size()) {
+        const char character = raw[cursor];
+        if (character == '"') {
+            std::string value;
+            if (!read_json_string(raw, cursor, value)) return {};
+            std::size_t after = cursor;
+            while (after < raw.size() && std::isspace(static_cast<unsigned char>(raw[after]))) ++after;
+            if (depth == 1 && value == "request_id" && after < raw.size() && raw[after] == ':') {
+                cursor = after + 1;
+                while (cursor < raw.size() && std::isspace(static_cast<unsigned char>(raw[cursor]))) ++cursor;
+                std::string request_id;
+                return read_json_string(raw, cursor, request_id) ? request_id : std::string{};
+            }
+            cursor = after;
+            continue;
+        }
+        if (character == '{' || character == '[') {
+            ++depth;
+        } else if (character == '}' || character == ']') {
+            --depth;
+        }
+        ++cursor;
     }
     return {};
 }

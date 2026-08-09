@@ -1288,6 +1288,61 @@ fn assert_raw_loft_with_outer_identity(
     assert!(failed.contains(detail), "got {stdout}");
 }
 
+fn run_raw_worker_line(worker: &OcctWorker, line: &str) -> String {
+    let mut child = Command::new(worker.binary_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("worker spawns");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin.write_all(line.as_bytes()).expect("stdin writes");
+    drop(stdin);
+    let output = child.wait_with_output().expect("worker waits");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn worker_binds_an_oversized_request_failure_to_the_outer_request_id() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request_id = "req-oversized-frame";
+    let padding = "x".repeat(threeterm_protocol::frame::MAX_FRAME_BUFFER);
+    let line = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"loft\",\"args\":{{\"padding\":\"{padding}\"}},\"revision_id\":\"\"}}\n"
+    );
+
+    let stdout = run_raw_worker_line(&worker, &line);
+
+    assert!(stdout.contains("\"kind\":\"failed\""), "got {stdout}");
+    assert!(
+        stdout.contains(request_id),
+        "failure must retain request identity: {stdout}"
+    );
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
+}
+
+#[test]
+fn worker_binds_an_unterminated_request_failure_to_the_outer_request_id() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request_id = "req-unterminated-frame";
+    let line = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"loft\",\"args\":{{}},\"revision_id\":\"\"}}"
+    );
+
+    let stdout = run_raw_worker_line(&worker, &line);
+
+    assert!(stdout.contains("\"kind\":\"failed\""), "got {stdout}");
+    assert!(
+        stdout.contains(request_id),
+        "failure must retain request identity: {stdout}"
+    );
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
+}
+
 #[test]
 fn loft_two_rectangles_returns_ok_with_real_brep() {
     let Some(worker) = locate_worker() else {

@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use threeterm_protocol::supervisor::{
-    ExitKind, Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
+    Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
 };
 use threeterm_protocol::worker::{
     SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
@@ -581,7 +581,7 @@ fn map_outcome(
             {
                 // Keep the structured termination facts when a domain failure
                 // is followed by a signal-bearing worker termination.
-                if record.exit_kind == ExitKind::Cooperative || record.exit_signal.is_none() {
+                if record.exit_signal.is_none() {
                     return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
                 }
             }
@@ -1466,7 +1466,9 @@ mod tests {
                 stderr_tail: "worker crashed".to_string(),
                 failed_code: Some("brep_invalid".to_string()),
                 failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
-                exit_kind: ExitKind::ForceAfterGrace,
+                // A Failed envelope can be observed before the worker dies;
+                // the signal must still keep the structured termination record.
+                exit_kind: ExitKind::Cooperative,
             },
         };
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)

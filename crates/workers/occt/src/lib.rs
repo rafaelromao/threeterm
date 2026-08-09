@@ -218,19 +218,12 @@ impl OcctWorker {
     /// Extrude `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn extrude(&self, request: &ExtrudeRequest) -> Result<ExtrudeResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("extrude request serialization failed: {error}"),
-        })?;
-        if bytes.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
-            return Err(WorkerError::Malformed {
-                detail: format!(
-                    "serialized request of {} bytes exceeds the {} byte input bound",
-                    bytes.len(),
-                    threeterm_protocol::frame::MAX_FRAME_BUFFER
-                ),
-            });
-        }
-        self.invoke(&bytes)?.into_extrude()
+        let bytes = bounded_serialize(request, "extrude")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_extrude()
     }
 
     /// Extrude `request` with a cooperative cancellation token. The
@@ -243,24 +236,17 @@ impl OcctWorker {
         request: &ExtrudeRequest,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("extrude request serialization failed: {error}"),
-        })?;
-        if bytes.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
-            return Err(WorkerError::Malformed {
-                detail: format!(
-                    "serialized request of {} bytes exceeds the {} byte input bound",
-                    bytes.len(),
-                    threeterm_protocol::frame::MAX_FRAME_BUFFER
-                ),
-            });
-        }
+        let bytes = bounded_serialize(request, "extrude")?;
         let value = self.run_with_cancel(&bytes, cancel)?;
         // The cancellable path must run the same bounded, digest-verified
         // decoder as the synchronous path: oversized, symlinked, or
         // mismatched staged output fails closed before it can reach the
         // host commit path.
-        RawResult { value }.into_extrude()
+        RawResult {
+            value,
+            expected_output: expected_output_path(&request.output_dir, &request.output_filename),
+        }
+        .into_extrude()
     }
 
     /// Boolean-fuse `request` by spawning the worker process. See
@@ -269,55 +255,67 @@ impl OcctWorker {
         &self,
         request: &BooleanFuseRequest,
     ) -> Result<BooleanFuseResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("boolean-fuse request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_boolean_fuse()
+        let bytes = bounded_serialize(request, "boolean-fuse")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_boolean_fuse()
     }
 
     /// Fillet `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn fillet(&self, request: &FilletRequest) -> Result<FilletResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("fillet request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_fillet()
+        let bytes = bounded_serialize(request, "fillet")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_fillet()
     }
 
     /// Chamfer `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn chamfer(&self, request: &ChamferRequest) -> Result<ChamferResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("chamfer request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_chamfer()
+        let bytes = bounded_serialize(request, "chamfer")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_chamfer()
     }
 
     /// Hole `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn hole(&self, request: &HoleRequest) -> Result<HoleResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("hole request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_hole()
+        let bytes = bounded_serialize(request, "hole")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_hole()
     }
 
     /// Revolve `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn revolve(&self, request: &RevolveRequest) -> Result<RevolveResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("revolve request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_revolve()
+        let bytes = bounded_serialize(request, "revolve")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_revolve()
     }
 
     /// Mirror `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn mirror(&self, request: &MirrorRequest) -> Result<MirrorResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("mirror request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_mirror()
+        let bytes = bounded_serialize(request, "mirror")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_mirror()
     }
 
     /// Linear pattern `request` by spawning the worker process. See
@@ -326,10 +324,12 @@ impl OcctWorker {
         &self,
         request: &LinearPatternRequest,
     ) -> Result<LinearPatternResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("linear_pattern request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_linear_pattern()
+        let bytes = bounded_serialize(request, "linear_pattern")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_linear_pattern()
     }
 
     /// Circular pattern `request` by spawning the worker process. See
@@ -338,46 +338,61 @@ impl OcctWorker {
         &self,
         request: &CircularPatternRequest,
     ) -> Result<CircularPatternResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("circular_pattern request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_circular_pattern()
+        let bytes = bounded_serialize(request, "circular_pattern")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_circular_pattern()
     }
 
     /// Shell `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn shell(&self, request: &ShellRequest) -> Result<ShellResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("shell request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_shell()
+        let bytes = bounded_serialize(request, "shell")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_shell()
     }
 
     /// Draft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn draft(&self, request: &DraftRequest) -> Result<DraftResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("draft request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_draft()
+        let bytes = bounded_serialize(request, "draft")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_draft()
     }
 
     /// Loft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn loft(&self, request: &LoftRequest) -> Result<LoftResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("loft request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_loft()
+        let bytes = bounded_serialize(request, "loft")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_loft()
     }
 
-    fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
+    fn invoke(
+        &self,
+        envelope: &[u8],
+        expected_output: Option<PathBuf>,
+    ) -> Result<RawResult, WorkerError> {
         // Every production operation flows through the same cancellable
         // supervised path; the synchronous variants carry a never-set
         // token, so the deadline expiry remains the hard stop.
         let cancel = std::sync::atomic::AtomicBool::new(false);
         self.run_with_cancel(envelope, &cancel)
-            .map(|value| RawResult { value })
+            .map(|value| RawResult {
+                value,
+                expected_output,
+            })
     }
 
     /// Run `envelope` through the supervised lifecycle with a
@@ -435,6 +450,19 @@ impl OcctWorker {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
+        let output_dir = args
+            .get("output_dir")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let output_filename = args
+            .get("output_filename")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let expected_output = if output_dir.is_empty() || output_filename.is_empty() {
+            None
+        } else {
+            Some(Path::new(output_dir).join(output_filename))
+        };
 
         let host = <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
@@ -455,7 +483,14 @@ impl OcctWorker {
             },
             cancel,
         );
-        map_outcome(outcome, &request_id, &command_id, &feature_id).map(|result| result.value)
+        map_outcome(
+            outcome,
+            &request_id,
+            &command_id,
+            &feature_id,
+            expected_output,
+        )
+        .map(|result| result.value)
     }
 }
 
@@ -472,6 +507,7 @@ fn map_outcome(
     request_id: &str,
     command_id: &str,
     expected_feature_id: &str,
+    expected_output: Option<PathBuf>,
 ) -> Result<RawResult, WorkerError> {
     match outcome {
         SupervisorOutcome::Completed { result, .. } => {
@@ -519,7 +555,10 @@ fn map_outcome(
                     ),
                 });
             }
-            Ok(RawResult { value: result })
+            Ok(RawResult {
+                value: result,
+                expected_output,
+            })
         }
         SupervisorOutcome::Acknowledged {
             request_id, reason, ..
@@ -549,6 +588,31 @@ fn map_outcome(
             })
         }
     }
+}
+
+/// Serializes a typed request through a capped writer so an oversized
+/// request fails during encoding instead of being fully materialized
+/// in memory before the protocol's input bound rejects it.
+fn bounded_serialize<T: serde::Serialize>(
+    request: &T,
+    operation: &str,
+) -> Result<Vec<u8>, WorkerError> {
+    threeterm_protocol::worker::serialize_capped(
+        request,
+        threeterm_protocol::frame::MAX_FRAME_BUFFER,
+    )
+    .map_err(|error| WorkerError::Malformed {
+        detail: format!("{operation} request serialization failed: {error}"),
+    })
+}
+
+/// The private output location a request declares, when both parts are
+/// present. The worker's advertised `brep_path` must match this.
+fn expected_output_path(output_dir: &Path, output_filename: &str) -> Option<PathBuf> {
+    if output_filename.is_empty() {
+        return None;
+    }
+    Some(output_dir.join(output_filename))
 }
 
 /// Hex SHA-256 of a file's bytes, used to verify the worker's staged
@@ -584,6 +648,12 @@ impl WorkerProcess for OcctWorker {
 #[derive(Debug)]
 struct RawResult {
     value: serde_json::Value,
+    /// The private output location the request declared
+    /// (`output_dir`/`output_filename`). When present, the worker's
+    /// advertised `brep_path` must equal it: a worker pointing at any
+    /// other file fails closed instead of letting the host promote
+    /// foreign bytes.
+    expected_output: Option<PathBuf>,
 }
 
 impl RawResult {
@@ -605,15 +675,28 @@ impl RawResult {
             .get("brep_path")
             .and_then(serde_json::Value::as_str)
             .map(PathBuf::from);
-        // The staged output must exist as a regular file that is not a
-        // symlink: a missing, dangling, or redirected path cannot be
-        // verified and fails closed instead of trusting the
-        // advertisement.
+        // The staged output must be the private location the request
+        // declared: a worker advertising any other path fails closed so
+        // a malformed or compromised worker can never direct the host to
+        // promote foreign bytes.
         let Some(path) = brep_path.as_deref() else {
             return Err(WorkerError::Malformed {
                 detail: "worker response is missing brep_path".to_string(),
             });
         };
+        if let Some(expected) = &self.expected_output {
+            if path != expected.as_path() {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "worker output at {path:?} is not the request's private output location {expected:?}"
+                    ),
+                });
+            }
+        }
+        // The staged output must exist as a regular file that is not a
+        // symlink: a missing, dangling, or redirected path cannot be
+        // verified and fails closed instead of trusting the
+        // advertisement.
         let metadata = std::fs::symlink_metadata(path).map_err(|error| WorkerError::Malformed {
             detail: format!("worker output at {path:?} could not be stat'd: {error}"),
         })?;
@@ -1176,8 +1259,8 @@ mod tests {
             }),
             artifact_headers: vec![],
         };
-        let result =
-            map_outcome(outcome, "req-1", "extrude", "box-1").expect("completed outcome maps");
+        let result = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect("completed outcome maps");
         assert_eq!(result.value["status"], "ok");
     }
 
@@ -1193,12 +1276,79 @@ mod tests {
             }),
             artifact_headers: vec![],
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("foreign request_id must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
             "expected Malformed; got {error:?}"
         );
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_bound_to_a_foreign_output_path() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "feature_id": "box-1",
+                "status": "ok",
+                "brep_path": "/tmp/other.brep",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(
+            outcome,
+            "req-1",
+            "extrude",
+            "box-1",
+            Some(PathBuf::from("/tmp/out.brep")),
+        )
+        .expect("completed outcome maps")
+        .into_extrude()
+        .expect_err("foreign output path must fail closed");
+        match error {
+            WorkerError::Malformed { detail } => {
+                assert!(
+                    detail.contains("output location"),
+                    "detail must name the output binding; got {detail:?}"
+                );
+            }
+            other => panic!("expected Malformed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_accepts_a_completed_result_at_the_expected_output_path() {
+        let output_path = std::env::temp_dir().join(format!("{}.brep", new_request_id()));
+        std::fs::write(&output_path, []).expect("expected output fixture writes");
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "feature_id": "box-1",
+                "status": "ok",
+                "brep_path": output_path,
+                "brep_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "brep_bytes": 0,
+            }),
+            artifact_headers: vec![],
+        };
+        let result = map_outcome(
+            outcome,
+            "req-1",
+            "extrude",
+            "box-1",
+            Some(output_path.clone()),
+        )
+        .expect("expected output path maps")
+        .into_extrude()
+        .expect("expected output path is accepted");
+        std::fs::remove_file(output_path).expect("expected output fixture removes");
+        assert_eq!(result.status, "ok");
     }
 
     #[test]
@@ -1213,7 +1363,7 @@ mod tests {
             }),
             artifact_headers: vec![],
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("foreign operation must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
@@ -1239,7 +1389,7 @@ mod tests {
                 exit_kind: ExitKind::Cooperative,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("failed envelope must not map to success");
         match error {
             WorkerError::Diagnostic(diagnostic) => {
@@ -1269,7 +1419,7 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("signal exit must not map to success");
         match error {
             WorkerError::Supervised { record } => {
@@ -1299,7 +1449,7 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("schema mismatch must fail closed");
         assert!(
             matches!(error, WorkerError::Malformed { .. }),
@@ -1325,7 +1475,7 @@ mod tests {
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
-        let error = map_outcome(outcome, "req-1", "extrude", "box-1")
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("closed worker must fail closed");
         match error {
             WorkerError::Supervised { record } => {

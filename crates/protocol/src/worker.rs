@@ -768,21 +768,32 @@ impl From<std::io::Error> for WorkerError {
 /// The host and worker speak newline-framed JSON; every line carries one
 /// envelope (closed issue #49).
 pub fn encode_frame(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
+    let mut bytes = serialize_capped(envelope, MAX_FRAME_BUFFER)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Serializes `value` to JSON with a hard byte cap, so an oversized
+/// payload fails during encoding instead of being fully materialized
+/// in memory first (the input bound is enforced, not checked after).
+pub fn serialize_capped<T: Serialize>(
+    value: &T,
+    limit: usize,
+) -> Result<Vec<u8>, serde_json::Error> {
     // Serialize through a capped writer so an oversized frame is
     // rejected during encoding instead of being fully materialized in
     // memory first (the input bound is enforced, not checked after).
     let mut writer = BoundedWriter {
         bytes: Vec::with_capacity(256),
-        limit: MAX_FRAME_BUFFER,
+        limit,
         exceeded: false,
     };
-    serde_json::to_writer(&mut writer, envelope)?;
+    serde_json::to_writer(&mut writer, value)?;
     if writer.exceeded {
         return Err(serde_json::Error::io(std::io::Error::other(format!(
-            "frame exceeds the {MAX_FRAME_BUFFER} byte bound"
+            "payload exceeds the {limit} byte bound"
         ))));
     }
-    writer.bytes.push(b'\n');
     Ok(writer.bytes)
 }
 

@@ -89,8 +89,12 @@ fn retry_fixture<T>(mut attempt: impl FnMut() -> Result<T, WorkerError>) -> Resu
 }
 
 fn sample_extrude_request() -> ExtrudeRequest {
+    sample_extrude_request_at("/tmp")
+}
+
+fn sample_extrude_request_at(output_dir: impl Into<std::path::PathBuf>) -> ExtrudeRequest {
     ExtrudeRequest::new("req-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 2.0)
-        .with_output_path("/tmp", "out.brep")
+        .with_output_path(output_dir, "out.brep")
         .with_feature_id("box-1")
 }
 
@@ -113,8 +117,8 @@ fn typed_extrude_routes_through_the_supervised_protocol() {
          read line\n\
          {reply}\n"
     ));
-    let result =
-        retry_fixture(|| worker.extrude(&sample_extrude_request())).expect("extrude succeeds");
+    let result = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
+        .expect("extrude succeeds");
     assert_eq!(result.status, "ok");
     assert_eq!(result.feature_id, "box-1");
     assert_eq!(result.brep_bytes, 42);
@@ -225,7 +229,7 @@ fn typed_extrude_fails_closed_on_oversized_staged_output() {
          read line\n\
          {reply}\n"
     ));
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("oversized staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
@@ -260,7 +264,7 @@ fn typed_extrude_fails_closed_when_the_actual_staged_file_is_oversized() {
             path = oversized_path.display()
         ),
     );
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("actual oversized staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
@@ -349,7 +353,7 @@ fn typed_extrude_fails_closed_on_staged_digest_mismatch() {
             },
         ),
     );
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("digest mismatch must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
@@ -380,7 +384,7 @@ fn typed_extrude_fails_closed_on_non_regular_staged_file() {
             path = staged.display()
         ),
     );
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("non-regular staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
@@ -414,7 +418,7 @@ fn typed_extrude_fails_closed_on_a_symlinked_staged_file() {
             path = staged.display()
         ),
     );
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("symlinked staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
@@ -449,8 +453,10 @@ fn typed_extrude_with_cancel_fails_closed_on_oversized_staged_output() {
         ),
     );
     let cancel = std::sync::atomic::AtomicBool::new(false);
-    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
-        .expect_err("cancellable oversized staged output must fail closed");
+    let error = retry_fixture(|| {
+        worker.extrude_with_cancel(&sample_extrude_request_at(&dir.root), &cancel)
+    })
+    .expect_err("cancellable oversized staged output must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
             assert!(
@@ -483,8 +489,10 @@ fn typed_extrude_with_cancel_fails_closed_on_digest_mismatch() {
         ),
     );
     let cancel = std::sync::atomic::AtomicBool::new(false);
-    let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
-        .expect_err("cancellable digest mismatch must fail closed");
+    let error = retry_fixture(|| {
+        worker.extrude_with_cancel(&sample_extrude_request_at(&dir.root), &cancel)
+    })
+    .expect_err("cancellable digest mismatch must fail closed");
     match error {
         WorkerError::Malformed { detail } => {
             assert!(
@@ -516,7 +524,7 @@ fn typed_extrude_fails_closed_on_foreign_feature_id_in_result() {
             path = staged.display()
         ),
     );
-    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("foreign feature_id must fail closed");
     match error {
         WorkerError::Malformed { detail } => {

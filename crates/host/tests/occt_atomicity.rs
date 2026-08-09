@@ -1880,15 +1880,7 @@ fn linear_pattern_brep_invalid_preserves_canonical_state() {
         &PathBuf::from("/no/such/base.brep"),
     );
     let result = host.linear_pattern(&root, request, &fake_worker);
-    assert!(
-        matches!(
-            result,
-            Err(HostError::WorkerTerminated { ref record })
-                if record.failed_code.as_deref() == Some("brep_invalid")
-                    && record.failed_detail.as_deref() == Some("BRepCheck_Analyzer failed")
-        ),
-        "got {result:?}"
-    );
+    assert!(is_brep_invalid(&result), "got {result:?}");
 
     let (post_manifest, post_log) = snapshot_files(&root);
     assert_eq!(prior_manifest, post_manifest);

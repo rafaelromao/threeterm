@@ -23,9 +23,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
-use nix::fcntl::{OFlag, openat};
+use nix::fcntl::{AtFlags, OFlag, openat};
 use nix::sys::stat::{Mode, mkdirat};
-use nix::unistd::{LinkatFlags, UnlinkatFlags, linkat, unlinkat};
+use nix::unistd::{UnlinkatFlags, linkat, unlinkat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -133,6 +133,7 @@ pub struct Stage {
 #[derive(Debug)]
 struct VerifiedFile {
     file: fs::File,
+    anchor_name: String,
 }
 
 impl Stage {
@@ -338,8 +339,31 @@ impl Stage {
                     actual: sha256,
                 });
             }
+            let verified_handle = open_child(
+                &self.root_dir,
+                &verified_name,
+                OFlag::O_PATH | OFlag::O_NOFOLLOW,
+                Mode::empty(),
+            )?;
+            let verified_metadata = verified.metadata().map_err(ArtifactError::Io)?;
+            let handle_metadata = verified_handle.metadata().map_err(ArtifactError::Io)?;
+            if !same_file(&verified_metadata, &handle_metadata) {
+                return Err(ArtifactError::StagedFileChanged(verified_name.clone()));
+            }
+            let anchor_name = format!("{verified_name}-anchor");
+            linkat(
+                &verified_handle,
+                "",
+                &self.root_dir,
+                anchor_name.as_str(),
+                AtFlags::AT_EMPTY_PATH,
+            )
+            .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))?;
             unlink_child(&self.root_dir, &staging_name)?;
-            Ok(VerifiedFile { file: verified })
+            Ok(VerifiedFile {
+                file: verified_handle,
+                anchor_name,
+            })
         })();
         match result {
             Ok(verified) => {
@@ -350,6 +374,7 @@ impl Stage {
             }
             Err(error) => {
                 let _ = unlink_child(&self.root_dir, &verified_name);
+                let _ = unlink_child(&self.root_dir, &format!("{verified_name}-anchor"));
                 let _ = unlink_child(&self.root_dir, &staging_name);
                 Err(error)
             }
@@ -376,27 +401,14 @@ impl Stage {
                     "verified artifact handle is no longer available",
                 ))
             })?;
-        let result = (|| -> Result<(), ArtifactError> {
-            let held_metadata = verified.file.metadata().map_err(ArtifactError::Io)?;
-            let current = open_child(
-                &self.root_dir,
-                &verified_name,
-                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
-                Mode::empty(),
-            )?;
-            let current_metadata = current.metadata().map_err(ArtifactError::Io)?;
-            if !same_file(&held_metadata, &current_metadata) {
-                return Err(ArtifactError::StagedFileChanged(verified_name.clone()));
-            }
-            linkat(
-                &self.root_dir,
-                verified_name.as_str(),
-                &self.root_dir,
-                final_name,
-                LinkatFlags::empty(),
-            )
-            .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
-        })()
+        let result = linkat(
+            &verified.file,
+            "",
+            &self.root_dir,
+            final_name,
+            AtFlags::AT_EMPTY_PATH,
+        )
+        .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
         .map_err(|error| match error {
             ArtifactError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 ArtifactError::FinalPathExists(final_path.clone())
@@ -405,6 +417,7 @@ impl Stage {
             error => error,
         });
         let _ = unlink_child(&self.root_dir, &verified_name);
+        let _ = unlink_child(&self.root_dir, &verified.anchor_name);
         result.map(|()| final_path)
     }
 
@@ -467,7 +480,9 @@ impl Stage {
     /// Remove a verified artifact after the Host accepts an existing cache hit.
     pub fn discard_verified(&self, staging_name: &str) {
         if validate_name(staging_name).is_ok() {
-            self.verified_files.borrow_mut().remove(staging_name);
+            if let Some(verified) = self.verified_files.borrow_mut().remove(staging_name) {
+                let _ = unlink_child(&self.root_dir, &verified.anchor_name);
+            }
             let _ = unlink_child(&self.root_dir, &format!(".{staging_name}.verified"));
         }
     }
@@ -968,12 +983,11 @@ mod tests {
         fs::remove_file(&verified_path).expect("verified path removes");
         fs::rename(&replacement, &verified_path).expect("replacement path installs");
 
-        let error = stage
+        let final_path = stage
             .publish_verified(&artifact_header.staging_name, "derived-final")
-            .expect_err("replaced verified path must fail closed");
+            .expect("retained verified inode publishes");
 
-        assert!(matches!(error, ArtifactError::StagedFileChanged(_)));
-        assert!(!root.join("derived-final").exists());
+        assert_eq!(fs::read(final_path).expect("published bytes read"), bytes);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(replacement);
     }

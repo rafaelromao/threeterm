@@ -16,9 +16,13 @@ use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::Mode;
+use nix::unistd::{LinkatFlags, UnlinkatFlags, linkat, unlinkat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -117,6 +121,9 @@ pub struct StagedArtifact {
 #[derive(Debug)]
 pub struct Stage {
     root: PathBuf,
+    parent: fs::File,
+    root_name: String,
+    root_dir: fs::File,
 }
 
 impl Stage {
@@ -140,7 +147,7 @@ impl Stage {
             return Err(ArtifactError::InvalidRoot(root));
         }
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(ArtifactError::Io)?;
-        Ok(Self { root })
+        Self::from_existing_root(root)
     }
 
     /// Create a new private staging directory without reusing an existing
@@ -181,7 +188,7 @@ impl Stage {
                         let _ = fs::remove_dir(&candidate);
                         return Err(ArtifactError::Io(error));
                     }
-                    return Ok(Self { root: candidate });
+                    return Self::from_existing_root(candidate);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(ArtifactError::Io(error)),
@@ -217,15 +224,12 @@ impl Stage {
             });
         }
         let sha256 = sha256_hex(bytes);
-        let staging_path = self.root.join(format!("{staging_name}.partial"));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(0o400000)
-            .open(&staging_path)
-            .map_err(ArtifactError::Io)?;
+        let mut file = open_child(
+            &self.root_dir,
+            &format!("{staging_name}.partial"),
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )?;
         file.write_all(bytes).map_err(ArtifactError::Io)?;
         file.sync_all().map_err(ArtifactError::Io)?;
         Ok(StagedArtifact {
@@ -244,42 +248,38 @@ impl Stage {
     /// advertised byte count and digest. Verification never publishes bytes.
     pub fn verify(&self, header: &ArtifactHeader) -> Result<(), ArtifactError> {
         validate_name(&header.staging_name)?;
-        let staging_path = self.root.join(format!("{}.partial", header.staging_name));
-        let verified_path = self.root.join(format!(".{}.verified", header.staging_name));
+        let staging_name = format!("{}.partial", header.staging_name);
+        let verified_name = format!(".{}.verified", header.staging_name);
         let result = (|| {
-            let metadata = fs::symlink_metadata(&staging_path).map_err(ArtifactError::Io)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
-            }
-            let mut source = OpenOptions::new()
-                .read(true)
-                .custom_flags(0o400000)
-                .open(&staging_path)
-                .map_err(ArtifactError::Io)?;
+            let mut source = match open_child(
+                &self.root_dir,
+                &staging_name,
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW,
+                Mode::empty(),
+            ) {
+                Err(ArtifactError::Io(error))
+                    if error.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32) =>
+                {
+                    return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
+                }
+                result => result?,
+            };
             let opened_metadata = source.metadata().map_err(ArtifactError::Io)?;
             if !opened_metadata.is_file() {
                 return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
             }
-            if metadata.len() > MAX_ARTIFACT_BYTES as u64
-                || opened_metadata.len() > MAX_ARTIFACT_BYTES as u64
-            {
+            if opened_metadata.len() > MAX_ARTIFACT_BYTES as u64 {
                 return Err(ArtifactError::PayloadTooLarge {
                     size: usize::try_from(opened_metadata.len()).unwrap_or(usize::MAX),
                     max: MAX_ARTIFACT_BYTES,
                 });
             }
-            if !same_file(&metadata, &opened_metadata) {
-                return Err(ArtifactError::StagedFileChanged(
-                    header.staging_name.clone(),
-                ));
-            }
-            let mut verified = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(0o400000)
-                .open(&verified_path)
-                .map_err(ArtifactError::Io)?;
+            let mut verified = open_child(
+                &self.root_dir,
+                &verified_name,
+                OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
+            )?;
             let mut digest = Sha256::new();
             let mut byte_count = 0u64;
             let mut buffer = [0u8; 8192];
@@ -315,22 +315,12 @@ impl Stage {
                     actual: sha256,
                 });
             }
-            let current_metadata =
-                fs::symlink_metadata(&staging_path).map_err(ArtifactError::Io)?;
-            if current_metadata.file_type().is_symlink()
-                || !current_metadata.is_file()
-                || !same_file(&opened_metadata, &current_metadata)
-            {
-                return Err(ArtifactError::StagedFileChanged(
-                    header.staging_name.clone(),
-                ));
-            }
-            fs::remove_file(&staging_path).map_err(ArtifactError::Io)?;
+            unlink_child(&self.root_dir, &staging_name)?;
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&verified_path);
-            let _ = fs::remove_file(&staging_path);
+            let _ = unlink_child(&self.root_dir, &verified_name);
+            let _ = unlink_child(&self.root_dir, &staging_name);
         }
         result
     }
@@ -344,16 +334,24 @@ impl Stage {
     ) -> Result<PathBuf, ArtifactError> {
         validate_name(staging_name)?;
         validate_name(final_name)?;
-        let verified_path = self.root.join(format!(".{staging_name}.verified"));
         let final_path = self.root.join(final_name);
-        let result = fs::hard_link(&verified_path, &final_path).map_err(|error| {
+        let verified_name = format!(".{staging_name}.verified");
+        let result = linkat(
+            &self.root_dir,
+            verified_name.as_str(),
+            &self.root_dir,
+            final_name,
+            LinkatFlags::empty(),
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 ArtifactError::FinalPathExists(final_path.clone())
             } else {
                 ArtifactError::Rename(error)
             }
         });
-        let _ = fs::remove_file(&verified_path);
+        let _ = unlink_child(&self.root_dir, &verified_name);
         result.map(|()| final_path)
     }
 
@@ -366,25 +364,22 @@ impl Stage {
         sha256: &str,
     ) -> Result<bool, ArtifactError> {
         validate_name(final_name)?;
-        let final_path = self.root.join(final_name);
-        let metadata = match fs::symlink_metadata(&final_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(ArtifactError::Io(error)),
+        let mut file = match open_child(
+            &self.root_dir,
+            final_name,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(file) => file,
+            Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         };
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != byte_count
-        {
-            return Ok(false);
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(0o400000)
-            .open(&final_path)
-            .map_err(ArtifactError::Io)?;
         let opened_metadata = file.metadata().map_err(ArtifactError::Io)?;
         if !opened_metadata.is_file()
             || opened_metadata.len() > MAX_ARTIFACT_BYTES as u64
-            || !same_file(&metadata, &opened_metadata)
+            || opened_metadata.len() != byte_count
         {
             return Ok(false);
         }
@@ -402,28 +397,24 @@ impl Stage {
             }
             digest.update(&buffer[..read]);
         }
-        let current_metadata = fs::symlink_metadata(&final_path).map_err(ArtifactError::Io)?;
-        Ok(current_metadata.is_file()
-            && same_file(&opened_metadata, &current_metadata)
-            && actual_bytes == byte_count
-            && hex_digest(&digest.finalize()) == sha256)
+        Ok(actual_bytes == byte_count && hex_digest(&digest.finalize()) == sha256)
     }
 
     /// Remove an invalid cache-owned final artifact before recovering it from
     /// a newly verified staging file.
     pub fn discard_final(&self, final_name: &str) -> Result<(), ArtifactError> {
         validate_name(final_name)?;
-        match fs::remove_file(self.root.join(final_name)) {
+        match unlink_child(&self.root_dir, final_name) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(ArtifactError::Io(error)),
+            Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
     /// Remove a verified artifact after the Host accepts an existing cache hit.
     pub fn discard_verified(&self, staging_name: &str) {
         if validate_name(staging_name).is_ok() {
-            let _ = fs::remove_file(self.root.join(format!(".{staging_name}.verified")));
+            let _ = unlink_child(&self.root_dir, &format!(".{staging_name}.verified"));
         }
     }
 
@@ -432,13 +423,89 @@ impl Stage {
     /// host never holds an authoritative-looking staged entry. The
     /// returned `Stage` is consumed; create a fresh one if needed.
     pub fn discard(self) -> Result<(), ArtifactError> {
-        match fs::remove_dir_all(&self.root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(ArtifactError::Io(error)),
+        let expected = self.root_dir.metadata().map_err(ArtifactError::Io)?;
+        let current = openat_directory(&self.parent, &self.root_name)?;
+        if !same_file(&expected, &current.metadata().map_err(ArtifactError::Io)?) {
+            return Err(ArtifactError::StagedFileChanged(
+                self.root.display().to_string(),
+            ));
         }
-        Ok(())
+        let stable_root = PathBuf::from(format!("/proc/self/fd/{}", self.root_dir.as_raw_fd()));
+        for entry in fs::read_dir(stable_root).map_err(ArtifactError::Io)? {
+            let entry = entry.map_err(ArtifactError::Io)?;
+            if entry.file_type().map_err(ArtifactError::Io)?.is_dir() {
+                fs::remove_dir_all(entry.path()).map_err(ArtifactError::Io)?;
+            } else {
+                unlink_child(&self.root_dir, &entry.file_name().to_string_lossy())?;
+            }
+        }
+        match unlinkat(
+            &self.parent,
+            self.root_name.as_str(),
+            UnlinkatFlags::RemoveDir,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) if error == nix::errno::Errno::ENOENT => Ok(()),
+            Err(error) => Err(ArtifactError::Io(std::io::Error::from_raw_os_error(
+                error as i32,
+            ))),
+        }
     }
+}
+
+impl Stage {
+    fn from_existing_root(root: PathBuf) -> Result<Self, ArtifactError> {
+        let parent_path = root
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let root_name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ArtifactError::InvalidRoot(root.clone()))?
+            .to_string();
+        let parent = open_directory(parent_path)?;
+        let root_dir = openat_directory(&parent, &root_name)?;
+        Ok(Self {
+            root,
+            parent,
+            root_name,
+            root_dir,
+        })
+    }
+}
+
+fn open_directory(path: &Path) -> Result<fs::File, ArtifactError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(0o200000 | 0o400000)
+        .open(path)
+        .map_err(ArtifactError::Io)
+}
+
+fn openat_directory(parent: &fs::File, name: &str) -> Result<fs::File, ArtifactError> {
+    open_child(
+        parent,
+        name,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+}
+
+fn open_child(
+    directory: &fs::File,
+    name: &str,
+    flags: OFlag,
+    mode: Mode,
+) -> Result<fs::File, ArtifactError> {
+    openat(directory, name, flags, mode)
+        .map(fs::File::from)
+        .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
+}
+
+fn unlink_child(directory: &fs::File, name: &str) -> Result<(), ArtifactError> {
+    unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
+        .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
 }
 
 /// SHA-256 hex digest of `bytes`, lowercase, 64 characters.
@@ -872,6 +939,32 @@ mod tests {
         assert!(matches!(error, ArtifactError::InvalidRoot(path) if path == link));
         let _ = fs::remove_file(link);
         let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn stable_stage_handle_does_not_follow_a_replaced_ancestor() {
+        let parent = temp_root("ancestor-parent");
+        let outside = temp_root("ancestor-outside");
+        let moved = temp_root("ancestor-moved");
+        fs::create_dir_all(&outside).expect("outside creates");
+        let stage = Stage::create_fresh(&parent, "extrude").expect("stage creates");
+        let staged = stage
+            .stage_bytes("sketch-1.brep", b"private bytes")
+            .expect("artifact stages");
+        let header = header(&staged, staged.sha256.clone());
+        let stage_name = stage.root().file_name().unwrap().to_owned();
+
+        fs::rename(&parent, &moved).expect("parent moves");
+        std::os::unix::fs::symlink(&outside, &parent).expect("ancestor symlink creates");
+
+        stage.verify(&header).expect("stable handle verifies");
+        assert!(!outside.join(&stage_name).exists());
+
+        stage.discard().expect("stable stage discards");
+        assert!(!moved.join(&stage_name).exists());
+        let _ = fs::remove_file(parent);
+        let _ = fs::remove_dir_all(outside);
+        let _ = fs::remove_dir_all(moved);
     }
 
     #[test]

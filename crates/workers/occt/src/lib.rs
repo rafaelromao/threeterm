@@ -671,7 +671,10 @@ fn map_outcome(
                     });
                 }
             }
-            if record.stage.starts_with("handshake_schema_mismatch") {
+            if record.stage.starts_with("handshake_schema_mismatch")
+                || record.stage.starts_with("handshake_worker_id_mismatch")
+                || record.stage.starts_with("envelope_schema_mismatch")
+            {
                 return Err(WorkerError::MalformedWithContext {
                     request_id: record.request_id.clone(),
                     detail: record.stage,

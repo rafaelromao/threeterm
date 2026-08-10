@@ -58,6 +58,8 @@ echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
-cargo test --workspace
+# OCCT integration tests spawn disposable native workers; serialize the test
+# harness so the rootless CI container does not kill workers under fan-out.
+cargo test --workspace --jobs 1 -- --test-threads=1
 
 echo "==> CI contract satisfied"

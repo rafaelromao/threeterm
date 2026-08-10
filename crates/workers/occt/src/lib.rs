@@ -23,12 +23,20 @@
 //! provides the path through the build script.
 
 use std::env;
-use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use threeterm_protocol::supervisor::{
+    Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
+};
+use threeterm_protocol::worker::{
+    SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
+    WorkerProcess,
+};
 
 pub mod envelope;
 pub use envelope::{
@@ -81,6 +89,14 @@ pub enum WorkerError {
     Malformed { detail: String },
     /// The worker emitted a JSON diagnostic instead of a response.
     Diagnostic(OcctDiagnostic),
+    /// The request was cooperatively cancelled and the worker
+    /// acknowledged the cancellation inside the grace period.
+    Cancelled { request_id: String },
+    /// The supervised lifecycle ended with a structured termination
+    /// record that does not map to a typed failure: the record's stage,
+    /// elapsed time, last progress, and stderr tail are preserved so
+    /// callers retain the diagnostic context.
+    Supervised { record: Box<TerminationRecord> },
 }
 
 impl std::fmt::Display for WorkerError {
@@ -107,6 +123,16 @@ impl std::fmt::Display for WorkerError {
                 "worker diagnostic {} {}: {}",
                 diagnostic.code, diagnostic.arg, diagnostic.schema_version
             ),
+            Self::Cancelled { request_id } => {
+                write!(formatter, "worker request {request_id} cancelled")
+            }
+            Self::Supervised { record } => {
+                write!(
+                    formatter,
+                    "supervised worker termination at stage {:?} after {:?}",
+                    record.stage, record.elapsed
+                )
+            }
         }
     }
 }
@@ -118,13 +144,27 @@ impl std::error::Error for WorkerError {}
 /// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, `shell`,
 /// and `draft`.
 ///
-/// The worker is **disposable**: each call spawns a fresh process, pipes
-/// the request to its stdin, reads one JSON line from its stdout, and
-/// kills the process on exit. The worker has no persistent state.
+/// The worker is **disposable**: each call spawns a fresh supervised
+/// worker process in its own process group, negotiates the versioned
+/// protocol handshake, pipes the request envelope in, and maps the
+/// supervised outcome to a typed result or structured failure. The
+/// worker has no persistent state.
 #[derive(Debug, Clone)]
 pub struct OcctWorker {
     binary_path: PathBuf,
+    /// Supervisor grace period: the worker must complete the handshake
+    /// and the request inside this deadline or it is force-terminated.
+    grace: Duration,
+    /// Revision Snapshot the host authorized for the request. The worker
+    /// protocol carries this outer identity even though the typed OCCT
+    /// arguments remain operation-specific.
+    revision_id: Option<String>,
 }
+
+/// Default supervisor grace for OCCT operations. Operations complete in
+/// well under a second; this bound catches hangs without harming
+/// legitimate geometry work.
+pub const DEFAULT_SUPERVISOR_GRACE: Duration = Duration::from_secs(30);
 
 impl OcctWorker {
     /// Locate the worker binary. Prefers the path embedded at build
@@ -162,7 +202,24 @@ impl OcctWorker {
     }
 
     pub fn with_binary_path(binary_path: PathBuf) -> Self {
-        Self { binary_path }
+        Self {
+            binary_path,
+            grace: DEFAULT_SUPERVISOR_GRACE,
+            revision_id: None,
+        }
+    }
+
+    /// Override the supervisor grace period (deadline) for every
+    /// operation this worker executes.
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
+    }
+
+    /// Bind subsequent requests to a host-owned Revision Snapshot.
+    pub fn with_revision_id(mut self, revision_id: impl Into<String>) -> Self {
+        self.revision_id = Some(revision_id.into());
+        self
     }
 
     pub fn binary_path(&self) -> &Path {
@@ -172,10 +229,35 @@ impl OcctWorker {
     /// Extrude `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn extrude(&self, request: &ExtrudeRequest) -> Result<ExtrudeResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("extrude request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_extrude()
+        let bytes = bounded_serialize(request, "extrude")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_extrude()
+    }
+
+    /// Extrude `request` with a cooperative cancellation token. The
+    /// caller sets the token to request cancellation; the supervisor
+    /// sends `Cancel`, waits the grace period for the worker's
+    /// acknowledgement, and force-terminates the worker's process group
+    /// if the worker does not cooperate.
+    pub fn extrude_with_cancel(
+        &self,
+        request: &ExtrudeRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<ExtrudeResult, WorkerError> {
+        let bytes = bounded_serialize(request, "extrude")?;
+        let value = self.run_with_cancel(&bytes, cancel)?;
+        // The cancellable path must run the same bounded, digest-verified
+        // decoder as the synchronous path: oversized, symlinked, or
+        // mismatched staged output fails closed before it can reach the
+        // host commit path.
+        RawResult {
+            value,
+            expected_output: expected_output_path(&request.output_dir, &request.output_filename),
+        }
+        .into_extrude()
     }
 
     /// Boolean-fuse `request` by spawning the worker process. See
@@ -184,55 +266,67 @@ impl OcctWorker {
         &self,
         request: &BooleanFuseRequest,
     ) -> Result<BooleanFuseResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("boolean-fuse request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_boolean_fuse()
+        let bytes = bounded_serialize(request, "boolean-fuse")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_boolean_fuse()
     }
 
     /// Fillet `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn fillet(&self, request: &FilletRequest) -> Result<FilletResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("fillet request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_fillet()
+        let bytes = bounded_serialize(request, "fillet")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_fillet()
     }
 
     /// Chamfer `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn chamfer(&self, request: &ChamferRequest) -> Result<ChamferResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("chamfer request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_chamfer()
+        let bytes = bounded_serialize(request, "chamfer")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_chamfer()
     }
 
     /// Hole `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn hole(&self, request: &HoleRequest) -> Result<HoleResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("hole request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_hole()
+        let bytes = bounded_serialize(request, "hole")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_hole()
     }
 
     /// Revolve `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn revolve(&self, request: &RevolveRequest) -> Result<RevolveResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("revolve request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_revolve()
+        let bytes = bounded_serialize(request, "revolve")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_revolve()
     }
 
     /// Mirror `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn mirror(&self, request: &MirrorRequest) -> Result<MirrorResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("mirror request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_mirror()
+        let bytes = bounded_serialize(request, "mirror")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_mirror()
     }
 
     /// Linear pattern `request` by spawning the worker process. See
@@ -241,10 +335,12 @@ impl OcctWorker {
         &self,
         request: &LinearPatternRequest,
     ) -> Result<LinearPatternResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("linear_pattern request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_linear_pattern()
+        let bytes = bounded_serialize(request, "linear_pattern")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_linear_pattern()
     }
 
     /// Circular pattern `request` by spawning the worker process. See
@@ -253,297 +349,541 @@ impl OcctWorker {
         &self,
         request: &CircularPatternRequest,
     ) -> Result<CircularPatternResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("circular_pattern request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_circular_pattern()
+        let bytes = bounded_serialize(request, "circular_pattern")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_circular_pattern()
     }
 
     /// Shell `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn shell(&self, request: &ShellRequest) -> Result<ShellResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("shell request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_shell()
+        let bytes = bounded_serialize(request, "shell")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_shell()
     }
 
     /// Draft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn draft(&self, request: &DraftRequest) -> Result<DraftResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("draft request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_draft()
+        let bytes = bounded_serialize(request, "draft")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_draft()
     }
 
     /// Loft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn loft(&self, request: &LoftRequest) -> Result<LoftResult, WorkerError> {
-        let bytes = serde_json::to_vec(request).map_err(|error| WorkerError::Malformed {
-            detail: format!("loft request serialization failed: {error}"),
-        })?;
-        self.invoke(&bytes)?.into_loft()
+        let bytes = bounded_serialize(request, "loft")?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_loft()
     }
 
-    fn invoke(&self, envelope: &[u8]) -> Result<RawResult, WorkerError> {
-        let mut child = Command::new(&self.binary_path)
+    fn invoke(
+        &self,
+        envelope: &[u8],
+        expected_output: Option<PathBuf>,
+    ) -> Result<RawResult, WorkerError> {
+        // Every production operation flows through the same cancellable
+        // supervised path; the synchronous variants carry a never-set
+        // token, so the deadline expiry remains the hard stop.
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        self.run_with_cancel(envelope, &cancel)
+            .map(|value| RawResult {
+                value,
+                expected_output,
+            })
+    }
+
+    /// Run `envelope` through the supervised lifecycle with a
+    /// cooperative cancellation token. The token's `cancel()` triggers
+    /// the supervisor's cancellation lifecycle: the worker receives a
+    /// `Cancel` envelope and, if it does not acknowledge inside the
+    /// grace period, is force-terminated and reaped with its process
+    /// group. The flag is polled every receive slice (50 ms), so an
+    /// in-flight operation observes the token well before the deadline.
+    /// Returns the raw typed-result JSON; typed callers parse it into
+    /// the operation-specific result.
+    pub fn run_with_cancel(
+        &self,
+        envelope: &[u8],
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<serde_json::Value, WorkerError> {
+        // Reject the raw input length before parsing: an oversized
+        // request must never be materialized into memory past the
+        // protocol's input bound.
+        if envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "request envelope of {} bytes exceeds the {} byte input bound",
+                    envelope.len(),
+                    threeterm_protocol::frame::MAX_FRAME_BUFFER
+                ),
+            });
+        }
+        let args: serde_json::Value =
+            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
+                detail: format!("request serialization failed: {error}"),
+            })?;
+        let request_id = args
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if request_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing request_id".to_string(),
+            });
+        }
+        let command_id = args
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if command_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing operation".to_string(),
+            });
+        }
+        let feature_id = args
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let output_dir = args
+            .get("output_dir")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let output_filename = args
+            .get("output_filename")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let expected_output = if output_dir.is_empty() || output_filename.is_empty() {
+            None
+        } else {
+            Some(Path::new(output_dir).join(output_filename))
+        };
+
+        let host = <Self as WorkerProcess>::spawn(WorkerConfig {
+            worker_id: "occt",
+            schema_version: threeterm_protocol::schema_version(),
+            command_line: vec![self.binary_path.display().to_string()],
+        })
+        .map_err(|error| WorkerError::Spawn {
+            binary: self.binary_path.clone(),
+            detail: error.to_string(),
+        })?;
+        let mut supervisor = Supervisor::new(self.grace, host, None);
+        let outcome = supervisor.request_with_cancel(
+            SupervisorRequest {
+                request_id: request_id.clone(),
+                command_id: command_id.clone(),
+                args,
+                revision_id: self.revision_id.clone().unwrap_or_default(),
+            },
+            cancel,
+        );
+        let cleanup_path = expected_output.clone();
+        let mapped = map_outcome(
+            outcome,
+            &request_id,
+            &command_id,
+            &feature_id,
+            expected_output,
+        );
+        let cleanup_required = mapped.as_ref().map_or(true, |result| {
+            result
+                .value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                != Some("ok")
+        });
+        if cleanup_required && let Some(path) = cleanup_path {
+            cleanup_worker_output(&path);
+        }
+        mapped.map(|result| result.value)
+    }
+}
+
+/// Maps a supervised outcome to the typed-result boundary: a completed
+/// request carries the typed result JSON, a cooperative `Failed`
+/// envelope becomes an [`OcctDiagnostic`], a signal-based exit keeps the
+/// actual signal, and everything else fails closed.
+///
+/// The typed result is bound to the active request: its inner
+/// `request_id`, `schema_version`, and `operation` must match the
+/// request that was sent, or the completion fails closed.
+fn map_outcome(
+    outcome: SupervisorOutcome,
+    request_id: &str,
+    command_id: &str,
+    expected_feature_id: &str,
+    expected_output: Option<PathBuf>,
+) -> Result<RawResult, WorkerError> {
+    match outcome {
+        SupervisorOutcome::Completed { result, .. } => {
+            let result_request_id = result
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let result_schema = result
+                .get("schema_version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let result_operation = result
+                .get("operation")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if result_request_id != request_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result is bound to {result_request_id:?}, expected {request_id:?}"
+                    ),
+                });
+            }
+            if result_schema != SCHEMA_VERSION {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result schema {result_schema:?}, expected {SCHEMA_VERSION:?}"
+                    ),
+                });
+            }
+            if result_operation != command_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result operation {result_operation:?}, expected {command_id:?}"
+                    ),
+                });
+            }
+            let result_feature_id = result
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !expected_feature_id.is_empty() && result_feature_id != expected_feature_id {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "completed result feature_id {result_feature_id:?}, expected {expected_feature_id:?}"
+                    ),
+                });
+            }
+            Ok(RawResult {
+                value: result,
+                expected_output,
+            })
+        }
+        SupervisorOutcome::Acknowledged {
+            request_id, reason, ..
+        } => Err(WorkerError::Cancelled {
+            request_id: if request_id.is_empty() {
+                reason
+            } else {
+                request_id
+            },
+        }),
+        SupervisorOutcome::ForceTerminated { record } => {
+            if let (Some(code), Some(detail)) =
+                (record.failed_code.clone(), record.failed_detail.clone())
+            {
+                // Keep the structured termination facts when a domain failure
+                // is followed by a signal-bearing worker termination.
+                if record.exit_signal.is_none() {
+                    return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
+                }
+            }
+            if record.stage.starts_with("handshake_schema_mismatch") {
+                return Err(WorkerError::Malformed {
+                    detail: record.stage,
+                });
+            }
+            // A worker that closes its stream before a terminal envelope is
+            // an actual process failure, not merely a generic supervision
+            // timeout. Preserve the reaped exit facts at the typed boundary.
+            let worker_closed = record.stage.starts_with("worker_closed")
+                || record.stage.starts_with("handshake_worker_closed");
+            if worker_closed {
+                if let Some(signal) = record.exit_signal {
+                    return Err(WorkerError::Signalled {
+                        signal,
+                        stderr: record.stderr_tail.clone(),
+                    });
+                }
+                if let Some(code) = record.exit_code
+                    && code != 0
+                {
+                    return Err(WorkerError::NonZeroExit {
+                        code: Some(code),
+                        stderr: record.stderr_tail.clone(),
+                    });
+                }
+            }
+            // Preserve the structured termination context: request id,
+            // stage, elapsed time, last progress, artifact errors, and
+            // stderr tail all remain available to callers.
+            Err(WorkerError::Supervised {
+                record: Box::new(record),
+            })
+        }
+    }
+}
+
+/// Serializes a typed request through a capped writer so an oversized
+/// request fails during encoding instead of being fully materialized
+/// in memory before the protocol's input bound rejects it.
+fn bounded_serialize<T: serde::Serialize>(
+    request: &T,
+    operation: &str,
+) -> Result<Vec<u8>, WorkerError> {
+    threeterm_protocol::worker::serialize_capped(
+        request,
+        threeterm_protocol::frame::MAX_FRAME_BUFFER,
+    )
+    .map_err(|error| WorkerError::Malformed {
+        detail: format!("{operation} request serialization failed: {error}"),
+    })
+}
+
+/// The private output location a request declares, when both parts are
+/// present. The worker's advertised `brep_path` must match this.
+fn expected_output_path(output_dir: &Path, output_filename: &str) -> Option<PathBuf> {
+    if output_filename.is_empty() {
+        return None;
+    }
+    Some(output_dir.join(output_filename))
+}
+
+/// Remove the final output and any interrupted sibling temporary files. The
+/// C++ worker writes `<name>.tmp-<pid>` before its final rename; force
+/// termination can interrupt that write before the worker can clean it.
+fn cleanup_worker_output(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let temporary_prefix = format!("{file_name}.tmp-");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(&temporary_prefix))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Hex SHA-256 of a file's bytes, used to verify the worker's staged
+/// artifact matches its advertised digest.
+pub fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Production `WorkerProcess` wiring: spawns the OCCT binary in its own
+/// process group with piped standard streams so the supervisor owns a
+/// contained, reapable process tree.
+impl WorkerProcess for OcctWorker {
+    fn spawn(config: WorkerConfig) -> Result<Box<dyn WorkerHost>, ProtocolWorkerError> {
+        let binary = config
+            .command_line
+            .first()
+            .ok_or_else(|| ProtocolWorkerError::Io(std::io::Error::other("empty command line")))?;
+        let child = Command::new(binary)
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| WorkerError::Spawn {
-                binary: self.binary_path.clone(),
-                detail: error.to_string(),
-            })?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(envelope)
-                .map_err(|error| WorkerError::Spawn {
-                    binary: self.binary_path.clone(),
-                    detail: format!("stdin write failed: {error}"),
-                })?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| WorkerError::Spawn {
-                binary: self.binary_path.clone(),
-                detail: format!("wait failed: {error}"),
-            })?;
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        match output.status.code() {
-            Some(0) => {}
-            Some(2) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "request_malformed",
-                    stderr.trim().to_string(),
-                )));
-            }
-            Some(3) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "brep_invalid",
-                    stderr.trim().to_string(),
-                )));
-            }
-            Some(4) => {
-                return Err(WorkerError::Diagnostic(OcctDiagnostic::new(
-                    "unsupported_geometry",
-                    error_detail(&stderr),
-                )));
-            }
-            Some(code) => {
-                return Err(WorkerError::NonZeroExit {
-                    code: Some(code),
-                    stderr,
-                });
-            }
-            None => {
-                return Err(WorkerError::Signalled { signal: 0, stderr });
-            }
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .ok_or_else(|| WorkerError::Malformed {
-                detail: "worker emitted empty stdout".to_string(),
-            })?;
-        Ok(RawResult {
-            line: line.to_string(),
-        })
+            .map_err(ProtocolWorkerError::Io)?;
+        SubprocessWorkerHost::new(child).map(|host| Box::new(host) as Box<dyn WorkerHost>)
     }
 }
 
-fn error_detail(stderr: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(stderr)
-        .ok()
-        .and_then(|response| response["diagnostic"].as_str().map(str::to_string))
-        .unwrap_or_else(|| stderr.trim().to_string())
-}
-
+#[derive(Debug)]
 struct RawResult {
-    line: String,
+    value: serde_json::Value,
+    /// The private output location the request declared
+    /// (`output_dir`/`output_filename`). When present, the worker's
+    /// advertised `brep_path` must equal it: a worker pointing at any
+    /// other file fails closed instead of letting the host promote
+    /// foreign bytes.
+    expected_output: Option<PathBuf>,
 }
 
 impl RawResult {
-    fn into_extrude(self) -> Result<ExtrudeResult, WorkerError> {
-        match serde_json::from_str::<ExtrudeResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "extrude response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
+    /// Fail closed when the worker's staged output exceeds the staged
+    /// artifact bound. The bound is enforced on the ACTUAL staged file
+    /// (its on-disk size), not on the worker's advertised `brep_bytes`
+    /// metadata, so a worker that under-reports its output cannot smuggle
+    /// an oversized artifact past the host.
+    fn bounded<T>(self) -> Result<T, WorkerError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let cleanup_path = self.expected_output.clone();
+        let result = self.bounded_inner();
+        if result.is_err()
+            && let Some(path) = cleanup_path
+        {
+            cleanup_worker_output(&path);
         }
+        result
+    }
+
+    fn bounded_inner<T>(self) -> Result<T, WorkerError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let value = self.value;
+        let brep_bytes = value
+            .get("brep_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let brep_path = value
+            .get("brep_path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from);
+        // The staged output must be the private location the request
+        // declared: a worker advertising any other path fails closed so
+        // a malformed or compromised worker can never direct the host to
+        // promote foreign bytes.
+        let Some(path) = brep_path.as_deref() else {
+            return Err(WorkerError::Malformed {
+                detail: "worker response is missing brep_path".to_string(),
+            });
+        };
+        if let Some(expected) = &self.expected_output
+            && path != expected.as_path()
+        {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "worker output at {path:?} is not the request's private output location {expected:?}"
+                ),
+            });
+        }
+        // The staged output must exist as a regular file that is not a
+        // symlink: a missing, dangling, or redirected path cannot be
+        // verified and fails closed instead of trusting the
+        // advertisement.
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| WorkerError::Malformed {
+            detail: format!("worker output at {path:?} could not be stat'd: {error}"),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(WorkerError::Malformed {
+                detail: format!("worker output at {path:?} must not be a symlink"),
+            });
+        }
+        if !metadata.is_file() {
+            return Err(WorkerError::Malformed {
+                detail: format!("worker output at {path:?} is not a regular file"),
+            });
+        }
+        let actual_bytes = metadata.len();
+        let bound = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
+        let largest = actual_bytes.max(brep_bytes);
+        if largest > bound {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "worker staged output of {largest} bytes (advertised {brep_bytes}) exceeds the {bound} byte bound"
+                ),
+            });
+        }
+        // The advertised byte count must equal the actual file size: an
+        // under-reporting worker is treated as malformed rather than
+        // being trusted on either side of the comparison.
+        if actual_bytes != brep_bytes {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "worker staged output at {path:?} is {actual_bytes} bytes but advertises {brep_bytes}"
+                ),
+            });
+        }
+        // Verify the staged file's SHA-256 digest matches the worker's
+        // advertisement. A digest mismatch fails closed so a tampered
+        // artifact can never reach the host's promotion path.
+        let advertised = value.get("brep_sha256").and_then(serde_json::Value::as_str);
+        if let Some(advertised) = advertised {
+            let actual = crate::sha256_file(path).map_err(|error| WorkerError::Malformed {
+                detail: format!("worker output at {path:?} could not be read: {error}"),
+            })?;
+            if actual != advertised {
+                return Err(WorkerError::Malformed {
+                    detail: format!(
+                        "worker output at {path:?} digest mismatch: advertised {advertised}, actual {actual}"
+                    ),
+                });
+            }
+        }
+        serde_json::from_value::<T>(value).map_err(|error| WorkerError::Malformed {
+            detail: format!("worker response could not be parsed: {error}"),
+        })
+    }
+
+    fn into_extrude(self) -> Result<ExtrudeResult, WorkerError> {
+        self.bounded()
     }
 
     fn into_boolean_fuse(self) -> Result<BooleanFuseResult, WorkerError> {
-        match serde_json::from_str::<BooleanFuseResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "boolean-fuse response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_fillet(self) -> Result<FilletResult, WorkerError> {
-        match serde_json::from_str::<FilletResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "fillet response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_chamfer(self) -> Result<ChamferResult, WorkerError> {
-        match serde_json::from_str::<ChamferResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "chamfer response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_hole(self) -> Result<HoleResult, WorkerError> {
-        match serde_json::from_str::<HoleResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "hole response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_revolve(self) -> Result<RevolveResult, WorkerError> {
-        match serde_json::from_str::<RevolveResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "revolve response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_mirror(self) -> Result<MirrorResult, WorkerError> {
-        match serde_json::from_str::<MirrorResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "mirror response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_linear_pattern(self) -> Result<LinearPatternResult, WorkerError> {
-        match serde_json::from_str::<LinearPatternResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "linear_pattern response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_circular_pattern(self) -> Result<CircularPatternResult, WorkerError> {
-        match serde_json::from_str::<CircularPatternResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "circular_pattern response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_shell(self) -> Result<ShellResult, WorkerError> {
-        match serde_json::from_str::<ShellResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "shell response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_draft(self) -> Result<DraftResult, WorkerError> {
-        match serde_json::from_str::<DraftResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "draft response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 
     fn into_loft(self) -> Result<LoftResult, WorkerError> {
-        match serde_json::from_str::<LoftResult>(&self.line) {
-            Ok(result) => Ok(result),
-            Err(_) => match serde_json::from_str::<OcctDiagnostic>(&self.line) {
-                Ok(diagnostic) => Err(WorkerError::Diagnostic(diagnostic)),
-                Err(error) => Err(WorkerError::Malformed {
-                    detail: format!(
-                        "loft response could not be parsed: {error}; line={}",
-                        self.line
-                    ),
-                }),
-            },
-        }
+        self.bounded()
     }
 }
 
@@ -991,5 +1331,335 @@ mod tests {
             ])
         );
         assert_eq!(value["feature_id"], "loft-1");
+    }
+
+    #[test]
+    fn map_outcome_completed_carries_the_typed_result_value() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "feature_id": "box-1",
+                "status": "ok",
+            }),
+            artifact_headers: vec![],
+        };
+        let result = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect("completed outcome maps");
+        assert_eq!(result.value["status"], "ok");
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_bound_to_another_request() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "other-request",
+                "operation": "extrude",
+                "status": "ok",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("foreign request_id must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_bound_to_a_foreign_output_path() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "feature_id": "box-1",
+                "status": "ok",
+                "brep_path": "/tmp/other.brep",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(
+            outcome,
+            "req-1",
+            "extrude",
+            "box-1",
+            Some(PathBuf::from("/tmp/out.brep")),
+        )
+        .expect("completed outcome maps")
+        .into_extrude()
+        .expect_err("foreign output path must fail closed");
+        match error {
+            WorkerError::Malformed { detail } => {
+                assert!(
+                    detail.contains("output location"),
+                    "detail must name the output binding; got {detail:?}"
+                );
+            }
+            other => panic!("expected Malformed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_accepts_a_completed_result_at_the_expected_output_path() {
+        let output_path = std::env::temp_dir().join(format!("{}.brep", new_request_id()));
+        std::fs::write(&output_path, []).expect("expected output fixture writes");
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "extrude",
+                "feature_id": "box-1",
+                "status": "ok",
+                "brep_path": output_path,
+                "brep_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "brep_bytes": 0,
+            }),
+            artifact_headers: vec![],
+        };
+        let result = map_outcome(
+            outcome,
+            "req-1",
+            "extrude",
+            "box-1",
+            Some(output_path.clone()),
+        )
+        .expect("expected output path maps")
+        .into_extrude()
+        .expect("expected output path is accepted");
+        std::fs::remove_file(output_path).expect("expected output fixture removes");
+        assert_eq!(result.status, "ok");
+    }
+
+    #[test]
+    fn map_outcome_rejects_a_completed_result_with_foreign_operation() {
+        let outcome = SupervisorOutcome::Completed {
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "req-1",
+                "operation": "boolean_fuse",
+                "status": "ok",
+            }),
+            artifact_headers: vec![],
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("foreign operation must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn map_outcome_failed_envelope_becomes_a_structured_diagnostic() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                exit_code: None,
+                stderr_tail: String::new(),
+                failed_code: Some("brep_invalid".to_string()),
+                failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                exit_kind: ExitKind::Cooperative,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("failed envelope must not map to success");
+        match error {
+            WorkerError::Diagnostic(diagnostic) => {
+                assert_eq!(diagnostic.code, "brep_invalid");
+                assert_eq!(diagnostic.arg, "BRepCheck_Analyzer failed");
+                assert_eq!(diagnostic.schema_version, SCHEMA_VERSION);
+            }
+            other => panic!("expected Diagnostic; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_failed_envelope_with_signal_preserves_termination_context() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(9),
+                exit_code: None,
+                stderr_tail: "worker crashed".to_string(),
+                failed_code: Some("brep_invalid".to_string()),
+                failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                // A Failed envelope can be observed before the worker dies;
+                // the signal must still keep the structured termination record.
+                exit_kind: ExitKind::Cooperative,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("signal-bearing failure must not lose termination context");
+        match error {
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.exit_signal, Some(9));
+                assert_eq!(record.failed_code.as_deref(), Some("brep_invalid"));
+                assert_eq!(record.stderr_tail, "worker crashed");
+            }
+            other => panic!("expected Supervised; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_signal_exit_reports_the_actual_signal() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "grace_exceeded".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(11),
+                exit_code: None,
+                stderr_tail: String::new(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("signal exit must not map to success");
+        match error {
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.exit_signal, Some(11));
+                assert_eq!(record.stage, "grace_exceeded");
+            }
+            other => panic!("expected Supervised; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_natural_signal_exit_becomes_typed_signalled_error() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(11),
+                exit_code: None,
+                stderr_tail: "segmentation fault".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("natural signal exit must fail closed");
+        match error {
+            WorkerError::Signalled { signal, stderr } => {
+                assert_eq!(signal, 11);
+                assert_eq!(stderr, "segmentation fault");
+            }
+            other => panic!("expected Signalled; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_natural_nonzero_exit_becomes_typed_nonzero_error() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                exit_code: Some(2),
+                stderr_tail: "malformed request".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("natural nonzero exit must fail closed");
+        match error {
+            WorkerError::NonZeroExit { code, stderr } => {
+                assert_eq!(code, Some(2));
+                assert_eq!(stderr, "malformed request");
+            }
+            other => panic!("expected NonZeroExit; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_handshake_schema_mismatch_fails_closed() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "<handshake>".to_string(),
+                stage: "handshake_schema_mismatch:received=threeterm.protocol/0 expected=threeterm.protocol/1"
+                    .to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(9),
+                exit_code: None,
+                stderr_tail: String::new(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("schema mismatch must fail closed");
+        assert!(
+            matches!(error, WorkerError::Malformed { .. }),
+            "expected Malformed; got {error:?}"
+        );
+    }
+
+    #[test]
+    fn map_outcome_closed_worker_preserves_stderr_tail() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                exit_code: None,
+                stderr_tail: "worker trace".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("closed worker must fail closed");
+        match error {
+            WorkerError::Supervised { record } => {
+                assert_eq!(record.stderr_tail, "worker trace");
+                assert_eq!(record.request_id, "req-1");
+            }
+            other => panic!("expected Supervised; got {other:?}"),
+        }
     }
 }

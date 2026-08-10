@@ -2336,7 +2336,10 @@ fn emit_extrude(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = ExtrudeRequest::new(threeterm_occt_worker::new_request_id(), profile, height)
         .with_output_path(&staging_dir, &output_filename)
         .with_feature_id(feature_id);
@@ -2385,7 +2388,10 @@ fn emit_boolean_fuse(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = BooleanFuseRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2429,7 +2435,10 @@ fn emit_fillet(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
         .with_output_path(&staging_dir, &output_filename)
         .with_feature_id(feature_id);
@@ -2467,7 +2476,10 @@ fn emit_chamfer(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = ChamferRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2512,7 +2524,10 @@ fn emit_hole(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = HoleRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2548,7 +2563,10 @@ fn emit_revolve(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = RevolveRequest::new(
         threeterm_occt_worker::new_request_id(),
         profile,
@@ -2594,7 +2612,10 @@ fn emit_mirror(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = MirrorRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2640,7 +2661,10 @@ fn emit_linear_pattern(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = LinearPatternRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2693,7 +2717,10 @@ fn emit_circular_pattern(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = CircularPatternRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2744,7 +2771,10 @@ fn emit_shell(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = ShellRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2788,7 +2818,10 @@ fn emit_draft(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = DraftRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
@@ -2822,7 +2855,10 @@ fn emit_loft(
         }
     };
     let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!("{feature_id}.brep");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
     let request = LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
         .with_solid(is_solid)
         .with_ruled(ruled)
@@ -3233,12 +3269,32 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
+        HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
+            "kind": "worker_terminated",
+            "request_id": record.request_id,
+            "stage": record.stage,
+            "elapsed_ms": record.elapsed.as_millis(),
+            "last_progress": record.last_progress.as_ref().map(|progress| json!({
+                "stage": progress.stage,
+                "percent": progress.percent,
+            })),
+            "last_artifact_error": record.last_artifact_error,
+            "exit_signal": record.exit_signal,
+            "exit_code": record.exit_code,
+            "stderr_tail": record.stderr_tail,
+            "failed_code": record.failed_code,
+            "failed_detail": record.failed_detail,
+            "exit_kind": record.exit_kind.as_str(),
+        }))
+        .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
     };
     let (diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
         }
-        HostError::WorkerFailure { .. } | HostError::WorkerUnavailable { .. } => {
+        HostError::WorkerFailure { .. }
+        | HostError::WorkerUnavailable { .. }
+        | HostError::WorkerTerminated { .. } => {
             (Diagnostic::worker_failure(&detail), EXIT_WORKER_FAILURE)
         }
         HostError::UnsupportedGeometry { .. } => (

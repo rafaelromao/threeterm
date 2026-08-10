@@ -160,8 +160,8 @@ fn boolean_fuse_cli_drives_host_to_commit_a_fused_brep() {
     let brep_path = parsed["brep_path"].as_str().expect("brep_path is a string");
     let brep_pathbuf = PathBuf::from(brep_path);
     assert!(
-        brep_pathbuf.is_file(),
-        "fused BREP missing at {brep_path:?}"
+        !brep_pathbuf.exists(),
+        "worker staging output must be retired after commit: {brep_path:?}"
     );
 
     let loaded = Bundle::at(&root).open().expect("bundle reopens");

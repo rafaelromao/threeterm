@@ -1247,26 +1247,100 @@ fn canonical_loft_request() -> LoftRequest {
 }
 
 fn assert_raw_loft_is_malformed(worker: &OcctWorker, request: &str, detail: &str) {
+    // The production path speaks the versioned envelope protocol: the
+    // worker expects a single newline-framed `request` envelope whose
+    // `args` carry the OCCT request, and reports malformed input as a
+    // `failed` envelope. The raw request is compacted so it embeds into
+    // one line (the worker reads exactly one envelope line).
+    let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
+    let request_id = args["request_id"].as_str().expect("raw request id");
+    let command_id = args["operation"].as_str().expect("raw operation");
+    assert_raw_loft_with_outer_identity(worker, request, request_id, command_id, detail);
+}
+
+fn assert_raw_loft_with_outer_identity(
+    worker: &OcctWorker,
+    request: &str,
+    request_id: &str,
+    command_id: &str,
+    detail: &str,
+) {
+    let args: serde_json::Value = serde_json::from_str(request).expect("raw request is valid JSON");
+    let envelope = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"{command_id}\",\"args\":{args},\"revision_id\":\"\"}}\n"
+    );
     let mut child = Command::new(worker.binary_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("worker spawns");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin open")
-        .write_all(request.as_bytes())
-        .expect("stdin writes");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin.write_all(envelope.as_bytes()).expect("stdin writes");
+    drop(stdin);
     let output = child.wait_with_output().expect("worker waits");
-    assert!(
-        !output.status.success(),
-        "worker must reject malformed loft requests"
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let failed = stdout
+        .lines()
+        .find(|line| line.contains("\"kind\":\"failed\""))
+        .expect("worker must emit a failed envelope");
+    assert!(failed.contains("request_malformed"), "got {stdout}");
+    assert!(failed.contains(detail), "got {stdout}");
+}
+
+fn run_raw_worker_line(worker: &OcctWorker, line: &str) -> String {
+    let mut child = Command::new(worker.binary_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("worker spawns");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin.write_all(line.as_bytes()).expect("stdin writes");
+    drop(stdin);
+    let output = child.wait_with_output().expect("worker waits");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn worker_binds_an_oversized_request_failure_to_the_outer_request_id() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request_id = "req-oversized-frame";
+    let padding = "x".repeat(threeterm_protocol::frame::MAX_FRAME_BUFFER);
+    let line = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"loft\",\"args\":{{\"padding\":\"{padding}\"}},\"revision_id\":\"\"}}\n"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("request_malformed"), "got {stderr}");
-    assert!(stderr.contains(detail), "got {stderr}");
+
+    let stdout = run_raw_worker_line(&worker, &line);
+
+    assert!(stdout.contains("\"kind\":\"failed\""), "got {stdout}");
+    assert!(
+        stdout.contains(request_id),
+        "failure must retain request identity: {stdout}"
+    );
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
+}
+
+#[test]
+fn worker_binds_an_unterminated_request_failure_to_the_outer_request_id() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request_id = "req-unterminated-frame";
+    let line = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"{request_id}\",\"command_id\":\"loft\",\"args\":{{}},\"revision_id\":\"\"}}"
+    );
+
+    let stdout = run_raw_worker_line(&worker, &line);
+
+    assert!(stdout.contains("\"kind\":\"failed\""), "got {stdout}");
+    assert!(
+        stdout.contains(request_id),
+        "failure must retain request identity: {stdout}"
+    );
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
 }
 
 #[test]
@@ -1374,5 +1448,58 @@ fn loft_with_non_boolean_flag_returns_request_malformed() {
             ]
         }"#,
         "is_solid must be a boolean",
+    );
+}
+
+#[test]
+fn worker_rejects_outer_and_typed_request_identity_mismatch() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    assert_raw_loft_with_outer_identity(
+        &worker,
+        r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "typed-request",
+            "operation": "loft",
+            "feature_id": "loft-1",
+            "output_dir": "/tmp",
+            "output_filename": "loft.brep",
+            "profiles": [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]], [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [10.0, 10.0, 5.0]]]
+        }"#,
+        "req-raw",
+        "loft",
+        "identity does not match",
+    );
+}
+
+#[test]
+fn worker_rejects_pending_cancel_without_a_reason() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let request = r#"{"schema_version":"threeterm.workers.occt/1","request_id":"req-raw","operation":"loft","feature_id":"loft-1","output_dir":"/tmp","output_filename":"loft.brep","profiles":[[[0.0,0.0,0.0],[10.0,0.0,0.0],[10.0,10.0,0.0]],[[0.0,0.0,5.0],[10.0,0.0,5.0],[10.0,10.0,5.0]]]}"#;
+    let envelope = format!(
+        "{{\"kind\":\"request\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\",\"command_id\":\"loft\",\"args\":{request},\"revision_id\":\"\"}}\n"
+    );
+    let cancel = b"{\"kind\":\"cancel\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-raw\"}\n";
+    let mut child = Command::new(worker.binary_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("worker spawns");
+    let mut stdin = child.stdin.take().expect("stdin open");
+    stdin
+        .write_all(envelope.as_bytes())
+        .expect("request writes");
+    stdin.write_all(cancel).expect("cancel writes");
+    drop(stdin);
+    let output = child.wait_with_output().expect("worker waits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("request_malformed"), "got {stdout}");
+    assert!(
+        stdout.contains("not a valid cancel envelope"),
+        "got {stdout}"
     );
 }

@@ -644,6 +644,21 @@ impl Bundle {
         self.append_features(&[(feature_id, kind)])
     }
 
+    /// Append one feature only if the sealed bundle is still at the
+    /// Revision Snapshot that authorized the operation. The check runs
+    /// inside the bundle write lock, so a worker completion cannot publish
+    /// stale geometry after another writer has advanced the revision.
+    pub fn append_feature_if_revision(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision))
+        })
+    }
+
     /// Atomically append one or more `(feature_id, kind)` pairs to the
     /// bundle's Canonical Transaction Log and revision graph. The bundle
     /// is opened once, every entry is applied to the in-memory graph and
@@ -667,12 +682,13 @@ impl Bundle {
         // stay unique, predecessor digests chain, and no writer observes a
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
-        with_bundle_write_lock(&self.root, || self.append_features_locked(entries))
+        with_bundle_write_lock(&self.root, || self.append_features_locked(entries, None))
     }
 
     fn append_features_locked(
         &self,
         entries: &[(&str, &str)],
+        expected_revision: Option<&str>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -684,6 +700,14 @@ impl Bundle {
         } else {
             Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
+        if let Some(expected_revision) = expected_revision
+            && loaded.revision_hash_hex() != expected_revision
+        {
+            return Err(BundleError::Invalid(format!(
+                "worker result belongs to revision {expected_revision:?}, but current revision is {:?}",
+                loaded.revision_hash_hex()
+            )));
+        }
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
@@ -1630,6 +1654,37 @@ mod tests {
         assert_eq!(loaded.revision_hash_hex(), saved.revision_hash_hex());
         assert!(root.join(MANIFEST_FILENAME).is_file());
         assert!(root.join(TRANSACTIONS_LOG_FILENAME).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn revision_fenced_append_rejects_stale_workers_without_mutating_the_bundle() {
+        let root = temp_root("revision-fence");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        let current = bundle
+            .append_feature("box-1", "box")
+            .expect("first feature appends");
+        let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+        let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+
+        let error = bundle
+            .append_feature_if_revision("box-2", "box", "stale-revision")
+            .expect_err("stale worker must be rejected");
+        assert!(
+            error.to_string().contains("current revision"),
+            "error must identify the revision mismatch: {error}"
+        );
+        assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
+        assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
+        assert_eq!(
+            bundle.open().unwrap().revision_hash_hex(),
+            current.revision_hash_hex()
+        );
+
+        let updated = bundle
+            .append_feature_if_revision("box-2", "box", current.revision_hash_hex())
+            .expect("current worker revision appends");
+        assert_eq!(updated.log.len(), 2);
         let _ = fs::remove_dir_all(root);
     }
 

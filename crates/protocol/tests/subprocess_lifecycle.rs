@@ -147,6 +147,49 @@ fn terminate_kills_and_reaps_descendants_in_the_process_group() {
 }
 
 #[test]
+fn terminate_kills_descendants_that_close_all_worker_pipes() {
+    let desc_marker = PathBuf::from(format!(
+        "{}/threeterm-desc-closed-pipes-{}.pid",
+        std::env::temp_dir().display(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&desc_marker);
+    let fixture = format!(
+        "printf '%s\\n' '{worker}'; sleep 300 </dev/null >/dev/null 2>/dev/null & echo $! > {marker}; wait",
+        worker = worker_ready_line(),
+        marker = desc_marker.display()
+    );
+    let child = spawn_in_group(&fixture);
+    let mut host =
+        SubprocessWorkerHost::with_limits(child, SMALL_LIMITS).expect("transport starts");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert!(
+        wait_until(deadline, || desc_marker.exists()),
+        "fixture must record its descendant pid"
+    );
+    let descendant_pid: u32 = std::fs::read_to_string(&desc_marker)
+        .expect("descendant pid file reads")
+        .trim()
+        .parse()
+        .expect("descendant pid parses");
+    assert!(
+        pid_alive(descendant_pid),
+        "descendant must be alive before terminate"
+    );
+
+    host.terminate()
+        .expect("terminate kills the closed-pipe descendant");
+
+    let death_deadline = Instant::now() + Duration::from_secs(5);
+    assert!(
+        wait_until(death_deadline, || !pid_alive(descendant_pid)),
+        "descendant that closed worker pipes must still be killed"
+    );
+    let _ = std::fs::remove_file(&desc_marker);
+}
+
+#[test]
 fn force_terminate_reports_the_kill_signal() {
     // The worker never exits on its own; the host must SIGKILL the
     // process group and the reaped exit status must report SIGKILL.

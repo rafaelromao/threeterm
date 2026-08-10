@@ -155,6 +155,10 @@ pub struct OcctWorker {
     /// Supervisor grace period: the worker must complete the handshake
     /// and the request inside this deadline or it is force-terminated.
     grace: Duration,
+    /// Revision Snapshot the host authorized for the request. The worker
+    /// protocol carries this outer identity even though the typed OCCT
+    /// arguments remain operation-specific.
+    revision_id: Option<String>,
 }
 
 /// Default supervisor grace for OCCT operations. Operations complete in
@@ -201,6 +205,7 @@ impl OcctWorker {
         Self {
             binary_path,
             grace: DEFAULT_SUPERVISOR_GRACE,
+            revision_id: None,
         }
     }
 
@@ -208,6 +213,12 @@ impl OcctWorker {
     /// operation this worker executes.
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    /// Bind subsequent requests to a host-owned Revision Snapshot.
+    pub fn with_revision_id(mut self, revision_id: impl Into<String>) -> Self {
+        self.revision_id = Some(revision_id.into());
         self
     }
 
@@ -479,7 +490,7 @@ impl OcctWorker {
                 request_id: request_id.clone(),
                 command_id: command_id.clone(),
                 args,
-                revision_id: String::new(),
+                revision_id: self.revision_id.clone().unwrap_or_default(),
             },
             cancel,
         );
@@ -491,9 +502,14 @@ impl OcctWorker {
             &feature_id,
             expected_output,
         );
-        if mapped.is_err()
-            && let Some(path) = cleanup_path
-        {
+        let cleanup_required = mapped.as_ref().map_or(true, |result| {
+            result
+                .value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                != Some("ok")
+        });
+        if cleanup_required && let Some(path) = cleanup_path {
             cleanup_worker_output(&path);
         }
         mapped.map(|result| result.value)
@@ -589,6 +605,27 @@ fn map_outcome(
                 return Err(WorkerError::Malformed {
                     detail: record.stage,
                 });
+            }
+            // A worker that closes its stream before a terminal envelope is
+            // an actual process failure, not merely a generic supervision
+            // timeout. Preserve the reaped exit facts at the typed boundary.
+            let worker_closed = record.stage.starts_with("worker_closed")
+                || record.stage.starts_with("handshake_worker_closed");
+            if worker_closed {
+                if let Some(signal) = record.exit_signal {
+                    return Err(WorkerError::Signalled {
+                        signal,
+                        stderr: record.stderr_tail.clone(),
+                    });
+                }
+                if let Some(code) = record.exit_code
+                    && code != 0
+                {
+                    return Err(WorkerError::NonZeroExit {
+                        code: Some(code),
+                        stderr: record.stderr_tail.clone(),
+                    });
+                }
             }
             // Preserve the structured termination context: request id,
             // stage, elapsed time, last progress, artifact errors, and
@@ -1509,6 +1546,64 @@ mod tests {
                 assert_eq!(record.stage, "grace_exceeded");
             }
             other => panic!("expected Supervised; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_natural_signal_exit_becomes_typed_signalled_error() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: Some(11),
+                exit_code: None,
+                stderr_tail: "segmentation fault".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("natural signal exit must fail closed");
+        match error {
+            WorkerError::Signalled { signal, stderr } => {
+                assert_eq!(signal, 11);
+                assert_eq!(stderr, "segmentation fault");
+            }
+            other => panic!("expected Signalled; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_outcome_natural_nonzero_exit_becomes_typed_nonzero_error() {
+        use threeterm_protocol::supervisor::{ExitKind, TerminationRecord};
+        let outcome = SupervisorOutcome::ForceTerminated {
+            record: TerminationRecord {
+                request_id: "req-1".to_string(),
+                stage: "worker_closed".to_string(),
+                elapsed: Duration::from_millis(1),
+                last_progress: None,
+                last_artifact_error: None,
+                exit_signal: None,
+                exit_code: Some(2),
+                stderr_tail: "malformed request".to_string(),
+                failed_code: None,
+                failed_detail: None,
+                exit_kind: ExitKind::ForceAfterGrace,
+            },
+        };
+        let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
+            .expect_err("natural nonzero exit must fail closed");
+        match error {
+            WorkerError::NonZeroExit { code, stderr } => {
+                assert_eq!(code, Some(2));
+                assert_eq!(stderr, "malformed request");
+            }
+            other => panic!("expected NonZeroExit; got {other:?}"),
         }
     }
 

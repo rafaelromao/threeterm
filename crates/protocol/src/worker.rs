@@ -363,7 +363,8 @@ pub struct SubprocessWorkerHost {
     process_group_id: Option<i32>,
     /// Linux cgroup-v2 containment boundary, when the runtime grants the
     /// worker's parent cgroup delegation. Descendants inherit membership,
-    /// including descendants that call `setsid` or close worker pipes.
+    /// including descendants that call `setsid` or close worker pipes. The
+    /// process-group boundary remains the portable required fallback.
     containment_cgroup: Option<PathBuf>,
     /// Count of reader threads that have finished draining their stream
     /// (observed EOF or an overflow). `terminate` waits for this to
@@ -393,7 +394,13 @@ impl SubprocessWorkerHost {
             None => return Err(missing_pipe_error(&mut child, "stdout")),
         };
         let stdout_pipe_identity = pipe_identity(&stdout);
-        let process_group_id = worker_process_group_id(child.id() as i32);
+        #[cfg(unix)]
+        let process_group_id = match worker_process_group_id(child.id() as i32) {
+            Some(group_id) => Some(group_id),
+            None => return Err(missing_process_group_error(&mut child)),
+        };
+        #[cfg(not(unix))]
+        let process_group_id = None;
         let containment_cgroup = create_process_cgroup(child.id() as i32);
         let stderr = child.stderr.take();
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
@@ -540,6 +547,17 @@ fn missing_pipe_error(child: &mut Child, pipe: &str) -> WorkerError {
     WorkerError::Io(std::io::Error::other(format!(
         "worker {pipe} was not piped"
     )))
+}
+
+#[cfg(unix)]
+fn missing_process_group_error(child: &mut Child) -> WorkerError {
+    // A caller that did not create a private process group cannot be safely
+    // terminated as a process tree. Reject it before reader threads start.
+    let _ = child.kill();
+    let _ = child.wait();
+    WorkerError::Io(std::io::Error::other(
+        "worker was not spawned as its own process-group leader",
+    ))
 }
 
 impl WorkerHost for SubprocessWorkerHost {
@@ -716,18 +734,9 @@ impl WorkerHost for SubprocessWorkerHost {
 /// Create a private cgroup-v2 child of the current cgroup and move the worker
 /// into it. Cgroup membership is inherited by every descendant, which closes
 /// the escape window left by process-group-only cleanup. Runtimes without
-/// delegated cgroup write access use the process-group fallback below.
+/// delegated cgroup write access use the process-group boundary below.
 #[cfg(target_os = "linux")]
 fn create_process_cgroup(pid: i32) -> Option<PathBuf> {
-    // Cgroup delegation is runtime-dependent and some rootless containers
-    // expose a hierarchy whose kill operation is not safely delegated. Keep
-    // the tested process-group boundary as the default; production runtimes
-    // with an explicitly delegated cgroup can opt into the durable boundary.
-    if std::env::var_os("THREETERM_ENABLE_WORKER_CGROUP").as_deref()
-        != Some(std::ffi::OsStr::new("1"))
-    {
-        return None;
-    }
     let cgroup_file = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let relative = cgroup_file
         .lines()
@@ -1051,6 +1060,7 @@ mod tests {
     use super::*;
     use crate::artifact::{Layer1CacheKey, WorkerFingerprint};
     use serde_json::json;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1256,6 +1266,7 @@ mod tests {
     fn subprocess_transport_honors_an_expired_receive_deadline() {
         let child = Command::new("sh")
             .args(["-c", "exec cat >/dev/null"])
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -1267,5 +1278,21 @@ mod tests {
             Err(WorkerError::TimedOut)
         ));
         transport.terminate().expect("blocked worker terminates");
+    }
+
+    #[test]
+    fn subprocess_transport_rejects_a_child_without_a_private_process_group() {
+        let child = Command::new("sh")
+            .args(["-c", "exec cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("uncontained worker starts");
+
+        let error = SubprocessWorkerHost::new(child).expect_err("uncontained worker rejected");
+        assert!(
+            error.to_string().contains("process-group leader"),
+            "error must explain the containment requirement: {error}"
+        );
     }
 }

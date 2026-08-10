@@ -588,7 +588,7 @@ impl Host {
         feature_id: &str,
         brep_path: &Path,
     ) -> Result<SnapshotView, HostError> {
-        self.commit_brep_feature_inner(root.as_ref(), feature_id, brep_path, None)
+        self.commit_brep_feature_inner(root.as_ref(), feature_id, brep_path, None, None)
     }
 
     /// Commit a worker artifact while verifying the advertised size and
@@ -606,6 +606,28 @@ impl Host {
             feature_id,
             brep_path,
             Some((expected_bytes, expected_sha256)),
+            None,
+        )
+    }
+
+    /// Commit a verified BREP only if the bundle is still at the revision
+    /// that authorized the worker request. The persistence lock performs the
+    /// final comparison immediately before publication.
+    pub fn commit_brep_feature_verified_at_revision(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        brep_path: &Path,
+        expected_revision: &str,
+        expected_bytes: usize,
+        expected_sha256: &str,
+    ) -> Result<SnapshotView, HostError> {
+        self.commit_brep_feature_inner(
+            root.as_ref(),
+            feature_id,
+            brep_path,
+            Some((expected_bytes, expected_sha256)),
+            Some(expected_revision),
         )
     }
 
@@ -615,6 +637,7 @@ impl Host {
         feature_id: &str,
         brep_path: &Path,
         expected: Option<(usize, &str)>,
+        expected_revision: Option<&str>,
     ) -> Result<SnapshotView, HostError> {
         if !brep_path.is_file() {
             return Err(HostError::BrepFileMissing {
@@ -668,7 +691,13 @@ impl Host {
         }
 
         let kind = format!("brep:{feature_id}");
-        let updated = match bundle.append_feature(feature_id, &kind) {
+        let updated_result = match expected_revision {
+            Some(expected_revision) => {
+                bundle.append_feature_if_revision(feature_id, &kind, expected_revision)
+            }
+            None => bundle.append_feature(feature_id, &kind),
+        };
+        let updated = match updated_result {
             Ok(loaded) => loaded,
             Err(error) => {
                 if let (Ok(manifest), Ok(log)) = (
@@ -720,7 +749,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.extrude(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .extrude(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -737,10 +770,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -766,7 +800,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.boolean_fuse(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .boolean_fuse(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -783,10 +821,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -812,7 +851,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.fillet(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .fillet(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -829,10 +872,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -858,7 +902,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.chamfer(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .chamfer(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -875,10 +923,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -904,7 +953,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.hole(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .hole(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -921,10 +974,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -950,7 +1004,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.revolve(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .revolve(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -967,10 +1025,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -996,7 +1055,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.mirror(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .mirror(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1013,10 +1076,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -1043,7 +1107,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.linear_pattern(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .linear_pattern(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1060,10 +1128,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -1090,7 +1159,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.circular_pattern(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .circular_pattern(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1107,10 +1180,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -1136,7 +1210,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.shell(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .shell(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1153,10 +1231,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified(
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         ) {
@@ -1182,7 +1261,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.draft(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .draft(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1199,10 +1282,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified(
+        let snapshot = self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         )?;
@@ -1223,7 +1307,11 @@ impl Host {
         let loaded = bundle.open()?;
         let prior_view = SnapshotView::from(&loaded);
 
-        let result = match worker.loft(&request) {
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .loft(&request)
+        {
             Ok(result) => result,
             Err(error) => {
                 self.current.replace(Some(loaded));
@@ -1240,10 +1328,11 @@ impl Host {
             });
         }
         let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified(
+        let snapshot = self.commit_brep_feature_verified_at_revision(
             root,
             &feature_id,
             &result.brep_path,
+            &prior_view.revision_hash,
             result.brep_bytes,
             &result.brep_sha256,
         )?;

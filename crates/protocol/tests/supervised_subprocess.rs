@@ -131,7 +131,7 @@ fn worker_that_never_emits_worker_ready_is_force_terminated_before_request() {
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
     };
-    assert_eq!(record.request_id, "<handshake>");
+    assert_eq!(record.request_id, "req-1");
     assert!(
         record.stage.starts_with("handshake_"),
         "stage: {:?}",

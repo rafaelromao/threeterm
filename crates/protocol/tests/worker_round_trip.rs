@@ -363,7 +363,7 @@ fn request_force_terminates_when_worker_never_sends_worker_ready() {
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
     };
-    assert_eq!(record.request_id, "<handshake>");
+    assert_eq!(record.request_id, "req-1");
     assert!(
         record.stage.starts_with("handshake_worker_closed")
             || record.stage.starts_with("handshake_grace_exceeded"),
@@ -499,7 +499,7 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
         other => panic!("expected ForceTerminated; got {other:?}"),
     };
 
-    assert_eq!(request_id, "<handshake>");
+    assert_eq!(request_id, "req-1");
     assert_eq!(exit_signal, None);
     assert_eq!(exit_code, None);
     assert_eq!(stderr_tail, "");

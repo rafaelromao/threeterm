@@ -69,11 +69,13 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -81,6 +83,7 @@
 #include <poll.h>
 #include <sstream>
 #include <string>
+#include <sys/types.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -403,19 +406,66 @@ private:
 
     bool parse_number(Value* out, std::string& error) {
         std::size_t start = cursor_;
-        if (!at_end() && source_[cursor_] == '-') cursor_++;
-        while (!at_end() &&
-               ((source_[cursor_] >= '0' && source_[cursor_] <= '9') ||
-                source_[cursor_] == '.' || source_[cursor_] == 'e' || source_[cursor_] == 'E' ||
-                source_[cursor_] == '+' || source_[cursor_] == '-')) {
+        if (!at_end() && source_[cursor_] == '-') {
             cursor_++;
         }
+
+        if (at_end()) {
+            error = "number is missing digits";
+            return false;
+        }
+        if (source_[cursor_] == '0') {
+            cursor_++;
+            if (!at_end() && std::isdigit(static_cast<unsigned char>(source_[cursor_]))) {
+                error = "number has a leading zero";
+                return false;
+            }
+        } else if (source_[cursor_] >= '1' && source_[cursor_] <= '9') {
+            while (!at_end() && std::isdigit(static_cast<unsigned char>(source_[cursor_]))) {
+                cursor_++;
+            }
+        } else {
+            error = "number is missing integer digits";
+            return false;
+        }
+
+        if (!at_end() && source_[cursor_] == '.') {
+            cursor_++;
+            const std::size_t fraction_start = cursor_;
+            while (!at_end() && std::isdigit(static_cast<unsigned char>(source_[cursor_]))) {
+                cursor_++;
+            }
+            if (cursor_ == fraction_start) {
+                error = "number fraction is missing digits";
+                return false;
+            }
+        }
+
+        if (!at_end() && (source_[cursor_] == 'e' || source_[cursor_] == 'E')) {
+            cursor_++;
+            if (!at_end() && (source_[cursor_] == '+' || source_[cursor_] == '-')) {
+                cursor_++;
+            }
+            const std::size_t exponent_start = cursor_;
+            while (!at_end() && std::isdigit(static_cast<unsigned char>(source_[cursor_]))) {
+                cursor_++;
+            }
+            if (cursor_ == exponent_start) {
+                error = "number exponent is missing digits";
+                return false;
+            }
+        }
+
         std::string text = source_.substr(start, cursor_ - start);
-        if (text.empty()) { error = "empty number"; return false; }
+        std::size_t consumed = 0;
         try {
-            out->number_value = std::stod(text);
+            out->number_value = std::stod(text, &consumed);
         } catch (...) {
             error = "could not parse number: " + text;
+            return false;
+        }
+        if (consumed != text.size() || !std::isfinite(out->number_value)) {
+            error = "could not parse finite number: " + text;
             return false;
         }
         out->kind = ValueKind::Number;
@@ -520,21 +570,35 @@ double get_number(const JsonParser::Value& object, const std::string& key) {
     return value->number_value;
 }
 
-std::vector<std::array<double, 2>> get_profile(const JsonParser::Value& object,
-                                                const std::string& key) {
-    std::vector<std::array<double, 2>> result;
+bool get_profile(const JsonParser::Value& object, const std::string& key,
+                 std::vector<std::array<double, 2>>& result, std::string& error) {
+    result.clear();
     const auto* value = find_field(object, key);
-    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) return result;
-    result.reserve(value->array_value.size());
-    for (const auto& pair : value->array_value) {
-        if (pair.kind != JsonParser::ValueKind::Array) continue;
-        if (pair.array_value.size() != 2) continue;
-        if (pair.array_value[0].kind != JsonParser::ValueKind::Number) continue;
-        if (pair.array_value[1].kind != JsonParser::ValueKind::Number) continue;
-        result.push_back(
-            {pair.array_value[0].number_value, pair.array_value[1].number_value});
+    if (value == nullptr || value->kind != JsonParser::ValueKind::Array) {
+        error = key + " must be an array";
+        return false;
     }
-    return result;
+    result.reserve(value->array_value.size());
+    for (std::size_t index = 0; index < value->array_value.size(); ++index) {
+        const auto& pair = value->array_value[index];
+        if (pair.kind != JsonParser::ValueKind::Array || pair.array_value.size() != 2) {
+            error = key + " vertex " + std::to_string(index) +
+                    " must be an array of exactly 2 numbers";
+            return false;
+        }
+        if (pair.array_value[0].kind != JsonParser::ValueKind::Number ||
+            pair.array_value[1].kind != JsonParser::ValueKind::Number) {
+            error = key + " vertex " + std::to_string(index) + " must contain only numbers";
+            return false;
+        }
+        if (!std::isfinite(pair.array_value[0].number_value) ||
+            !std::isfinite(pair.array_value[1].number_value)) {
+            error = key + " vertex " + std::to_string(index) + " must contain finite numbers";
+            return false;
+        }
+        result.push_back({pair.array_value[0].number_value, pair.array_value[1].number_value});
+    }
+    return true;
 }
 
 std::array<double, 3> get_vec3(const JsonParser::Value& object, const std::string& key) {
@@ -673,23 +737,38 @@ std::string sha256_hex(const std::string& bytes) {
 class CappedFileBuffer final : public std::streambuf {
 public:
     CappedFileBuffer(const std::filesystem::path& path, std::size_t limit)
-        : file_(path, std::ios::binary | std::ios::out), limit_(limit) {}
+        : limit_(limit) {
+        fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    }
 
-    bool is_open() const { return file_.is_open(); }
+    CappedFileBuffer(const CappedFileBuffer&) = delete;
+    CappedFileBuffer& operator=(const CappedFileBuffer&) = delete;
+
+    ~CappedFileBuffer() override {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+
+    bool is_open() const { return fd_ >= 0; }
     bool exceeded() const { return exceeded_; }
     bool close() {
-        file_.close();
-        return !file_.fail();
+        if (fd_ < 0) return !write_failed_;
+        const bool flushed = sync() == 0;
+        const bool closed = ::close(fd_) == 0;
+        fd_ = -1;
+        return flushed && closed && !write_failed_;
     }
 
 protected:
     std::streamsize xsputn(const char* data, std::streamsize count) override {
+        if (count <= 0) return 0;
         const std::streamsize available = static_cast<std::streamsize>(limit_ - written_);
         const std::streamsize accepted = std::min(count, available);
         if (accepted > 0) {
-            file_.write(data, accepted);
-            if (!file_) return 0;
-            written_ += static_cast<std::size_t>(accepted);
+            const std::streamsize written = write_bytes(data, accepted);
+            written_ += static_cast<std::size_t>(written);
+            if (written != accepted) return written;
         }
         if (accepted != count) {
             exceeded_ = true;
@@ -705,22 +784,44 @@ protected:
             exceeded_ = true;
             return traits_type::eof();
         }
-        file_.put(traits_type::to_char_type(character));
-        if (!file_) return traits_type::eof();
-        ++written_;
-        return character;
+        const char value = traits_type::to_char_type(character);
+        return xsputn(&value, 1) == 1 ? character : traits_type::eof();
     }
 
     int sync() override {
-        file_.flush();
-        return file_ ? 0 : -1;
+        if (fd_ < 0 || write_failed_) return -1;
+        while (::fsync(fd_) != 0) {
+            if (errno != EINTR) {
+                write_failed_ = true;
+                return -1;
+            }
+        }
+        return 0;
     }
 
 private:
-    std::ofstream file_;
+    std::streamsize write_bytes(const char* data, std::streamsize count) {
+        std::streamsize offset = 0;
+        while (offset < count) {
+            const ssize_t written = ::write(fd_, data + offset,
+                                            static_cast<std::size_t>(count - offset));
+            if (written > 0) {
+                offset += written;
+            } else if (written < 0 && errno == EINTR) {
+                continue;
+            } else {
+                write_failed_ = true;
+                break;
+            }
+        }
+        return offset;
+    }
+
+    int fd_ = -1;
     std::size_t limit_;
     std::size_t written_ = 0;
     bool exceeded_ = false;
+    bool write_failed_ = false;
 };
 
 bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, std::string& error) {
@@ -743,7 +844,6 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
     // check-then-write window around the worker-selected output path.
     std::filesystem::path temporary = path;
     temporary += ".tmp-" + std::to_string(static_cast<long long>(getpid()));
-    std::filesystem::remove(temporary, ec);
     CappedFileBuffer output_buffer(temporary, kMaxArtifactBytes);
     if (!output_buffer.is_open()) {
         error = "staged BREP could not be opened for writing: " + temporary.string();
@@ -770,12 +870,16 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
         std::filesystem::remove(temporary, ec);
         return false;
     }
-    std::filesystem::rename(temporary, path, ec);
-    if (ec) {
-        error = "atomic BREP promotion failed for " + path.string() + ": " + ec.message();
+    // Hard-link publication is atomic and refuses an existing destination,
+    // including a symlink. Unlike rename, it cannot replace a path that was
+    // planted after the initial symlink check.
+    if (::link(temporary.c_str(), path.c_str()) != 0) {
+        error = "atomic BREP promotion failed for " + path.string() + ": " +
+                std::strerror(errno);
         std::filesystem::remove(temporary, ec);
         return false;
     }
+    std::filesystem::remove(temporary, ec);
     return true;
 }
 
@@ -791,7 +895,8 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
     std::string output_dir = get_string(request, "output_dir");
     std::string output_filename = get_string(request, "output_filename");
     double height = get_number(request, "height");
-    auto profile = get_profile(request, "profile");
+    std::vector<std::array<double, 2>> profile;
+    if (!get_profile(request, "profile", profile, error)) return false;
 
     if (request_id.empty() || feature_id.empty() || output_dir.empty() || output_filename.empty()) {
         error = "extrude request is missing required string fields";
@@ -1435,7 +1540,8 @@ bool handle_revolve(const JsonParser::Value& request, std::string& error) {
     std::string feature_id = get_string(request, "feature_id");
     std::string output_dir = get_string(request, "output_dir");
     std::string output_filename = get_string(request, "output_filename");
-    auto profile = get_profile(request, "profile");
+    std::vector<std::array<double, 2>> profile;
+    if (!get_profile(request, "profile", profile, error)) return false;
     auto axis_point = get_vec3(request, "axis_point");
     auto axis_direction = get_vec3(request, "axis_direction");
     double angle = get_number(request, "angle");

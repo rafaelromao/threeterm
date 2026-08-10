@@ -423,7 +423,7 @@ impl Supervisor {
         // advertise the canonical schema_version or the host fails
         // closed before sending any `Request`.
         let deadline = started + self.grace;
-        if let Some(outcome) = self.consume_worker_ready("<handshake>", started, deadline) {
+        if let Some(outcome) = self.consume_worker_ready(&request.request_id, started, deadline) {
             return outcome;
         }
         if Instant::now() >= deadline {
@@ -789,7 +789,7 @@ impl Supervisor {
                 failed: None,
             };
             return self.cooperative_termination_outcome(
-                request_id,
+                request.request_id.clone(),
                 "protocol_violation:completed_request_id_mismatch".to_string(),
                 started,
                 context,
@@ -816,7 +816,8 @@ impl Supervisor {
         // protocol terminal envelope and the validated stream/reap state are
         // authoritative; a worker may report a useful result before exiting
         // with a domain-specific status code.
-        if let Some(outcome) = self.verify_clean_exit(&request_id, started, "completed_reap", None)
+        if let Some(outcome) =
+            self.verify_clean_exit(&request_id, started, "completed_reap", last_progress)
         {
             self.discard_stage();
             return outcome;
@@ -1258,7 +1259,7 @@ mod tests {
         let outcome = supervisor.request(sample_request());
         match outcome {
             SupervisorOutcome::ForceTerminated { record } => {
-                assert_eq!(record.request_id, "<handshake>");
+                assert_eq!(record.request_id, "req-1");
                 assert!(
                     record.stage.starts_with("handshake_grace_exceeded")
                         || record.stage.starts_with("handshake_worker_closed"),

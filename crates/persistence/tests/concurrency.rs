@@ -30,6 +30,23 @@ fn previous_generation_sibling(root: &Path) -> PathBuf {
     previous
 }
 
+fn assert_no_publish_staging(root: &Path) {
+    let root_name = root.file_name().expect("root has a name").to_string_lossy();
+    let staging = fs::read_dir(root.parent().expect("root has a parent"))
+        .expect("bundle parent reads")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(root_name.as_ref()) && name.contains(".publish-tmp-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        staging.is_empty(),
+        "failed first save must not strand staging: {staging:?}"
+    );
+}
+
 #[test]
 fn successful_saves_retain_the_immediately_preceding_generation() {
     let root = unique_temp_dir("retain-preceding");
@@ -633,6 +650,9 @@ fn first_save_setup_failures_leave_no_partial_root() {
             !root.exists(),
             "no partial canonical root after an interrupted first save"
         );
+        if point != PublicationFailurePoint::PromoteStaging {
+            assert_no_publish_staging(&root);
+        }
 
         bundle
             .append_feature("box-1", "box")

@@ -58,6 +58,35 @@ fn previous_root(root: &std::path::Path) -> PathBuf {
     previous
 }
 
+fn generation_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(root: &Path, path: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(path).expect("generation directory reads") {
+            let entry = entry.expect("generation entry reads");
+            let entry_path = entry.path();
+            if entry
+                .file_type()
+                .expect("generation entry type reads")
+                .is_dir()
+            {
+                collect(root, &entry_path, files);
+            } else {
+                files.push((
+                    entry_path
+                        .strip_prefix(root)
+                        .expect("generation path is relative")
+                        .to_path_buf(),
+                    std::fs::read(&entry_path).expect("generation file reads"),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
 fn assert_no_publication_staging(root: &Path) {
     let root_name = root.file_name().expect("root has a name").to_string_lossy();
     let staging = std::fs::read_dir(root.parent().expect("root has a parent"))
@@ -75,11 +104,27 @@ fn assert_no_publication_staging(root: &Path) {
     );
 }
 
+fn assert_no_atomic_write_temporary_files(root: &Path) {
+    if !root.exists() {
+        return;
+    }
+    let temporary_files = generation_snapshot(root)
+        .into_iter()
+        .filter(|(path, _)| path.to_string_lossy().ends_with(".tmp"))
+        .map(|(path, _)| root.join(path))
+        .collect::<Vec<_>>();
+    assert!(
+        temporary_files.is_empty(),
+        "atomic-write temporary files must not remain: {temporary_files:?}"
+    );
+}
+
 fn assert_host_save_storage_failure(point: PublicationFailurePoint) {
     let root = temp_root(&format!("{point:?}-failure"));
     let host = Host::new();
     host.save(&root, "box-1", "box")
         .expect("initial save succeeds");
+    let prior_generation = generation_snapshot(&root);
     let prior_manifest = std::fs::read(root.join("manifest.json")).expect("manifest reads");
     let prior_log = std::fs::read(root.join("transactions.log")).expect("log reads");
 
@@ -103,7 +148,14 @@ fn assert_host_save_storage_failure(point: PublicationFailurePoint) {
     );
     host.load(&root)
         .expect("the prior generation remains reloadable");
+    assert_eq!(
+        generation_snapshot(&root),
+        prior_generation,
+        "{point:?} must preserve the complete current generation"
+    );
     assert_no_publication_staging(&root);
+    assert_no_atomic_write_temporary_files(&root);
+    assert_no_atomic_write_temporary_files(&previous_root(&root));
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(previous_root(&root));
@@ -141,6 +193,8 @@ fn concurrent_host_saves_serialize_through_the_bundle_lock() {
         .collect();
     assert_eq!(actual_features, expected_features);
     assert_no_publication_staging(&root);
+    assert_no_atomic_write_temporary_files(&root);
+    assert_no_atomic_write_temporary_files(&previous_root(&root));
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(previous_root(&root));
@@ -172,6 +226,7 @@ fn host_save_surfaces_containing_directory_sync_failure_after_promotion() {
     let host = Host::new();
     host.save(&root, "box-1", "box")
         .expect("initial save succeeds");
+    let prior_generation = generation_snapshot(&root);
     let prior_manifest = std::fs::read(root.join("manifest.json")).expect("manifest reads");
     let prior_log = std::fs::read(root.join("transactions.log")).expect("log reads");
 
@@ -190,6 +245,11 @@ fn host_save_surfaces_containing_directory_sync_failure_after_promotion() {
     let previous = previous_root(&root);
     assert_linear_log(&previous, 1);
     assert_eq!(
+        generation_snapshot(&previous),
+        prior_generation,
+        "the prior generation remains byte-identical in the recovery slot"
+    );
+    assert_eq!(
         std::fs::read(previous.join("manifest.json")).unwrap(),
         prior_manifest,
         "the prior manifest remains byte-identical in the recovery slot"
@@ -199,6 +259,8 @@ fn host_save_surfaces_containing_directory_sync_failure_after_promotion() {
         prior_log,
         "the prior log remains byte-identical in the recovery slot"
     );
+    assert_no_atomic_write_temporary_files(&root);
+    assert_no_atomic_write_temporary_files(&previous);
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(previous);
@@ -235,7 +297,10 @@ fn a_later_host_save_recovers_after_each_injected_storage_failure() {
             2
         };
         assert_linear_log(&root, expected_len);
+        assert_linear_log(&previous_root(&root), expected_len - 1);
         assert_no_publication_staging(&root);
+        assert_no_atomic_write_temporary_files(&root);
+        assert_no_atomic_write_temporary_files(&previous_root(&root));
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(previous_root(&root));

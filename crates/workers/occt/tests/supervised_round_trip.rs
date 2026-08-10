@@ -45,7 +45,9 @@ impl FixtureDir {
         use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script, permissions).expect("fixture script chmod");
-        OcctWorker::with_binary_path(script).with_grace(Duration::from_secs(10))
+        OcctWorker::with_binary_path(script)
+            .with_expected_worker_id("fixture")
+            .with_grace(Duration::from_secs(10))
     }
 }
 
@@ -96,6 +98,19 @@ fn sample_extrude_request_at(output_dir: impl Into<std::path::PathBuf>) -> Extru
     ExtrudeRequest::new("req-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 2.0)
         .with_output_path(output_dir, "out.brep")
         .with_feature_id("box-1")
+}
+
+fn assert_id_bound_malformed(error: WorkerError, detail_fragment: &str) {
+    match error {
+        WorkerError::MalformedWithContext { request_id, detail } => {
+            assert_eq!(request_id, "req-1");
+            assert!(
+                detail.contains(detail_fragment),
+                "detail must contain {detail_fragment:?}; got {detail:?}"
+            );
+        }
+        other => panic!("expected ID-bearing Malformed; got {other:?}"),
+    }
 }
 
 #[test]
@@ -153,10 +168,12 @@ fn typed_extrude_rejects_a_schema_mismatched_worker() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("schema-mismatched worker must fail closed");
-    assert!(
-        matches!(error, WorkerError::Malformed { .. }),
-        "expected Malformed; got {error:?}"
-    );
+    match error {
+        WorkerError::MalformedWithContext { request_id, .. } => {
+            assert_eq!(request_id, "req-1");
+        }
+        other => panic!("expected ID-bearing Malformed; got {other:?}"),
+    }
 }
 
 #[test]
@@ -258,15 +275,7 @@ fn typed_extrude_fails_closed_on_oversized_staged_output() {
     ));
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("oversized staged output must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("exceeds the"),
-                "detail must name the bound; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "exceeds the");
 }
 
 #[test]
@@ -293,15 +302,7 @@ fn typed_extrude_fails_closed_when_the_actual_staged_file_is_oversized() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("actual oversized staged output must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("exceeds the"),
-                "detail must name the bound; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "exceeds the");
 }
 
 #[test]
@@ -382,15 +383,7 @@ fn typed_extrude_fails_closed_on_staged_digest_mismatch() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("digest mismatch must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("digest mismatch"),
-                "detail must name the digest mismatch; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "digest mismatch");
 }
 
 #[test]
@@ -413,15 +406,7 @@ fn typed_extrude_fails_closed_on_non_regular_staged_file() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("non-regular staged output must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("not a regular file"),
-                "detail must name the file identity; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "not a regular file");
 }
 
 #[test]
@@ -447,15 +432,7 @@ fn typed_extrude_fails_closed_on_a_symlinked_staged_file() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("symlinked staged output must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("symlink"),
-                "detail must name the symlink; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "symlink");
 }
 
 #[test]
@@ -484,15 +461,7 @@ fn typed_extrude_with_cancel_fails_closed_on_oversized_staged_output() {
         worker.extrude_with_cancel(&sample_extrude_request_at(&dir.root), &cancel)
     })
     .expect_err("cancellable oversized staged output must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("exceeds the"),
-                "detail must name the bound; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "exceeds the");
 }
 
 #[test]
@@ -520,15 +489,49 @@ fn typed_extrude_with_cancel_fails_closed_on_digest_mismatch() {
         worker.extrude_with_cancel(&sample_extrude_request_at(&dir.root), &cancel)
     })
     .expect_err("cancellable digest mismatch must fail closed");
+    assert_id_bound_malformed(error, "digest mismatch");
+}
+
+#[test]
+fn typed_extrude_rejects_a_foreign_operation_with_request_context() {
+    let worker = fixture_worker_named(
+        "foreign-operation-public",
+        r#"printf '%s\n' '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{"schema_version":"threeterm.workers.occt/1","request_id":"req-1","operation":"boolean_fuse","status":"ok","feature_id":"box-1"}}'"#,
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("foreign operation must fail closed");
     match error {
-        WorkerError::Malformed { detail } => {
+        WorkerError::MalformedWithContext { request_id, detail } => {
+            assert_eq!(request_id, "req-1");
             assert!(
-                detail.contains("digest mismatch"),
-                "detail must name the digest mismatch; got {detail:?}"
+                detail.contains("operation"),
+                "detail must name the operation binding: {detail:?}"
             );
         }
-        other => panic!("expected Malformed; got {other:?}"),
+        other => panic!("expected ID-bearing Malformed; got {other:?}"),
     }
+}
+
+#[test]
+fn typed_extrude_rejects_a_foreign_inner_request_id_with_context() {
+    let worker = fixture_worker_named(
+        "foreign-inner-request",
+        r#"printf '%s\n' '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{"schema_version":"threeterm.workers.occt/1","request_id":"other-request","operation":"extrude","status":"ok","feature_id":"box-1"}}'"#,
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("foreign inner request must fail closed");
+    assert_id_bound_malformed(error, "bound to");
+}
+
+#[test]
+fn typed_extrude_rejects_a_foreign_inner_schema_with_context() {
+    let worker = fixture_worker_named(
+        "foreign-inner-schema",
+        r#"printf '%s\n' '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-1","result":{"schema_version":"threeterm.workers.occt/0","request_id":"req-1","operation":"extrude","status":"ok","feature_id":"box-1"}}'"#,
+    );
+    let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
+        .expect_err("foreign inner schema must fail closed");
+    assert_id_bound_malformed(error, "completed result schema");
 }
 
 #[test]
@@ -553,13 +556,5 @@ fn typed_extrude_fails_closed_on_foreign_feature_id_in_result() {
     );
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request_at(&dir.root)))
         .expect_err("foreign feature_id must fail closed");
-    match error {
-        WorkerError::Malformed { detail } => {
-            assert!(
-                detail.contains("feature_id"),
-                "detail must name the feature id; got {detail:?}"
-            );
-        }
-        other => panic!("expected Malformed; got {other:?}"),
-    }
+    assert_id_bound_malformed(error, "feature_id");
 }

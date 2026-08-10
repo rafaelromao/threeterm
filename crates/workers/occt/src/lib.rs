@@ -87,6 +87,9 @@ pub enum WorkerError {
     /// The worker emitted output that is not valid JSON or not a parseable
     /// envelope.
     Malformed { detail: String },
+    /// A malformed result after the active request identity was safely
+    /// extracted.
+    MalformedWithContext { request_id: String, detail: String },
     /// The worker emitted a JSON diagnostic instead of a response.
     Diagnostic(OcctDiagnostic),
     /// The request was cooperatively cancelled and the worker
@@ -118,6 +121,10 @@ impl std::fmt::Display for WorkerError {
             Self::Malformed { detail } => {
                 write!(formatter, "malformed worker output: {detail}")
             }
+            Self::MalformedWithContext { request_id, detail } => write!(
+                formatter,
+                "malformed worker output for request {request_id}: {detail}"
+            ),
             Self::Diagnostic(diagnostic) => write!(
                 formatter,
                 "worker diagnostic {} {}: {}",
@@ -159,6 +166,8 @@ pub struct OcctWorker {
     /// protocol carries this outer identity even though the typed OCCT
     /// arguments remain operation-specific.
     revision_id: Option<String>,
+    /// Expected worker identity negotiated during the protocol handshake.
+    expected_worker_id: Option<String>,
 }
 
 /// Default supervisor grace for OCCT operations. Operations complete in
@@ -174,12 +183,12 @@ impl OcctWorker {
     pub fn locate() -> Result<Self, WorkerError> {
         let built = PathBuf::from(BUILT_WORKER_PATH.trim());
         if built.is_file() {
-            return Ok(Self::with_binary_path(built));
+            return Ok(Self::with_binary_path(built).with_expected_worker_id("occt"));
         }
         if let Some(path) = env::var_os("THREETERM_OCCTBUILD_WORKER") {
             let candidate = PathBuf::from(path);
             if candidate.is_file() {
-                return Ok(Self::with_binary_path(candidate));
+                return Ok(Self::with_binary_path(candidate).with_expected_worker_id("occt"));
             }
         }
         let target_root = env::var_os("CARGO_TARGET_DIR")
@@ -206,6 +215,7 @@ impl OcctWorker {
             binary_path,
             grace: DEFAULT_SUPERVISOR_GRACE,
             revision_id: None,
+            expected_worker_id: None,
         }
     }
 
@@ -219,6 +229,12 @@ impl OcctWorker {
     /// Bind subsequent requests to a host-owned Revision Snapshot.
     pub fn with_revision_id(mut self, revision_id: impl Into<String>) -> Self {
         self.revision_id = Some(revision_id.into());
+        self
+    }
+
+    /// Require a specific worker identity during handshake negotiation.
+    pub fn with_expected_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.expected_worker_id = Some(worker_id.into());
         self
     }
 
@@ -255,6 +271,7 @@ impl OcctWorker {
         // host commit path.
         RawResult {
             value,
+            request_id: request.request_id.clone(),
             expected_output: expected_output_path(&request.output_dir, &request.output_filename),
         }
         .into_extrude()
@@ -402,6 +419,7 @@ impl OcctWorker {
         self.run_with_cancel(envelope, &cancel)
             .map(|value| RawResult {
                 value,
+                request_id: request_id_from_envelope(envelope),
                 expected_output,
             })
     }
@@ -485,6 +503,9 @@ impl OcctWorker {
             detail: error.to_string(),
         })?;
         let mut supervisor = Supervisor::new(self.grace, host, None);
+        if let Some(worker_id) = &self.expected_worker_id {
+            supervisor = supervisor.with_expected_worker_id(worker_id.clone());
+        }
         let outcome = supervisor.request_with_cancel(
             SupervisorRequest {
                 request_id: request_id.clone(),
@@ -546,21 +567,24 @@ fn map_outcome(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
             if result_request_id != request_id {
-                return Err(WorkerError::Malformed {
+                return Err(WorkerError::MalformedWithContext {
+                    request_id: request_id.to_string(),
                     detail: format!(
                         "completed result is bound to {result_request_id:?}, expected {request_id:?}"
                     ),
                 });
             }
             if result_schema != SCHEMA_VERSION {
-                return Err(WorkerError::Malformed {
+                return Err(WorkerError::MalformedWithContext {
+                    request_id: request_id.to_string(),
                     detail: format!(
                         "completed result schema {result_schema:?}, expected {SCHEMA_VERSION:?}"
                     ),
                 });
             }
             if result_operation != command_id {
-                return Err(WorkerError::Malformed {
+                return Err(WorkerError::MalformedWithContext {
+                    request_id: request_id.to_string(),
                     detail: format!(
                         "completed result operation {result_operation:?}, expected {command_id:?}"
                     ),
@@ -571,7 +595,8 @@ fn map_outcome(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
             if !expected_feature_id.is_empty() && result_feature_id != expected_feature_id {
-                return Err(WorkerError::Malformed {
+                return Err(WorkerError::MalformedWithContext {
+                    request_id: request_id.to_string(),
                     detail: format!(
                         "completed result feature_id {result_feature_id:?}, expected {expected_feature_id:?}"
                     ),
@@ -579,6 +604,7 @@ fn map_outcome(
             }
             Ok(RawResult {
                 value: result,
+                request_id: request_id.to_string(),
                 expected_output,
             })
         }
@@ -602,7 +628,8 @@ fn map_outcome(
                 }
             }
             if record.stage.starts_with("handshake_schema_mismatch") {
-                return Err(WorkerError::Malformed {
+                return Err(WorkerError::MalformedWithContext {
+                    request_id: record.request_id.clone(),
                     detail: record.stage,
                 });
             }
@@ -651,6 +678,31 @@ fn bounded_serialize<T: serde::Serialize>(
     .map_err(|error| WorkerError::Malformed {
         detail: format!("{operation} request serialization failed: {error}"),
     })
+}
+
+fn request_id_from_envelope(envelope: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(envelope)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn malformed_for_request(request_id: &str, detail: impl Into<String>) -> WorkerError {
+    if request_id.is_empty() {
+        WorkerError::Malformed {
+            detail: detail.into(),
+        }
+    } else {
+        WorkerError::MalformedWithContext {
+            request_id: request_id.to_string(),
+            detail: detail.into(),
+        }
+    }
 }
 
 /// The private output location a request declares, when both parts are
@@ -721,6 +773,7 @@ impl WorkerProcess for OcctWorker {
 #[derive(Debug)]
 struct RawResult {
     value: serde_json::Value,
+    request_id: String,
     /// The private output location the request declared
     /// (`output_dir`/`output_filename`). When present, the worker's
     /// advertised `brep_path` must equal it: a worker pointing at any
@@ -753,7 +806,9 @@ impl RawResult {
     where
         T: serde::de::DeserializeOwned,
     {
+        let request_id = self.request_id;
         let value = self.value;
+        let expected_output = self.expected_output;
         let brep_bytes = value
             .get("brep_bytes")
             .and_then(serde_json::Value::as_u64)
@@ -767,74 +822,90 @@ impl RawResult {
         // a malformed or compromised worker can never direct the host to
         // promote foreign bytes.
         let Some(path) = brep_path.as_deref() else {
-            return Err(WorkerError::Malformed {
-                detail: "worker response is missing brep_path".to_string(),
-            });
+            return Err(malformed_for_request(
+                &request_id,
+                "worker response is missing brep_path",
+            ));
         };
-        if let Some(expected) = &self.expected_output
+        if let Some(expected) = &expected_output
             && path != expected.as_path()
         {
-            return Err(WorkerError::Malformed {
-                detail: format!(
+            return Err(malformed_for_request(
+                &request_id,
+                format!(
                     "worker output at {path:?} is not the request's private output location {expected:?}"
                 ),
-            });
+            ));
         }
         // The staged output must exist as a regular file that is not a
         // symlink: a missing, dangling, or redirected path cannot be
         // verified and fails closed instead of trusting the
         // advertisement.
-        let metadata = std::fs::symlink_metadata(path).map_err(|error| WorkerError::Malformed {
-            detail: format!("worker output at {path:?} could not be stat'd: {error}"),
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            malformed_for_request(
+                &request_id,
+                format!("worker output at {path:?} could not be stat'd: {error}"),
+            )
         })?;
         if metadata.file_type().is_symlink() {
-            return Err(WorkerError::Malformed {
-                detail: format!("worker output at {path:?} must not be a symlink"),
-            });
+            return Err(malformed_for_request(
+                &request_id,
+                format!("worker output at {path:?} must not be a symlink"),
+            ));
         }
         if !metadata.is_file() {
-            return Err(WorkerError::Malformed {
-                detail: format!("worker output at {path:?} is not a regular file"),
-            });
+            return Err(malformed_for_request(
+                &request_id,
+                format!("worker output at {path:?} is not a regular file"),
+            ));
         }
         let actual_bytes = metadata.len();
         let bound = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
         let largest = actual_bytes.max(brep_bytes);
         if largest > bound {
-            return Err(WorkerError::Malformed {
-                detail: format!(
+            return Err(malformed_for_request(
+                &request_id,
+                format!(
                     "worker staged output of {largest} bytes (advertised {brep_bytes}) exceeds the {bound} byte bound"
                 ),
-            });
+            ));
         }
         // The advertised byte count must equal the actual file size: an
         // under-reporting worker is treated as malformed rather than
         // being trusted on either side of the comparison.
         if actual_bytes != brep_bytes {
-            return Err(WorkerError::Malformed {
-                detail: format!(
+            return Err(malformed_for_request(
+                &request_id,
+                format!(
                     "worker staged output at {path:?} is {actual_bytes} bytes but advertises {brep_bytes}"
                 ),
-            });
+            ));
         }
         // Verify the staged file's SHA-256 digest matches the worker's
         // advertisement. A digest mismatch fails closed so a tampered
         // artifact can never reach the host's promotion path.
         let advertised = value.get("brep_sha256").and_then(serde_json::Value::as_str);
         if let Some(advertised) = advertised {
-            let actual = crate::sha256_file(path).map_err(|error| WorkerError::Malformed {
-                detail: format!("worker output at {path:?} could not be read: {error}"),
+            let actual = crate::sha256_file(path).map_err(|error| {
+                malformed_for_request(
+                    &request_id,
+                    format!("worker output at {path:?} could not be read: {error}"),
+                )
             })?;
             if actual != advertised {
-                return Err(WorkerError::Malformed {
-                    detail: format!(
+                return Err(malformed_for_request(
+                    &request_id,
+                    format!(
                         "worker output at {path:?} digest mismatch: advertised {advertised}, actual {actual}"
                     ),
-                });
+                ));
             }
         }
-        serde_json::from_value::<T>(value).map_err(|error| WorkerError::Malformed {
-            detail: format!("worker response could not be parsed: {error}"),
+        serde_json::from_value::<T>(value).map_err(|error| {
+            malformed_for_request(
+                &request_id,
+                format!("worker response could not be parsed: {error}"),
+            )
         })
     }
 
@@ -1366,8 +1437,8 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("foreign request_id must fail closed");
         assert!(
-            matches!(error, WorkerError::Malformed { .. }),
-            "expected Malformed; got {error:?}"
+            matches!(error, WorkerError::MalformedWithContext { .. }),
+            "expected ID-bearing Malformed; got {error:?}"
         );
     }
 
@@ -1396,13 +1467,14 @@ mod tests {
         .into_extrude()
         .expect_err("foreign output path must fail closed");
         match error {
-            WorkerError::Malformed { detail } => {
+            WorkerError::MalformedWithContext { request_id, detail } => {
+                assert_eq!(request_id, "req-1");
                 assert!(
                     detail.contains("output location"),
                     "detail must name the output binding; got {detail:?}"
                 );
             }
-            other => panic!("expected Malformed; got {other:?}"),
+            other => panic!("expected ID-bearing Malformed; got {other:?}"),
         }
     }
 
@@ -1453,8 +1525,8 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("foreign operation must fail closed");
         assert!(
-            matches!(error, WorkerError::Malformed { .. }),
-            "expected Malformed; got {error:?}"
+            matches!(error, WorkerError::MalformedWithContext { .. }),
+            "expected ID-bearing Malformed; got {error:?}"
         );
     }
 
@@ -1629,8 +1701,8 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("schema mismatch must fail closed");
         assert!(
-            matches!(error, WorkerError::Malformed { .. }),
-            "expected Malformed; got {error:?}"
+            matches!(error, WorkerError::MalformedWithContext { .. }),
+            "expected ID-bearing Malformed; got {error:?}"
         );
     }
 

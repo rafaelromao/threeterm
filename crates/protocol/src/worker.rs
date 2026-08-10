@@ -232,6 +232,13 @@ pub trait WorkerHost {
         Ok(())
     }
 
+    /// Finalize a terminal envelope before the supervisor accepts its result.
+    /// Implementations terminate/reap the worker, settle bounded stream
+    /// readers, and reject buffered or trailing protocol data.
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.terminate()
+    }
+
     /// Returns the actual Linux signal the worker process exited by, if
     /// it was killed by a signal rather than exiting cleanly. `None`
     /// when the worker exited normally or has not been reaped yet.
@@ -283,6 +290,32 @@ impl FramedWorkerHost {
             parser: FrameParser::new(),
             pending: VecDeque::new(),
         }
+    }
+
+    fn finish_terminal_data(&mut self) -> Result<(), WorkerError> {
+        if self.pending.front().is_some() {
+            return Err(WorkerError::Protocol(
+                "trailing envelope after terminal message".to_string(),
+            ));
+        }
+
+        while let Ok(bytes) = self.inbound.try_recv() {
+            let envelopes = self
+                .parser
+                .push(&bytes)
+                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+            if !envelopes.is_empty() {
+                return Err(WorkerError::Protocol(
+                    "trailing envelope after terminal message".to_string(),
+                ));
+            }
+        }
+        if self.parser.has_buffered_bytes() {
+            return Err(WorkerError::Protocol(
+                "unterminated trailing data after terminal message".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -337,6 +370,10 @@ impl WorkerHost for FramedWorkerHost {
             request_id: request_id.to_string(),
             reason: reason.to_string(),
         })
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.finish_terminal_data()
     }
 }
 
@@ -699,6 +736,12 @@ impl WorkerHost for SubprocessWorkerHost {
             let _ = std::fs::remove_dir(path);
         }
         Ok(())
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.terminate()?;
+        self.fail_closed_on_overflow()?;
+        self.transport.finish_terminal_data()
     }
 
     fn exit_signal(&mut self) -> Option<i32> {

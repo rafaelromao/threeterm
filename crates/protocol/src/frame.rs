@@ -47,7 +47,11 @@ impl FrameParser {
                 max: MAX_FRAME_BUFFER,
             });
         }
+        let contains_newline = bytes.contains(&b'\n');
         self.buffer.extend_from_slice(bytes);
+        if !contains_newline {
+            return Ok(Vec::new());
+        }
 
         let mut envelopes = Vec::new();
         while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
@@ -61,7 +65,13 @@ impl FrameParser {
                     self.buffer.clear();
                 })
                 .map_err(|_| FrameError::NonUtf8)?;
-            let value: Value = serde_json::from_str(line_str).map_err(FrameError::InvalidJson)?;
+            let value: Value = match serde_json::from_str(line_str) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.buffer.clear();
+                    return Err(FrameError::InvalidJson(error));
+                }
+            };
             let kind_string = value
                 .get("kind")
                 .and_then(Value::as_str)
@@ -93,6 +103,11 @@ impl FrameParser {
     /// parser so the supervisor can resync.
     pub fn reset(&mut self) {
         self.buffer.clear();
+    }
+
+    /// Returns whether an unterminated frame is still buffered.
+    pub fn has_buffered_bytes(&self) -> bool {
+        !self.buffer.is_empty()
     }
 }
 
@@ -242,6 +257,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_json_drops_any_trailing_carry_before_resynchronizing() {
+        let mut parser = FrameParser::new();
+        let error = parser
+            .push(b"not json\n{\"kind\":\"worker_ready\"")
+            .expect_err("malformed frame must be rejected");
+        assert!(matches!(error, FrameError::InvalidJson(_)));
+        assert!(!parser.has_buffered_bytes(), "malformed input clears carry");
+
+        let ready = Envelope::WorkerReady {
+            schema_version: crate::schema_version().to_string(),
+            worker_id: "occt-worker".to_string(),
+        };
+        assert_eq!(
+            parser.push(&encode(&ready)).expect("parser resynchronizes"),
+            vec![ready]
+        );
+    }
+
+    #[test]
     fn push_rejects_frame_missing_kind_discriminator() {
         let mut parser = FrameParser::new();
         let error = parser
@@ -276,5 +310,20 @@ mod tests {
         assert!(!parser.buffer.is_empty());
         parser.reset();
         assert!(parser.buffer.is_empty(), "reset clears the buffer");
+    }
+
+    #[test]
+    fn push_rejects_an_oversized_unterminated_frame() {
+        let mut parser = FrameParser::new();
+        let chunk = vec![b'x'; 4096];
+        let mut error = None;
+        for _ in 0..=(MAX_FRAME_BUFFER / chunk.len()) {
+            if let Err(found) = parser.push(&chunk) {
+                error = Some(found);
+                break;
+            }
+        }
+        assert!(matches!(error, Some(FrameError::PayloadTooLarge { .. })));
+        assert!(!parser.has_buffered_bytes(), "oversized input clears carry");
     }
 }

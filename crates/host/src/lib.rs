@@ -135,6 +135,7 @@ pub enum HostError {
     },
     Persistence(BundleError),
     WorkerFailure {
+        request_id: Option<String>,
         detail: String,
     },
     WorkerUnavailable {
@@ -176,7 +177,7 @@ impl std::fmt::Display for HostError {
             }
             Self::Validation { detail } => write!(formatter, "host.validation: {detail}"),
             Self::Persistence(error) => error.fmt(formatter),
-            Self::WorkerFailure { detail } => {
+            Self::WorkerFailure { detail, .. } => {
                 write!(formatter, "occt worker failure: {detail}")
             }
             Self::WorkerUnavailable { detail } => {
@@ -231,12 +232,18 @@ impl From<WorkerError> for HostError {
                     }
                 } else {
                     Self::WorkerFailure {
+                        request_id: None,
                         detail: format!("{} {}", diagnostic.code, diagnostic.arg),
                     }
                 }
             }
+            WorkerError::MalformedWithContext { request_id, detail } => Self::WorkerFailure {
+                request_id: Some(request_id),
+                detail,
+            },
             WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {
+                request_id: None,
                 detail: other.to_string(),
             },
         }

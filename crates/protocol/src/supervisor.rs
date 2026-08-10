@@ -152,6 +152,7 @@ pub struct Supervisor {
     grace: Duration,
     host: Box<dyn WorkerHost>,
     stage: Option<Stage>,
+    expected_worker_id: Option<String>,
     /// Artifact headers accumulated during the request lifecycle. The
     /// `Completed` arm returns them as worker lifecycle facts; `discard_stage`
     /// clears them without publishing.
@@ -170,6 +171,7 @@ impl fmt::Debug for Supervisor {
                 "stage",
                 &self.stage.as_ref().map(|stage| stage.root().to_path_buf()),
             )
+            .field("expected_worker_id", &self.expected_worker_id)
             .finish_non_exhaustive()
     }
 }
@@ -180,6 +182,7 @@ impl Supervisor {
             grace,
             host,
             stage,
+            expected_worker_id: None,
             artifact_headers: Vec::new(),
             last_artifact_error: None,
         }
@@ -188,6 +191,13 @@ impl Supervisor {
     /// Returns the configured grace period.
     pub fn grace(&self) -> Duration {
         self.grace
+    }
+
+    /// Require the handshake to identify the configured worker before a
+    /// request is dispatched.
+    pub fn with_expected_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.expected_worker_id = Some(worker_id.into());
+        self
     }
 
     /// Cooperative cancellation lifecycle: send a `Cancel` envelope and
@@ -269,7 +279,7 @@ impl Supervisor {
                         );
                     }
                     self.discard_stage();
-                    if let Err(error) = self.host.terminate() {
+                    if let Err(error) = self.host.finish_terminal() {
                         let context = TerminationContext {
                             last_progress: last_progress.take(),
                             last_artifact_error: self.last_artifact_error.take(),
@@ -278,7 +288,7 @@ impl Supervisor {
                         return SupervisorOutcome::ForceTerminated {
                             record: self.termination_record(
                                 ack_request_id,
-                                format!("cancel_reap_failed:{error}"),
+                                format!("cancel_terminal_finalize_failed:{error}"),
                                 started,
                                 context,
                                 ExitKind::ForceAfterGrace,
@@ -728,7 +738,10 @@ impl Supervisor {
             }
         };
         match envelope {
-            Envelope::WorkerReady { schema_version, .. } => {
+            Envelope::WorkerReady {
+                schema_version,
+                worker_id,
+            } => {
                 let expected = crate::schema_version();
                 if schema_version != expected {
                     let detail = format!("received={schema_version:?} expected={expected:?}");
@@ -737,6 +750,18 @@ impl Supervisor {
                         started,
                         "handshake_schema_mismatch",
                         Some(detail),
+                        None,
+                    ))
+                } else if let Some(expected_worker_id) = &self.expected_worker_id
+                    && worker_id != *expected_worker_id
+                {
+                    Some(self.force_terminate_outcome(
+                        request_id,
+                        started,
+                        "handshake_worker_id_mismatch",
+                        Some(format!(
+                            "received={worker_id:?} expected={expected_worker_id:?}"
+                        )),
                         None,
                     ))
                 } else {
@@ -795,7 +820,7 @@ impl Supervisor {
                 context,
             );
         }
-        if let Err(error) = self.host.terminate() {
+        if let Err(error) = self.host.finish_terminal() {
             self.discard_stage();
             let context = TerminationContext {
                 last_progress,
@@ -805,7 +830,7 @@ impl Supervisor {
             return SupervisorOutcome::ForceTerminated {
                 record: self.termination_record(
                     request_id,
-                    format!("completed_reap_failed:{error}"),
+                    format!("completed_terminal_finalize_failed:{error}"),
                     started,
                     context,
                     ExitKind::ForceAfterGrace,
@@ -869,7 +894,7 @@ impl Supervisor {
         started: Instant,
         context: TerminationContext,
     ) -> SupervisorOutcome {
-        let termination_error = self.host.terminate().err();
+        let termination_error = self.host.finish_terminal().err();
         let reaped = termination_error.is_none();
         SupervisorOutcome::ForceTerminated {
             record: self.termination_record(

@@ -3261,7 +3261,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
         HostError::Persistence(error) => error.diagnostic_detail().to_string(),
-        HostError::WorkerFailure { detail } => detail.clone(),
+        HostError::WorkerFailure { detail, .. } => detail.clone(),
         HostError::WorkerUnavailable { detail } => detail.clone(),
         HostError::UnsupportedGeometry { detail } => detail.clone(),
         HostError::BrepInvalid { detail } => detail.clone(),

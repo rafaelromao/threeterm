@@ -2934,3 +2934,65 @@ fn loft_brep_invalid_preserves_canonical_state() {
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(script);
 }
+
+#[test]
+fn adversarial_trailing_worker_data_preserves_canonical_host_state() {
+    let root = fresh_bundle_with_feature("adversarial-trailing", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+    let output_dir = root.join("stage");
+    fs::create_dir_all(&output_dir).expect("stage directory creates");
+    let output = output_dir.join("extrude.brep");
+    let bytes = b"valid staged worker output";
+    fs::write(&output, bytes).expect("staged output writes");
+    let digest = threeterm_occt_worker::sha256_file(&output).expect("staged output hashes");
+    let request = ExtrudeRequest::new(
+        "req-adversarial",
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+        3.0,
+    )
+    .with_feature_id("adversarial-box")
+    .with_output_path(&output_dir, "extrude.brep");
+    let reply = format!(
+        r#"printf '%s\n%s\n' '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-adversarial","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"req-adversarial","operation":"extrude","status":"ok","brep_path":"{path}","brep_sha256":"{digest}","brep_bytes":{bytes},"feature_id":"adversarial-box"}}}}' '{{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"req-adversarial","stage":"trailing","percent":100}}'"#,
+        path = output.display(),
+        digest = digest,
+        bytes = bytes.len(),
+    );
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-adversarial-trailing-{}.sh",
+        std::process::id()
+    ));
+    fs::write(&script, format!("{}\n", fake_worker_script(&reply))).expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let result = host.extrude(&root, request, &fake_worker);
+    let record = match result {
+        Err(HostError::WorkerTerminated { record }) => record,
+        other => panic!("trailing worker data must terminate the request: {other:?}"),
+    };
+    assert_eq!(record.request_id, "req-adversarial");
+    assert!(
+        record.stage.contains("trailing") || record.stage.contains("protocol"),
+        "termination must preserve the framing failure: {:?}",
+        record.stage
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+    assert!(!root.join("brep/adversarial-box.brep").exists());
+    assert!(
+        !output.exists(),
+        "rejected staged output must be cleaned up"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}

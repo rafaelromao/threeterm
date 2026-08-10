@@ -243,6 +243,81 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
 }
 
 #[test]
+fn host_acceptance_keeps_using_the_owned_stage_after_an_ancestor_replacement() {
+    let project_root = temp_root("ancestor-replacement-project");
+    let stage_parent = temp_root("ancestor-replacement-parent");
+    let moved_parent = temp_root("ancestor-replacement-moved");
+    let outside = temp_root("ancestor-replacement-outside");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "seed", "box")
+        .expect("canonical snapshot saves");
+    let request = binding(&snapshot);
+    std::fs::create_dir_all(&stage_parent).expect("stage parent creates");
+    let stage = Stage::create_fresh(&stage_parent, "extrude").expect("stage creates");
+    let original_bytes = b"original staged bytes";
+    stage
+        .stage_bytes(&request.staging_name, original_bytes)
+        .expect("original artifact stages");
+    let mut result = typed_result(
+        &stage
+            .root()
+            .join(format!("{}.partial", request.staging_name)),
+        original_bytes,
+    );
+    let mut outcome = completed(&request, &result, original_bytes);
+    let stage_name = stage
+        .root()
+        .file_name()
+        .expect("stage has a name")
+        .to_owned();
+
+    std::fs::create_dir_all(&outside).expect("outside directory creates");
+    std::fs::rename(&stage_parent, &moved_parent).expect("stage ancestor moves");
+    std::os::unix::fs::symlink(&outside, &stage_parent).expect("stage ancestor symlink creates");
+    let outside_stage = outside.join(&stage_name);
+    std::fs::create_dir(&outside_stage).expect("outside stage creates");
+    let outside_bytes = b"outside stage bytes!!";
+    std::fs::write(
+        outside_stage.join(format!("{}.partial", request.staging_name)),
+        outside_bytes,
+    )
+    .expect("outside artifact writes");
+    let outside_sha256 = sha256_hex(outside_bytes);
+    result.brep_bytes = original_bytes.len();
+    result.brep_sha256 = outside_sha256.clone();
+    let SupervisorOutcome::Completed {
+        artifact_headers, ..
+    } = &mut outcome
+    else {
+        unreachable!("fixture completes");
+    };
+    artifact_headers[0].header.byte_count = original_bytes.len() as u64;
+    artifact_headers[0].header.sha256 = outside_sha256;
+    replace_completion_result(&mut outcome, &result);
+
+    let diagnostic = host
+        .accept_staged_extrude(stage, &request, &result, outcome)
+        .expect_err("replacement outside the owned stage must reject");
+
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactHashMismatch);
+    assert_eq!(
+        std::fs::read(outside_stage.join(format!("{}.partial", request.staging_name)))
+            .expect("outside artifact remains untouched"),
+        outside_bytes
+    );
+    assert!(
+        !moved_parent.join(stage_name).exists(),
+        "rejected owned stage must be discarded"
+    );
+
+    let _ = std::fs::remove_file(stage_parent);
+    let _ = std::fs::remove_dir_all(outside);
+    let _ = std::fs::remove_dir_all(moved_parent);
+    let _ = std::fs::remove_dir_all(project_root);
+}
+
+#[test]
 fn host_rejects_identity_mutations_after_worker_completion() {
     enum Mutation {
         Request,

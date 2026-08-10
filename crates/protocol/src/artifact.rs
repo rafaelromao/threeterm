@@ -445,7 +445,7 @@ impl Stage {
             UnlinkatFlags::RemoveDir,
         ) {
             Ok(()) => Ok(()),
-            Err(error) if error == nix::errno::Errno::ENOENT => Ok(()),
+            Err(nix::errno::Errno::ENOENT) => Ok(()),
             Err(error) => Err(ArtifactError::Io(std::io::Error::from_raw_os_error(
                 error as i32,
             ))),

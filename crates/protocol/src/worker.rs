@@ -1099,9 +1099,13 @@ mod tests {
             header: Box::new(ArtifactHeader {
                 request_id: "req-7".to_string(),
                 source_revision_id: "rev-1".to_string(),
+                operation: "extrude".to_string(),
+                feature_id: "sketch-1".to_string(),
                 cache_key: Layer1CacheKey {
                     source_revision_id: "rev-1".to_string(),
                     worker_fingerprint: fingerprint.clone(),
+                    operation: "extrude".to_string(),
+                    feature_id: "sketch-1".to_string(),
                     artifact_kind: "brep".to_string(),
                     semantic_input_sha256: "11".repeat(32),
                     deterministic_settings_sha256: "22".repeat(32),

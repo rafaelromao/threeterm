@@ -156,6 +156,9 @@ pub struct Supervisor {
     /// `Completed` arm returns them as worker lifecycle facts; `discard_stage`
     /// clears them without publishing.
     artifact_headers: Vec<StagedArtifact>,
+    /// Stage ownership can leave the supervisor only after a completed
+    /// lifecycle has been reaped and stream state has settled.
+    completed: bool,
     /// Most recent artifact binding or validation failure. The supervisor
     /// surfaces staging errors here so the host's diagnostic taxonomy sees them.
     last_artifact_error: Option<String>,
@@ -181,6 +184,7 @@ impl Supervisor {
             host,
             stage,
             artifact_headers: Vec::new(),
+            completed: false,
             last_artifact_error: None,
         }
     }
@@ -822,6 +826,7 @@ impl Supervisor {
             self.discard_stage();
             return outcome;
         }
+        self.completed = true;
         SupervisorOutcome::Completed {
             request_id,
             result,
@@ -891,8 +896,20 @@ impl Supervisor {
 
     fn discard_stage(&mut self) {
         self.artifact_headers.clear();
+        self.completed = false;
         if let Some(stage) = self.stage.take() {
             let _ = stage.discard();
+        }
+    }
+
+    /// Transfer a completed request's private stage to the Host. Failure
+    /// paths use `discard_stage` instead, so a caller can only retain a stage
+    /// after the worker emitted a completed lifecycle.
+    pub fn take_stage(&mut self) -> Option<Stage> {
+        if self.completed {
+            self.stage.take()
+        } else {
+            None
         }
     }
 
@@ -1182,6 +1199,36 @@ mod tests {
             SupervisorOutcome::Completed { .. }
         ));
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn stage_ownership_cannot_leave_before_a_completed_lifecycle() {
+        let root = std::env::temp_dir().join(format!(
+            "threeterm-supervisor-stage-gate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let stage = crate::artifact::Stage::open(&root).expect("stage opens");
+        let worker = ScriptedWorker::new(vec![
+            ready_envelope(),
+            Envelope::Completed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                result: serde_json::json!({}),
+            },
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), Some(stage));
+
+        assert!(supervisor.take_stage().is_none());
+        assert!(matches!(
+            supervisor.request(sample_request()),
+            SupervisorOutcome::Completed { .. }
+        ));
+        let retained = supervisor
+            .take_stage()
+            .expect("completed lifecycle returns the stage");
+        retained.discard().expect("stage discards");
+        assert!(!root.exists());
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
@@ -13,7 +14,7 @@ use threeterm_occt_worker::{
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
-    ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint,
+    ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::supervisor::SupervisorOutcome;
@@ -43,11 +44,20 @@ pub struct Layer1DerivedResult {
     pub source_revision_id: String,
     pub cache_key: Layer1CacheKey,
     pub worker_fingerprint: WorkerFingerprint,
+    pub operation: String,
+    pub feature_id: String,
     pub artifact_kind: String,
     pub artifact_name: String,
     pub byte_count: u64,
     pub sha256: String,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtrudeDerivedResult {
+    pub source_snapshot: SnapshotView,
+    pub result: ExtrudeResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +169,9 @@ pub enum HostError {
     WorkerTerminated {
         record: Box<threeterm_protocol::supervisor::TerminationRecord>,
     },
+    DerivedResult {
+        diagnostic: Diagnostic,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -197,6 +210,13 @@ impl std::fmt::Display for HostError {
                     record.exit_signal,
                     record.exit_code,
                     record.request_id
+                )
+            }
+            Self::DerivedResult { diagnostic } => {
+                write!(
+                    formatter,
+                    "derived result rejected: {:?}: {}",
+                    diagnostic.code, diagnostic.arg
                 )
             }
             Self::BrepFileMissing { path } => {
@@ -430,6 +450,210 @@ impl Host {
         self.current.borrow().as_ref().map(SnapshotView::from)
     }
 
+    /// Run one extrude through the Host-owned Derived Result boundary. This
+    /// captures the source Revision Snapshot and retains a validated result
+    /// outside canonical persistence for a later promotion slice.
+    pub fn stage_extrude(
+        &self,
+        root: impl AsRef<Path>,
+        request: ExtrudeRequest,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeDerivedResult, HostError> {
+        let root = root.as_ref();
+        let source_snapshot = self.load(root)?;
+
+        let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
+        let stage = Stage::create_fresh(root.join(".derived"), "extrude").map_err(|error| {
+            HostError::BrepIo {
+                detail: format!("create extrude request stage failed: {error}"),
+            }
+        })?;
+        let staging_name = format!("extrude-{}.brep", threeterm_occt_worker::new_request_id());
+        binding.staging_name = staging_name.clone();
+        let staged_request = request
+            .clone()
+            .with_output_path(stage.root(), format!("{staging_name}.partial"))
+            .with_artifact_request(binding.clone());
+        if let Err(detail) = staged_request.validate() {
+            let _ = stage.discard();
+            return Err(HostError::Validation { detail });
+        }
+
+        let completion = match worker
+            .clone()
+            .with_revision_id(source_snapshot.revision_hash.clone())
+            .extrude_staged(&staged_request, stage)
+        {
+            Ok(completion) => completion,
+            Err(error) => return Err(HostError::from(error)),
+        };
+        let artifact = self
+            .accept_staged_extrude(
+                completion.stage,
+                &binding,
+                &completion.result,
+                completion.outcome,
+            )
+            .map_err(|diagnostic| HostError::DerivedResult { diagnostic })?;
+
+        Ok(ExtrudeDerivedResult {
+            source_snapshot,
+            result: completion.result,
+            artifact,
+        })
+    }
+
+    /// Independently validate a completed staged extrude before the generic
+    /// non-authoritative cache link. This seam accepts completed facts and a
+    /// typed result separately so neither worker-side validation path can
+    /// substitute for Host checks.
+    pub fn accept_staged_extrude(
+        &self,
+        stage: Stage,
+        binding: &Layer1ArtifactRequest,
+        typed_result: &ExtrudeResult,
+        outcome: SupervisorOutcome,
+    ) -> Result<Layer1DerivedResult, Diagnostic> {
+        let stage_root = stage.root().to_path_buf();
+        let reject = |diagnostic| {
+            let _ = stage.discard();
+            diagnostic
+        };
+        let SupervisorOutcome::Completed {
+            request_id,
+            result,
+            mut artifact_headers,
+        } = outcome
+        else {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "worker_result_not_completed",
+            )));
+        };
+        if binding.request_id.is_empty() {
+            return Err(reject(Diagnostic::artifact_request_mismatch(
+                "empty_artifact_request_id",
+            )));
+        }
+        if binding.operation != "extrude" {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_request_operation_mismatch",
+            )));
+        }
+        if binding.feature_id.is_empty() {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "empty_artifact_feature_id",
+            )));
+        }
+        if !is_sha256_hex(&binding.source_revision_id) {
+            return Err(reject(Diagnostic::artifact_revision_mismatch(
+                "invalid_artifact_source_revision",
+            )));
+        }
+        if binding.artifact_kind != "brep" {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_request_kind_mismatch",
+            )));
+        }
+        if binding.staging_name.is_empty()
+            || binding.staging_name.contains('/')
+            || binding.staging_name.contains('\\')
+            || binding.staging_name.contains('\0')
+        {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_request_staging_name_invalid",
+            )));
+        }
+        if !is_sha256_hex(&binding.semantic_input_sha256)
+            || !is_sha256_hex(&binding.deterministic_settings_sha256)
+        {
+            return Err(reject(Diagnostic::artifact_cache_key_mismatch(
+                "invalid_artifact_cache_identity",
+            )));
+        }
+        if request_id != binding.request_id {
+            return Err(reject(Diagnostic::artifact_request_mismatch(
+                "completed_request_id_mismatch",
+            )));
+        }
+        let outcome_result = match serde_json::from_value::<ExtrudeResult>(result) {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(reject(Diagnostic::artifact_promotion_failure(&format!(
+                    "typed_result_schema_mismatch:{error}"
+                ))));
+            }
+        };
+        if outcome_result != *typed_result {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_does_not_match_completion",
+            )));
+        }
+        if typed_result.schema_version != threeterm_occt_worker::SCHEMA_VERSION {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_schema_mismatch",
+            )));
+        }
+        if !typed_result.is_success() {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_not_ok",
+            )));
+        }
+        if typed_result.request_id != binding.request_id {
+            return Err(reject(Diagnostic::artifact_request_mismatch(
+                "typed_result_request_id_mismatch",
+            )));
+        }
+        if typed_result.operation != threeterm_occt_worker::Operation::Extrude
+            || binding.operation != "extrude"
+        {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_operation_mismatch",
+            )));
+        }
+        if typed_result.feature_id != binding.feature_id {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_feature_id_mismatch",
+            )));
+        }
+        let expected_path = stage_root.join(format!("{}.partial", binding.staging_name));
+        if typed_result.brep_path != expected_path {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_path_mismatch",
+            )));
+        }
+        if artifact_headers.len() != 1 {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "expected_exactly_one_artifact",
+            )));
+        }
+        let artifact = artifact_headers
+            .pop()
+            .expect("checked exactly one artifact");
+        if artifact.schema_version != threeterm_protocol::schema_version() {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_schema_mismatch",
+            )));
+        }
+        if typed_result.brep_bytes as u64 != artifact.header.byte_count
+            || typed_result.brep_sha256 != artifact.header.sha256
+        {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "typed_result_artifact_metadata_mismatch",
+            )));
+        }
+        let expected_worker = expected_occt_worker_fingerprint();
+        if artifact.header.worker_fingerprint != expected_worker {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_worker_fingerprint_mismatch",
+            )));
+        }
+
+        match self.accept_staged_artifact(&stage_root, binding, &expected_worker, artifact.header) {
+            Ok(result) => Ok(result),
+            Err(diagnostic) => Err(reject(diagnostic)),
+        }
+    }
+
     /// Accept a completed worker lifecycle and publish its one Derived Result.
     /// The Host owns this boundary because only it can compare the staged
     /// result with its current Revision Snapshot and register the result.
@@ -516,6 +740,11 @@ impl Host {
                 "artifact_request_id_mismatch",
             )));
         }
+        if header.operation != request.operation || header.feature_id != request.feature_id {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "artifact_operation_or_feature_id_mismatch",
+            )));
+        }
         if header.cache_key != expected_cache_key {
             return Err(reject(Diagnostic::artifact_cache_key_mismatch(
                 "artifact_cache_key_mismatch",
@@ -556,6 +785,8 @@ impl Host {
             source_revision_id: header.source_revision_id,
             cache_key: header.cache_key,
             worker_fingerprint: header.worker_fingerprint,
+            operation: header.operation,
+            feature_id: header.feature_id,
             artifact_kind: header.artifact_kind,
             artifact_name: header.staging_name,
             byte_count: header.byte_count,
@@ -1350,6 +1581,54 @@ fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
     }
 }
 
+fn expected_occt_worker_fingerprint() -> WorkerFingerprint {
+    WorkerFingerprint {
+        worker_kind: "occt".to_string(),
+        worker_schema_version: threeterm_occt_worker::SCHEMA_VERSION.to_string(),
+        protocol_schema_version: threeterm_protocol::schema_version().to_string(),
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn extrude_artifact_request(
+    request: &ExtrudeRequest,
+    source_snapshot: &SnapshotView,
+) -> Result<Layer1ArtifactRequest, HostError> {
+    let semantic_input = serde_json::to_vec(&ExtrudeSemanticInput {
+        operation: "extrude",
+        feature_id: &request.feature_id,
+        profile: &request.profile,
+        height: request.height,
+    })
+    .map_err(|error| HostError::Validation {
+        detail: format!("extrude semantic input serialization failed: {error}"),
+    })?;
+    Ok(Layer1ArtifactRequest {
+        request_id: request.request_id.clone(),
+        source_revision_id: source_snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: request.feature_id.clone(),
+        artifact_kind: "brep".to_string(),
+        staging_name: String::new(),
+        semantic_input_sha256: sha256_hex(&semantic_input),
+        deterministic_settings_sha256: sha256_hex(b"threeterm.extrude.derived-settings/1"),
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct ExtrudeSemanticInput<'a> {
+    operation: &'static str,
+    feature_id: &'a str,
+    profile: &'a [[f64; 2]],
+    height: f64,
+}
+
 fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
     if staging_name.is_empty()
         || staging_name.contains('/')
@@ -1920,6 +2199,29 @@ mod tests {
         assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extrude_artifact_request_uses_the_pinned_semantic_input_order() {
+        let request =
+            ExtrudeRequest::new("request-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 2.0)
+                .with_feature_id("feature-1");
+        let snapshot = SnapshotView {
+            feature_graph_hash: "a".repeat(64),
+            revision_hash: "b".repeat(64),
+            recovered_from_previous: false,
+        };
+        let binding = extrude_artifact_request(&request, &snapshot).expect("binding derives");
+        let expected = br#"{"operation":"extrude","feature_id":"feature-1","profile":[[0.0,0.0],[1.0,0.0],[1.0,1.0]],"height":2.0}"#;
+
+        assert_eq!(
+            binding.semantic_input_sha256,
+            threeterm_protocol::artifact::sha256_hex(expected)
+        );
+        assert_eq!(
+            binding.deterministic_settings_sha256,
+            threeterm_protocol::artifact::sha256_hex(b"threeterm.extrude.derived-settings/1")
+        );
     }
 }
 

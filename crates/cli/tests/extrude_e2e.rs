@@ -12,12 +12,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use threeterm_occt_worker::OcctWorker;
+use threeterm_host::Host;
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{EXTRUDE_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
@@ -69,13 +71,16 @@ fn extrude_command_is_registered() {
     assert_eq!(entry.name, "extrude");
     assert_eq!(
         entry.response_schema_version,
-        "threeterm.command.extrude.response/1"
+        "threeterm.command.extrude.response/2"
     );
 }
 
 #[test]
-fn extrude_cli_drives_host_to_commit_a_brep() {
+fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() {
     if OcctWorker::locate().is_err() {
+        if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
+            panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
+        }
         eprintln!(
             "extrude_e2e: no OCCT worker binary found; set THREETERM_OCCTBUILD_WORKER \
              or build the crate against a system OCCT install"
@@ -88,10 +93,30 @@ fn extrude_cli_drives_host_to_commit_a_brep() {
     new_project(bin, &root);
     save(bin, &root, "box-seed", "box");
 
+    let prior_request = ExtrudeRequest::new(
+        "prior-canonical",
+        vec![(0.0, 0.0), (8.0, 0.0), (8.0, 4.0), (0.0, 4.0)],
+        2.0,
+    )
+    .with_output_path(root.join("prior-stage"), "prior.brep")
+    .with_feature_id("prior-box");
+    Host::new()
+        .extrude(
+            &root,
+            prior_request,
+            &OcctWorker::locate().expect("worker locates"),
+        )
+        .expect("prior canonical BREP commits");
+    let prior_manifest = fs::read(root.join("manifest.json")).expect("prior manifest reads");
+    let prior_log = fs::read(root.join("transactions.log")).expect("prior log reads");
+    let prior_brep = fs::read(root.join("brep/prior-box.brep")).expect("prior BREP reads");
+    let prior_snapshot = Host::new().load(&root).expect("prior snapshot loads");
+
     let profile_path = root.join("profile.json");
     fs::write(&profile_path, rectangle_profile()).expect("profile writes");
 
     let output = Command::new(bin)
+        .stdin(Stdio::null())
         .args(["--machine", "extrude"])
         .args(["--bundle"])
         .arg(&root)
@@ -124,13 +149,48 @@ fn extrude_cli_drives_host_to_commit_a_brep() {
     assert_eq!(parsed["feature_id"], "box-rect");
     assert_eq!(
         parsed["schema_version"],
-        "threeterm.command.extrude.response/1"
+        "threeterm.command.extrude.response/2"
     );
     let brep_path = parsed["brep_path"].as_str().expect("brep_path is a string");
     let brep_pathbuf = PathBuf::from(brep_path);
     assert!(
-        !brep_pathbuf.exists(),
-        "worker staging output must be retired after commit: {brep_path:?}"
+        brep_pathbuf.is_file(),
+        "validated derived artifact must remain available: {brep_path:?}"
+    );
+    assert!(
+        !brep_pathbuf.starts_with(root.join("brep")),
+        "derived artifact must not be canonical: {brep_path:?}"
+    );
+    assert_eq!(parsed["authoritative"], false);
+    assert_eq!(parsed["artifact_kind"], "brep");
+    assert!(
+        !parsed["artifact_name"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert_eq!(
+        parsed["source_snapshot"]["feature_graph_hash"],
+        prior_snapshot.feature_graph_hash
+    );
+    assert_eq!(
+        parsed["source_snapshot"]["revision_hash"],
+        prior_snapshot.revision_hash
+    );
+    assert_eq!(
+        parsed["feature_graph_hash"],
+        prior_snapshot.feature_graph_hash
+    );
+    assert_eq!(parsed["revision_hash"], prior_snapshot.revision_hash);
+    assert!(!parsed["request_id"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(parsed["worker_fingerprint"]["worker_kind"], "occt");
+    assert_eq!(
+        parsed["worker_fingerprint"]["worker_schema_version"],
+        "threeterm.workers.occt/1"
+    );
+    assert_eq!(
+        parsed["worker_fingerprint"]["protocol_schema_version"],
+        "threeterm.protocol/1"
     );
     let brep_sha = parsed["brep_sha256"]
         .as_str()
@@ -147,16 +207,27 @@ fn extrude_cli_drives_host_to_commit_a_brep() {
     );
     assert_eq!(loaded.revision_hash_hex(), parsed["revision_hash"]);
 
-    // The committed BREP must live in the canonical brep/ directory.
-    let committed = root.join("brep/box-rect.brep");
-    assert!(
-        committed.is_file(),
-        "committed BREP missing at {committed:?}"
-    );
-    let on_disk_bytes = fs::metadata(&committed)
-        .expect("committed BREP metadata")
+    let on_disk_bytes = fs::metadata(&brep_pathbuf)
+        .expect("derived BREP metadata")
         .len();
     assert_eq!(brep_bytes, on_disk_bytes);
+    assert_eq!(
+        sha256_hex(&fs::read(&brep_pathbuf).expect("derived BREP reads")),
+        brep_sha
+    );
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("manifest re-reads"),
+        prior_manifest
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("log re-reads"),
+        prior_log
+    );
+    assert_eq!(
+        fs::read(root.join("brep/prior-box.brep")).expect("prior BREP re-reads"),
+        prior_brep
+    );
+    assert!(!root.join("brep/box-rect.brep").exists());
 
     let _ = fs::remove_dir_all(root);
 }

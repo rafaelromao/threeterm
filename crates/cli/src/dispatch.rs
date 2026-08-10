@@ -2335,16 +2335,12 @@ fn emit_extrude(
             return EXIT_WORKER_FAILURE;
         }
     };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
     let request = ExtrudeRequest::new(threeterm_occt_worker::new_request_id(), profile, height)
-        .with_output_path(&staging_dir, &output_filename)
         .with_feature_id(feature_id);
-    match Host::new().extrude(bundle, request, &worker) {
-        Ok(view) => write_extrude_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+    match Host::new().stage_extrude(bundle, request, &worker) {
+        Ok(view) => {
+            write_extrude_derived_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr)
+        }
         Err(error) => emit_host_error(&error, stderr),
     }
 }
@@ -2969,8 +2965,8 @@ fn write_load_snapshot(
     )
 }
 
-fn write_extrude_view(
-    view: &threeterm_host::ExtrudeCommitView,
+fn write_extrude_derived_view(
+    view: &threeterm_host::ExtrudeDerivedResult,
     schema_version: &str,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -2981,11 +2977,24 @@ fn write_extrude_view(
             "status": view.result.status,
             "operation": Operation::Extrude.as_str(),
             "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
+            "request_id": view.artifact.request_id,
+            "source_snapshot": {
+                "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+                "revision_hash": view.source_snapshot.revision_hash,
+            },
+            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+            "revision_hash": view.source_snapshot.revision_hash,
+            "authoritative": false,
+            "artifact_kind": view.artifact.artifact_kind,
+            "artifact_name": view.artifact.artifact_name,
+            "brep_path": view.artifact.path,
+            "brep_sha256": view.artifact.sha256,
+            "brep_bytes": view.artifact.byte_count,
+            "worker_fingerprint": {
+                "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+                "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+                "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+            },
             "schema_version": schema_version,
         }),
         stderr,
@@ -3256,6 +3265,10 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
 }
 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
+    if let HostError::DerivedResult { diagnostic } = error {
+        write_diagnostic(stderr, diagnostic);
+        return EXIT_INTEGRITY_FAILURE;
+    }
     let detail = match error {
         HostError::Validation { detail } => detail.clone(),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
@@ -3287,6 +3300,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             "exit_kind": record.exit_kind.as_str(),
         }))
         .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
+        HostError::DerivedResult { diagnostic } => diagnostic.arg.clone(),
     };
     let (diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
@@ -3301,6 +3315,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             Diagnostic::unsupported_geometry(&detail),
             EXIT_WORKER_FAILURE,
         ),
+        HostError::DerivedResult { .. } => unreachable!("derived result diagnostics return above"),
         _ => (
             Diagnostic::integrity_failure(&detail),
             EXIT_INTEGRITY_FAILURE,

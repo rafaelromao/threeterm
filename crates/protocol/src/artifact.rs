@@ -35,6 +35,8 @@ pub struct WorkerFingerprint {
 pub struct Layer1ArtifactRequest {
     pub request_id: String,
     pub source_revision_id: String,
+    pub operation: String,
+    pub feature_id: String,
     pub artifact_kind: String,
     pub staging_name: String,
     pub semantic_input_sha256: String,
@@ -45,6 +47,8 @@ pub struct Layer1ArtifactRequest {
 pub struct Layer1CacheKey {
     pub source_revision_id: String,
     pub worker_fingerprint: WorkerFingerprint,
+    pub operation: String,
+    pub feature_id: String,
     pub artifact_kind: String,
     pub semantic_input_sha256: String,
     pub deterministic_settings_sha256: String,
@@ -55,6 +59,8 @@ impl Layer1CacheKey {
         Self {
             source_revision_id: request.source_revision_id.clone(),
             worker_fingerprint: worker_fingerprint.clone(),
+            operation: request.operation.clone(),
+            feature_id: request.feature_id.clone(),
             artifact_kind: request.artifact_kind.clone(),
             semantic_input_sha256: request.semantic_input_sha256.clone(),
             deterministic_settings_sha256: request.deterministic_settings_sha256.clone(),
@@ -69,6 +75,8 @@ impl Layer1CacheKey {
             &self.worker_fingerprint.worker_kind,
             &self.worker_fingerprint.worker_schema_version,
             &self.worker_fingerprint.protocol_schema_version,
+            &self.operation,
+            &self.feature_id,
             &self.artifact_kind,
             &self.semantic_input_sha256,
             &self.deterministic_settings_sha256,
@@ -85,6 +93,8 @@ impl Layer1CacheKey {
 pub struct ArtifactHeader {
     pub request_id: String,
     pub source_revision_id: String,
+    pub operation: String,
+    pub feature_id: String,
     pub cache_key: Layer1CacheKey,
     pub worker_fingerprint: WorkerFingerprint,
     pub artifact_kind: String,
@@ -131,6 +141,56 @@ impl Stage {
         }
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(ArtifactError::Io)?;
         Ok(Self { root })
+    }
+
+    /// Create a new private staging directory without reusing an existing
+    /// path. The caller owns the returned directory until it is discarded or
+    /// a validated result is deliberately retained there.
+    pub fn create_fresh(parent: impl Into<PathBuf>, prefix: &str) -> Result<Self, ArtifactError> {
+        validate_name(prefix)?;
+        let parent = parent.into();
+        match fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(ArtifactError::InvalidRoot(parent));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&parent).map_err(ArtifactError::Io)?;
+            }
+            Err(error) => return Err(ArtifactError::Io(error)),
+        }
+        let parent_metadata = fs::symlink_metadata(&parent).map_err(ArtifactError::Io)?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err(ArtifactError::InvalidRoot(parent));
+        }
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
+            .map_err(ArtifactError::Io)?;
+
+        for attempt in 0..32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let candidate =
+                parent.join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
+            match fs::create_dir(&candidate) {
+                Ok(()) => {
+                    if let Err(error) =
+                        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                    {
+                        let _ = fs::remove_dir(&candidate);
+                        return Err(ArtifactError::Io(error));
+                    }
+                    return Ok(Self { root: candidate });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(ArtifactError::Io(error)),
+            }
+        }
+        Err(ArtifactError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a fresh staging directory after 32 attempts",
+        )))
     }
 
     /// Returns the staging root path.
@@ -191,21 +251,31 @@ impl Stage {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
             }
-            if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
-                return Err(ArtifactError::PayloadTooLarge {
-                    size: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
-                    max: MAX_ARTIFACT_BYTES,
-                });
-            }
             let mut source = OpenOptions::new()
                 .read(true)
                 .custom_flags(0o400000)
                 .open(&staging_path)
                 .map_err(ArtifactError::Io)?;
+            let opened_metadata = source.metadata().map_err(ArtifactError::Io)?;
+            if !opened_metadata.is_file() {
+                return Err(ArtifactError::NotRegularFile(header.staging_name.clone()));
+            }
+            if metadata.len() > MAX_ARTIFACT_BYTES as u64
+                || opened_metadata.len() > MAX_ARTIFACT_BYTES as u64
+            {
+                return Err(ArtifactError::PayloadTooLarge {
+                    size: usize::try_from(opened_metadata.len()).unwrap_or(usize::MAX),
+                    max: MAX_ARTIFACT_BYTES,
+                });
+            }
+            if !same_file(&metadata, &opened_metadata) {
+                return Err(ArtifactError::StagedFileChanged(
+                    header.staging_name.clone(),
+                ));
+            }
             let mut verified = OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .custom_flags(0o400000)
                 .open(&verified_path)
@@ -244,6 +314,16 @@ impl Stage {
                     expected: header.sha256.clone(),
                     actual: sha256,
                 });
+            }
+            let current_metadata =
+                fs::symlink_metadata(&staging_path).map_err(ArtifactError::Io)?;
+            if current_metadata.file_type().is_symlink()
+                || !current_metadata.is_file()
+                || !same_file(&opened_metadata, &current_metadata)
+            {
+                return Err(ArtifactError::StagedFileChanged(
+                    header.staging_name.clone(),
+                ));
             }
             fs::remove_file(&staging_path).map_err(ArtifactError::Io)?;
             Ok(())
@@ -301,16 +381,32 @@ impl Stage {
             .custom_flags(0o400000)
             .open(&final_path)
             .map_err(ArtifactError::Io)?;
+        let opened_metadata = file.metadata().map_err(ArtifactError::Io)?;
+        if !opened_metadata.is_file()
+            || opened_metadata.len() > MAX_ARTIFACT_BYTES as u64
+            || !same_file(&metadata, &opened_metadata)
+        {
+            return Ok(false);
+        }
         let mut digest = Sha256::new();
+        let mut actual_bytes = 0u64;
         let mut buffer = [0u8; 8192];
         loop {
             let read = file.read(&mut buffer).map_err(ArtifactError::Io)?;
             if read == 0 {
                 break;
             }
+            actual_bytes = actual_bytes.saturating_add(read as u64);
+            if actual_bytes > MAX_ARTIFACT_BYTES as u64 {
+                return Ok(false);
+            }
             digest.update(&buffer[..read]);
         }
-        Ok(hex_digest(&digest.finalize()) == sha256)
+        let current_metadata = fs::symlink_metadata(&final_path).map_err(ArtifactError::Io)?;
+        Ok(current_metadata.is_file()
+            && same_file(&opened_metadata, &current_metadata)
+            && actual_bytes == byte_count
+            && hex_digest(&digest.finalize()) == sha256)
     }
 
     /// Remove an invalid cache-owned final artifact before recovering it from
@@ -336,7 +432,11 @@ impl Stage {
     /// host never holds an authoritative-looking staged entry. The
     /// returned `Stage` is consumed; create a fresh one if needed.
     pub fn discard(self) -> Result<(), ArtifactError> {
-        fs::remove_dir_all(&self.root).map_err(ArtifactError::Io)?;
+        match fs::remove_dir_all(&self.root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ArtifactError::Io(error)),
+        }
         Ok(())
     }
 }
@@ -352,6 +452,18 @@ fn validate_name(name: &str) -> Result<(), ArtifactError> {
         return Err(ArtifactError::InvalidName(name.to_string()));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len()
 }
 
 fn hex_digest(digest: &[u8]) -> String {
@@ -385,6 +497,7 @@ pub enum ArtifactError {
     InvalidName(String),
     InvalidRoot(PathBuf),
     NotRegularFile(String),
+    StagedFileChanged(String),
     FinalPathExists(PathBuf),
     /// Filesystem error during write or discard.
     Io(std::io::Error),
@@ -419,6 +532,12 @@ impl fmt::Display for ArtifactError {
             }
             Self::NotRegularFile(name) => {
                 write!(formatter, "staged artifact is not a regular file: {name:?}")
+            }
+            Self::StagedFileChanged(name) => {
+                write!(
+                    formatter,
+                    "staged artifact changed while being verified: {name:?}"
+                )
             }
             Self::FinalPathExists(path) => {
                 write!(
@@ -456,9 +575,13 @@ mod tests {
         ArtifactHeader {
             request_id: "request-1".to_string(),
             source_revision_id: "revision-1".to_string(),
+            operation: "extrude".to_string(),
+            feature_id: "sketch-1".to_string(),
             cache_key: Layer1CacheKey {
                 source_revision_id: "revision-1".to_string(),
                 worker_fingerprint: worker_fingerprint.clone(),
+                operation: "extrude".to_string(),
+                feature_id: "sketch-1".to_string(),
                 artifact_kind: "brep".to_string(),
                 semantic_input_sha256: "11".repeat(32),
                 deterministic_settings_sha256: "22".repeat(32),
@@ -481,6 +604,8 @@ mod tests {
         let cache_key = Layer1CacheKey {
             source_revision_id: "revision-1".to_string(),
             worker_fingerprint: worker_fingerprint.clone(),
+            operation: "extrude".to_string(),
+            feature_id: "sketch-1".to_string(),
             artifact_kind: "brep".to_string(),
             semantic_input_sha256: "11".repeat(32),
             deterministic_settings_sha256: "22".repeat(32),
@@ -490,7 +615,7 @@ mod tests {
 
         assert_eq!(
             name,
-            "derived-60e53484e877d7e112519847f6a64ce027744d337d28dc532464583e873a4c75"
+            "derived-cf86824e370dcff05e492e7eb0e02c8b4aa6ee06310a3a21a0174a9c7a6f7942"
         );
         assert_eq!(name, cache_key.final_artifact_name());
         assert!(name.starts_with("derived-"));
@@ -524,6 +649,14 @@ mod tests {
                     protocol_schema_version: "threeterm.protocol/2".to_string(),
                     ..worker_fingerprint
                 },
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                operation: "boolean_fuse".to_string(),
+                ..cache_key.clone()
+            },
+            Layer1CacheKey {
+                feature_id: "sketch-2".to_string(),
                 ..cache_key.clone()
             },
             Layer1CacheKey {
@@ -692,6 +825,56 @@ mod tests {
     }
 
     #[test]
+    fn create_fresh_makes_unique_private_directories() {
+        let parent = temp_root("fresh-parent");
+        let first = Stage::create_fresh(&parent, "extrude").expect("first stage creates");
+        let second = Stage::create_fresh(&parent, "extrude").expect("second stage creates");
+
+        assert_ne!(first.root(), second.root());
+        assert!(first.root().is_dir());
+        assert!(second.root().is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(first.root())
+                    .expect("first metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(second.root())
+                    .expect("second metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+
+        first.discard().expect("first stage discards");
+        second.discard().expect("second stage discards");
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn create_fresh_rejects_a_symlinked_parent() {
+        let target = temp_root("fresh-parent-target");
+        let link = temp_root("fresh-parent-link");
+        fs::create_dir_all(&target).expect("target creates");
+        std::os::unix::fs::symlink(&target, &link).expect("parent symlink creates");
+
+        let error = Stage::create_fresh(&link, "extrude").expect_err("symlinked parent rejects");
+
+        assert!(matches!(error, ArtifactError::InvalidRoot(path) if path == link));
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
     fn promotion_rejects_a_symlinked_staged_file() {
         let root = temp_root("file-symlink");
         let target = temp_root("file-target");
@@ -715,6 +898,30 @@ mod tests {
         assert!(!root.join("sketch-1.brep.partial").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn verification_does_not_truncate_a_hard_linked_host_path() {
+        let root = temp_root("verified-hard-link");
+        let protected = temp_root("verified-hard-link-protected");
+        let stage = Stage::open(&root).expect("stage opens");
+        let bytes = b"protected canonical bytes";
+        fs::write(&protected, bytes).expect("protected file writes");
+        let staged = stage
+            .stage_bytes("sketch-1.brep", b"worker bytes")
+            .expect("artifact stages");
+        fs::hard_link(&protected, root.join(".sketch-1.brep.verified"))
+            .expect("verified path hard link creates");
+
+        let error = stage
+            .verify(&header(&staged, staged.sha256.clone()))
+            .expect_err("pre-existing verified path rejects");
+
+        assert!(matches!(error, ArtifactError::Io(_)));
+        assert_eq!(fs::read(&protected).expect("protected file reads"), bytes);
+        assert!(!root.join("sketch-1.brep.partial").exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(protected);
     }
 
     #[test]

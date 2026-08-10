@@ -149,7 +149,11 @@ fn typed_extrude_surfaces_a_cooperative_failed_envelope_as_diagnostic() {
     let error = retry_fixture(|| worker.extrude(&sample_extrude_request()))
         .expect_err("failed envelope must fail the typed call");
     match error {
-        WorkerError::Diagnostic(diagnostic) => {
+        WorkerError::DiagnosticWithContext {
+            request_id,
+            diagnostic,
+        } => {
+            assert_eq!(request_id, "req-1");
             assert_eq!(diagnostic.code, "brep_invalid");
             assert_eq!(diagnostic.arg, "BRepCheck_Analyzer failed");
         }

@@ -82,8 +82,20 @@ pub enum WorkerError {
     Spawn { binary: PathBuf, detail: String },
     /// The worker exited with a non-zero status.
     NonZeroExit { code: Option<i32>, stderr: String },
+    /// A non-zero worker exit with a safely recovered active request ID.
+    NonZeroExitWithContext {
+        request_id: String,
+        code: Option<i32>,
+        stderr: String,
+    },
     /// The worker exited due to a signal.
     Signalled { signal: i32, stderr: String },
+    /// A signal-bearing worker exit with a safely recovered active request ID.
+    SignalledWithContext {
+        request_id: String,
+        signal: i32,
+        stderr: String,
+    },
     /// The worker emitted output that is not valid JSON or not a parseable
     /// envelope.
     Malformed { detail: String },
@@ -92,6 +104,11 @@ pub enum WorkerError {
     MalformedWithContext { request_id: String, detail: String },
     /// The worker emitted a JSON diagnostic instead of a response.
     Diagnostic(OcctDiagnostic),
+    /// A worker diagnostic with a safely recovered active request ID.
+    DiagnosticWithContext {
+        request_id: String,
+        diagnostic: OcctDiagnostic,
+    },
     /// The request was cooperatively cancelled and the worker
     /// acknowledged the cancellation inside the grace period.
     Cancelled { request_id: String },
@@ -115,9 +132,25 @@ impl std::fmt::Display for WorkerError {
             Self::NonZeroExit { code, stderr } => {
                 write!(formatter, "worker exited with code {code:?}: {stderr}")
             }
+            Self::NonZeroExitWithContext {
+                request_id,
+                code,
+                stderr,
+            } => write!(
+                formatter,
+                "worker request {request_id} exited with code {code:?}: {stderr}"
+            ),
             Self::Signalled { signal, stderr } => {
                 write!(formatter, "worker signalled with {signal}: {stderr}")
             }
+            Self::SignalledWithContext {
+                request_id,
+                signal,
+                stderr,
+            } => write!(
+                formatter,
+                "worker request {request_id} signalled with {signal}: {stderr}"
+            ),
             Self::Malformed { detail } => {
                 write!(formatter, "malformed worker output: {detail}")
             }
@@ -128,6 +161,14 @@ impl std::fmt::Display for WorkerError {
             Self::Diagnostic(diagnostic) => write!(
                 formatter,
                 "worker diagnostic {} {}: {}",
+                diagnostic.code, diagnostic.arg, diagnostic.schema_version
+            ),
+            Self::DiagnosticWithContext {
+                request_id,
+                diagnostic,
+            } => write!(
+                formatter,
+                "worker diagnostic for request {request_id} {} {}: {}",
                 diagnostic.code, diagnostic.arg, diagnostic.schema_version
             ),
             Self::Cancelled { request_id } => {
@@ -624,7 +665,10 @@ fn map_outcome(
                 // Keep the structured termination facts when a domain failure
                 // is followed by a signal-bearing worker termination.
                 if record.exit_signal.is_none() {
-                    return Err(WorkerError::Diagnostic(OcctDiagnostic::new(code, detail)));
+                    return Err(WorkerError::DiagnosticWithContext {
+                        request_id: record.request_id.clone(),
+                        diagnostic: OcctDiagnostic::new(code, detail),
+                    });
                 }
             }
             if record.stage.starts_with("handshake_schema_mismatch") {
@@ -640,7 +684,8 @@ fn map_outcome(
                 || record.stage.starts_with("handshake_worker_closed");
             if worker_closed {
                 if let Some(signal) = record.exit_signal {
-                    return Err(WorkerError::Signalled {
+                    return Err(WorkerError::SignalledWithContext {
+                        request_id: record.request_id.clone(),
                         signal,
                         stderr: record.stderr_tail.clone(),
                     });
@@ -648,7 +693,8 @@ fn map_outcome(
                 if let Some(code) = record.exit_code
                     && code != 0
                 {
-                    return Err(WorkerError::NonZeroExit {
+                    return Err(WorkerError::NonZeroExitWithContext {
+                        request_id: record.request_id.clone(),
                         code: Some(code),
                         stderr: record.stderr_tail.clone(),
                     });
@@ -1551,7 +1597,11 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("failed envelope must not map to success");
         match error {
-            WorkerError::Diagnostic(diagnostic) => {
+            WorkerError::DiagnosticWithContext {
+                request_id,
+                diagnostic,
+            } => {
+                assert_eq!(request_id, "req-1");
                 assert_eq!(diagnostic.code, "brep_invalid");
                 assert_eq!(diagnostic.arg, "BRepCheck_Analyzer failed");
                 assert_eq!(diagnostic.schema_version, SCHEMA_VERSION);
@@ -1642,7 +1692,12 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("natural signal exit must fail closed");
         match error {
-            WorkerError::Signalled { signal, stderr } => {
+            WorkerError::SignalledWithContext {
+                request_id,
+                signal,
+                stderr,
+            } => {
+                assert_eq!(request_id, "req-1");
                 assert_eq!(signal, 11);
                 assert_eq!(stderr, "segmentation fault");
             }
@@ -1671,7 +1726,12 @@ mod tests {
         let error = map_outcome(outcome, "req-1", "extrude", "box-1", None)
             .expect_err("natural nonzero exit must fail closed");
         match error {
-            WorkerError::NonZeroExit { code, stderr } => {
+            WorkerError::NonZeroExitWithContext {
+                request_id,
+                code,
+                stderr,
+            } => {
+                assert_eq!(request_id, "req-1");
                 assert_eq!(code, Some(2));
                 assert_eq!(stderr, "malformed request");
             }

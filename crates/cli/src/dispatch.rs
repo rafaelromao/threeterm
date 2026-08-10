@@ -3266,8 +3266,11 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             .map(|request_id| format!("request_id={request_id}; {detail}"))
             .unwrap_or_else(|| detail.clone()),
         HostError::WorkerUnavailable { detail } => detail.clone(),
-        HostError::UnsupportedGeometry { detail } => detail.clone(),
-        HostError::BrepInvalid { detail } => detail.clone(),
+        HostError::UnsupportedGeometry { request_id, detail }
+        | HostError::BrepInvalid { request_id, detail } => request_id
+            .as_deref()
+            .map(|request_id| format!("request_id={request_id}; {detail}"))
+            .unwrap_or_else(|| detail.clone()),
         HostError::BrepFileMissing { path } => {
             format!("brep file missing: {}", path.display())
         }
@@ -3381,6 +3384,7 @@ mod tests {
         let mut stderr = Vec::new();
         let exit = emit_host_error(
             &HostError::UnsupportedGeometry {
+                request_id: None,
                 detail: "selected edges include fillet curves".to_string(),
             },
             &mut stderr,

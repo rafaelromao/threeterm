@@ -254,7 +254,7 @@ impl Stage {
             let mut source = match open_child(
                 &self.root_dir,
                 &staging_name,
-                OFlag::O_RDONLY | OFlag::O_NOFOLLOW,
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
                 Mode::empty(),
             ) {
                 Err(ArtifactError::Io(error))
@@ -367,7 +367,7 @@ impl Stage {
         let mut file = match open_child(
             &self.root_dir,
             final_name,
-            OFlag::O_RDONLY | OFlag::O_NOFOLLOW,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
             Mode::empty(),
         ) {
             Ok(file) => file,
@@ -415,6 +415,15 @@ impl Stage {
     pub fn discard_verified(&self, staging_name: &str) {
         if validate_name(staging_name).is_ok() {
             let _ = unlink_child(&self.root_dir, &format!(".{staging_name}.verified"));
+        }
+    }
+
+    /// Remove only the request-owned staged entries, preserving other files
+    /// already published in this shared cache directory.
+    pub fn discard_staged(&self, staging_name: &str) {
+        if validate_name(staging_name).is_ok() {
+            let _ = unlink_child(&self.root_dir, &format!("{staging_name}.partial"));
+            self.discard_verified(staging_name);
         }
     }
 
@@ -991,6 +1000,27 @@ mod tests {
         assert!(!root.join("sketch-1.brep.partial").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn promotion_rejects_a_fifo_without_waiting_for_a_writer() {
+        let root = temp_root("file-fifo");
+        let stage = Stage::open(&root).expect("stage opens");
+        let fifo = root.join("sketch-1.brep.partial");
+        nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).expect("artifact fifo creates");
+        let staged = StagedArtifact {
+            staging_name: "sketch-1.brep".to_string(),
+            sha256: sha256_hex(b"fifo bytes"),
+            byte_count: b"fifo bytes".len() as u64,
+        };
+
+        let error = stage
+            .validate_and_promote(&header(&staged, staged.sha256.clone()))
+            .expect_err("fifo artifact is rejected");
+
+        assert!(matches!(error, ArtifactError::NotRegularFile(_)));
+        assert!(!fifo.exists(), "rejected fifo must be removed");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

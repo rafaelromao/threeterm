@@ -2674,144 +2674,160 @@ impl Host {
         outcome: SupervisorOutcome,
     ) -> Result<Layer1DerivedResult, Diagnostic> {
         let stage_root = stage.root().to_path_buf();
-        let reject = |diagnostic| {
-            let _ = stage.discard();
-            diagnostic
-        };
         let SupervisorOutcome::Completed {
             request_id,
             result,
             mut artifact_headers,
         } = outcome
         else {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "worker_result_not_completed",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
+            ));
         };
         if binding.request_id.is_empty() {
-            return Err(reject(Diagnostic::artifact_request_mismatch(
-                "empty_artifact_request_id",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_request_mismatch("empty_artifact_request_id"),
+            ));
         }
         if binding.operation != "extrude" {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_request_operation_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("artifact_request_operation_mismatch"),
+            ));
         }
         if binding.feature_id.is_empty() {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "empty_artifact_feature_id",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("empty_artifact_feature_id"),
+            ));
         }
         if !is_sha256_hex(&binding.source_revision_id) {
-            return Err(reject(Diagnostic::artifact_revision_mismatch(
-                "invalid_artifact_source_revision",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_revision_mismatch("invalid_artifact_source_revision"),
+            ));
         }
         if binding.artifact_kind != "brep" {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_request_kind_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("artifact_request_kind_mismatch"),
+            ));
         }
         if binding.staging_name.is_empty()
             || binding.staging_name.contains('/')
             || binding.staging_name.contains('\\')
             || binding.staging_name.contains('\0')
         {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_request_staging_name_invalid",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("artifact_request_staging_name_invalid"),
+            ));
         }
         if !is_sha256_hex(&binding.semantic_input_sha256)
             || !is_sha256_hex(&binding.deterministic_settings_sha256)
         {
-            return Err(reject(Diagnostic::artifact_cache_key_mismatch(
-                "invalid_artifact_cache_identity",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_cache_key_mismatch("invalid_artifact_cache_identity"),
+            ));
         }
         if request_id != binding.request_id {
-            return Err(reject(Diagnostic::artifact_request_mismatch(
-                "completed_request_id_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_request_mismatch("completed_request_id_mismatch"),
+            ));
         }
         let outcome_result = match serde_json::from_value::<ExtrudeResult>(result) {
             Ok(result) => result,
             Err(error) => {
-                return Err(reject(Diagnostic::artifact_promotion_failure(&format!(
-                    "typed_result_schema_mismatch:{error}"
-                ))));
+                return Err(discard_stage(
+                    stage,
+                    Diagnostic::artifact_promotion_failure(&format!(
+                        "typed_result_schema_mismatch:{error}"
+                    )),
+                ));
             }
         };
         if outcome_result != *typed_result {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_does_not_match_completion",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
+            ));
         }
         if typed_result.schema_version != threeterm_occt_worker::SCHEMA_VERSION {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_schema_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_schema_mismatch"),
+            ));
         }
         if !typed_result.is_success() {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_not_ok",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_not_ok"),
+            ));
         }
         if typed_result.request_id != binding.request_id {
-            return Err(reject(Diagnostic::artifact_request_mismatch(
-                "typed_result_request_id_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_request_mismatch("typed_result_request_id_mismatch"),
+            ));
         }
         if typed_result.operation != threeterm_occt_worker::Operation::Extrude
             || binding.operation != "extrude"
         {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_operation_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_operation_mismatch"),
+            ));
         }
         if typed_result.feature_id != binding.feature_id {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_feature_id_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_feature_id_mismatch"),
+            ));
         }
         let expected_path = stage_root.join(format!("{}.partial", binding.staging_name));
         if typed_result.brep_path != expected_path {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_path_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_path_mismatch"),
+            ));
         }
         if artifact_headers.len() != 1 {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "expected_exactly_one_artifact",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("expected_exactly_one_artifact"),
+            ));
         }
         let artifact = artifact_headers
             .pop()
             .expect("checked exactly one artifact");
         if artifact.schema_version != threeterm_protocol::schema_version() {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_schema_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("artifact_schema_mismatch"),
+            ));
         }
         if typed_result.brep_bytes as u64 != artifact.header.byte_count
             || typed_result.brep_sha256 != artifact.header.sha256
         {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "typed_result_artifact_metadata_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_artifact_metadata_mismatch"),
+            ));
         }
         let expected_worker = expected_occt_worker_fingerprint();
         if artifact.header.worker_fingerprint != expected_worker {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_worker_fingerprint_mismatch",
-            )));
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("artifact_worker_fingerprint_mismatch"),
+            ));
         }
 
-        match self.accept_staged_artifact(&stage_root, binding, &expected_worker, artifact.header) {
-            Ok(result) => Ok(result),
-            Err(diagnostic) => Err(reject(diagnostic)),
-        }
-        }
+        self.accept_staged_artifact(stage, binding, &expected_worker, artifact.header, true)
+    }
     /// Accept a completed worker lifecycle and publish its one Derived Result.
     /// The Host owns this boundary because only it can compare the staged
     /// result with its current Revision Snapshot and register the result.
@@ -2862,22 +2878,36 @@ impl Host {
                 "artifact_schema_mismatch",
             ));
         }
-        self.accept_staged_artifact(root, request, expected_worker, artifact.header)
+        let stage = match Stage::open(root) {
+            Ok(stage) => stage,
+            Err(error) => {
+                cleanup_staged_artifact(root, &request.staging_name);
+                return Err(Diagnostic::artifact_promotion_failure(&error.to_string()));
+            }
+        };
+        self.accept_staged_artifact(stage, request, expected_worker, artifact.header, false)
     }
 
     fn accept_staged_artifact(
         &self,
-        artifact_root: impl AsRef<Path>,
+        stage: Stage,
         request: &Layer1ArtifactRequest,
         expected_worker: &WorkerFingerprint,
         header: threeterm_protocol::artifact::ArtifactHeader,
+        discard_stage_on_error: bool,
     ) -> Result<Layer1DerivedResult, Diagnostic> {
-        let root = artifact_root.as_ref();
         let header_staging_name = header.staging_name.clone();
-        let reject = |diagnostic| {
-            cleanup_staged_artifact(root, &request.staging_name);
-            cleanup_staged_artifact(root, &header_staging_name);
-            diagnostic
+        let current = match self.current() {
+            Some(current) => current,
+            None => {
+                return Err(reject_staged_artifact(
+                    stage,
+                    &request.staging_name,
+                    &header_staging_name,
+                    Diagnostic::artifact_promotion_failure("canonical_snapshot_missing"),
+                    discard_stage_on_error,
+                ));
+            }
         };
         // Exclusion policy: never cache Command Drafts, hover/pointer/candidate,
         // stale last-valid geometry, preview-only beyond session, worker internals.
@@ -2886,65 +2916,109 @@ impl Host {
                 "excluded_layer1_artifact: draft/hover/candidate/pointer/stale/preview-only/worker-internal/tmp/stderr",
             )));
         }
-        let current = self.current().ok_or_else(|| {
-            reject(Diagnostic::artifact_promotion_failure(
-                "canonical_snapshot_missing",
-            ))
-        })?;
         let expected_cache_key = Layer1CacheKey::issue(request, expected_worker);
         if request.source_revision_id != current.revision_hash
             || header.source_revision_id != request.source_revision_id
             || header.cache_key.source_revision_id != request.source_revision_id
         {
-            return Err(reject(Diagnostic::artifact_revision_mismatch(
-                "artifact_source_revision_mismatch",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_revision_mismatch("artifact_source_revision_mismatch"),
+                discard_stage_on_error,
+            ));
         }
         if header.request_id != request.request_id {
-            return Err(reject(Diagnostic::artifact_request_mismatch(
-                "artifact_request_id_mismatch",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_request_mismatch("artifact_request_id_mismatch"),
+                discard_stage_on_error,
+            ));
         }
         if header.operation != request.operation || header.feature_id != request.feature_id {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_operation_or_feature_id_mismatch",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_promotion_failure("artifact_operation_or_feature_id_mismatch"),
+                discard_stage_on_error,
+            ));
         }
         if header.cache_key != expected_cache_key {
-            return Err(reject(Diagnostic::artifact_cache_key_mismatch(
-                "artifact_cache_key_mismatch",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_cache_key_mismatch("artifact_cache_key_mismatch"),
+                discard_stage_on_error,
+            ));
         }
         if header.artifact_kind != request.artifact_kind
             || header.staging_name != request.staging_name
             || header.worker_fingerprint != *expected_worker
         {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "artifact_header_mismatch",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_promotion_failure("artifact_header_mismatch"),
+                discard_stage_on_error,
+            ));
         }
 
-        let stage = Stage::open(root)
-            .map_err(|error| reject(Diagnostic::artifact_promotion_failure(&error.to_string())))?;
-        stage
-            .verify(&header)
-            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+        if let Err(error) = stage.verify(&header) {
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                artifact_error_diagnostic(&error),
+                discard_stage_on_error,
+            ));
+        }
         let final_name = header.cache_key.final_artifact_name();
         if let Some(existing) = self.layer1_result(&header.cache_key) {
-            if stage
-                .published_matches(&final_name, existing.byte_count, &existing.sha256)
-                .map_err(|error| reject(artifact_error_diagnostic(&error)))?
-            {
+            let published_matches =
+                match stage.published_matches(&final_name, existing.byte_count, &existing.sha256) {
+                    Ok(matches) => matches,
+                    Err(error) => {
+                        return Err(reject_staged_artifact(
+                            stage,
+                            &request.staging_name,
+                            &header_staging_name,
+                            artifact_error_diagnostic(&error),
+                            discard_stage_on_error,
+                        ));
+                    }
+                };
+            if published_matches {
                 stage.discard_verified(&header.staging_name);
                 return Ok(existing);
             }
-            stage
-                .discard_final(&final_name)
-                .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+            if let Err(error) = stage.discard_final(&final_name) {
+                return Err(reject_staged_artifact(
+                    stage,
+                    &request.staging_name,
+                    &header_staging_name,
+                    artifact_error_diagnostic(&error),
+                    discard_stage_on_error,
+                ));
+            }
         }
-        let path = stage
-            .publish_verified(&header.staging_name, &final_name)
-            .map_err(|error| reject(artifact_error_diagnostic(&error)))?;
+        let path = match stage.publish_verified(&header.staging_name, &final_name) {
+            Ok(path) => path,
+            Err(error) => {
+                return Err(reject_staged_artifact(
+                    stage,
+                    &request.staging_name,
+                    &header_staging_name,
+                    artifact_error_diagnostic(&error),
+                    discard_stage_on_error,
+                ));
+            }
+        };
         let result = Layer1DerivedResult {
             request_id: header.request_id,
             source_revision_id: header.source_revision_id,
@@ -4145,6 +4219,27 @@ fn draft_preview_revision(source_revision: &str, input_fingerprint: &str) -> Str
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn discard_stage(stage: Stage, diagnostic: Diagnostic) -> Diagnostic {
+    let _ = stage.discard();
+    diagnostic
+}
+
+fn reject_staged_artifact(
+    stage: Stage,
+    request_staging_name: &str,
+    header_staging_name: &str,
+    diagnostic: Diagnostic,
+    discard_stage_on_error: bool,
+) -> Diagnostic {
+    if discard_stage_on_error {
+        return discard_stage(stage, diagnostic);
+    }
+    stage.discard_staged(request_staging_name);
+    if header_staging_name != request_staging_name {
+        stage.discard_staged(header_staging_name);
+    }
+    diagnostic
+}
 fn expected_occt_worker_fingerprint() -> WorkerFingerprint {
     WorkerFingerprint {
         worker_kind: "occt".to_string(),

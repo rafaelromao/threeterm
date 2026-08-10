@@ -50,10 +50,11 @@ pub struct V0Bundle {
 pub mod bundle {
     pub use super::{
         Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, LoadedBundle, LogEntry, MANIFEST_FILENAME,
-        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PublicationFailurePoint,
-        SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest,
-        detect_schema, fail_next_publication_at, load, migrate_v0_to_v1, prior_schema_epoch,
-        read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
+        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
+        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
+        fail_next_publication_at, load, migrate_v0_to_v1, prior_schema_epoch, read_v0,
+        schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -73,6 +74,60 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+pub const PUBLICATION_KILL_POINT_ENV: &str = "THREETERM_PUBLICATION_KILL_POINT";
+
+/// Named publication boundaries used by the child-process recovery harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationKillPoint {
+    StagedFiles,
+    LogSeal,
+    ManifestSeal,
+    StagingSync,
+    StagingValidation,
+    RetirePrevious,
+    ReplaceCurrent,
+    PromoteStaging,
+    ParentSync,
+    RetiredCleanup,
+}
+
+impl PublicationKillPoint {
+    pub const ALL: [Self; 10] = [
+        Self::StagedFiles,
+        Self::LogSeal,
+        Self::ManifestSeal,
+        Self::StagingSync,
+        Self::StagingValidation,
+        Self::RetirePrevious,
+        Self::ReplaceCurrent,
+        Self::PromoteStaging,
+        Self::ParentSync,
+        Self::RetiredCleanup,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StagedFiles => "staged-files",
+            Self::LogSeal => "log-seal",
+            Self::ManifestSeal => "manifest-seal",
+            Self::StagingSync => "staging-sync",
+            Self::StagingValidation => "staging-validation",
+            Self::RetirePrevious => "retire-previous",
+            Self::ReplaceCurrent => "replace-current",
+            Self::PromoteStaging => "promote-staging",
+            Self::ParentSync => "parent-sync",
+            Self::RetiredCleanup => "retired-cleanup",
+        }
+    }
+}
+
+fn terminate_at_requested_publication_point(point: PublicationKillPoint) {
+    if std::env::var(PUBLICATION_KILL_POINT_ENV).ok().as_deref() == Some(point.as_str()) {
+        // Exit without unwinding so the child leaves the filesystem at the
+        // exact publication boundary selected by the recovery harness.
+        std::process::exit(137);
+    }
+}
 
 /// A deterministic filesystem-operation boundary for generation-publication
 /// tests. The hook makes the selected operation return an I/O error, then
@@ -85,6 +140,19 @@ pub enum PublicationFailurePoint {
     PromoteStaging,
     ParentSync,
     RetiredCleanup,
+}
+
+impl PublicationFailurePoint {
+    fn kill_point(self) -> PublicationKillPoint {
+        match self {
+            Self::StagingSync => PublicationKillPoint::StagingSync,
+            Self::RetirePrevious => PublicationKillPoint::RetirePrevious,
+            Self::ReplaceCurrent => PublicationKillPoint::ReplaceCurrent,
+            Self::PromoteStaging => PublicationKillPoint::PromoteStaging,
+            Self::ParentSync => PublicationKillPoint::ParentSync,
+            Self::RetiredCleanup => PublicationKillPoint::RetiredCleanup,
+        }
+    }
 }
 
 thread_local! {
@@ -737,14 +805,18 @@ impl Bundle {
             &previous_generation_path(&self.root)
         };
         copy_dir_recursive(source, &staging)?;
+        terminate_at_requested_publication_point(PublicationKillPoint::StagedFiles);
         atomic_write(&staging.join(TRANSACTIONS_LOG_FILENAME), &encoded)?;
+        terminate_at_requested_publication_point(PublicationKillPoint::LogSeal);
         atomic_write(
             &staging.join(MANIFEST_FILENAME),
             &serde_json::to_vec_pretty(&loaded.manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
         )?;
+        terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
         sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
         Bundle::at(&staging).open_sealed(false)?;
+        terminate_at_requested_publication_point(PublicationKillPoint::StagingValidation);
         publish_staged(&staging, &self.root)?;
         self.open_locked()
     }
@@ -1010,12 +1082,16 @@ impl PublicationFilesystem {
         point: PublicationFailurePoint,
     ) -> std::io::Result<()> {
         fail_if_injected(point)?;
-        fs::rename(source, destination)
+        fs::rename(source, destination)?;
+        terminate_at_requested_publication_point(point.kill_point());
+        Ok(())
     }
 
     fn sync_directory(path: &Path, point: PublicationFailurePoint) -> std::io::Result<()> {
         fail_if_injected(point)?;
-        File::open(path)?.sync_all()
+        File::open(path)?.sync_all()?;
+        terminate_at_requested_publication_point(point.kill_point());
+        Ok(())
     }
 }
 
@@ -1023,6 +1099,7 @@ fn remove_retired_generation(path: &Path) -> std::io::Result<()> {
     if path.exists() {
         fail_if_injected(PublicationFailurePoint::RetiredCleanup)?;
         fs::remove_dir_all(path)?;
+        terminate_at_requested_publication_point(PublicationKillPoint::RetiredCleanup);
     }
     Ok(())
 }

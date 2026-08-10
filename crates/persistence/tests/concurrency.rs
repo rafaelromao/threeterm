@@ -617,6 +617,7 @@ fn load_waits_for_an_in_flight_publication() {
 #[test]
 fn first_save_setup_failures_leave_no_partial_root() {
     for point in [
+        PublicationFailurePoint::StagedFiles,
         PublicationFailurePoint::StagingSync,
         PublicationFailurePoint::PromoteStaging,
     ] {

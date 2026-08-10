@@ -145,6 +145,9 @@ fn terminate_at_requested_publication_point(point: PublicationKillPoint) {
 /// clears itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationFailurePoint {
+    StagedFiles,
+    LogSync,
+    ManifestSync,
     StagingSync,
     RetirePrevious,
     ReplaceCurrent,
@@ -156,6 +159,9 @@ pub enum PublicationFailurePoint {
 impl PublicationFailurePoint {
     fn kill_point(self) -> PublicationKillPoint {
         match self {
+            Self::StagedFiles => PublicationKillPoint::StagedFiles,
+            Self::LogSync => PublicationKillPoint::LogSeal,
+            Self::ManifestSync => PublicationKillPoint::ManifestSeal,
             Self::StagingSync => PublicationKillPoint::StagingSync,
             Self::RetirePrevious => PublicationKillPoint::RetirePrevious,
             Self::ReplaceCurrent => PublicationKillPoint::ReplaceCurrent,
@@ -577,12 +583,17 @@ impl Bundle {
         fs::create_dir_all(&bundle.root)?;
         let log = TransactionLog::empty();
         let graph = FeatureGraph::empty();
-        atomic_write(&bundle.transactions_path(), &log.encode())?;
+        atomic_write(
+            &bundle.transactions_path(),
+            &log.encode(),
+            Some(PublicationFailurePoint::LogSync),
+        )?;
         let manifest = Manifest::seal(generation_id, revision_id, &log, &graph);
         atomic_write(
             &bundle.manifest_path(),
             &serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?,
+            Some(PublicationFailurePoint::ManifestSync),
         )?;
         // A fresh bundle is a new directory entry: it is only durable once
         // the containing directory is synced.
@@ -591,7 +602,7 @@ impl Bundle {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            File::open(parent)?.sync_all()?;
+            sync_directory(parent, PublicationFailurePoint::ParentSync)?;
         }
         Ok(bundle)
     }
@@ -616,9 +627,17 @@ impl Bundle {
             )));
         }
         let staging = fresh_staging_path_for_publish(&bundle.root);
-        Self::create_inner(&staging, generation_id, revision_id)?;
-        sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
-        Bundle::at(&staging).open_sealed(false)?;
+        let prepared = (|| {
+            Self::create_inner(&staging, generation_id, revision_id)?;
+            fail_if_injected(PublicationFailurePoint::StagedFiles)?;
+            sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+            Bundle::at(&staging).open_sealed(false)?;
+            Ok::<(), BundleError>(())
+        })();
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
         publish_staged(&staging, &bundle.root)?;
         Ok(bundle)
     }
@@ -815,18 +834,31 @@ impl Bundle {
         } else {
             &previous_generation_path(&self.root)
         };
-        copy_dir_recursive(source, &staging)?;
-        terminate_at_requested_publication_point(PublicationKillPoint::StagedFiles);
-        atomic_write(&staging.join(TRANSACTIONS_LOG_FILENAME), &encoded)?;
-        terminate_at_requested_publication_point(PublicationKillPoint::LogSeal);
-        atomic_write(
-            &staging.join(MANIFEST_FILENAME),
-            &serde_json::to_vec_pretty(&loaded.manifest)
-                .map_err(|error| BundleError::Invalid(error.to_string()))?,
-        )?;
-        terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
-        sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
-        Bundle::at(&staging).open_sealed(false)?;
+        let prepared = (|| {
+            copy_dir_recursive(source, &staging)?;
+            fail_if_injected(PublicationFailurePoint::StagedFiles)?;
+            terminate_at_requested_publication_point(PublicationKillPoint::StagedFiles);
+            atomic_write(
+                &staging.join(TRANSACTIONS_LOG_FILENAME),
+                &encoded,
+                Some(PublicationFailurePoint::LogSync),
+            )?;
+            terminate_at_requested_publication_point(PublicationKillPoint::LogSeal);
+            atomic_write(
+                &staging.join(MANIFEST_FILENAME),
+                &serde_json::to_vec_pretty(&loaded.manifest)
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                Some(PublicationFailurePoint::ManifestSync),
+            )?;
+            terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
+            sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+            Bundle::at(&staging).open_sealed(false)?;
+            Ok::<(), BundleError>(())
+        })();
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
         terminate_at_requested_publication_point(PublicationKillPoint::StagingValidation);
         publish_staged(&staging, &self.root)?;
         self.open_locked()
@@ -1396,10 +1428,15 @@ fn write_v1_into(
     transactions: &[u8],
 ) -> Result<(), BundleError> {
     fs::create_dir_all(staging)?;
-    atomic_write(&staging.join(TRANSACTIONS_LOG_FILENAME), transactions)?;
+    atomic_write(
+        &staging.join(TRANSACTIONS_LOG_FILENAME),
+        transactions,
+        Some(PublicationFailurePoint::LogSync),
+    )?;
     atomic_write(
         &staging.join(MANIFEST_FILENAME),
         &serde_json::to_vec_pretty(manifest)?,
+        Some(PublicationFailurePoint::ManifestSync),
     )?;
     sync_directory(staging, PublicationFailurePoint::StagingSync)?;
     Ok(())
@@ -1659,18 +1696,22 @@ fn read_required(path: &Path, missing: BundleError) -> Result<Vec<u8>, BundleErr
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
+fn atomic_write(
+    path: &Path,
+    bytes: &[u8],
+    sync_point: Option<PublicationFailurePoint>,
+) -> Result<(), BundleError> {
     let file_name = path
         .file_name()
         .ok_or_else(|| BundleError::Invalid("target has no file name".to_string()))?;
     let temporary = path.with_file_name(format!("{}.tmp", file_name.to_string_lossy()));
     let mut file = File::create(&temporary)?;
     file.write_all(bytes)?;
+    if let Some(point) = sync_point {
+        fail_if_injected(point)?;
+    }
     file.sync_all()?;
     fs::rename(temporary, path)?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
     Ok(())
 }
 

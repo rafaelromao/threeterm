@@ -125,13 +125,19 @@ impl PublicationKillPoint {
 }
 
 fn terminate_at_requested_publication_point(point: PublicationKillPoint) {
-    // This seam is inert unless the recovery harness explicitly opts in on a
-    // child process; normal callers never terminate from the persistence API.
-    if std::env::var(PUBLICATION_KILL_POINT_ENV).ok().as_deref() == Some(point.as_str()) {
-        // Exit without unwinding so the child leaves the filesystem at the
-        // exact publication boundary selected by the recovery harness.
-        std::process::exit(137);
+    #[cfg(feature = "publication-kill-points")]
+    {
+        // This seam is inert unless the recovery harness explicitly opts in on a
+        // child process; normal callers never terminate from the persistence API.
+        if std::env::var(PUBLICATION_KILL_POINT_ENV).ok().as_deref() == Some(point.as_str()) {
+            // Exit without unwinding so the child leaves the filesystem at the
+            // exact publication boundary selected by the recovery harness.
+            std::process::exit(137);
+        }
     }
+
+    #[cfg(not(feature = "publication-kill-points"))]
+    let _ = point;
 }
 
 /// A deterministic filesystem-operation boundary for generation-publication

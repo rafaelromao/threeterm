@@ -15,6 +15,9 @@ threeterm-occt-worker = { path = "../workers/occt" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 
+[dev-dependencies]
+threeterm-persistence = { path = "../persistence", features = ["publication-kill-points"] }
+
 [[bin]]
 name = "threeterm"
 path = "src/main.rs"

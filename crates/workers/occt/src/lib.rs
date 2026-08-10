@@ -79,7 +79,12 @@ impl OcctDiagnostic {
 #[derive(Debug)]
 pub enum WorkerError {
     /// The worker binary could not be located or spawned.
-    Spawn { binary: PathBuf, detail: String },
+    Spawn {
+        binary: PathBuf,
+        detail: String,
+        /// The active request ID when spawning was attempted for a request.
+        request_id: Option<String>,
+    },
     /// The worker exited with a non-zero status.
     NonZeroExit { code: Option<i32>, stderr: String },
     /// A non-zero worker exit with a safely recovered active request ID.
@@ -122,7 +127,7 @@ pub enum WorkerError {
 impl std::fmt::Display for WorkerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Spawn { binary, detail } => {
+            Self::Spawn { binary, detail, .. } => {
                 write!(
                     formatter,
                     "worker spawn failed at {}: {detail}",
@@ -238,6 +243,7 @@ impl OcctWorker {
             .ok_or_else(|| WorkerError::Spawn {
                 binary: PathBuf::from("threeterm-occt-worker"),
                 detail: "could not determine target directory".to_string(),
+                request_id: None,
             })?;
         for profile in ["debug", "release"] {
             let candidate = target_root.join(profile).join("bin/threeterm-occt-worker");
@@ -248,6 +254,7 @@ impl OcctWorker {
         Err(WorkerError::Spawn {
             binary: target_root.join("debug/bin/threeterm-occt-worker"),
             detail: "worker binary not found; build the occt worker first".to_string(),
+            request_id: None,
         })
     }
 
@@ -286,7 +293,7 @@ impl OcctWorker {
     /// Extrude `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn extrude(&self, request: &ExtrudeRequest) -> Result<ExtrudeResult, WorkerError> {
-        let bytes = bounded_serialize(request, "extrude")?;
+        let bytes = bounded_serialize(request, "extrude", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -304,7 +311,7 @@ impl OcctWorker {
         request: &ExtrudeRequest,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeResult, WorkerError> {
-        let bytes = bounded_serialize(request, "extrude")?;
+        let bytes = bounded_serialize(request, "extrude", &request.request_id)?;
         let value = self.run_with_cancel(&bytes, cancel)?;
         // The cancellable path must run the same bounded, digest-verified
         // decoder as the synchronous path: oversized, symlinked, or
@@ -324,7 +331,7 @@ impl OcctWorker {
         &self,
         request: &BooleanFuseRequest,
     ) -> Result<BooleanFuseResult, WorkerError> {
-        let bytes = bounded_serialize(request, "boolean-fuse")?;
+        let bytes = bounded_serialize(request, "boolean-fuse", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -335,7 +342,7 @@ impl OcctWorker {
     /// Fillet `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn fillet(&self, request: &FilletRequest) -> Result<FilletResult, WorkerError> {
-        let bytes = bounded_serialize(request, "fillet")?;
+        let bytes = bounded_serialize(request, "fillet", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -346,7 +353,7 @@ impl OcctWorker {
     /// Chamfer `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn chamfer(&self, request: &ChamferRequest) -> Result<ChamferResult, WorkerError> {
-        let bytes = bounded_serialize(request, "chamfer")?;
+        let bytes = bounded_serialize(request, "chamfer", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -357,7 +364,7 @@ impl OcctWorker {
     /// Hole `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn hole(&self, request: &HoleRequest) -> Result<HoleResult, WorkerError> {
-        let bytes = bounded_serialize(request, "hole")?;
+        let bytes = bounded_serialize(request, "hole", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -368,7 +375,7 @@ impl OcctWorker {
     /// Revolve `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn revolve(&self, request: &RevolveRequest) -> Result<RevolveResult, WorkerError> {
-        let bytes = bounded_serialize(request, "revolve")?;
+        let bytes = bounded_serialize(request, "revolve", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -379,7 +386,7 @@ impl OcctWorker {
     /// Mirror `request` by spawning the worker process. See module
     /// docs for the disposable-worker contract.
     pub fn mirror(&self, request: &MirrorRequest) -> Result<MirrorResult, WorkerError> {
-        let bytes = bounded_serialize(request, "mirror")?;
+        let bytes = bounded_serialize(request, "mirror", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -393,7 +400,7 @@ impl OcctWorker {
         &self,
         request: &LinearPatternRequest,
     ) -> Result<LinearPatternResult, WorkerError> {
-        let bytes = bounded_serialize(request, "linear_pattern")?;
+        let bytes = bounded_serialize(request, "linear_pattern", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -407,7 +414,7 @@ impl OcctWorker {
         &self,
         request: &CircularPatternRequest,
     ) -> Result<CircularPatternResult, WorkerError> {
-        let bytes = bounded_serialize(request, "circular_pattern")?;
+        let bytes = bounded_serialize(request, "circular_pattern", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -418,7 +425,7 @@ impl OcctWorker {
     /// Shell `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn shell(&self, request: &ShellRequest) -> Result<ShellResult, WorkerError> {
-        let bytes = bounded_serialize(request, "shell")?;
+        let bytes = bounded_serialize(request, "shell", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -429,7 +436,7 @@ impl OcctWorker {
     /// Draft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn draft(&self, request: &DraftRequest) -> Result<DraftResult, WorkerError> {
-        let bytes = bounded_serialize(request, "draft")?;
+        let bytes = bounded_serialize(request, "draft", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -440,7 +447,7 @@ impl OcctWorker {
     /// Loft `request` by spawning the worker process. See module docs
     /// for the disposable-worker contract.
     pub fn loft(&self, request: &LoftRequest) -> Result<LoftResult, WorkerError> {
-        let bytes = bounded_serialize(request, "loft")?;
+        let bytes = bounded_serialize(request, "loft", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
@@ -479,31 +486,36 @@ impl OcctWorker {
         envelope: &[u8],
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<serde_json::Value, WorkerError> {
+        let request_id = request_id_from_envelope(envelope);
         // Reject the raw input length before parsing: an oversized
         // request must never be materialized into memory past the
         // protocol's input bound.
         if envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
-            return Err(WorkerError::Malformed {
-                detail: format!(
+            return Err(malformed_for_request(
+                &request_id,
+                format!(
                     "request envelope of {} bytes exceeds the {} byte input bound",
                     envelope.len(),
                     threeterm_protocol::frame::MAX_FRAME_BUFFER
                 ),
-            });
+            ));
         }
-        let args: serde_json::Value =
-            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
-                detail: format!("request serialization failed: {error}"),
-            })?;
+        let args: serde_json::Value = serde_json::from_slice(envelope).map_err(|error| {
+            malformed_for_request(
+                &request_id,
+                format!("request serialization failed: {error}"),
+            )
+        })?;
         let request_id = args
             .get("request_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
         if request_id.is_empty() {
-            return Err(WorkerError::Malformed {
-                detail: "request envelope is missing request_id".to_string(),
-            });
+            return Err(malformed_for_request(
+                &request_id,
+                "request envelope is missing request_id",
+            ));
         }
         let command_id = args
             .get("operation")
@@ -511,9 +523,10 @@ impl OcctWorker {
             .unwrap_or("")
             .to_string();
         if command_id.is_empty() {
-            return Err(WorkerError::Malformed {
-                detail: "request envelope is missing operation".to_string(),
-            });
+            return Err(malformed_for_request(
+                &request_id,
+                "request envelope is missing operation",
+            ));
         }
         let feature_id = args
             .get("feature_id")
@@ -542,6 +555,7 @@ impl OcctWorker {
         .map_err(|error| WorkerError::Spawn {
             binary: self.binary_path.clone(),
             detail: error.to_string(),
+            request_id: Some(request_id.clone()),
         })?;
         let mut supervisor = Supervisor::new(self.grace, host, None);
         if let Some(worker_id) = &self.expected_worker_id {
@@ -719,13 +733,17 @@ fn map_outcome(
 fn bounded_serialize<T: serde::Serialize>(
     request: &T,
     operation: &str,
+    request_id: &str,
 ) -> Result<Vec<u8>, WorkerError> {
     threeterm_protocol::worker::serialize_capped(
         request,
         threeterm_protocol::frame::MAX_FRAME_BUFFER,
     )
-    .map_err(|error| WorkerError::Malformed {
-        detail: format!("{operation} request serialization failed: {error}"),
+    .map_err(|error| {
+        malformed_for_request(
+            request_id,
+            format!("{operation} request serialization failed: {error}"),
+        )
     })
 }
 

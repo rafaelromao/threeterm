@@ -242,10 +242,24 @@ fn locate_missing_binary_fails_closed() {
     let error = worker
         .extrude(&sample_extrude_request())
         .expect_err("missing binary must fail closed");
-    assert!(
-        matches!(error, WorkerError::Spawn { .. }),
-        "expected Spawn; got {error:?}"
-    );
+    match error {
+        WorkerError::Spawn { request_id, .. } => {
+            assert_eq!(request_id.as_deref(), Some("req-1"));
+        }
+        other => panic!("expected ID-bearing Spawn; got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_extrude_preserves_request_id_when_request_serialization_exceeds_bound() {
+    let mut request = sample_extrude_request();
+    request.feature_id = "x".repeat(threeterm_protocol::frame::MAX_FRAME_BUFFER);
+    let worker = OcctWorker::with_binary_path(std::path::PathBuf::from("/no/such/worker"));
+
+    let error = worker
+        .extrude(&request)
+        .expect_err("oversized request serialization must fail closed");
+    assert_id_bound_malformed(error, "serialization failed");
 }
 
 #[test]

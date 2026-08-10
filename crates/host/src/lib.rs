@@ -267,6 +267,13 @@ impl From<WorkerError> for HostError {
                 request_id: Some(request_id),
                 detail,
             },
+            WorkerError::Spawn {
+                request_id, detail, ..
+            } => Self::WorkerFailure { request_id, detail },
+            WorkerError::Cancelled { request_id } => Self::WorkerFailure {
+                request_id: Some(request_id.clone()),
+                detail: format!("worker request {request_id} cancelled"),
+            },
             WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {
                 request_id: None,
@@ -796,7 +803,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "extrude returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -848,7 +855,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "boolean_fuse returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -900,7 +907,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "fillet returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -952,7 +959,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "chamfer returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1004,7 +1011,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "hole returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1056,7 +1063,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "revolve returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1108,7 +1115,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "mirror returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1161,7 +1168,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "linear_pattern returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1214,7 +1221,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "circular_pattern returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1266,7 +1273,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "shell returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1318,7 +1325,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "draft returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1365,7 +1372,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
-                request_id: None,
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "loft returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id

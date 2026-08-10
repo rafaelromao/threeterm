@@ -201,7 +201,7 @@ impl OcctWorker {
         for profile in ["debug", "release"] {
             let candidate = target_root.join(profile).join("bin/threeterm-occt-worker");
             if candidate.is_file() {
-                return Ok(Self::with_binary_path(candidate));
+                return Ok(Self::with_binary_path(candidate).with_expected_worker_id("occt"));
             }
         }
         Err(WorkerError::Spawn {

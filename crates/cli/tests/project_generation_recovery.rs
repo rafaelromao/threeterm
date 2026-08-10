@@ -38,6 +38,7 @@ fn unique_scenario(label: &str) -> std::path::PathBuf {
 
 fn run_save(root: &Path, feature_id: &str, kill_point: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
+    command.env_remove(PUBLICATION_KILL_POINT_ENV);
     command.args(["--machine", "save"]).arg(root).args([
         "--feature-id",
         feature_id,
@@ -51,11 +52,12 @@ fn run_save(root: &Path, feature_id: &str, kill_point: Option<&str>) -> Output {
 }
 
 fn run_load(root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_threeterm"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
+    command
+        .env_remove(PUBLICATION_KILL_POINT_ENV)
         .args(["--machine", "load"])
-        .arg(root)
-        .output()
-        .expect("load process runs")
+        .arg(root);
+    command.output().expect("load process runs")
 }
 
 fn response(output: &Output, operation: &str) -> Value {
@@ -63,6 +65,11 @@ fn response(output: &Output, operation: &str) -> Value {
         output.status.success(),
         "{operation} failed: status={:?} stderr={}",
         output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{operation} wrote diagnostics to stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("command response is JSON")
@@ -74,22 +81,37 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
     let root = scenario.join("project");
 
     response(&run_save(&root, "box-1", None), "initial save");
-    let before = response(&run_save(&root, "box-2", None), "second save");
+    let before = GenerationHashes::from_response(
+        &response(&run_save(&root, "box-2", None), "second save"),
+        "pre-save generation",
+    );
 
     let interrupted = run_save(&root, "box-3", Some("staged-files"));
     assert!(
         !interrupted.status.success(),
         "staged-files: interrupted save unexpectedly succeeded"
     );
+    assert_eq!(
+        interrupted.status.code(),
+        Some(137),
+        "staged-files: interrupted save returned an unexpected status"
+    );
     assert!(
         interrupted.stdout.is_empty(),
         "staged-files: interrupted save emitted a success response: {}",
         String::from_utf8_lossy(&interrupted.stdout)
     );
+    assert!(
+        interrupted.stderr.is_empty(),
+        "staged-files: interrupted save wrote diagnostics: {}",
+        String::from_utf8_lossy(&interrupted.stderr)
+    );
 
     let loaded = response(&run_load(&root), "load after staged-files interruption");
-    assert_eq!(loaded["feature_graph_hash"], before["feature_graph_hash"]);
-    assert_eq!(loaded["revision_hash"], before["revision_hash"]);
+    assert_eq!(
+        GenerationHashes::from_response(&loaded, "recovered generation"),
+        before
+    );
 
     let _ = fs::remove_dir_all(scenario);
 }
@@ -145,10 +167,20 @@ fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_genera
             !interrupted.status.success(),
             "{point:?}: interrupted save unexpectedly succeeded"
         );
+        assert_eq!(
+            interrupted.status.code(),
+            Some(137),
+            "{point:?}: interrupted save returned an unexpected status"
+        );
         assert!(
             interrupted.stdout.is_empty(),
             "{point:?}: interrupted save emitted a success response: {}",
             String::from_utf8_lossy(&interrupted.stdout)
+        );
+        assert!(
+            interrupted.stderr.is_empty(),
+            "{point:?}: interrupted save wrote diagnostics: {}",
+            String::from_utf8_lossy(&interrupted.stderr)
         );
 
         let loaded = response(

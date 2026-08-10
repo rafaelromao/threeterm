@@ -74,9 +74,12 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+/// Harness-only environment variable; it is not part of the end-user CLI contract.
+#[doc(hidden)]
 pub const PUBLICATION_KILL_POINT_ENV: &str = "THREETERM_PUBLICATION_KILL_POINT";
 
 /// Named publication boundaries used by the child-process recovery harness.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationKillPoint {
     StagedFiles,
@@ -122,6 +125,8 @@ impl PublicationKillPoint {
 }
 
 fn terminate_at_requested_publication_point(point: PublicationKillPoint) {
+    // This seam is inert unless the recovery harness explicitly opts in on a
+    // child process; normal callers never terminate from the persistence API.
     if std::env::var(PUBLICATION_KILL_POINT_ENV).ok().as_deref() == Some(point.as_str()) {
         // Exit without unwinding so the child leaves the filesystem at the
         // exact publication boundary selected by the recovery harness.

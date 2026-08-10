@@ -1600,12 +1600,15 @@ fn extrude_artifact_request(
     request: &ExtrudeRequest,
     source_snapshot: &SnapshotView,
 ) -> Result<Layer1ArtifactRequest, HostError> {
-    let semantic_input = serde_json::to_vec(&ExtrudeSemanticInput {
-        operation: "extrude",
-        feature_id: &request.feature_id,
-        profile: &request.profile,
-        height: request.height,
-    })
+    let semantic_input = threeterm_protocol::worker::serialize_capped(
+        &ExtrudeSemanticInput {
+            operation: "extrude",
+            feature_id: &request.feature_id,
+            profile: &request.profile,
+            height: request.height,
+        },
+        threeterm_protocol::frame::MAX_FRAME_BUFFER,
+    )
     .map_err(|error| HostError::Validation {
         detail: format!("extrude semantic input serialization failed: {error}"),
     })?;
@@ -2221,6 +2224,25 @@ mod tests {
         assert_eq!(
             binding.deterministic_settings_sha256,
             threeterm_protocol::artifact::sha256_hex(b"threeterm.extrude.derived-settings/1")
+        );
+    }
+
+    #[test]
+    fn extrude_artifact_request_rejects_an_oversized_profile_before_materializing_it() {
+        let mut request =
+            ExtrudeRequest::new("request-1", vec![(0.0, 0.0); 3], 2.0).with_feature_id("feature-1");
+        request.profile = vec![[0.0, 0.0]; threeterm_protocol::frame::MAX_FRAME_BUFFER];
+        let snapshot = SnapshotView {
+            feature_graph_hash: "a".repeat(64),
+            revision_hash: "b".repeat(64),
+            recovered_from_previous: false,
+        };
+
+        let error = extrude_artifact_request(&request, &snapshot)
+            .expect_err("oversized semantic input must fail closed");
+        assert!(
+            matches!(error, HostError::Validation { ref detail } if detail.contains("serialization failed")),
+            "expected bounded serialization failure; got {error:?}"
         );
     }
 }

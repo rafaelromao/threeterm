@@ -1036,6 +1036,22 @@ impl Supervisor {
                 }
                 Err(WorkerError::Closed) => return None,
                 Err(WorkerError::TimedOut) if Instant::now() < deadline => continue,
+                Err(WorkerError::StreamOverflow { stream, .. }) => {
+                    let context = TerminationContext {
+                        last_progress: last_progress.clone(),
+                        last_artifact_error: self.last_artifact_error.take(),
+                        failed: None,
+                    };
+                    return Some(SupervisorOutcome::ForceTerminated {
+                        record: self.termination_record(
+                            request_id.to_string(),
+                            format!("{stage_prefix}:stream_overflow:{stream}"),
+                            started,
+                            context,
+                            ExitKind::ForceAfterGrace,
+                        ),
+                    });
+                }
                 Err(error) => {
                     let context = TerminationContext {
                         last_progress: last_progress.clone(),

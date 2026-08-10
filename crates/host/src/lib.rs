@@ -2980,24 +2980,54 @@ impl Host {
         }
         let final_name = header.cache_key.final_artifact_name();
         if let Some(existing) = self.layer1_result(&header.cache_key) {
-            let published_matches =
-                match stage.published_matches(&final_name, existing.byte_count, &existing.sha256) {
-                    Ok(matches) => matches,
-                    Err(error) => {
-                        return Err(reject_staged_artifact(
-                            stage,
-                            &request.staging_name,
-                            &header_staging_name,
-                            artifact_error_diagnostic(&error),
-                            discard_stage_on_error,
-                        ));
-                    }
-                };
+            let Some(existing_root) = existing.path.parent() else {
+                return Err(reject_staged_artifact(
+                    stage,
+                    &request.staging_name,
+                    &header_staging_name,
+                    Diagnostic::artifact_promotion_failure("cached_artifact_root_missing"),
+                    discard_stage_on_error,
+                ));
+            };
+            let cached_stage = match Stage::open_existing(existing_root) {
+                Ok(stage) => stage,
+                Err(error) => {
+                    return Err(reject_staged_artifact(
+                        stage,
+                        &request.staging_name,
+                        &header_staging_name,
+                        artifact_error_diagnostic(&error),
+                        discard_stage_on_error,
+                    ));
+                }
+            };
+            let published_matches = match cached_stage.published_matches(
+                &final_name,
+                existing.byte_count,
+                &existing.sha256,
+            ) {
+                Ok(matches) => matches,
+                Err(error) => {
+                    return Err(reject_staged_artifact(
+                        stage,
+                        &request.staging_name,
+                        &header_staging_name,
+                        artifact_error_diagnostic(&error),
+                        discard_stage_on_error,
+                    ));
+                }
+            };
             if published_matches {
-                stage.discard_verified(&header.staging_name);
+                if discard_stage_on_error {
+                    if let Err(error) = stage.discard() {
+                        return Err(Diagnostic::artifact_promotion_failure(&error.to_string()));
+                    }
+                } else {
+                    stage.discard_staged(&header.staging_name);
+                }
                 return Ok(existing);
             }
-            if let Err(error) = stage.discard_final(&final_name) {
+            if let Err(error) = cached_stage.discard_final(&final_name) {
                 return Err(reject_staged_artifact(
                     stage,
                     &request.staging_name,

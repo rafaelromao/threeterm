@@ -243,6 +243,71 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
 }
 
 #[test]
+fn host_reuses_a_valid_cached_extrude_without_orphaning_the_first_stage() {
+    let project_root = temp_root("cache-hit-project");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "seed", "box")
+        .expect("canonical snapshot saves");
+    let request = binding(&snapshot);
+    let first_root = temp_root("cache-hit-first-stage");
+    let first_stage = Stage::open(&first_root).expect("first stage opens");
+    let first_bytes = b"first cached result";
+    first_stage
+        .stage_bytes(&request.staging_name, first_bytes)
+        .expect("first artifact stages");
+    let first_result = typed_result(
+        &first_stage
+            .root()
+            .join(format!("{}.partial", request.staging_name)),
+        first_bytes,
+    );
+    let first = host
+        .accept_staged_extrude(
+            first_stage,
+            &request,
+            &first_result,
+            completed(&request, &first_result, first_bytes),
+        )
+        .expect("first derived result accepts");
+    let second_root = temp_root("cache-hit-second-stage");
+    let second_stage = Stage::open(&second_root).expect("second stage opens");
+    let second_bytes = b"second cached result";
+    second_stage
+        .stage_bytes(&request.staging_name, second_bytes)
+        .expect("second artifact stages");
+    let second_result = typed_result(
+        &second_stage
+            .root()
+            .join(format!("{}.partial", request.staging_name)),
+        second_bytes,
+    );
+    let repeated = host
+        .accept_staged_extrude(
+            second_stage,
+            &request,
+            &second_result,
+            completed(&request, &second_result, second_bytes),
+        )
+        .expect("valid cache hit reuses the first result");
+
+    assert_eq!(repeated, first);
+    assert_eq!(
+        std::fs::read(&first.path).expect("first artifact reads"),
+        first_bytes
+    );
+    assert!(first_root.exists(), "cached stage remains available");
+    assert!(
+        !second_root.exists(),
+        "new request stage is discarded on cache hit"
+    );
+
+    let _ = std::fs::remove_dir_all(project_root);
+    let _ = std::fs::remove_dir_all(first_root);
+    let _ = std::fs::remove_dir_all(second_root);
+}
+
+#[test]
 fn host_acceptance_keeps_using_the_owned_stage_after_an_ancestor_replacement() {
     let project_root = temp_root("ancestor-replacement-project");
     let stage_parent = temp_root("ancestor-replacement-parent");

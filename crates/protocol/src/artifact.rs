@@ -12,16 +12,19 @@
 //!
 //! See `artifact::Stage` for the public API.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::CString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use nix::fcntl::{OFlag, openat};
-use nix::sys::stat::Mode;
+use nix::sys::stat::{Mode, mkdirat};
 use nix::unistd::{LinkatFlags, UnlinkatFlags, linkat, unlinkat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,6 +127,12 @@ pub struct Stage {
     parent: fs::File,
     root_name: String,
     root_dir: fs::File,
+    verified_files: RefCell<HashMap<String, VerifiedFile>>,
+}
+
+#[derive(Debug)]
+struct VerifiedFile {
+    file: fs::File,
 }
 
 impl Stage {
@@ -132,22 +141,31 @@ impl Stage {
     /// accumulates `.partial` files until `promote` or `discard`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
         let root = root.into();
-        match fs::symlink_metadata(&root) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(ArtifactError::InvalidRoot(root));
+        let (parent_path, root_name) = root_parts(&root)?;
+        let parent = open_directory_tree(&parent_path, true)?;
+        let root_dir = match openat_directory(&parent, &root_name) {
+            Ok(root_dir) => root_dir,
+            Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                mkdir_child(&parent, &root_name)?;
+                open_root_child(&parent, &root_name, &root)?
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(&root).map_err(ArtifactError::Io)?;
-            }
-            Err(error) => return Err(ArtifactError::Io(error)),
-        }
-        let metadata = fs::symlink_metadata(&root).map_err(ArtifactError::Io)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(ArtifactError::InvalidRoot(root));
-        }
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(ArtifactError::Io)?;
-        Self::from_existing_root(root)
+            Err(error) => return Err(map_root_open_error(error, &root)),
+        };
+        root_dir
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(ArtifactError::Io)?;
+        Self::from_pinned_root(root, parent, root_name, root_dir)
+    }
+
+    /// Open an existing staging namespace without creating any missing
+    /// component. This is used to validate a previously published cache
+    /// result without binding a new path into the filesystem.
+    pub fn open_existing(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
+        let root = root.into();
+        let (parent_path, root_name) = root_parts(&root)?;
+        let parent = open_directory_tree(&parent_path, false)?;
+        let root_dir = open_root_child(&parent, &root_name, &root)?;
+        Self::from_pinned_root(root, parent, root_name, root_dir)
     }
 
     /// Create a new private staging directory without reusing an existing
@@ -156,21 +174,9 @@ impl Stage {
     pub fn create_fresh(parent: impl Into<PathBuf>, prefix: &str) -> Result<Self, ArtifactError> {
         validate_name(prefix)?;
         let parent = parent.into();
-        match fs::symlink_metadata(&parent) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(ArtifactError::InvalidRoot(parent));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(&parent).map_err(ArtifactError::Io)?;
-            }
-            Err(error) => return Err(ArtifactError::Io(error)),
-        }
-        let parent_metadata = fs::symlink_metadata(&parent).map_err(ArtifactError::Io)?;
-        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
-            return Err(ArtifactError::InvalidRoot(parent));
-        }
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
+        let parent_dir = open_directory_tree(&parent, true)?;
+        parent_dir
+            .set_permissions(fs::Permissions::from_mode(0o700))
             .map_err(ArtifactError::Io)?;
 
         for attempt in 0..32 {
@@ -180,18 +186,35 @@ impl Stage {
                 .unwrap_or(0);
             let candidate =
                 parent.join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
-            match fs::create_dir(&candidate) {
+            let candidate_name = candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| ArtifactError::InvalidRoot(parent.clone()))?
+                .to_string();
+            match mkdir_child(&parent_dir, &candidate_name) {
                 Ok(()) => {
-                    if let Err(error) =
-                        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                    let root_dir = match open_root_child(&parent_dir, &candidate_name, &candidate) {
+                        Ok(root_dir) => root_dir,
+                        Err(error) => {
+                            let _ = unlink_child(&parent_dir, &candidate_name);
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = root_dir
+                        .set_permissions(fs::Permissions::from_mode(0o700))
+                        .map_err(ArtifactError::Io)
                     {
-                        let _ = fs::remove_dir(&candidate);
-                        return Err(ArtifactError::Io(error));
+                        let _ = unlink_child(&parent_dir, &candidate_name);
+                        return Err(error);
                     }
-                    return Self::from_existing_root(candidate);
+                    return Self::from_pinned_root(candidate, parent_dir, candidate_name, root_dir);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(ArtifactError::Io(error)),
+                Err(ArtifactError::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
         Err(ArtifactError::Io(std::io::Error::new(
@@ -250,7 +273,7 @@ impl Stage {
         validate_name(&header.staging_name)?;
         let staging_name = format!("{}.partial", header.staging_name);
         let verified_name = format!(".{}.verified", header.staging_name);
-        let result = (|| {
+        let result = (|| -> Result<VerifiedFile, ArtifactError> {
             let mut source = match open_child(
                 &self.root_dir,
                 &staging_name,
@@ -316,13 +339,21 @@ impl Stage {
                 });
             }
             unlink_child(&self.root_dir, &staging_name)?;
-            Ok(())
+            Ok(VerifiedFile { file: verified })
         })();
-        if result.is_err() {
-            let _ = unlink_child(&self.root_dir, &verified_name);
-            let _ = unlink_child(&self.root_dir, &staging_name);
+        match result {
+            Ok(verified) => {
+                self.verified_files
+                    .borrow_mut()
+                    .insert(header.staging_name.clone(), verified);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = unlink_child(&self.root_dir, &verified_name);
+                let _ = unlink_child(&self.root_dir, &staging_name);
+                Err(error)
+            }
         }
-        result
     }
 
     /// Publish a verified artifact under a cache-derived final filename.
@@ -336,20 +367,42 @@ impl Stage {
         validate_name(final_name)?;
         let final_path = self.root.join(final_name);
         let verified_name = format!(".{staging_name}.verified");
-        let result = linkat(
-            &self.root_dir,
-            verified_name.as_str(),
-            &self.root_dir,
-            final_name,
-            LinkatFlags::empty(),
-        )
-        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                ArtifactError::FinalPathExists(final_path.clone())
-            } else {
-                ArtifactError::Rename(error)
+        let verified = self
+            .verified_files
+            .borrow_mut()
+            .remove(staging_name)
+            .ok_or_else(|| {
+                ArtifactError::Io(std::io::Error::other(
+                    "verified artifact handle is no longer available",
+                ))
+            })?;
+        let result = (|| -> Result<(), ArtifactError> {
+            let held_metadata = verified.file.metadata().map_err(ArtifactError::Io)?;
+            let current = open_child(
+                &self.root_dir,
+                &verified_name,
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )?;
+            let current_metadata = current.metadata().map_err(ArtifactError::Io)?;
+            if !same_file(&held_metadata, &current_metadata) {
+                return Err(ArtifactError::StagedFileChanged(verified_name.clone()));
             }
+            linkat(
+                &self.root_dir,
+                verified_name.as_str(),
+                &self.root_dir,
+                final_name,
+                LinkatFlags::empty(),
+            )
+            .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
+        })()
+        .map_err(|error| match error {
+            ArtifactError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                ArtifactError::FinalPathExists(final_path.clone())
+            }
+            ArtifactError::Io(error) => ArtifactError::Rename(error),
+            error => error,
         });
         let _ = unlink_child(&self.root_dir, &verified_name);
         result.map(|()| final_path)
@@ -414,6 +467,7 @@ impl Stage {
     /// Remove a verified artifact after the Host accepts an existing cache hit.
     pub fn discard_verified(&self, staging_name: &str) {
         if validate_name(staging_name).is_ok() {
+            self.verified_files.borrow_mut().remove(staging_name);
             let _ = unlink_child(&self.root_dir, &format!(".{staging_name}.verified"));
         }
     }
@@ -432,6 +486,7 @@ impl Stage {
     /// host never holds an authoritative-looking staged entry. The
     /// returned `Stage` is consumed; create a fresh one if needed.
     pub fn discard(self) -> Result<(), ArtifactError> {
+        self.verified_files.borrow_mut().clear();
         let expected = self.root_dir.metadata().map_err(ArtifactError::Io)?;
         let current = openat_directory(&self.parent, &self.root_name)?;
         if !same_file(&expected, &current.metadata().map_err(ArtifactError::Io)?) {
@@ -463,23 +518,18 @@ impl Stage {
 }
 
 impl Stage {
-    fn from_existing_root(root: PathBuf) -> Result<Self, ArtifactError> {
-        let parent_path = root
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let root_name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| ArtifactError::InvalidRoot(root.clone()))?
-            .to_string();
-        let parent = open_directory(parent_path)?;
-        let root_dir = openat_directory(&parent, &root_name)?;
+    fn from_pinned_root(
+        root: PathBuf,
+        parent: fs::File,
+        root_name: String,
+        root_dir: fs::File,
+    ) -> Result<Self, ArtifactError> {
         Ok(Self {
             root,
             parent,
             root_name,
             root_dir,
+            verified_files: RefCell::new(HashMap::new()),
         })
     }
 }
@@ -490,6 +540,86 @@ fn open_directory(path: &Path) -> Result<fs::File, ArtifactError> {
         .custom_flags(0o200000 | 0o400000)
         .open(path)
         .map_err(ArtifactError::Io)
+}
+
+fn root_parts(root: &Path) -> Result<(PathBuf, String), ArtifactError> {
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ArtifactError::InvalidRoot(root.to_path_buf()))?
+        .to_string();
+    let parent = root
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    Ok((parent, root_name))
+}
+
+fn open_directory_tree(path: &Path, create_missing: bool) -> Result<fs::File, ArtifactError> {
+    let mut current = if path.is_absolute() {
+        open_directory(Path::new("/"))?
+    } else {
+        open_directory(Path::new("."))?
+    };
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(ArtifactError::InvalidRoot(path.to_path_buf()));
+        }
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let Some(name) = name.to_str() else {
+            return Err(ArtifactError::InvalidRoot(path.to_path_buf()));
+        };
+        current = match openat_directory(&current, name) {
+            Ok(directory) => Ok(directory),
+            Err(ArtifactError::Io(error))
+                if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                match mkdir_child(&current, name) {
+                    Ok(()) => openat_directory(&current, name),
+                    Err(ArtifactError::Io(error))
+                        if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
+                        openat_directory(&current, name)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(map_root_open_error(error, path)),
+        }
+        .map_err(|error| map_root_open_error(error, path))?;
+    }
+    Ok(current)
+}
+
+fn open_root_child(parent: &fs::File, name: &str, root: &Path) -> Result<fs::File, ArtifactError> {
+    openat_directory(parent, name).map_err(|error| map_root_open_error(error, root))
+}
+
+fn map_root_open_error(error: ArtifactError, root: &Path) -> ArtifactError {
+    let invalid = matches!(
+        &error,
+        ArtifactError::Io(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code)
+                    if code == nix::errno::Errno::ELOOP as i32
+                        || code == nix::errno::Errno::ENOTDIR as i32
+            )
+    );
+    if invalid {
+        ArtifactError::InvalidRoot(root.to_path_buf())
+    } else {
+        error
+    }
+}
+
+fn mkdir_child(directory: &fs::File, name: &str) -> Result<(), ArtifactError> {
+    let name = CString::new(name).map_err(|_| ArtifactError::InvalidName(name.to_string()))?;
+    mkdirat(directory, name.as_c_str(), Mode::from_bits_truncate(0o700))
+        .map_err(|error| ArtifactError::Io(std::io::Error::from_raw_os_error(error as i32)))
 }
 
 fn openat_directory(parent: &fs::File, name: &str) -> Result<fs::File, ArtifactError> {
@@ -822,6 +952,33 @@ mod tests {
     }
 
     #[test]
+    fn publication_uses_the_verified_inode_after_its_path_is_replaced() {
+        let root = temp_root("verified-path-replacement");
+        let replacement = temp_root("verified-path-replacement-file");
+        let stage = Stage::open(&root).expect("stage opens");
+        let bytes = b"verified inode bytes";
+        let staged = stage
+            .stage_bytes("requested-name.brep", bytes)
+            .expect("artifact stages");
+        let artifact_header = header(&staged, staged.sha256.clone());
+        stage.verify(&artifact_header).expect("artifact verifies");
+
+        let verified_path = root.join(".requested-name.brep.verified");
+        fs::write(&replacement, b"replacement path bytes").expect("replacement writes");
+        fs::remove_file(&verified_path).expect("verified path removes");
+        fs::rename(&replacement, &verified_path).expect("replacement path installs");
+
+        let error = stage
+            .publish_verified(&artifact_header.staging_name, "derived-final")
+            .expect_err("replaced verified path must fail closed");
+
+        assert!(matches!(error, ArtifactError::StagedFileChanged(_)));
+        assert!(!root.join("derived-final").exists());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(replacement);
+    }
+
+    #[test]
     fn validate_rejects_an_artifact_whose_advertised_hash_does_not_match() {
         let root = temp_root("mismatch");
         let stage = Stage::open(&root).expect("stage opens");
@@ -947,6 +1104,25 @@ mod tests {
 
         assert!(matches!(error, ArtifactError::InvalidRoot(path) if path == link));
         let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn create_fresh_rejects_a_symlinked_ancestor_before_creating_outside() {
+        let base = temp_root("fresh-ancestor-base");
+        let target = temp_root("fresh-ancestor-target");
+        let redirect = base.join("redirect");
+        fs::create_dir_all(&base).expect("base creates");
+        fs::create_dir_all(&target).expect("target creates");
+        std::os::unix::fs::symlink(&target, &redirect).expect("ancestor symlink creates");
+        let parent = redirect.join("stages");
+
+        let error = Stage::create_fresh(&parent, "extrude")
+            .expect_err("symlinked ancestor must reject before creating a stage");
+
+        assert!(matches!(error, ArtifactError::InvalidRoot(path) if path == parent));
+        assert!(!target.join("stages").exists());
+        let _ = fs::remove_dir_all(base);
         let _ = fs::remove_dir_all(target);
     }
 

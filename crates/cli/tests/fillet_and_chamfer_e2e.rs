@@ -22,6 +22,8 @@ use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{CHAMFER_COMMAND_ID, FILLET_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
+mod common;
+
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -95,24 +97,11 @@ fn fillet_cli_drives_host_to_commit_a_filleted_brep() {
     new_project(bin, &root);
     save(bin, &root, "box-seed", "box");
 
-    let profile_path = root.join("rect.json");
-    fs::write(&profile_path, rectangle_profile()).expect("profile writes");
-
-    let extrude_output = Command::new(bin)
-        .args(["--machine", "extrude"])
-        .args(["--bundle"])
-        .arg(&root)
-        .args(["--feature-id", "box-rect"])
-        .args(["--profile-file"])
-        .arg(&profile_path)
-        .args(["--height"])
-        .arg("3.0")
-        .output()
-        .expect("extrude runs");
-    assert!(
-        extrude_output.status.success(),
-        "extrude failed: stderr={}",
-        String::from_utf8_lossy(&extrude_output.stderr)
+    common::extrude_canonical(
+        &root,
+        "box-rect",
+        serde_json::from_str(&rectangle_profile()).expect("profile parses"),
+        3.0,
     );
 
     let output = Command::new(bin)
@@ -203,24 +192,11 @@ fn chamfer_cli_drives_host_to_commit_a_chamfered_brep() {
     new_project(bin, &root);
     save(bin, &root, "box-seed", "box");
 
-    let profile_path = root.join("rect.json");
-    fs::write(&profile_path, rectangle_profile()).expect("profile writes");
-
-    let extrude_output = Command::new(bin)
-        .args(["--machine", "extrude"])
-        .args(["--bundle"])
-        .arg(&root)
-        .args(["--feature-id", "box-rect"])
-        .args(["--profile-file"])
-        .arg(&profile_path)
-        .args(["--height"])
-        .arg("3.0")
-        .output()
-        .expect("extrude runs");
-    assert!(
-        extrude_output.status.success(),
-        "extrude failed: stderr={}",
-        String::from_utf8_lossy(&extrude_output.stderr)
+    common::extrude_canonical(
+        &root,
+        "box-rect",
+        serde_json::from_str(&rectangle_profile()).expect("profile parses"),
+        3.0,
     );
 
     let output = Command::new(bin)

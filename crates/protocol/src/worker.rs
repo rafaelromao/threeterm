@@ -739,6 +739,11 @@ impl WorkerHost for SubprocessWorkerHost {
     }
 
     fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        // Give already-emitted trailing stream data a bounded opportunity to
+        // reach the readers before killing a worker that stays alive after a
+        // terminal envelope. Otherwise a stderr flood can be truncated by
+        // termination and incorrectly promote the terminal result.
+        self.settle_terminal_streams();
         self.terminate()?;
         self.fail_closed_on_overflow()?;
         self.transport.finish_terminal_data()
@@ -938,6 +943,16 @@ fn descendant_pids(_root: i32) -> Vec<i32> {
 }
 
 impl SubprocessWorkerHost {
+    fn settle_terminal_streams(&self) {
+        let deadline = Instant::now() + STREAM_DRAIN_WAIT;
+        while !self.readers_settled()
+            && self.fail_closed_on_overflow().is_ok()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(REAP_POLL);
+        }
+    }
+
     /// True once every active stream reader has finished draining its
     /// stream (observed EOF or an overflow). The reader count is fixed
     /// at construction time, so a reader that never starts is counted

@@ -8,8 +8,8 @@ use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
     FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, OcctWorker, RevolveRequest, RevolveResult,
-    ShellRequest, ShellResult, WorkerError,
+    LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest,
+    RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -220,48 +220,33 @@ impl From<BundleError> for HostError {
     }
 }
 
+fn host_error_from_diagnostic(diagnostic: OcctDiagnostic, request_id: Option<String>) -> HostError {
+    if diagnostic.code == "brep_invalid" {
+        HostError::BrepInvalid {
+            request_id,
+            detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+        }
+    } else if diagnostic.code == "unsupported_geometry" {
+        HostError::UnsupportedGeometry {
+            request_id,
+            detail: diagnostic.arg,
+        }
+    } else {
+        HostError::WorkerFailure {
+            request_id,
+            detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+        }
+    }
+}
+
 impl From<WorkerError> for HostError {
     fn from(error: WorkerError) -> Self {
         match error {
-            WorkerError::Diagnostic(diagnostic) => {
-                if diagnostic.code == "brep_invalid" {
-                    Self::BrepInvalid {
-                        request_id: None,
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                } else if diagnostic.code == "unsupported_geometry" {
-                    Self::UnsupportedGeometry {
-                        request_id: None,
-                        detail: diagnostic.arg,
-                    }
-                } else {
-                    Self::WorkerFailure {
-                        request_id: None,
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                }
-            }
+            WorkerError::Diagnostic(diagnostic) => host_error_from_diagnostic(diagnostic, None),
             WorkerError::DiagnosticWithContext {
                 request_id,
                 diagnostic,
-            } => {
-                if diagnostic.code == "brep_invalid" {
-                    Self::BrepInvalid {
-                        request_id: Some(request_id),
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                } else if diagnostic.code == "unsupported_geometry" {
-                    Self::UnsupportedGeometry {
-                        request_id: Some(request_id),
-                        detail: diagnostic.arg,
-                    }
-                } else {
-                    Self::WorkerFailure {
-                        request_id: Some(request_id),
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                }
-            }
+            } => host_error_from_diagnostic(diagnostic, Some(request_id)),
             WorkerError::NonZeroExitWithContext {
                 request_id,
                 code,

@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -173,77 +174,71 @@ fn extract_palette(
             index += 1;
             continue;
         }
-        if global_options && argument == "--palette" {
-            if palette.is_some() {
-                return Err(PaletteStartupError {
-                    value: "<duplicate>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "duplicate_option",
-                });
-            }
-            let Some(value) = args.get(index + 1) else {
-                return Err(PaletteStartupError {
-                    value: "<missing>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "missing_value",
-                });
-            };
-            let Some(value) = value.to_str() else {
-                return Err(PaletteStartupError {
-                    value: "<non-utf8>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "non_utf8_value",
-                });
-            };
-            if value.is_empty() {
-                return Err(PaletteStartupError {
-                    value: "<missing>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "missing_value",
-                });
-            }
-            palette = Some(value.to_string());
-            index += 2;
-            continue;
-        }
         if global_options
-            && let Some(value) = argument
-                .to_str()
-                .and_then(|arg| arg.strip_prefix("--palette="))
+            && let Some((value, consumed)) = parse_palette_argument(args, index, palette.is_some())?
         {
-            if palette.is_some() {
-                return Err(PaletteStartupError {
-                    value: "<duplicate>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "duplicate_option",
-                });
-            }
-            if value.is_empty() {
-                return Err(PaletteStartupError {
-                    value: "<missing>".to_string(),
-                    source: PaletteSource::Cli,
-                    detail: "missing_value",
-                });
-            }
-            palette = Some(value.to_string());
-            index += 1;
+            palette = Some(value);
+            index += consumed;
             continue;
-        }
-        if global_options
-            && argument.to_str().is_none()
-            && argument.as_encoded_bytes().starts_with(b"--palette=")
-        {
-            return Err(PaletteStartupError {
-                value: "<non-utf8>".to_string(),
-                source: PaletteSource::Cli,
-                detail: "non_utf8_value",
-            });
         }
         filtered.push(argument.clone());
         index += 1;
     }
 
     Ok((filtered, palette))
+}
+
+fn parse_palette_argument(
+    args: &[OsString],
+    index: usize,
+    already_present: bool,
+) -> Result<Option<(String, usize)>, PaletteStartupError> {
+    let argument = &args[index];
+    if argument == "--palette" {
+        if already_present {
+            return Err(palette_startup_error("<duplicate>", "duplicate_option"));
+        }
+        let Some(value) = args.get(index + 1) else {
+            return Err(palette_startup_error("<missing>", "missing_value"));
+        };
+        return Ok(Some((parse_palette_os_value(value)?, 2)));
+    }
+
+    let Some(argument) = argument.to_str() else {
+        if argument.as_encoded_bytes().starts_with(b"--palette=") {
+            return Err(palette_startup_error("<non-utf8>", "non_utf8_value"));
+        }
+        return Ok(None);
+    };
+    let Some(value) = argument.strip_prefix("--palette=") else {
+        return Ok(None);
+    };
+    if already_present {
+        return Err(palette_startup_error("<duplicate>", "duplicate_option"));
+    }
+    Ok(Some((parse_palette_value(value)?, 1)))
+}
+
+fn parse_palette_os_value(value: &OsStr) -> Result<String, PaletteStartupError> {
+    let Some(value) = value.to_str() else {
+        return Err(palette_startup_error("<non-utf8>", "non_utf8_value"));
+    };
+    parse_palette_value(value)
+}
+
+fn parse_palette_value(value: &str) -> Result<String, PaletteStartupError> {
+    if value.is_empty() {
+        return Err(palette_startup_error("<missing>", "missing_value"));
+    }
+    Ok(value.to_string())
+}
+
+fn palette_startup_error(value: &str, detail: &'static str) -> PaletteStartupError {
+    PaletteStartupError {
+        value: value.to_string(),
+        source: PaletteSource::Cli,
+        detail,
+    }
 }
 
 fn resolve_startup_palette(
@@ -290,6 +285,56 @@ fn palette_error_to_startup_error(error: PaletteError) -> PaletteStartupError {
         source: error.source,
         detail: error.reason.as_str(),
     }
+}
+
+fn load_config_palette() -> Result<Option<String>, PaletteStartupError> {
+    let Some(path) = std::env::var_os("THREETERM_CONFIG") else {
+        return Ok(None);
+    };
+    let path_text = path.to_str().unwrap_or("<non-utf8>");
+    let contents = fs::read(&path).map_err(|_| PaletteStartupError {
+        value: path_text.to_string(),
+        source: PaletteSource::Config,
+        detail: "config_read_failure",
+    })?;
+    let contents = String::from_utf8(contents).map_err(|_| PaletteStartupError {
+        value: "<non-utf8>".to_string(),
+        source: PaletteSource::Config,
+        detail: "non_utf8_value",
+    })?;
+    parse_config_palette(&contents)
+}
+
+fn parse_config_palette(contents: &str) -> Result<Option<String>, PaletteStartupError> {
+    let mut palette = None;
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "palette" {
+            continue;
+        }
+        if palette.is_some() {
+            return Err(PaletteStartupError {
+                value: "<duplicate>".to_string(),
+                source: PaletteSource::Config,
+                detail: "duplicate_option",
+            });
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(value);
+        palette = Some(value.to_string());
+    }
+    Ok(palette)
 }
 
 fn plan(args: &[OsString]) -> DispatchPlan {
@@ -1854,8 +1899,27 @@ pub fn dispatch<I>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i
 where
     I: IntoIterator<Item = OsString>,
 {
+    let args: Vec<OsString> = args.into_iter().collect();
     let environment = std::env::var_os("THREETERM_PALETTE");
-    dispatch_with_sources(args, environment.as_deref(), None, stdout, stderr)
+    let cli = match extract_palette(&args) {
+        Ok((_, cli)) => cli,
+        Err(error) => return emit_palette_error(&error, stderr),
+    };
+    let config = if cli.is_none() && environment.is_none() {
+        match load_config_palette() {
+            Ok(config) => config,
+            Err(error) => return emit_palette_error(&error, stderr),
+        }
+    } else {
+        None
+    };
+    dispatch_with_sources(
+        args,
+        environment.as_deref(),
+        config.as_deref(),
+        stdout,
+        stderr,
+    )
 }
 
 pub fn dispatch_with_config<I>(

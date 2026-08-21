@@ -6,11 +6,23 @@ use serde_json::Value;
 
 fn run(args: &[&str], palette: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
-    command.args(args).env_remove("THREETERM_PALETTE");
+    command
+        .args(args)
+        .env_remove("THREETERM_PALETTE")
+        .env_remove("THREETERM_CONFIG");
     if let Some(palette) = palette {
         command.env("THREETERM_PALETTE", palette);
     }
     command.output().expect("threeterm binary runs")
+}
+
+fn run_with_config(args: &[&str], config: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .args(args)
+        .env_remove("THREETERM_PALETTE")
+        .env("THREETERM_CONFIG", config)
+        .output()
+        .expect("threeterm binary runs")
 }
 
 fn diagnostic(output: &Output) -> Value {
@@ -37,6 +49,30 @@ fn environment_palette_allows_the_real_machine_command_path() {
     assert!(output.stderr.is_empty());
     let commands: Value = serde_json::from_slice(&output.stdout).expect("list is JSON");
     assert_eq!(commands.as_array().expect("list is an array").len(), 17);
+}
+
+#[test]
+fn config_palette_is_used_by_the_real_machine_command_path() {
+    let config = temporary_path("threeterm-theme-config");
+    fs::write(&config, "palette = sandman-light\n").expect("config is writable");
+    let output = run_with_config(&["--machine", "list"], &config);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_file(config);
+}
+
+#[test]
+fn unreadable_config_fails_closed_before_command_parsing() {
+    let config = temporary_path("threeterm-theme-missing-config");
+    let output = run_with_config(&["--machine", "not-a-command"], &config);
+
+    assert_eq!(output.status.code(), Some(6));
+    assert!(output.stdout.is_empty());
+    let diagnostic = diagnostic(&output);
+    assert_eq!(diagnostic["code"], "theme_palette_invalid");
+    assert_eq!(diagnostic["source"], "config");
+    assert_eq!(diagnostic["detail"], "config_read_failure");
 }
 
 #[test]

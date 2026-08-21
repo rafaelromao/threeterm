@@ -229,6 +229,7 @@ dependencies = [
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-theme",
 ]
 
 [[package]]

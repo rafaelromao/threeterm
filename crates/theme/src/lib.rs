@@ -223,6 +223,21 @@ pub struct ResolvedPalette {
     pub source: PaletteSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeContext {
+    pub palette: &'static Palette,
+    pub source: PaletteSource,
+}
+
+impl From<ResolvedPalette> for ThemeContext {
+    fn from(resolved: ResolvedPalette) -> Self {
+        Self {
+            palette: resolved.palette,
+            source: resolved.source,
+        }
+    }
+}
+
 pub fn resolve_palette(sources: PaletteSources<'_>) -> Result<ResolvedPalette, PaletteError> {
     for (source, value) in [
         (PaletteSource::Cli, sources.cli),
@@ -354,5 +369,19 @@ mod tests {
             assert_eq!(error.source, PaletteSource::Cli);
             assert_eq!(error.value, value);
         }
+    }
+
+    #[test]
+    fn resolved_palette_is_retained_in_an_immutable_theme_context() {
+        let resolved = resolve_palette(PaletteSources {
+            cli: Some("catppuccin"),
+            environment: None,
+            config: None,
+        })
+        .expect("palette resolves");
+        let context = ThemeContext::from(resolved);
+
+        assert_eq!(context.palette.name, "catppuccin");
+        assert_eq!(context.source, PaletteSource::Cli);
     }
 }

@@ -22,7 +22,7 @@ pub use threeterm_protocol::schema::{
 };
 use threeterm_protocol::schema::{CommandId, find_by_name, iter};
 use threeterm_theme::{
-    PaletteError, PaletteSource, PaletteSources, ResolvedPalette, resolve_palette,
+    PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -1882,13 +1882,14 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let args: Vec<OsString> = args.into_iter().collect();
-    let (args, _palette) = match resolve_startup_palette(&args, environment, config) {
+    let (args, resolved) = match resolve_startup_palette(&args, environment, config) {
         Ok(resolved) => resolved,
         Err(error) => return emit_palette_error(&error, stderr),
     };
+    let theme = ThemeContext::from(resolved);
     let plan = plan(&args);
     let DispatchPlan::Unknown { arg } = &plan else {
-        return execute_registered(plan, stdout, stderr);
+        return execute_registered(plan, &theme, stdout, stderr);
     };
     emit_unknown_command(arg, stderr)
 }
@@ -1896,11 +1897,17 @@ where
 fn execute_handler(
     plan: DispatchPlan,
     request: &Value,
+    theme: &ThemeContext,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    if theme.palette.name.is_empty() {
+        return emit_internal_error("resolved theme has no palette", stderr);
+    }
     match plan {
-        DispatchPlan::Registered { plan, .. } => execute_handler(*plan, request, stdout, stderr),
+        DispatchPlan::Registered { plan, .. } => {
+            execute_handler(*plan, request, theme, stdout, stderr)
+        }
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
         DispatchPlan::Save {
@@ -2196,7 +2203,23 @@ impl std::fmt::Display for DispatchError {
 
 impl std::error::Error for DispatchError {}
 
-fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+fn execute_registered(
+    plan: DispatchPlan,
+    theme: &ThemeContext,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    execute_registered_with_observer(plan, theme, stdout, stderr, |_| {})
+}
+
+fn execute_registered_with_observer(
+    plan: DispatchPlan,
+    theme: &ThemeContext,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    observe_theme: impl FnOnce(&ThemeContext),
+) -> i32 {
+    observe_theme(theme);
     let DispatchPlan::Registered { command, plan } = plan else {
         return emit_internal_error("parsed command has no registered schema", stderr);
     };
@@ -2207,7 +2230,13 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
-        let exit = execute_handler(*plan, &request, &mut handler_stdout, &mut handler_stderr);
+        let exit = execute_handler(
+            *plan,
+            &request,
+            theme,
+            &mut handler_stdout,
+            &mut handler_stderr,
+        );
         if exit != EXIT_OK {
             return Err((exit, handler_stderr));
         }
@@ -3666,6 +3695,29 @@ mod tests {
 
         assert_eq!(resolved.palette.name, "catppuccin");
         assert_eq!(resolved.source, PaletteSource::Cli);
+    }
+
+    #[test]
+    fn registered_execution_receives_the_selected_theme_context() {
+        let resolved = resolve_palette(PaletteSources {
+            cli: None,
+            environment: Some("catppuccin"),
+            config: None,
+        })
+        .expect("palette resolves");
+        let context = ThemeContext::from(resolved);
+        let plan = plan(&args(&["--machine", "list"]));
+        let mut selected = None;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit =
+            execute_registered_with_observer(plan, &context, &mut stdout, &mut stderr, |context| {
+                selected = Some((context.palette.name, context.source))
+            });
+
+        assert_eq!(exit, EXIT_OK);
+        assert_eq!(selected, Some(("catppuccin", PaletteSource::Environment)));
+        assert!(stderr.is_empty());
     }
 
     #[test]

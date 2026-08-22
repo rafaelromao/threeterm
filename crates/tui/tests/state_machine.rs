@@ -410,7 +410,7 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
             },
         )))
         .expect_err("empty verification cannot select a target");
-    assert_eq!(invalid.code, TuiDiagnosticCode::InvalidTransition);
+    assert_eq!(invalid.code, TuiDiagnosticCode::SelectionIncompatible);
     assert_eq!(invalid.axis, Some(StateAxis::Selection));
 
     session
@@ -418,6 +418,14 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
             candidates: vec!["feature-a".to_string()],
         })
         .expect("a candidate can be retried after ambiguity");
+    let before_mismatch = session.state();
+    let mismatch = session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["feature-b".to_string()],
+        }))
+        .expect_err("verification cannot select outside the authoritative candidate");
+    assert_eq!(mismatch.code, TuiDiagnosticCode::SelectionIncompatible);
+    assert_eq!(session.state(), before_mismatch);
     let lost = session
         .transition_selection(SelectionEvent::Verify(SelectionVerification::Lost))
         .expect("lost references become an explicit diagnostic outcome");

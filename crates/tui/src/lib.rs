@@ -1008,16 +1008,32 @@ impl TuiSession {
             }
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Exact {
                 stable_ids,
-            })) if matches!(self.selection, SelectionState::Candidate { .. })
-                && !stable_ids.is_empty() =>
-            {
-                self.selected_index = stable_ids.first().and_then(|stable_id| {
-                    self.targets
-                        .iter()
-                        .position(|target| target.id == *stable_id)
-                });
-                self.selection = SelectionState::Selected { stable_ids };
-                self.finish_transition(kind, "selection verified", TransientState::Selected)
+            })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
+                let valid = !stable_ids.is_empty()
+                    && stable_ids.iter().all(|stable_id| {
+                        matches!(
+                            &self.selection,
+                            SelectionState::Candidate { candidates, .. }
+                                if candidates.contains(stable_id)
+                        ) && self.targets.iter().any(|target| target.id == *stable_id)
+                    });
+                if !valid {
+                    Err(self.operation_diagnostic(
+                        TuiDiagnosticCode::SelectionIncompatible,
+                        axis,
+                        kind,
+                        "verified selection is not an authoritative candidate".to_string(),
+                        "Candidate",
+                    ))
+                } else {
+                    self.selected_index = stable_ids.first().and_then(|stable_id| {
+                        self.targets
+                            .iter()
+                            .position(|target| target.id == *stable_id)
+                    });
+                    self.selection = SelectionState::Selected { stable_ids };
+                    self.finish_transition(kind, "selection verified", TransientState::Selected)
+                }
             }
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
                 stable_ids,

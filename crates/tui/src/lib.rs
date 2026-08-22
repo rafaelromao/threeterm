@@ -732,87 +732,13 @@ impl TuiSession {
         &mut self,
         event: LifecycleEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::Lifecycle(event))
-    }
-
-    fn handle_focus_capture(
-        &mut self,
-        event: FocusCaptureEvent,
-    ) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::FocusCapture(event))
-    }
-
-    fn handle_selection(
-        &mut self,
-        event: SelectionEvent,
-    ) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::Selection(event))
-    }
-
-    fn handle_interaction(
-        &mut self,
-        event: InteractionEvent,
-    ) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::Interaction(event))
-    }
-
-    fn handle_command(&mut self, event: CommandEvent) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::Command(event))
-    }
-
-    fn handle_history(&mut self, event: HistoryEvent) -> Result<StateTransition, TuiDiagnostic> {
-        self.apply_transition(StateEvent::History(event))
-    }
-
-    fn apply_transition(&mut self, event: StateEvent) -> Result<StateTransition, TuiDiagnostic> {
-        let (axis, kind) = match &event {
-            StateEvent::Lifecycle(event) => (
-                StateAxis::Lifecycle,
-                StateEventKind::Lifecycle(event.kind()),
-            ),
-            StateEvent::FocusCapture(event) => (
-                StateAxis::FocusCapture,
-                StateEventKind::FocusCapture(event.kind()),
-            ),
-            StateEvent::Selection(event) => (
-                StateAxis::Selection,
-                StateEventKind::Selection(event.kind()),
-            ),
-            StateEvent::Command(event) => (
-                StateAxis::CommandPhase,
-                StateEventKind::Command(event.kind()),
-            ),
-            StateEvent::Interaction(event) => (
-                StateAxis::InteractionMode,
-                StateEventKind::Interaction(event.kind()),
-            ),
-            StateEvent::History(event) => {
-                (StateAxis::History, StateEventKind::History(event.kind()))
-            }
-        };
-        if self.lifecycle != LifecycleState::InteractiveReady
-            && !matches!(&event, StateEvent::Lifecycle(_))
-        {
-            return self.invalid_transition(axis, kind);
-        }
-        if self.focus == FocusState::FocusLost
-            && !matches!(
-                &event,
-                StateEvent::FocusCapture(FocusCaptureEvent::FocusIn) | StateEvent::Lifecycle(_)
-            )
-        {
-            return self.invalid_transition(axis, kind);
-        }
+        let kind = StateEventKind::Lifecycle(event.kind());
         match event {
-            StateEvent::Lifecycle(LifecycleEvent::ProbeStarted)
-                if self.lifecycle == LifecycleState::HeadlessOnly =>
-            {
+            LifecycleEvent::ProbeStarted if self.lifecycle == LifecycleState::HeadlessOnly => {
                 self.lifecycle = LifecycleState::Probing;
                 self.finish_transition(kind, "probing", TransientState::Ready)
             }
-            StateEvent::Lifecycle(LifecycleEvent::ProbeSucceeded)
-                if self.lifecycle == LifecycleState::Probing =>
-            {
+            LifecycleEvent::ProbeSucceeded if self.lifecycle == LifecycleState::Probing => {
                 self.lifecycle = LifecycleState::InteractiveReady;
                 self.focus = FocusState::Focused;
                 self.capture = CaptureState::None;
@@ -822,13 +748,11 @@ impl TuiSession {
                 self.command_source_revision = None;
                 self.finish_transition(kind, "interactive readiness", TransientState::Ready)
             }
-            StateEvent::Lifecycle(LifecycleEvent::ProbeFailed { detail })
-                if self.lifecycle == LifecycleState::Probing =>
-            {
+            LifecycleEvent::ProbeFailed { detail } if self.lifecycle == LifecycleState::Probing => {
                 self.lifecycle = LifecycleState::HeadlessOnly;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::LifecycleFailure,
-                    axis,
+                    StateAxis::Lifecycle,
                     kind,
                     detail,
                     "Probing",
@@ -840,16 +764,12 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Lifecycle(LifecycleEvent::ResizeStarted)
-                if self.lifecycle == LifecycleState::InteractiveReady =>
-            {
+            LifecycleEvent::ResizeStarted if self.lifecycle == LifecycleState::InteractiveReady => {
                 self.invalidate_for_resize();
                 self.lifecycle = LifecycleState::Resizing;
                 self.finish_transition(kind, "resizing", TransientState::ResizeRecovery)
             }
-            StateEvent::Lifecycle(LifecycleEvent::ResizeCompleted)
-                if self.lifecycle == LifecycleState::Resizing =>
-            {
+            LifecycleEvent::ResizeCompleted if self.lifecycle == LifecycleState::Resizing => {
                 self.lifecycle = LifecycleState::InteractiveReady;
                 if self.command_phase == CommandPhase::Idle {
                     self.interaction_mode = InteractionMode::ModelessReady;
@@ -858,14 +778,14 @@ impl TuiSession {
                 }
                 self.finish_transition(kind, "resize recovery complete", TransientState::Ready)
             }
-            StateEvent::Lifecycle(LifecycleEvent::ResizeFailed { detail })
+            LifecycleEvent::ResizeFailed { detail }
                 if self.lifecycle == LifecycleState::Resizing =>
             {
                 self.invalidate_for_resize();
                 self.lifecycle = LifecycleState::Restoring;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::LifecycleFailure,
-                    axis,
+                    StateAxis::Lifecycle,
                     kind,
                     detail,
                     "Resizing",
@@ -877,7 +797,7 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Lifecycle(LifecycleEvent::RuntimeFailure { detail })
+            LifecycleEvent::RuntimeFailure { detail }
                 if matches!(
                     self.lifecycle,
                     LifecycleState::InteractiveReady | LifecycleState::Resizing
@@ -888,7 +808,7 @@ impl TuiSession {
                 self.lifecycle = LifecycleState::Restoring;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::LifecycleFailure,
-                    axis,
+                    StateAxis::Lifecycle,
                     kind,
                     detail,
                     &from,
@@ -900,13 +820,11 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Lifecycle(LifecycleEvent::RestoreCompleted)
-                if self.lifecycle == LifecycleState::Restoring =>
-            {
+            LifecycleEvent::RestoreCompleted if self.lifecycle == LifecycleState::Restoring => {
                 self.lifecycle = LifecycleState::HeadlessOnly;
                 self.finish_transition(kind, "headless-only recovery", TransientState::Error)
             }
-            StateEvent::Lifecycle(LifecycleEvent::CloseRequested)
+            LifecycleEvent::CloseRequested
                 if !matches!(
                     self.lifecycle,
                     LifecycleState::Closing | LifecycleState::Closed
@@ -927,19 +845,30 @@ impl TuiSession {
                 self.lifecycle = LifecycleState::Closing;
                 self.finish_transition(kind, "closing", TransientState::Cancelled)
             }
-            StateEvent::Lifecycle(LifecycleEvent::CleanupCompleted)
-                if self.lifecycle == LifecycleState::Closing =>
-            {
+            LifecycleEvent::CleanupCompleted if self.lifecycle == LifecycleState::Closing => {
                 self.lifecycle = LifecycleState::Closed;
                 self.finish_transition(kind, "closed", TransientState::Ready)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::PointerPressed {
+            _ => self.invalid_transition(StateAxis::Lifecycle, kind),
+        }
+    }
+
+    fn handle_focus_capture(
+        &mut self,
+        event: FocusCaptureEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        let kind = StateEventKind::FocusCapture(event.kind());
+        self.guard_global(
+            StateAxis::FocusCapture,
+            kind,
+            matches!(&event, FocusCaptureEvent::FocusIn),
+        )?;
+        match event {
+            FocusCaptureEvent::PointerPressed {
                 tool,
                 origin,
                 candidate,
-            }) if self.lifecycle == LifecycleState::InteractiveReady
-                && self.focus == FocusState::Focused
-                && self.capture == CaptureState::None
+            } if self.capture == CaptureState::None
                 && self.interaction_mode == InteractionMode::ModelessReady =>
             {
                 let previous = self.selected_ids();
@@ -957,7 +886,7 @@ impl TuiSession {
                 }
                 self.finish_transition(kind, "pointer candidate", TransientState::Candidate)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::PointerMoved { candidate })
+            FocusCaptureEvent::PointerMoved { candidate }
                 if matches!(self.capture, CaptureState::PointerCapture(_))
                     && self.focus == FocusState::Focused =>
             {
@@ -974,9 +903,8 @@ impl TuiSession {
                 }
                 self.finish_transition(kind, "pointer capture updated", TransientState::Candidate)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::DragStarted)
-                if self.focus == FocusState::Focused
-                    && self.interaction_mode == InteractionMode::ModelessReady
+            FocusCaptureEvent::DragStarted
+                if self.interaction_mode == InteractionMode::ModelessReady
                     && matches!(self.capture, CaptureState::PointerCapture(_)) =>
             {
                 let tool = match &self.capture {
@@ -986,7 +914,7 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::DragActive { tool };
                 self.finish_transition(kind, "drag active", TransientState::Drag)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::DragFinished)
+            FocusCaptureEvent::DragFinished
                 if matches!(self.interaction_mode, InteractionMode::DragActive { .. })
                     && matches!(self.capture, CaptureState::PointerCapture(_)) =>
             {
@@ -994,7 +922,7 @@ impl TuiSession {
                 self.capture = CaptureState::None;
                 self.finish_transition(kind, "drag finished", TransientState::Ready)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::PointerReleased)
+            FocusCaptureEvent::PointerReleased
                 if matches!(self.capture, CaptureState::PointerCapture(_)) =>
             {
                 self.capture = CaptureState::None;
@@ -1003,9 +931,7 @@ impl TuiSession {
                 }
                 self.finish_transition(kind, "pointer release acknowledged", TransientState::Ready)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::FocusLost)
-                if self.focus == FocusState::Focused =>
-            {
+            FocusCaptureEvent::FocusLost if self.focus == FocusState::Focused => {
                 self.focus = FocusState::FocusLost;
                 self.capture = CaptureState::None;
                 self.restore_selection_after_cancel();
@@ -1020,16 +946,13 @@ impl TuiSession {
                     TransientState::FocusRecovery,
                 )
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::FocusIn)
-                if self.focus == FocusState::FocusLost
-                    && self.lifecycle == LifecycleState::InteractiveReady =>
-            {
+            FocusCaptureEvent::FocusIn if self.focus == FocusState::FocusLost => {
                 self.focus = FocusState::Focused;
                 self.capture = CaptureState::None;
                 self.interaction_mode = InteractionMode::RecoveryReady;
                 self.finish_transition(kind, "focus recovery ready", TransientState::FocusRecovery)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::RecoveryCompleted)
+            FocusCaptureEvent::RecoveryCompleted
                 if self.interaction_mode == InteractionMode::RecoveryReady
                     && self.focus == FocusState::Focused =>
             {
@@ -1040,7 +963,7 @@ impl TuiSession {
                 };
                 self.finish_transition(kind, "focus recovery complete", TransientState::Ready)
             }
-            StateEvent::FocusCapture(FocusCaptureEvent::CaptureCancelled)
+            FocusCaptureEvent::CaptureCancelled
                 if matches!(self.capture, CaptureState::PointerCapture(_))
                     || matches!(self.interaction_mode, InteractionMode::DragActive { .. }) =>
             {
@@ -1049,11 +972,18 @@ impl TuiSession {
                 self.restore_selection_after_cancel();
                 self.finish_transition(kind, "capture cancelled", TransientState::Cancelled)
             }
-            StateEvent::Selection(SelectionEvent::Nominate { candidates })
-                if self.lifecycle == LifecycleState::InteractiveReady
-                    && self.focus == FocusState::Focused
-                    && !candidates.is_empty() =>
-            {
+            _ => self.invalid_transition(StateAxis::FocusCapture, kind),
+        }
+    }
+
+    fn handle_selection(
+        &mut self,
+        event: SelectionEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        let kind = StateEventKind::Selection(event.kind());
+        self.guard_global(StateAxis::Selection, kind, false)?;
+        match event {
+            SelectionEvent::Nominate { candidates } if !candidates.is_empty() => {
                 let previous = self.selected_ids();
                 self.selected_index = None;
                 self.selection = SelectionState::Candidate {
@@ -1062,22 +992,17 @@ impl TuiSession {
                 };
                 self.finish_transition(kind, "selection candidate", TransientState::Candidate)
             }
-            StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Exact {
-                stable_ids,
-            })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
-                let valid = !stable_ids.is_empty()
-                    && stable_ids_are_distinct(&stable_ids)
-                    && stable_ids.iter().all(|stable_id| {
-                        matches!(
-                            &self.selection,
-                            SelectionState::Candidate { candidates, .. }
-                                if candidates.contains(stable_id)
-                        ) && self.targets.iter().any(|target| target.id == *stable_id)
-                    });
+            SelectionEvent::Verify(SelectionVerification::Exact { stable_ids })
+                if matches!(self.selection, SelectionState::Candidate { .. }) =>
+            {
+                let valid = !stable_ids.is_empty() && stable_ids_are_distinct(&stable_ids) && stable_ids.iter().all(|stable_id| {
+                    matches!(&self.selection, SelectionState::Candidate { candidates, .. } if candidates.contains(stable_id))
+                        && self.targets.iter().any(|target| target.id == *stable_id)
+                });
                 if !valid {
                     Err(self.operation_diagnostic(
                         TuiDiagnosticCode::SelectionIncompatible,
-                        axis,
+                        StateAxis::Selection,
                         kind,
                         "verified selection is not an authoritative candidate".to_string(),
                         "Candidate",
@@ -1092,22 +1017,17 @@ impl TuiSession {
                     self.finish_transition(kind, "selection verified", TransientState::Selected)
                 }
             }
-            StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
-                stable_ids,
-            })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
-                let valid = stable_ids.len() > 1
-                    && stable_ids_are_distinct(&stable_ids)
-                    && stable_ids.iter().all(|stable_id| {
-                        matches!(
-                            &self.selection,
-                            SelectionState::Candidate { candidates, .. }
-                                if candidates.contains(stable_id)
-                        ) && self.targets.iter().any(|target| target.id == *stable_id)
-                    });
+            SelectionEvent::Verify(SelectionVerification::Ambiguous { stable_ids })
+                if matches!(self.selection, SelectionState::Candidate { .. }) =>
+            {
+                let valid = stable_ids.len() > 1 && stable_ids_are_distinct(&stable_ids) && stable_ids.iter().all(|stable_id| {
+                    matches!(&self.selection, SelectionState::Candidate { candidates, .. } if candidates.contains(stable_id))
+                        && self.targets.iter().any(|target| target.id == *stable_id)
+                });
                 if !valid {
                     Err(self.operation_diagnostic(
                         TuiDiagnosticCode::SelectionIncompatible,
-                        axis,
+                        StateAxis::Selection,
                         kind,
                         "ambiguous selection contains an unauthoritative id".to_string(),
                         "Candidate",
@@ -1119,14 +1039,13 @@ impl TuiSession {
                         candidates: stable_ids,
                         previous,
                     };
-                    let diagnostic = TuiDiagnostic {
-                        code: TuiDiagnosticCode::AmbiguousSelection,
-                        detail: "authoritative selection has multiple candidates".to_string(),
-                        canonical_revision: self.canonical_revision.clone(),
-                        axis: Some(axis),
-                        event: Some(kind),
-                        from: Some("Candidate".to_string()),
-                    };
+                    let diagnostic = self.operation_diagnostic(
+                        TuiDiagnosticCode::AmbiguousSelection,
+                        StateAxis::Selection,
+                        kind,
+                        "authoritative selection has multiple candidates".to_string(),
+                        "Candidate",
+                    );
                     self.finish_transition_with_diagnostic(
                         kind,
                         "selection remains pending",
@@ -1135,14 +1054,14 @@ impl TuiSession {
                     )
                 }
             }
-            StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Lost))
+            SelectionEvent::Verify(SelectionVerification::Lost)
                 if matches!(self.selection, SelectionState::Candidate { .. }) =>
             {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionLost,
-                    axis,
+                    StateAxis::Selection,
                     kind,
                     "authoritative selection reference was lost".to_string(),
                     "Candidate",
@@ -1154,14 +1073,14 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Incompatible))
+            SelectionEvent::Verify(SelectionVerification::Incompatible)
                 if matches!(self.selection, SelectionState::Candidate { .. }) =>
             {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionIncompatible,
-                    axis,
+                    StateAxis::Selection,
                     kind,
                     "authoritative selection reference is incompatible".to_string(),
                     "Candidate",
@@ -1173,26 +1092,33 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Selection(SelectionEvent::Clear)
-                if !matches!(self.selection, SelectionState::None) =>
-            {
+            SelectionEvent::Clear if !matches!(self.selection, SelectionState::None) => {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
                 self.finish_transition(kind, "selection cleared", TransientState::Ready)
             }
-            StateEvent::Interaction(InteractionEvent::OpenCommand { command }) => {
-                self.open_command(command, axis, kind)
+            _ => self.invalid_transition(StateAxis::Selection, kind),
+        }
+    }
+
+    fn handle_interaction(
+        &mut self,
+        event: InteractionEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        let kind = StateEventKind::Interaction(event.kind());
+        self.guard_global(StateAxis::InteractionMode, kind, false)?;
+        match event {
+            InteractionEvent::OpenCommand { command } => {
+                self.open_command(command, StateAxis::InteractionMode, kind)
             }
-            StateEvent::Interaction(InteractionEvent::StartDrag { tool })
-                if self.lifecycle == LifecycleState::InteractiveReady
-                    && self.focus == FocusState::Focused
-                    && self.interaction_mode == InteractionMode::ModelessReady
+            InteractionEvent::StartDrag { tool }
+                if self.interaction_mode == InteractionMode::ModelessReady
                     && matches!(&self.capture, CaptureState::PointerCapture(capture) if capture.tool == tool) =>
             {
                 self.interaction_mode = InteractionMode::DragActive { tool };
                 self.finish_transition(kind, "drag active", TransientState::Drag)
             }
-            StateEvent::Interaction(InteractionEvent::FinishDrag)
+            InteractionEvent::FinishDrag
                 if matches!(self.interaction_mode, InteractionMode::DragActive { .. })
                     && matches!(self.capture, CaptureState::PointerCapture(_)) =>
             {
@@ -1200,7 +1126,7 @@ impl TuiSession {
                 self.capture = CaptureState::None;
                 self.finish_transition(kind, "drag finished", TransientState::Ready)
             }
-            StateEvent::Interaction(InteractionEvent::RecoveryCompleted)
+            InteractionEvent::RecoveryCompleted
                 if self.interaction_mode == InteractionMode::RecoveryReady
                     && self.focus == FocusState::Focused =>
             {
@@ -1211,7 +1137,7 @@ impl TuiSession {
                 };
                 self.finish_transition(kind, "focus recovery complete", TransientState::Ready)
             }
-            StateEvent::Interaction(InteractionEvent::CloseCommand)
+            InteractionEvent::CloseCommand
                 if matches!(self.command_phase, CommandPhase::Outcome { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1221,7 +1147,7 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.finish_transition(kind, "command outcome dismissed", TransientState::Ready)
             }
-            StateEvent::Interaction(InteractionEvent::StartHistory { direction }) => {
+            InteractionEvent::StartHistory { direction } => {
                 let available = match &direction {
                     HistoryDirection::Undo => {
                         matches!(self.history, HistoryState::Linear { can_undo: true, .. })
@@ -1237,7 +1163,6 @@ impl TuiSession {
                     && matches!(self.history, HistoryState::Linear { .. })
                     && self.interaction_mode == InteractionMode::ModelessReady
                     && self.command_phase == CommandPhase::Idle
-                    && self.focus == FocusState::Focused
                 {
                     let (can_undo, can_redo) = self.history_availability();
                     self.history = HistoryState::Applying {
@@ -1252,13 +1177,21 @@ impl TuiSession {
                         TransientState::Ready,
                     )
                 } else {
-                    self.invalid_transition(axis, kind)
+                    self.invalid_transition(StateAxis::InteractionMode, kind)
                 }
             }
-            StateEvent::Command(CommandEvent::Open { command }) => {
-                self.open_command(command, axis, kind)
+            _ => self.invalid_transition(StateAxis::InteractionMode, kind),
+        }
+    }
+
+    fn handle_command(&mut self, event: CommandEvent) -> Result<StateTransition, TuiDiagnostic> {
+        let kind = StateEventKind::Command(event.kind());
+        self.guard_global(StateAxis::CommandPhase, kind, false)?;
+        match event {
+            CommandEvent::Open { command } => {
+                self.open_command(command, StateAxis::CommandPhase, kind)
             }
-            StateEvent::Command(CommandEvent::DraftUpdated { input_fingerprint })
+            CommandEvent::DraftUpdated { input_fingerprint }
                 if matches!(self.command_phase, CommandPhase::Draft { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1272,7 +1205,7 @@ impl TuiSession {
                 };
                 self.finish_transition(kind, "command draft updated", TransientState::Ready)
             }
-            StateEvent::Command(CommandEvent::PreviewRequested)
+            CommandEvent::PreviewRequested
                 if matches!(self.command_phase, CommandPhase::Draft { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1285,35 +1218,39 @@ impl TuiSession {
                 self.command_phase = CommandPhase::Previewing { input_fingerprint };
                 self.finish_transition(kind, "command previewing", TransientState::Drag)
             }
-            StateEvent::Command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
-                if let CommandPhase::Previewing { input_fingerprint } = &self.command_phase
+            CommandEvent::PreviewCompleted(PreviewResult::Ready)
+                if matches!(self.command_phase, CommandPhase::Previewing { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
-                self.command_phase = CommandPhase::PreviewReady {
-                    input_fingerprint: input_fingerprint.clone(),
+                let input_fingerprint = match &self.command_phase {
+                    CommandPhase::Previewing { input_fingerprint } => input_fingerprint.clone(),
+                    _ => unreachable!("previewing phase was checked above"),
                 };
+                self.command_phase = CommandPhase::PreviewReady { input_fingerprint };
                 self.finish_transition(kind, "command preview ready", TransientState::Ready)
             }
-            StateEvent::Command(CommandEvent::PreviewCompleted(PreviewResult::Rejected {
-                detail,
-            })) if let CommandPhase::Previewing { input_fingerprint } = &self.command_phase
-                && self.interaction_mode == InteractionMode::CommandModal =>
+            CommandEvent::PreviewCompleted(PreviewResult::Rejected { detail })
+                if matches!(self.command_phase, CommandPhase::Previewing { .. })
+                    && self.interaction_mode == InteractionMode::CommandModal =>
             {
+                let input_fingerprint = match &self.command_phase {
+                    CommandPhase::Previewing { input_fingerprint } => input_fingerprint.clone(),
+                    _ => unreachable!("previewing phase was checked above"),
+                };
                 self.command_phase = CommandPhase::Draft {
                     command: self
                         .active_command
                         .clone()
                         .expect("preview has an active command"),
-                    input_fingerprint: input_fingerprint.clone(),
+                    input_fingerprint,
                 };
-                let diagnostic = TuiDiagnostic {
-                    code: TuiDiagnosticCode::CommandRejected,
+                let diagnostic = self.operation_diagnostic(
+                    TuiDiagnosticCode::CommandRejected,
+                    StateAxis::CommandPhase,
+                    kind,
                     detail,
-                    canonical_revision: self.canonical_revision.clone(),
-                    axis: Some(axis),
-                    event: Some(kind),
-                    from: Some("Previewing".to_string()),
-                };
+                    "Previewing",
+                );
                 self.finish_transition_with_diagnostic(
                     kind,
                     "command preview rejected",
@@ -1321,7 +1258,7 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Command(CommandEvent::CommitRequested)
+            CommandEvent::CommitRequested
                 if matches!(self.command_phase, CommandPhase::PreviewReady { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1332,26 +1269,18 @@ impl TuiSession {
                 self.command_phase = CommandPhase::Committing { input_fingerprint };
                 self.finish_transition(kind, "command committing", TransientState::Drag)
             }
-            StateEvent::Command(CommandEvent::CommitAccepted {
+            CommandEvent::CommitAccepted {
                 source_revision,
                 validated_revision,
                 revision,
-            }) if matches!(self.command_phase, CommandPhase::Committing { .. })
+            } if matches!(self.command_phase, CommandPhase::Committing { .. })
                 && self.interaction_mode == InteractionMode::CommandModal
                 && !revision.is_empty() =>
             {
                 if self.command_source_revision.as_deref() != Some(source_revision.as_str())
                     || validated_revision != source_revision
                 {
-                    Err(self.operation_diagnostic(
-                        TuiDiagnosticCode::StalePreview,
-                        axis,
-                        kind,
-                        format!(
-                            "commit source revision {source_revision} does not match preview revision"
-                        ),
-                        "Committing",
-                    ))
+                    Err(self.operation_diagnostic(TuiDiagnosticCode::StalePreview, StateAxis::CommandPhase, kind, format!("commit source revision {source_revision} does not match preview revision"), "Committing"))
                 } else {
                     self.canonical_revision = revision.clone();
                     self.history = HistoryState::Linear {
@@ -1364,7 +1293,7 @@ impl TuiSession {
                     self.finish_transition(kind, "command committed", TransientState::Selected)
                 }
             }
-            StateEvent::Command(CommandEvent::CommitRejected { detail })
+            CommandEvent::CommitRejected { detail }
                 if matches!(self.command_phase, CommandPhase::Committing { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1375,7 +1304,7 @@ impl TuiSession {
                 };
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::CommandRejected,
-                    axis,
+                    StateAxis::CommandPhase,
                     kind,
                     detail,
                     "Committing",
@@ -1387,7 +1316,7 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Command(CommandEvent::CancelRequested)
+            CommandEvent::CancelRequested
                 if matches!(
                     self.command_phase,
                     CommandPhase::Draft { .. }
@@ -1399,7 +1328,7 @@ impl TuiSession {
                 self.command_phase = CommandPhase::Cancelling;
                 self.finish_transition(kind, "command cancelling", TransientState::Cancelled)
             }
-            StateEvent::Command(CommandEvent::CancellationCompleted { detail })
+            CommandEvent::CancellationCompleted { detail }
                 if self.command_phase == CommandPhase::Cancelling
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1410,7 +1339,7 @@ impl TuiSession {
                 };
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::CommandCancelled,
-                    axis,
+                    StateAxis::CommandPhase,
                     kind,
                     detail,
                     "Cancelling",
@@ -1422,7 +1351,7 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::Command(CommandEvent::OutcomeDismissed)
+            CommandEvent::OutcomeDismissed
                 if matches!(self.command_phase, CommandPhase::Outcome { .. })
                     && self.interaction_mode == InteractionMode::CommandModal =>
             {
@@ -1432,11 +1361,18 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.finish_transition(kind, "command outcome dismissed", TransientState::Ready)
             }
-            StateEvent::History(HistoryEvent::UndoRequested)
+            _ => self.invalid_transition(StateAxis::CommandPhase, kind),
+        }
+    }
+
+    fn handle_history(&mut self, event: HistoryEvent) -> Result<StateTransition, TuiDiagnostic> {
+        let kind = StateEventKind::History(event.kind());
+        self.guard_global(StateAxis::History, kind, false)?;
+        match event {
+            HistoryEvent::UndoRequested
                 if matches!(self.history, HistoryState::Linear { can_undo: true, .. })
                     && self.interaction_mode == InteractionMode::ModelessReady
-                    && self.command_phase == CommandPhase::Idle
-                    && self.focus == FocusState::Focused =>
+                    && self.command_phase == CommandPhase::Idle =>
             {
                 let (can_undo, can_redo) = self.history_availability();
                 self.history = HistoryState::Applying {
@@ -1447,11 +1383,10 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::HistoryApplying;
                 self.finish_transition(kind, "history undo applying", TransientState::Ready)
             }
-            StateEvent::History(HistoryEvent::RedoRequested)
+            HistoryEvent::RedoRequested
                 if matches!(self.history, HistoryState::Linear { can_redo: true, .. })
                     && self.interaction_mode == InteractionMode::ModelessReady
-                    && self.command_phase == CommandPhase::Idle
-                    && self.focus == FocusState::Focused =>
+                    && self.command_phase == CommandPhase::Idle =>
             {
                 let (can_undo, can_redo) = self.history_availability();
                 self.history = HistoryState::Applying {
@@ -1462,12 +1397,11 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::HistoryApplying;
                 self.finish_transition(kind, "history redo applying", TransientState::Ready)
             }
-            StateEvent::History(HistoryEvent::RestoreNamedRevision { name })
+            HistoryEvent::RestoreNamedRevision { name }
                 if self.recoverable_revisions.contains(&name)
                     && matches!(self.history, HistoryState::Linear { .. })
                     && self.interaction_mode == InteractionMode::ModelessReady
-                    && self.command_phase == CommandPhase::Idle
-                    && self.focus == FocusState::Focused =>
+                    && self.command_phase == CommandPhase::Idle =>
             {
                 let (can_undo, can_redo) = self.history_availability();
                 self.history = HistoryState::Applying {
@@ -1478,32 +1412,29 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::HistoryApplying;
                 self.finish_transition(kind, "named revision applying", TransientState::Ready)
             }
-            StateEvent::History(HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
+            HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
                 revision,
                 can_undo,
                 can_redo,
-            })) if matches!(self.history, HistoryState::Applying { .. })
-                && !revision.is_empty() =>
-            {
+            }) if matches!(self.history, HistoryState::Applying { .. }) && !revision.is_empty() => {
                 self.canonical_revision = revision;
                 self.history = HistoryState::Linear { can_undo, can_redo };
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.finish_transition(kind, "history application complete", TransientState::Ready)
             }
-            StateEvent::History(HistoryEvent::ApplyCompleted(HistoryApplyResult::Rejected {
-                detail,
-            })) if matches!(self.history, HistoryState::Applying { .. }) => {
+            HistoryEvent::ApplyCompleted(HistoryApplyResult::Rejected { detail })
+                if matches!(self.history, HistoryState::Applying { .. }) =>
+            {
                 let (can_undo, can_redo) = self.history_availability();
                 self.history = HistoryState::Linear { can_undo, can_redo };
                 self.interaction_mode = InteractionMode::ModelessReady;
-                let diagnostic = TuiDiagnostic {
-                    code: TuiDiagnosticCode::HistoryRejected,
+                let diagnostic = self.operation_diagnostic(
+                    TuiDiagnosticCode::HistoryRejected,
+                    StateAxis::History,
+                    kind,
                     detail,
-                    canonical_revision: self.canonical_revision.clone(),
-                    axis: Some(axis),
-                    event: Some(kind),
-                    from: Some("Applying".to_string()),
-                };
+                    "Applying",
+                );
                 self.finish_transition_with_diagnostic(
                     kind,
                     "history application rejected",
@@ -1511,13 +1442,12 @@ impl TuiSession {
                     Some(diagnostic),
                 )
             }
-            StateEvent::History(HistoryEvent::DivergentCommit {
+            HistoryEvent::DivergentCommit {
                 revision,
                 preserved_named_revision,
-            }) if matches!(self.history, HistoryState::Linear { can_redo: true, .. })
+            } if matches!(self.history, HistoryState::Linear { can_redo: true, .. })
                 && self.interaction_mode == InteractionMode::ModelessReady
                 && self.command_phase == CommandPhase::Idle
-                && self.focus == FocusState::Focused
                 && !revision.is_empty()
                 && !preserved_named_revision.is_empty() =>
             {
@@ -1534,8 +1464,23 @@ impl TuiSession {
                 };
                 self.finish_transition(kind, "named revision preserved", TransientState::Selected)
             }
-            _ => self.invalid_transition(axis, kind),
+            _ => self.invalid_transition(StateAxis::History, kind),
         }
+    }
+
+    fn guard_global(
+        &self,
+        axis: StateAxis,
+        event: StateEventKind,
+        allows_focus_recovery: bool,
+    ) -> Result<(), TuiDiagnostic> {
+        if self.lifecycle != LifecycleState::InteractiveReady {
+            return self.invalid_transition(axis, event).map(|_| ());
+        }
+        if self.focus == FocusState::FocusLost && !allows_focus_recovery {
+            return self.invalid_transition(axis, event).map(|_| ());
+        }
+        Ok(())
     }
 
     pub fn press(&mut self, key: ArrowKey) -> InputOutcome {

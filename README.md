@@ -74,3 +74,7 @@ request targeting `main`. The workflow:
 The CI script installs rustup and the pinned toolchain inside the
 archlinux container, then runs `cargo check`, `cargo fmt --check`,
 `cargo clippy -D warnings`, and `cargo test`.
+
+<a href="https://github.com/rafaelromao/sandman">
+  <img src="https://raw.githubusercontent.com/rafaelromao/sandman/main/assets/badge-built-with-sandman.svg" alt="Built with Sandman" width="154" />
+</a>

@@ -893,6 +893,7 @@ impl TuiSession {
                     candidate: candidate.clone(),
                 });
                 if let Some(candidate) = candidate {
+                    self.selected_index = None;
                     self.selection = SelectionState::Candidate {
                         candidates: vec![candidate],
                         previous,
@@ -908,6 +909,7 @@ impl TuiSession {
                     capture.candidate = candidate.clone();
                 }
                 if let Some(candidate) = candidate {
+                    self.selected_index = None;
                     let previous = self.selected_ids();
                     self.selection = SelectionState::Candidate {
                         candidates: vec![candidate],
@@ -996,6 +998,7 @@ impl TuiSession {
                     && !candidates.is_empty() =>
             {
                 let previous = self.selected_ids();
+                self.selected_index = None;
                 self.selection = SelectionState::Candidate {
                     candidates,
                     previous,
@@ -1007,6 +1010,11 @@ impl TuiSession {
             })) if matches!(self.selection, SelectionState::Candidate { .. })
                 && !stable_ids.is_empty() =>
             {
+                self.selected_index = stable_ids.first().and_then(|stable_id| {
+                    self.targets
+                        .iter()
+                        .position(|target| target.id == *stable_id)
+                });
                 self.selection = SelectionState::Selected { stable_ids };
                 self.finish_transition(kind, "selection verified", TransientState::Selected)
             }
@@ -1016,6 +1024,7 @@ impl TuiSession {
                 && stable_ids.len() > 1 =>
             {
                 let previous = self.selected_ids();
+                self.selected_index = None;
                 self.selection = SelectionState::Candidate {
                     candidates: stable_ids,
                     previous,
@@ -1038,6 +1047,7 @@ impl TuiSession {
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Lost))
                 if matches!(self.selection, SelectionState::Candidate { .. }) =>
             {
+                self.selected_index = None;
                 self.selection = SelectionState::None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionLost,
@@ -1056,6 +1066,7 @@ impl TuiSession {
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Incompatible))
                 if matches!(self.selection, SelectionState::Candidate { .. }) =>
             {
+                self.selected_index = None;
                 self.selection = SelectionState::None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionIncompatible,
@@ -1074,6 +1085,7 @@ impl TuiSession {
             StateEvent::Selection(SelectionEvent::Clear)
                 if !matches!(self.selection, SelectionState::None) =>
             {
+                self.selected_index = None;
                 self.selection = SelectionState::None;
                 self.finish_transition(kind, "selection cleared", TransientState::Ready)
             }
@@ -1455,7 +1467,7 @@ impl TuiSession {
                     can_undo: true,
                     can_redo: false,
                 };
-                self.finish_transition(kind, "history future preserved", TransientState::Selected)
+                self.finish_transition(kind, "named revision preserved", TransientState::Selected)
             }
             _ => self.invalid_transition(axis, kind),
         }
@@ -1661,13 +1673,10 @@ impl TuiSession {
     }
 
     fn selected_target(&self) -> Option<&str> {
-        self.selected_index
-            .and_then(|index| self.targets.get(index))
-            .map(|target| target.id.as_str())
-            .or_else(|| match &self.selection {
-                SelectionState::Selected { stable_ids } => stable_ids.first().map(String::as_str),
-                SelectionState::None | SelectionState::Candidate { .. } => None,
-            })
+        match &self.selection {
+            SelectionState::Selected { stable_ids } => stable_ids.first().map(String::as_str),
+            SelectionState::None | SelectionState::Candidate { .. } => None,
+        }
     }
 
     fn selected_ids(&self) -> Option<Vec<String>> {
@@ -1682,6 +1691,11 @@ impl TuiSession {
         let selection = std::mem::replace(&mut self.selection, SelectionState::None);
         if let SelectionState::Candidate { previous, .. } = selection {
             if let Some(stable_ids) = previous {
+                self.selected_index = stable_ids.first().and_then(|stable_id| {
+                    self.targets
+                        .iter()
+                        .position(|target| target.id == *stable_id)
+                });
                 self.selection = SelectionState::Selected { stable_ids };
             }
         } else {

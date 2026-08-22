@@ -5,7 +5,8 @@ use threeterm_persistence::Bundle;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
     ArrowKey, CaptureState, CommandPhase, FeatureTarget, FocusState, HistoryState, InteractionMode,
-    LifecycleState, NavigationResult, SelectionState, TuiDiagnosticCode, TuiSession,
+    LifecycleState, NavigationResult, SelectionEvent, SelectionState, TuiDiagnosticCode,
+    TuiSession,
 };
 
 fn temporary_bundle_root() -> std::path::PathBuf {
@@ -45,6 +46,10 @@ fn modeless_arrow_navigation_uses_the_canonical_host_projection() {
             stable_ids: vec!["feature-a".to_string()]
         }
     );
+    session
+        .transition_selection(SelectionEvent::Clear)
+        .expect("explicit selection clearing updates the public projection");
+    assert_eq!(session.state().selected_target, None);
     assert_eq!(outcome.frame.acknowledgement.sequence, 1);
     assert_eq!(
         outcome.frame.acknowledgement.marker,

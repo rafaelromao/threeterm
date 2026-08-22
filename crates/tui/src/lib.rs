@@ -1090,21 +1090,8 @@ impl TuiSession {
                 self.selection = SelectionState::None;
                 self.finish_transition(kind, "selection cleared", TransientState::Ready)
             }
-            StateEvent::Interaction(InteractionEvent::OpenCommand { command })
-                if self.lifecycle == LifecycleState::InteractiveReady
-                    && self.focus == FocusState::Focused
-                    && self.interaction_mode == InteractionMode::ModelessReady
-                    && self.command_phase == CommandPhase::Idle
-                    && !command.is_empty() =>
-            {
-                self.active_command = Some(command.clone());
-                self.command_source_revision = Some(self.canonical_revision.clone());
-                self.interaction_mode = InteractionMode::CommandModal;
-                self.command_phase = CommandPhase::Draft {
-                    command,
-                    input_fingerprint: String::new(),
-                };
-                self.finish_transition(kind, "command draft open", TransientState::Ready)
+            StateEvent::Interaction(InteractionEvent::OpenCommand { command }) => {
+                self.open_command(command, axis, kind)
             }
             StateEvent::Interaction(InteractionEvent::StartDrag { tool })
                 if self.lifecycle == LifecycleState::InteractiveReady
@@ -1178,21 +1165,8 @@ impl TuiSession {
                     self.invalid_transition(axis, kind)
                 }
             }
-            StateEvent::Command(CommandEvent::Open { command })
-                if self.lifecycle == LifecycleState::InteractiveReady
-                    && self.focus == FocusState::Focused
-                    && self.interaction_mode == InteractionMode::ModelessReady
-                    && self.command_phase == CommandPhase::Idle
-                    && !command.is_empty() =>
-            {
-                self.active_command = Some(command.clone());
-                self.command_source_revision = Some(self.canonical_revision.clone());
-                self.interaction_mode = InteractionMode::CommandModal;
-                self.command_phase = CommandPhase::Draft {
-                    command,
-                    input_fingerprint: String::new(),
-                };
-                self.finish_transition(kind, "command draft open", TransientState::Ready)
+            StateEvent::Command(CommandEvent::Open { command }) => {
+                self.open_command(command, axis, kind)
             }
             StateEvent::Command(CommandEvent::DraftUpdated { input_fingerprint })
                 if matches!(self.command_phase, CommandPhase::Draft { .. })
@@ -1622,6 +1596,29 @@ impl TuiSession {
             event: Some(event),
             from: Some(from.to_string()),
         }
+    }
+
+    fn open_command(
+        &mut self,
+        command: String,
+        axis: StateAxis,
+        event: StateEventKind,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        if self.focus != FocusState::Focused
+            || self.interaction_mode != InteractionMode::ModelessReady
+            || self.command_phase != CommandPhase::Idle
+            || command.is_empty()
+        {
+            return self.invalid_transition(axis, event);
+        }
+        self.active_command = Some(command.clone());
+        self.command_source_revision = Some(self.canonical_revision.clone());
+        self.interaction_mode = InteractionMode::CommandModal;
+        self.command_phase = CommandPhase::Draft {
+            command,
+            input_fingerprint: String::new(),
+        };
+        self.finish_transition(event, "command draft open", TransientState::Ready)
     }
 
     fn invalid_transition(

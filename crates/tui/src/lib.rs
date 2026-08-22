@@ -679,45 +679,92 @@ impl TuiSession {
         &mut self,
         event: LifecycleEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::Lifecycle(event))
+        self.handle_lifecycle(event)
     }
 
     pub fn transition_focus_capture(
         &mut self,
         event: FocusCaptureEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::FocusCapture(event))
+        self.handle_focus_capture(event)
     }
 
     pub fn transition_selection(
         &mut self,
         event: SelectionEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::Selection(event))
+        self.handle_selection(event)
     }
 
     pub fn transition_interaction(
         &mut self,
         event: InteractionEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::Interaction(event))
+        self.handle_interaction(event)
     }
 
     pub fn transition_command(
         &mut self,
         event: CommandEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::Command(event))
+        self.handle_command(event)
     }
 
     pub fn transition_history(
         &mut self,
         event: HistoryEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
-        self.transition(StateEvent::History(event))
+        self.handle_history(event)
     }
 
     pub fn transition(&mut self, event: StateEvent) -> Result<StateTransition, TuiDiagnostic> {
+        match event {
+            StateEvent::Lifecycle(event) => self.handle_lifecycle(event),
+            StateEvent::FocusCapture(event) => self.handle_focus_capture(event),
+            StateEvent::Selection(event) => self.handle_selection(event),
+            StateEvent::Interaction(event) => self.handle_interaction(event),
+            StateEvent::Command(event) => self.handle_command(event),
+            StateEvent::History(event) => self.handle_history(event),
+        }
+    }
+
+    fn handle_lifecycle(
+        &mut self,
+        event: LifecycleEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::Lifecycle(event))
+    }
+
+    fn handle_focus_capture(
+        &mut self,
+        event: FocusCaptureEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::FocusCapture(event))
+    }
+
+    fn handle_selection(
+        &mut self,
+        event: SelectionEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::Selection(event))
+    }
+
+    fn handle_interaction(
+        &mut self,
+        event: InteractionEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::Interaction(event))
+    }
+
+    fn handle_command(&mut self, event: CommandEvent) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::Command(event))
+    }
+
+    fn handle_history(&mut self, event: HistoryEvent) -> Result<StateTransition, TuiDiagnostic> {
+        self.apply_transition(StateEvent::History(event))
+    }
+
+    fn apply_transition(&mut self, event: StateEvent) -> Result<StateTransition, TuiDiagnostic> {
         let (axis, kind) = match &event {
             StateEvent::Lifecycle(event) => (
                 StateAxis::Lifecycle,

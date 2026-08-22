@@ -85,6 +85,7 @@ pub enum CommandEvent {
     CommitRequested,
     CommitAccepted {
         source_revision: String,
+        validated_revision: String,
         revision: String,
     },
     CommitRejected {
@@ -742,6 +743,11 @@ impl TuiSession {
                 (StateAxis::History, StateEventKind::History(event.kind()))
             }
         };
+        if self.lifecycle != LifecycleState::InteractiveReady
+            && !matches!(&event, StateEvent::Lifecycle(_))
+        {
+            return self.invalid_transition(axis, kind);
+        }
         match event {
             StateEvent::Lifecycle(LifecycleEvent::ProbeStarted)
                 if self.lifecycle == LifecycleState::HeadlessOnly =>
@@ -850,6 +856,18 @@ impl TuiSession {
                     LifecycleState::Closing | LifecycleState::Closed
                 ) =>
             {
+                self.capture = CaptureState::None;
+                self.restore_selection_after_cancel();
+                self.interaction_mode = InteractionMode::ModelessReady;
+                self.command_phase = CommandPhase::Idle;
+                self.active_command = None;
+                self.command_source_revision = None;
+                if let HistoryState::Applying {
+                    can_undo, can_redo, ..
+                } = self.history.clone()
+                {
+                    self.history = HistoryState::Linear { can_undo, can_redo };
+                }
                 self.lifecycle = LifecycleState::Closing;
                 self.finish_transition(kind, "closing", TransientState::Cancelled)
             }
@@ -1239,12 +1257,15 @@ impl TuiSession {
             }
             StateEvent::Command(CommandEvent::CommitAccepted {
                 source_revision,
+                validated_revision,
                 revision,
             }) if matches!(self.command_phase, CommandPhase::Committing { .. })
                 && self.interaction_mode == InteractionMode::CommandModal
                 && !revision.is_empty() =>
             {
-                if self.command_source_revision.as_deref() != Some(source_revision.as_str()) {
+                if self.command_source_revision.as_deref() != Some(source_revision.as_str())
+                    || validated_revision != source_revision
+                {
                     Err(self.operation_diagnostic(
                         TuiDiagnosticCode::StalePreview,
                         axis,

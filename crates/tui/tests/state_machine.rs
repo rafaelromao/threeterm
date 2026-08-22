@@ -151,6 +151,27 @@ fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
         .transition_lifecycle(LifecycleEvent::RestoreCompleted)
         .expect("failed resize cleanup reaches headless mode");
 
+    let mut closing_session = TuiSession::new([], "revision-closing");
+    closing_session
+        .transition_focus_capture(FocusCaptureEvent::PointerPressed {
+            tool: InteractionTool::Orbit,
+            origin: PointerOrigin { column: 5, row: 5 },
+            candidate: None,
+        })
+        .expect("close test starts with active capture");
+    let closing = closing_session
+        .transition_lifecycle(LifecycleEvent::CloseRequested)
+        .expect("close cancels active transient input");
+    assert_eq!(closing.state.capture, CaptureState::None);
+    assert_eq!(closing.state.command_phase, CommandPhase::Idle);
+    closing_session
+        .transition_lifecycle(LifecycleEvent::CleanupCompleted)
+        .expect("close test cleanup completes");
+    let closed_invalid = closing_session
+        .transition_focus_capture(FocusCaptureEvent::FocusIn)
+        .expect_err("closed sessions reject interactive events");
+    assert_eq!(closed_invalid.code, TuiDiagnosticCode::InvalidTransition);
+
     session
         .transition(StateEvent::Lifecycle(LifecycleEvent::CloseRequested))
         .expect("close begins bounded cleanup");
@@ -589,6 +610,7 @@ fn history_handlers_keep_one_linear_timeline_and_preserve_divergent_future() {
     let stale = session
         .transition(StateEvent::Command(CommandEvent::CommitAccepted {
             source_revision: "stale-preview".to_string(),
+            validated_revision: "revision-history-2".to_string(),
             revision: "revision-history-stale".to_string(),
         }))
         .expect_err("a stale preview cannot be promoted");
@@ -602,6 +624,7 @@ fn history_handlers_keep_one_linear_timeline_and_preserve_divergent_future() {
     session
         .transition(StateEvent::Command(CommandEvent::CommitAccepted {
             source_revision: "revision-history-1".to_string(),
+            validated_revision: "revision-history-1".to_string(),
             revision: "revision-history-2".to_string(),
         }))
         .expect("accepted command advances the canonical projection identity");
@@ -853,6 +876,18 @@ fn invalid_transition_matrix_is_structured_and_state_preserving() {
         &mut lifecycle,
         StateEvent::Lifecycle(LifecycleEvent::ProbeStarted),
         StateAxis::Lifecycle,
+    );
+
+    let mut headless = TuiSession::new_probing([], "revision-invalid-headless");
+    headless
+        .transition_lifecycle(LifecycleEvent::ProbeFailed {
+            detail: "no capability".to_string(),
+        })
+        .expect("invalid matrix setup enters headless mode");
+    reject(
+        &mut headless,
+        StateEvent::History(HistoryEvent::UndoRequested),
+        StateAxis::History,
     );
 
     let mut focus = TuiSession::new([], "revision-invalid-focus");

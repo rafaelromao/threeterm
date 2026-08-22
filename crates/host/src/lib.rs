@@ -9,8 +9,8 @@ use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
     FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, OcctWorker, RevolveRequest, RevolveResult,
-    ShellRequest, ShellResult, WorkerError,
+    LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest,
+    RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -147,15 +147,18 @@ pub enum HostError {
     },
     Persistence(BundleError),
     WorkerFailure {
+        request_id: Option<String>,
         detail: String,
     },
     WorkerUnavailable {
         detail: String,
     },
     UnsupportedGeometry {
+        request_id: Option<String>,
         detail: String,
     },
     BrepInvalid {
+        request_id: Option<String>,
         detail: String,
     },
     BrepFileMissing {
@@ -188,16 +191,16 @@ impl std::fmt::Display for HostError {
             }
             Self::Validation { detail } => write!(formatter, "host.validation: {detail}"),
             Self::Persistence(error) => error.fmt(formatter),
-            Self::WorkerFailure { detail } => {
+            Self::WorkerFailure { detail, .. } => {
                 write!(formatter, "occt worker failure: {detail}")
             }
             Self::WorkerUnavailable { detail } => {
                 write!(formatter, "occt worker unavailable: {detail}")
             }
-            Self::UnsupportedGeometry { detail } => {
+            Self::UnsupportedGeometry { detail, .. } => {
                 write!(formatter, "occt unsupported geometry: {detail}")
             }
-            Self::BrepInvalid { detail } => {
+            Self::BrepInvalid { detail, .. } => {
                 write!(formatter, "occt brep invalid: {detail}")
             }
             Self::WorkerTerminated { record } => {
@@ -229,26 +232,63 @@ impl From<BundleError> for HostError {
     }
 }
 
+fn host_error_from_diagnostic(diagnostic: OcctDiagnostic, request_id: Option<String>) -> HostError {
+    if diagnostic.code == "brep_invalid" {
+        HostError::BrepInvalid {
+            request_id,
+            detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+        }
+    } else if diagnostic.code == "unsupported_geometry" {
+        HostError::UnsupportedGeometry {
+            request_id,
+            detail: diagnostic.arg,
+        }
+    } else {
+        HostError::WorkerFailure {
+            request_id,
+            detail: format!("{} {}", diagnostic.code, diagnostic.arg),
+        }
+    }
+}
+
 impl From<WorkerError> for HostError {
     fn from(error: WorkerError) -> Self {
         match error {
-            WorkerError::Diagnostic(diagnostic) => {
-                if diagnostic.code == "brep_invalid" {
-                    Self::BrepInvalid {
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                } else if diagnostic.code == "unsupported_geometry" {
-                    Self::UnsupportedGeometry {
-                        detail: diagnostic.arg,
-                    }
-                } else {
-                    Self::WorkerFailure {
-                        detail: format!("{} {}", diagnostic.code, diagnostic.arg),
-                    }
-                }
-            }
+            WorkerError::Diagnostic(diagnostic) => host_error_from_diagnostic(diagnostic, None),
+            WorkerError::DiagnosticWithContext {
+                request_id,
+                diagnostic,
+            } => host_error_from_diagnostic(diagnostic, Some(request_id)),
+            WorkerError::NonZeroExitWithContext {
+                request_id,
+                code,
+                stderr,
+            } => Self::WorkerFailure {
+                request_id: Some(request_id),
+                detail: format!("worker exited with code {code:?}: {stderr}"),
+            },
+            WorkerError::SignalledWithContext {
+                request_id,
+                signal,
+                stderr,
+            } => Self::WorkerFailure {
+                request_id: Some(request_id),
+                detail: format!("worker signalled with {signal}: {stderr}"),
+            },
+            WorkerError::MalformedWithContext { request_id, detail } => Self::WorkerFailure {
+                request_id: Some(request_id),
+                detail,
+            },
+            WorkerError::Spawn {
+                request_id, detail, ..
+            } => Self::WorkerFailure { request_id, detail },
+            WorkerError::Cancelled { request_id } => Self::WorkerFailure {
+                request_id: Some(request_id.clone()),
+                detail: format!("worker request {request_id} cancelled"),
+            },
             WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {
+                request_id: None,
                 detail: other.to_string(),
             },
         }
@@ -804,6 +844,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "extrude returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -855,6 +896,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "boolean_fuse returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -906,6 +948,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "fillet returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -957,6 +1000,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "chamfer returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1008,6 +1052,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "hole returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1059,6 +1104,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "revolve returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1110,6 +1156,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "mirror returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1162,6 +1209,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "linear_pattern returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1214,6 +1262,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "circular_pattern returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1265,6 +1314,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "shell returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1316,6 +1366,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "draft returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id
@@ -1362,6 +1413,7 @@ impl Host {
         if !result.is_success() {
             self.current.replace(Some(loaded));
             return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
                 detail: format!(
                     "loft returned non-ok status: status={} feature_id={}",
                     result.status, result.feature_id

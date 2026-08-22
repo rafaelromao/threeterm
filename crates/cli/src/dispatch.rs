@@ -3533,10 +3533,16 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
         HostError::Persistence(error) => error.diagnostic_detail().to_string(),
-        HostError::WorkerFailure { detail } => detail.clone(),
+        HostError::WorkerFailure { request_id, detail } => request_id
+            .as_deref()
+            .map(|request_id| format!("request_id={request_id}; {detail}"))
+            .unwrap_or_else(|| detail.clone()),
         HostError::WorkerUnavailable { detail } => detail.clone(),
-        HostError::UnsupportedGeometry { detail } => detail.clone(),
-        HostError::BrepInvalid { detail } => detail.clone(),
+        HostError::UnsupportedGeometry { request_id, detail }
+        | HostError::BrepInvalid { request_id, detail } => request_id
+            .as_deref()
+            .map(|request_id| format!("request_id={request_id}; {detail}"))
+            .unwrap_or_else(|| detail.clone()),
         HostError::BrepFileMissing { path } => {
             format!("brep file missing: {}", path.display())
         }
@@ -3801,6 +3807,7 @@ mod tests {
         let mut stderr = Vec::new();
         let exit = emit_host_error(
             &HostError::UnsupportedGeometry {
+                request_id: None,
                 detail: "selected edges include fillet curves".to_string(),
             },
             &mut stderr,
@@ -3809,6 +3816,22 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "unsupported_geometry");
         assert_eq!(parsed["arg"], "selected edges include fillet curves");
+    }
+
+    #[test]
+    fn worker_failure_diagnostic_preserves_request_id() {
+        let mut stderr = Vec::new();
+        let exit = emit_host_error(
+            &HostError::WorkerFailure {
+                request_id: Some("req-42".to_string()),
+                detail: "foreign completion".to_string(),
+            },
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_WORKER_FAILURE);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(parsed["code"], "worker_failure");
+        assert_eq!(parsed["arg"], "request_id=req-42; foreign completion");
     }
 
     #[test]

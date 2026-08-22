@@ -104,7 +104,9 @@ fn extrude_with_short_profile_returns_request_malformed() {
     request.profile = vec![[0.0, 0.0], [1.0, 0.0]]; // 2 vertices — too short
     let result = worker.extrude(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
             assert_eq!(diag.schema_version, schema_version());
         }
@@ -121,7 +123,9 @@ fn extrude_with_zero_height_returns_request_malformed() {
     request.height = 0.0;
     let result = worker.extrude(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -193,7 +197,9 @@ fn boolean_fuse_with_missing_base_returns_request_malformed() {
     .with_feature_id("missing-1");
     let result = worker.boolean_fuse(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -309,7 +315,9 @@ fn fillet_with_missing_base_returns_request_malformed() {
     .with_feature_id("fillet-missing-1");
     let result = worker.fillet(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -329,7 +337,9 @@ fn chamfer_with_missing_base_returns_request_malformed() {
     .with_feature_id("chamfer-missing-1");
     let result = worker.chamfer(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -352,7 +362,9 @@ fn chamfer_with_malformed_base_returns_request_malformed() {
     let result = worker.chamfer(&request);
 
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -369,7 +381,9 @@ fn fillet_with_zero_radius_returns_request_malformed() {
         .with_feature_id("fillet-zero-1");
     let result = worker.fillet(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -385,7 +399,9 @@ fn chamfer_with_zero_distance_returns_request_malformed() {
         .with_feature_id("chamfer-zero-1");
     let result = worker.chamfer(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -532,7 +548,9 @@ fn hole_with_missing_base_returns_request_malformed() {
     );
     let result = worker.hole(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -554,7 +572,9 @@ fn hole_with_zero_diameter_returns_request_malformed() {
     .with_feature_id("hole-zero-1");
     let result = worker.hole(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -621,7 +641,9 @@ fn revolve_with_short_profile_returns_request_malformed() {
     request.profile = vec![[0.0, 0.5], [1.0, 0.5]];
     let result = worker.revolve(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -696,7 +718,9 @@ fn mirror_with_zero_plane_normal_returns_request_malformed() {
     request.plane_normal = [0.0, 0.0, 0.0];
     let result = worker.mirror(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
             assert_eq!(diag.schema_version, schema_version());
         }
@@ -717,7 +741,9 @@ fn mirror_with_non_finite_plane_normal_returns_request_malformed() {
     request.plane_normal = [f64::NAN, 0.0, 0.0];
     let result = worker.mirror(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -733,7 +759,9 @@ fn revolve_with_zero_angle_returns_request_malformed() {
     request.angle = 0.0;
     let result = worker.revolve(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -749,7 +777,9 @@ fn revolve_with_zero_axis_direction_returns_request_malformed() {
     request.axis_direction = [0.0, 0.0, 0.0];
     let result = worker.revolve(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -872,7 +902,9 @@ fn linear_pattern_with_missing_base_returns_request_malformed() {
     );
     let result = worker.linear_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -907,7 +939,9 @@ fn linear_pattern_with_zero_count_returns_request_malformed() {
     request.count = 0;
     let result = worker.linear_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -940,7 +974,9 @@ fn linear_pattern_with_zero_direction_returns_request_malformed() {
     request.direction = [0.0, 0.0, 0.0];
     let result = worker.linear_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -973,7 +1009,9 @@ fn linear_pattern_with_zero_spacing_returns_request_malformed() {
     request.spacing = 0.0;
     let result = worker.linear_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -1114,7 +1152,9 @@ fn circular_pattern_with_missing_base_returns_request_malformed() {
     );
     let result = worker.circular_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -1150,7 +1190,9 @@ fn circular_pattern_with_zero_count_returns_request_malformed() {
     request.count = 0;
     let result = worker.circular_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -1183,7 +1225,9 @@ fn circular_pattern_with_zero_axis_normal_returns_request_malformed() {
     request.axis_normal = [0.0, 0.0, 0.0];
     let result = worker.circular_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -1216,7 +1260,9 @@ fn circular_pattern_with_zero_angle_step_returns_request_malformed() {
     request.angle_step = 0.0;
     let result = worker.circular_pattern(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),
@@ -1395,7 +1441,9 @@ fn loft_with_single_profile_returns_request_malformed() {
 
     let result = worker.loft(&request);
     match result {
-        Err(WorkerError::Diagnostic(diag)) => {
+        Err(WorkerError::DiagnosticWithContext {
+            diagnostic: diag, ..
+        }) => {
             assert_eq!(diag.code, "request_malformed");
         }
         other => panic!("expected request_malformed diagnostic, got {other:?}"),

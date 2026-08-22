@@ -128,6 +128,10 @@ fn flooding_stderr_worker_fails_closed_and_preserves_bounded_tail() {
 
     let tail = host.stderr_tail();
     assert!(
+        host.stderr_tail_bytes().len() <= 2048,
+        "raw stderr tail must not exceed the cap"
+    );
+    assert!(
         tail.len() <= 2048,
         "bounded stderr tail must not exceed the cap; got {} bytes",
         tail.len()

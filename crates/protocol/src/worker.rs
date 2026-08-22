@@ -232,6 +232,13 @@ pub trait WorkerHost {
         Ok(())
     }
 
+    /// Finalize a terminal envelope before the supervisor accepts its result.
+    /// Implementations terminate/reap the worker, settle bounded stream
+    /// readers, and reject buffered or trailing protocol data.
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.terminate()
+    }
+
     /// Returns the actual Linux signal the worker process exited by, if
     /// it was killed by a signal rather than exiting cleanly. `None`
     /// when the worker exited normally or has not been reaped yet.
@@ -283,6 +290,32 @@ impl FramedWorkerHost {
             parser: FrameParser::new(),
             pending: VecDeque::new(),
         }
+    }
+
+    fn finish_terminal_data(&mut self) -> Result<(), WorkerError> {
+        if self.pending.front().is_some() {
+            return Err(WorkerError::Protocol(
+                "trailing envelope after terminal message".to_string(),
+            ));
+        }
+
+        while let Ok(bytes) = self.inbound.try_recv() {
+            let envelopes = self
+                .parser
+                .push(&bytes)
+                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+            if !envelopes.is_empty() {
+                return Err(WorkerError::Protocol(
+                    "trailing envelope after terminal message".to_string(),
+                ));
+            }
+        }
+        if self.parser.has_buffered_bytes() {
+            return Err(WorkerError::Protocol(
+                "unterminated trailing data after terminal message".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -337,6 +370,10 @@ impl WorkerHost for FramedWorkerHost {
             request_id: request_id.to_string(),
             reason: reason.to_string(),
         })
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.finish_terminal_data()
     }
 }
 
@@ -701,6 +738,17 @@ impl WorkerHost for SubprocessWorkerHost {
         Ok(())
     }
 
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        // Give already-emitted trailing stream data a bounded opportunity to
+        // reach the readers before killing a worker that stays alive after a
+        // terminal envelope. Otherwise a stderr flood can be truncated by
+        // termination and incorrectly promote the terminal result.
+        self.settle_terminal_streams();
+        self.terminate()?;
+        self.fail_closed_on_overflow()?;
+        self.transport.finish_terminal_data()
+    }
+
     fn exit_signal(&mut self) -> Option<i32> {
         use std::os::unix::process::ExitStatusExt;
         self.reaped_status.and_then(|status| status.signal())
@@ -895,6 +943,16 @@ fn descendant_pids(_root: i32) -> Vec<i32> {
 }
 
 impl SubprocessWorkerHost {
+    fn settle_terminal_streams(&self) {
+        let deadline = Instant::now() + STREAM_DRAIN_WAIT;
+        while !self.readers_settled()
+            && self.fail_closed_on_overflow().is_ok()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(REAP_POLL);
+        }
+    }
+
     /// True once every active stream reader has finished draining its
     /// stream (observed EOF or an overflow). The reader count is fixed
     /// at construction time, so a reader that never starts is counted

@@ -27,6 +27,7 @@ pub struct PaletteVariables {
     pub shadow: &'static str,
     pub page_top: &'static str,
     pub page_bottom: &'static str,
+    pub semantic: SemanticPalette<'static>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +125,6 @@ pub struct Palette {
     pub name: &'static str,
     pub scheme: ColorScheme,
     pub variables: PaletteVariables,
-    pub semantic: SemanticPalette<'static>,
 }
 
 const INHERITED_REVIEWING_ACCENT: &str = "oklch(0.65 0.16 285)";
@@ -297,8 +297,8 @@ const PALETTES: [Palette; 5] = [
             shadow: "0 1px 0 oklch(0.97 0.01 245 / 0.05), 0 24px 48px oklch(0.11 0.01 245 / 0.3)",
             page_top: "oklch(0.18 0.03 284)",
             page_bottom: "var(--bg)",
+            semantic: CATPPUCCIN_SEMANTIC,
         },
-        semantic: CATPPUCCIN_SEMANTIC,
     },
     Palette {
         name: "tokyo-night",
@@ -321,8 +321,8 @@ const PALETTES: [Palette; 5] = [
             shadow: "0 1px 0 oklch(0.97 0.01 245 / 0.05), 0 24px 48px oklch(0.11 0.01 245 / 0.3)",
             page_top: "oklch(0.16 0.03 261)",
             page_bottom: "var(--bg)",
+            semantic: TOKYO_NIGHT_SEMANTIC,
         },
-        semantic: TOKYO_NIGHT_SEMANTIC,
     },
     Palette {
         name: "evergreen",
@@ -345,8 +345,8 @@ const PALETTES: [Palette; 5] = [
             shadow: "0 1px 0 oklch(0.97 0.01 245 / 0.05), 0 24px 48px oklch(0.11 0.01 245 / 0.3)",
             page_top: "oklch(0.23 0.02 135)",
             page_bottom: "var(--bg)",
+            semantic: EVERGREEN_SEMANTIC,
         },
-        semantic: EVERGREEN_SEMANTIC,
     },
     Palette {
         name: "gruvbox",
@@ -369,8 +369,8 @@ const PALETTES: [Palette; 5] = [
             shadow: "0 1px 0 oklch(0.97 0.01 245 / 0.05), 0 24px 48px oklch(0.11 0.01 245 / 0.3)",
             page_top: "oklch(0.24 0.03 75)",
             page_bottom: "var(--bg)",
+            semantic: GRUVBOX_SEMANTIC,
         },
-        semantic: GRUVBOX_SEMANTIC,
     },
     Palette {
         name: "sandman-light",
@@ -393,8 +393,8 @@ const PALETTES: [Palette; 5] = [
             shadow: "0 1px 0 oklch(0.99 0.006 80 / 0.65), 0 24px 54px oklch(0.30 0.028 58 / 0.13)",
             page_top: "oklch(0.97 0.015 82)",
             page_bottom: "oklch(0.90 0.034 79)",
+            semantic: SANDMAN_LIGHT_SEMANTIC,
         },
-        semantic: SANDMAN_LIGHT_SEMANTIC,
     },
 ];
 
@@ -408,6 +408,12 @@ pub fn palette(name: &str) -> Option<&'static Palette> {
 
 pub fn default_dark() -> &'static Palette {
     &PALETTES[0]
+}
+
+impl Palette {
+    pub fn semantic(&self) -> &SemanticPalette<'static> {
+        &self.variables.semantic
+    }
 }
 
 impl<'a> SemanticPalette<'a> {
@@ -588,20 +594,40 @@ pub struct ThemeVerificationError {
 pub fn verify_transient_marker_coverage(
     visuals: &[TransientVisual],
 ) -> Result<(), ThemeVerificationError> {
+    verify_transient_marker_coverage_named("", visuals)
+}
+
+fn verify_transient_marker_coverage_named(
+    palette_name: &str,
+    visuals: &[TransientVisual],
+) -> Result<(), ThemeVerificationError> {
     for state in EXPECTED_TRANSIENT_STATES {
         let mut matches = visuals.iter().filter(|visual| visual.state == state);
         let Some(visual) = matches.next() else {
-            return Err(state_error(ThemeVerificationCode::MissingState, state));
+            return Err(state_error(
+                ThemeVerificationCode::MissingState,
+                palette_name,
+                state,
+            ));
         };
         if matches.next().is_some() {
-            return Err(state_error(ThemeVerificationCode::DuplicateState, state));
+            return Err(state_error(
+                ThemeVerificationCode::DuplicateState,
+                palette_name,
+                state,
+            ));
         }
         if visual.color.is_none() {
-            return Err(state_error(ThemeVerificationCode::MissingStateColor, state));
+            return Err(state_error(
+                ThemeVerificationCode::MissingStateColor,
+                palette_name,
+                state,
+            ));
         }
         if visual.marker.is_none() {
             return Err(state_error(
                 ThemeVerificationCode::MissingStateMarker,
+                palette_name,
                 state,
             ));
         }
@@ -609,10 +635,14 @@ pub fn verify_transient_marker_coverage(
     Ok(())
 }
 
-fn state_error(code: ThemeVerificationCode, state: TransientState) -> ThemeVerificationError {
+fn state_error(
+    code: ThemeVerificationCode,
+    palette_name: &str,
+    state: TransientState,
+) -> ThemeVerificationError {
     ThemeVerificationError {
         code,
-        palette: String::new(),
+        palette: palette_name.to_string(),
         state: Some(state),
         token: None,
         related_token: None,
@@ -624,26 +654,26 @@ fn state_error(code: ThemeVerificationCode, state: TransientState) -> ThemeVerif
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ParsedOklch {
-    lightness: f64,
     hue: f64,
     luminance: f64,
 }
 
 pub fn verify_palette(palette: &Palette) -> Result<(), ThemeVerificationError> {
-    verify_semantic_palette(palette.name, &palette.semantic)
+    verify_semantic_palette(palette.name, palette.semantic())
 }
 
 pub fn verify_theme_contract(palette: &Palette) -> Result<(), ThemeVerificationError> {
     verify_palette(palette)?;
-    verify_transient_marker_coverage(&TRANSIENT_VISUALS)?;
+    verify_transient_marker_coverage_named(palette.name, &TRANSIENT_VISUALS)?;
     for visual in TRANSIENT_VISUALS {
         let Some(token) = visual.color else {
             return Err(state_error(
                 ThemeVerificationCode::MissingStateColor,
+                palette.name,
                 visual.state,
             ));
         };
-        if palette.semantic.token(token).is_none() {
+        if palette.semantic().token(token).is_none() {
             return Err(ThemeVerificationError {
                 code: ThemeVerificationCode::MissingToken,
                 palette: palette.name.to_string(),
@@ -910,11 +940,7 @@ fn parse_oklch(
             required: None,
             value: Some(value.to_string()),
         })?;
-    Ok(ParsedOklch {
-        lightness,
-        hue,
-        luminance,
-    })
+    Ok(ParsedOklch { hue, luminance })
 }
 
 fn parse_color_component(
@@ -989,6 +1015,7 @@ impl PaletteSource {
 pub enum PaletteErrorReason {
     EmptyValue,
     UnknownPalette,
+    ThemeContractInvalid,
 }
 
 impl PaletteErrorReason {
@@ -996,15 +1023,17 @@ impl PaletteErrorReason {
         match self {
             Self::EmptyValue => "missing_value",
             Self::UnknownPalette => "unknown_palette",
+            Self::ThemeContractInvalid => "theme_contract_invalid",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaletteError {
     pub source: PaletteSource,
     pub value: String,
     pub reason: PaletteErrorReason,
+    pub verification: Option<ThemeVerificationError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1047,28 +1076,40 @@ pub fn resolve_palette(sources: PaletteSources<'_>) -> Result<ResolvedPalette, P
         return resolve_named(value, source);
     }
 
-    Ok(ResolvedPalette {
-        palette: default_dark(),
-        source: PaletteSource::Default,
-    })
+    resolve_verified(default_dark(), PaletteSource::Default)
 }
 
 fn resolve_named(value: &str, source: PaletteSource) -> Result<ResolvedPalette, PaletteError> {
-    let reason = if value.is_empty() {
-        PaletteErrorReason::EmptyValue
-    } else if palette(value).is_none() {
-        PaletteErrorReason::UnknownPalette
-    } else {
-        return Ok(ResolvedPalette {
-            palette: palette(value).expect("palette was checked"),
+    if value.is_empty() {
+        return Err(PaletteError {
             source,
+            value: value.to_string(),
+            reason: PaletteErrorReason::EmptyValue,
+            verification: None,
+        });
+    }
+    let Some(palette) = palette(value) else {
+        return Err(PaletteError {
+            source,
+            value: value.to_string(),
+            reason: PaletteErrorReason::UnknownPalette,
+            verification: None,
         });
     };
-    Err(PaletteError {
+    resolve_verified(palette, source)
+}
+
+fn resolve_verified(
+    palette: &'static Palette,
+    source: PaletteSource,
+) -> Result<ResolvedPalette, PaletteError> {
+    verify_theme_contract(palette).map_err(|verification| PaletteError {
         source,
-        value: value.to_string(),
-        reason,
-    })
+        value: palette.name.to_string(),
+        reason: PaletteErrorReason::ThemeContractInvalid,
+        verification: Some(verification),
+    })?;
+    Ok(ResolvedPalette { palette, source })
 }
 
 #[cfg(test)]

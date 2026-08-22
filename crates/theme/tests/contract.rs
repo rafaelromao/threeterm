@@ -13,9 +13,9 @@ fn catppuccin_palette_has_a_verified_semantic_contract() {
 
 #[test]
 fn contrast_failure_reports_the_palette_and_token_pair() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let semantic = SemanticPalette {
         viewport: threeterm_theme::ViewportTokens {
             body: Some("oklch(0.25 0.03 284)"),
@@ -42,9 +42,9 @@ fn contrast_failure_reports_the_palette_and_token_pair() {
 
 #[test]
 fn selected_body_must_remain_luminance_distinct_from_body() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let semantic = SemanticPalette {
         viewport: threeterm_theme::ViewportTokens {
             selected_body: original.viewport.body,
@@ -71,9 +71,9 @@ fn selected_body_must_remain_luminance_distinct_from_body() {
 
 #[test]
 fn critical_viewport_tokens_must_clear_the_critical_contrast_tier() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let semantic = SemanticPalette {
         viewport: threeterm_theme::ViewportTokens {
             warning: original.viewport.background,
@@ -102,9 +102,9 @@ fn every_registered_palette_passes_the_complete_contrast_contract() {
 
 #[test]
 fn tui_selection_pair_is_checked_as_text_against_its_highlight() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let semantic = SemanticPalette {
         tui: threeterm_theme::TuiTokens {
             selection: threeterm_theme::TuiSelectionTokens {
@@ -132,9 +132,9 @@ fn tui_selection_pair_is_checked_as_text_against_its_highlight() {
 
 #[test]
 fn malformed_and_out_of_gamut_colors_have_structured_failures() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let malformed = SemanticPalette {
         viewport: threeterm_theme::ViewportTokens {
             grid: Some("rgb(1, 2, 3)"),
@@ -207,9 +207,9 @@ fn every_transient_state_color_resolves_in_every_registered_palette() {
 
 #[test]
 fn selected_edge_must_have_a_distinct_hue() {
-    let original = palette("catppuccin")
+    let original = *palette("catppuccin")
         .expect("catppuccin is registered")
-        .semantic;
+        .semantic();
     let semantic = SemanticPalette {
         viewport: threeterm_theme::ViewportTokens {
             selected_edge: Some("oklch(0.56 0.04 24)"),

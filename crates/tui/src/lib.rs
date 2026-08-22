@@ -748,6 +748,14 @@ impl TuiSession {
         {
             return self.invalid_transition(axis, kind);
         }
+        if self.focus == FocusState::FocusLost
+            && !matches!(
+                &event,
+                StateEvent::FocusCapture(FocusCaptureEvent::FocusIn) | StateEvent::Lifecycle(_)
+            )
+        {
+            return self.invalid_transition(axis, kind);
+        }
         match event {
             StateEvent::Lifecycle(LifecycleEvent::ProbeStarted)
                 if self.lifecycle == LifecycleState::HeadlessOnly =>

@@ -887,6 +887,13 @@ fn interaction_axis_has_an_explicit_public_handler() {
         focus_lost.state.command_phase,
         CommandPhase::Draft { .. }
     ));
+    let blocked_while_unfocused = focus_command
+        .transition_command(CommandEvent::PreviewRequested)
+        .expect_err("command progression waits for focus recovery");
+    assert_eq!(
+        blocked_while_unfocused.code,
+        TuiDiagnosticCode::InvalidTransition
+    );
     focus_command
         .transition_focus_capture(FocusCaptureEvent::FocusIn)
         .expect("focus returns through recovery");

@@ -147,6 +147,23 @@ fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
             .map(|diagnostic| diagnostic.code),
         Some(TuiDiagnosticCode::LifecycleFailure)
     );
+
+    let mut runtime_resize = TuiSession::new([], "revision-runtime-resize");
+    runtime_resize
+        .transition_lifecycle(LifecycleEvent::ResizeStarted)
+        .expect("runtime failure test enters resize");
+    let runtime_failed = runtime_resize
+        .transition_lifecycle(LifecycleEvent::RuntimeFailure {
+            detail: "terminal write failed".to_string(),
+        })
+        .expect("runtime failure during resize enters restoration");
+    assert_eq!(
+        runtime_failed
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.from.as_deref()),
+        Some("Resizing")
+    );
     session
         .transition_lifecycle(LifecycleEvent::RestoreCompleted)
         .expect("failed resize cleanup reaches headless mode");

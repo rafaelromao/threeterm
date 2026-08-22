@@ -828,6 +828,7 @@ impl TuiSession {
                     LifecycleState::InteractiveReady | LifecycleState::Resizing
                 ) =>
             {
+                let from = format!("{:?}", self.lifecycle);
                 self.invalidate_for_resize();
                 self.lifecycle = LifecycleState::Restoring;
                 let diagnostic = self.operation_diagnostic(
@@ -835,7 +836,7 @@ impl TuiSession {
                     axis,
                     kind,
                     detail,
-                    "InteractiveReady",
+                    &from,
                 );
                 self.finish_transition_with_diagnostic(
                     kind,

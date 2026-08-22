@@ -713,6 +713,19 @@ pub fn verify_semantic_palette(
             3.0,
         )?;
     }
+    require_lightness_shift(
+        palette_name,
+        semantic,
+        SemanticToken::ViewportSelectedEdge,
+        SemanticToken::ViewportEdge,
+        1.5,
+    )?;
+    require_hue_distinction(
+        palette_name,
+        semantic,
+        SemanticToken::ViewportSelectedEdge,
+        SemanticToken::ViewportEdge,
+    )?;
     for token in [SemanticToken::ViewportWarning, SemanticToken::ViewportError] {
         require_contrast(
             palette_name,
@@ -742,12 +755,6 @@ pub fn verify_semantic_palette(
         SemanticToken::ViewportSelectedBody,
         SemanticToken::ViewportBody,
         1.5,
-    )?;
-    require_hue_distinction(
-        palette_name,
-        semantic,
-        SemanticToken::ViewportSelectedEdge,
-        SemanticToken::ViewportEdge,
     )?;
     for token in [
         SemanticToken::TuiForeground,

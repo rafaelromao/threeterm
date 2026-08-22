@@ -230,3 +230,32 @@ fn selected_edge_must_have_a_distinct_hue() {
         Some("viewport.edge")
     );
 }
+
+#[test]
+fn selected_edge_must_also_have_a_lightness_shift() {
+    let original = *palette("catppuccin")
+        .expect("catppuccin is registered")
+        .semantic();
+    let semantic = SemanticPalette {
+        viewport: threeterm_theme::ViewportTokens {
+            selected_edge: Some("oklch(0.75 0.04 304)"),
+            ..original.viewport
+        },
+        ..original
+    };
+
+    let error = verify_semantic_palette("broken", &semantic).expect_err("lightness must differ");
+
+    assert_eq!(
+        error.code,
+        ThemeVerificationCode::LightnessShiftBelowMinimum
+    );
+    assert_eq!(
+        error.token.map(|token| token.as_str()),
+        Some("viewport.selected_edge")
+    );
+    assert_eq!(
+        error.related_token.map(|token| token.as_str()),
+        Some("viewport.edge")
+    );
+}

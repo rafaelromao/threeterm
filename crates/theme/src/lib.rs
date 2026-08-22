@@ -471,6 +471,23 @@ pub enum NonColorMarker {
     ReadyStatus,
 }
 
+impl NonColorMarker {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Outline => "outline",
+            Self::DashedOutline => "dashed-outline",
+            Self::MotionTrail => "motion-trail",
+            Self::SelectionGlyph => "selection-glyph",
+            Self::WarningGlyph => "warning-glyph",
+            Self::ErrorGlyph => "error-glyph",
+            Self::CancellationGlyph => "cancellation-glyph",
+            Self::FocusRecoveryBanner => "focus-recovery-banner",
+            Self::ResizeRecoveryGlyph => "resize-recovery-glyph",
+            Self::ReadyStatus => "ready-status",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransientVisual {
     pub state: TransientState,

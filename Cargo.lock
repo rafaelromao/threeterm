@@ -311,6 +311,12 @@ version = "0.1.0"
 [[package]]
 name = "threeterm-tui"
 version = "0.1.0"
+dependencies = [
+ "threeterm-domain",
+ "threeterm-host",
+ "threeterm-persistence",
+ "threeterm-theme",
+]
 
 [[package]]
 name = "threeterm-viewport"

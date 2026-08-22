@@ -486,13 +486,13 @@ impl OcctWorker {
         envelope: &[u8],
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<serde_json::Value, WorkerError> {
-        let request_id = request_id_from_envelope(envelope);
-        // Reject the raw input length before parsing: an oversized
-        // request must never be materialized into memory past the
-        // protocol's input bound.
+        // Reject the raw input length before any JSON materialization: an
+        // oversized request must never be parsed into a `serde_json::Value`
+        // past the protocol's input bound.
         if envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            let bounded_request_id = bounded_request_id_hint(envelope);
             return Err(malformed_for_request(
-                &request_id,
+                &bounded_request_id,
                 format!(
                     "request envelope of {} bytes exceeds the {} byte input bound",
                     envelope.len(),
@@ -500,6 +500,7 @@ impl OcctWorker {
                 ),
             ));
         }
+        let request_id = request_id_from_envelope(envelope);
         let args: serde_json::Value = serde_json::from_slice(envelope).map_err(|error| {
             malformed_for_request(
                 &request_id,
@@ -757,6 +758,53 @@ fn request_id_from_envelope(envelope: &[u8]) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_default()
+}
+
+/// Bounded request-ID hint for oversized envelopes. The hint scans only the
+/// first 8 KiB of the raw envelope with a manual `request_id` search so a
+/// hostile oversized payload is never materialized into a full
+/// `serde_json::Value` before the input bound rejects it.
+fn bounded_request_id_hint(envelope: &[u8]) -> String {
+    const HINT_LIMIT: usize = 8192;
+    const MAX_ID_LEN: usize = 512;
+    let scan_len = envelope.len().min(HINT_LIMIT);
+    let scan = &envelope[..scan_len];
+    let Ok(text) = std::str::from_utf8(scan) else {
+        return String::new();
+    };
+    let Some(key_idx) = text.find("\"request_id\"") else {
+        return String::new();
+    };
+    let after_key = &text[key_idx + "\"request_id\"".len()..];
+    let Some(colon_idx) = after_key.find(':') else {
+        return String::new();
+    };
+    let after_colon = after_key[colon_idx + 1..].trim_start();
+    if !after_colon.starts_with('"') {
+        return String::new();
+    }
+    let mut id = String::new();
+    let mut escaped = false;
+    for ch in after_colon[1..].chars() {
+        if escaped {
+            id.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            break;
+        } else {
+            id.push(ch);
+        }
+        if id.len() > MAX_ID_LEN {
+            break;
+        }
+    }
+    if id.is_empty() || id.len() > MAX_ID_LEN {
+        String::new()
+    } else {
+        id
+    }
 }
 
 fn malformed_for_request(request_id: &str, detail: impl Into<String>) -> WorkerError {
@@ -1814,5 +1862,54 @@ mod tests {
             }
             other => panic!("expected Supervised; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_with_cancel_rejects_oversized_envelope_before_unbounded_parse() {
+        use std::sync::atomic::AtomicBool;
+        let worker = OcctWorker::with_binary_path(std::path::PathBuf::from("/no/such/worker"));
+        let cancel = AtomicBool::new(false);
+        // Build a valid JSON envelope that exceeds the frame bound but carries the
+        // request_id near the front so the bounded hint can recover it.
+        let prefix = format!(
+            r#"{{"request_id":"req-oversized","operation":"extrude","schema_version":"{}","feature_id":"box-1","output_dir":"/tmp","output_filename":"out.brep","profile":[[0.0,0.0]],"height":1.0,"padding":""#,
+            SCHEMA_VERSION
+        );
+        let suffix = "\"}";
+        let pad_len =
+            threeterm_protocol::frame::MAX_FRAME_BUFFER - prefix.len() - suffix.len() + 1024;
+        let mut envelope = prefix;
+        envelope.push_str(&"x".repeat(pad_len));
+        envelope.push_str(suffix);
+        assert!(
+            envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER,
+            "envelope must exceed the bound"
+        );
+        let error = worker
+            .run_with_cancel(envelope.as_bytes(), &cancel)
+            .expect_err("oversized envelope must fail closed");
+        match error {
+            WorkerError::MalformedWithContext { request_id, detail } => {
+                assert_eq!(request_id, "req-oversized");
+                assert!(
+                    detail.contains("exceeds the"),
+                    "detail must name the bound; got {detail:?}"
+                );
+            }
+            other => panic!("expected ID-bearing Malformed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bounded_request_id_hint_is_bounded() {
+        let mut envelope = br#"{"request_id":"req-hint","operation":"extrude"#.to_vec();
+        envelope.resize(threeterm_protocol::frame::MAX_FRAME_BUFFER + 1024, b'x');
+        let hint = bounded_request_id_hint(&envelope);
+        assert_eq!(hint, "req-hint");
+        // Non-UTF8 prefix must not panic and yields empty hint.
+        let mut non_utf8 = vec![0xff, 0xfe];
+        non_utf8.extend_from_slice(b"request_id");
+        non_utf8.resize(threeterm_protocol::frame::MAX_FRAME_BUFFER + 1, b'x');
+        assert_eq!(bounded_request_id_hint(&non_utf8), "");
     }
 }

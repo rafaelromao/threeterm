@@ -230,7 +230,7 @@ const GRUVBOX_SEMANTIC: SemanticPalette<'static> = SemanticPalette {
         drag_feedback: Some("oklch(0.72 0.04 230)"),
         overlay: Some("oklch(0.64 0.04 315)"),
         warning: Some("oklch(0.90 0.04 35)"),
-        error: Some("oklch(0.74 0.04 255)"),
+        error: Some("oklch(0.72 0.04 255)"),
     },
     tui: TuiTokens {
         foreground: Some("oklch(0.88 0.05 88)"),
@@ -654,6 +654,7 @@ fn state_error(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ParsedOklch {
+    lightness: f64,
     hue: f64,
     luminance: f64,
 }
@@ -742,12 +743,11 @@ pub fn verify_semantic_palette(
         SemanticToken::ViewportBody,
         1.5,
     )?;
-    require_hue_and_lightness_distinction(
+    require_hue_distinction(
         palette_name,
         semantic,
         SemanticToken::ViewportSelectedEdge,
         SemanticToken::ViewportEdge,
-        1.5,
     )?;
     for token in [
         SemanticToken::TuiForeground,
@@ -813,7 +813,7 @@ fn require_lightness_shift(
 ) -> Result<(), ThemeVerificationError> {
     let (first_token, first) = parse_token(palette_name, semantic, first)?;
     let (second_token, second) = parse_token(palette_name, semantic, second)?;
-    let ratio = contrast_ratio(first.luminance, second.luminance);
+    let ratio = lightness_shift(&first, &second);
     if ratio < minimum {
         return Err(ThemeVerificationError {
             code: ThemeVerificationCode::LightnessShiftBelowMinimum,
@@ -829,37 +829,32 @@ fn require_lightness_shift(
     Ok(())
 }
 
-fn require_hue_and_lightness_distinction(
+fn lightness_shift(first: &ParsedOklch, second: &ParsedOklch) -> f64 {
+    // A 1.5:1 shift is measured by the WCAG luminance ratio, but equal OKLCH
+    // lightness cannot claim a lightness shift merely through hue or chroma.
+    if (first.lightness - second.lightness).abs() <= f64::EPSILON {
+        return 1.0;
+    }
+    contrast_ratio(first.luminance, second.luminance)
+}
+
+fn require_hue_distinction(
     palette_name: &str,
     semantic: &SemanticPalette<'_>,
     first: SemanticToken,
     second: SemanticToken,
-    minimum_shift: f64,
 ) -> Result<(), ThemeVerificationError> {
     let (first_token, first) = parse_token(palette_name, semantic, first)?;
     let (second_token, second) = parse_token(palette_name, semantic, second)?;
-    let ratio = contrast_ratio(first.luminance, second.luminance);
-    if ratio < minimum_shift {
-        return Err(ThemeVerificationError {
-            code: ThemeVerificationCode::LightnessShiftBelowMinimum,
-            palette: palette_name.to_string(),
-            state: None,
-            token: Some(first_token),
-            related_token: Some(second_token),
-            observed: Some(ratio),
-            required: Some(minimum_shift),
-            value: None,
-        });
-    }
-    let hue_distance = hue_distance(first.hue, second.hue);
-    if hue_distance <= f64::EPSILON {
+    let distance = hue_distance(first.hue, second.hue);
+    if distance <= f64::EPSILON {
         return Err(ThemeVerificationError {
             code: ThemeVerificationCode::HueNotDistinct,
             palette: palette_name.to_string(),
             state: None,
             token: Some(first_token),
             related_token: Some(second_token),
-            observed: Some(hue_distance),
+            observed: Some(distance),
             required: Some(f64::EPSILON),
             value: None,
         });
@@ -940,7 +935,11 @@ fn parse_oklch(
             required: None,
             value: Some(value.to_string()),
         })?;
-    Ok(ParsedOklch { hue, luminance })
+    Ok(ParsedOklch {
+        lightness,
+        hue,
+        luminance,
+    })
 }
 
 fn parse_color_component(

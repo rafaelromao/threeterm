@@ -7,6 +7,8 @@ use threeterm_viewport::{
 struct RecordingRenderer {
     submissions: Vec<FrameIdentity>,
     acknowledgements: Vec<FrameAcknowledgement>,
+    cancel_calls: usize,
+    cleanup_calls: usize,
 }
 
 impl Renderer for RecordingRenderer {
@@ -29,6 +31,7 @@ impl Renderer for RecordingRenderer {
         &mut self,
         _active: Option<&FrameIdentity>,
     ) -> Result<(), ViewportDiagnostic> {
+        self.cancel_calls += 1;
         Ok(())
     }
 
@@ -41,6 +44,7 @@ impl Renderer for RecordingRenderer {
     }
 
     fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.cleanup_calls += 1;
         Ok(())
     }
 }
@@ -124,4 +128,6 @@ fn invalidated_attachment_rejects_new_frames_with_structured_state() {
         ViewportDiagnosticCode::CapabilityInvalidated
     );
     assert!(!coordinator.is_valid());
+    assert_eq!(coordinator.renderer().cancel_calls, 1);
+    assert_eq!(coordinator.renderer().cleanup_calls, 1);
 }

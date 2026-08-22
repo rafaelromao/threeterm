@@ -8,7 +8,7 @@ mod renderer;
 
 pub use capability::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, CapabilityState,
-    MAX_PROBE_RESPONSE_BYTES, TerminalCapabilityVector, TerminalEnvironment,
+    CapabilityTranscript, MAX_PROBE_RESPONSE_BYTES, TerminalCapabilityVector, TerminalEnvironment,
 };
 pub use diagnostic::{SCHEMA_VERSION, ViewportDiagnostic, ViewportDiagnosticCode};
 pub use kitty::{

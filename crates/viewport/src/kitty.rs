@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
+use crate::capability::TerminalCapabilityVector;
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 use crate::projection::{MAX_PIXELS, ViewportFrame};
 use crate::renderer::{FrameAcknowledgement, FrameIdentity, Renderer, RendererSubmission};
@@ -49,11 +50,19 @@ pub struct GhosttyRenderer<W: Write, T: TermiosRestorer = NoopTermiosRestorer> {
     entered: bool,
     cleaned: bool,
     valid: bool,
+    admitted: bool,
+    probe_mode: bool,
 }
 
 impl<W: Write> GhosttyRenderer<W> {
     pub fn new(writer: W) -> Self {
         Self::with_termios_restorer(writer, NoopTermiosRestorer)
+    }
+
+    pub fn for_probe(writer: W) -> Self {
+        let mut renderer = Self::with_termios_restorer(writer, NoopTermiosRestorer);
+        renderer.probe_mode = true;
+        renderer
     }
 }
 
@@ -68,6 +77,8 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
             entered: false,
             cleaned: false,
             valid: true,
+            admitted: false,
+            probe_mode: false,
         }
     }
 
@@ -99,6 +110,35 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
 
     pub fn is_valid(&self) -> bool {
         self.valid
+    }
+
+    pub fn is_admitted(&self) -> bool {
+        self.admitted || self.probe_mode
+    }
+
+    pub fn admit(
+        &mut self,
+        capabilities: &TerminalCapabilityVector,
+    ) -> Result<(), ViewportDiagnostic> {
+        if !capabilities.supports_interactive() {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityDenied,
+                "terminal capability vector is not sufficient for Interactive Modeling",
+                "capability-probe",
+                "complete a fresh direct-Ghostty capability probe",
+            ));
+        }
+        if self.cleaned {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityInvalidated,
+                "Ghostty renderer has already been cleaned up",
+                "capability-probe",
+                "create a new renderer for the fresh direct-Ghostty attachment",
+            ));
+        }
+        self.admitted = true;
+        self.valid = true;
+        Ok(())
     }
 
     pub fn enter(&mut self) -> Result<(), ViewportDiagnostic> {
@@ -134,6 +174,7 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
 
     pub fn invalidate(&mut self) {
         self.valid = false;
+        self.admitted = false;
     }
 
     fn emit_frame(
@@ -147,6 +188,16 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
                 "Ghostty attachment is invalid",
                 &frame.revision,
                 "run a fresh capability probe before submitting a frame",
+            )
+            .with_frame_token(frame_token)
+            .with_generation(frame.generation));
+        }
+        if !self.admitted && !self.probe_mode {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityDenied,
+                "Ghostty renderer has not been admitted by a capability probe",
+                &frame.revision,
+                "complete a direct-Ghostty capability probe before submitting a frame",
             )
             .with_frame_token(frame_token)
             .with_generation(frame.generation));
@@ -265,7 +316,6 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
         if self.cleaned {
             return Ok(());
         }
-        self.cleaned = true;
         let revision = self
             .active_submission
             .as_ref()
@@ -281,6 +331,7 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
                 Some(active.image_id),
             )
         {
+            self.active_submission = Some(active);
             failures.push(error.detail);
         }
         for sequence in [
@@ -297,8 +348,14 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
             failures.push(error);
         }
         if failures.is_empty() {
+            self.cleaned = true;
+            self.entered = false;
+            self.valid = false;
+            self.admitted = false;
             Ok(())
         } else {
+            self.valid = false;
+            self.admitted = false;
             Err(diagnostic(
                 ViewportDiagnosticCode::CleanupFailed,
                 failures.join("; "),
@@ -353,6 +410,10 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
 }
 
 impl<W: Write, T: TermiosRestorer> Renderer for GhosttyRenderer<W, T> {
+    fn is_admitted(&self) -> bool {
+        self.admitted || self.probe_mode
+    }
+
     fn submit_image(
         &mut self,
         frame: &ViewportFrame,

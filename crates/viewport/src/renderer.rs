@@ -42,6 +42,10 @@ impl From<&FrameIdentity> for FrameAcknowledgement {
 
 /// Protocol-neutral terminal renderer boundary.
 pub trait Renderer {
+    fn is_admitted(&self) -> bool {
+        true
+    }
+
     fn submit_image(
         &mut self,
         frame: &ViewportFrame,
@@ -178,7 +182,13 @@ impl<R: Renderer> RenderCoordinator<R> {
             });
         }
 
-        let started = self.start(frame)?;
+        let started = match self.start(frame) {
+            Ok(started) => started,
+            Err(error) => {
+                self.invalidate_and_cleanup();
+                return Err(error);
+            }
+        };
         Ok(SubmitOutcome {
             started: Some(started),
             queued: None,
@@ -192,21 +202,21 @@ impl<R: Renderer> RenderCoordinator<R> {
         acknowledgement: FrameAcknowledgement,
     ) -> Result<AcknowledgeOutcome, ViewportDiagnostic> {
         let Some(active) = self.in_flight.as_ref() else {
-            self.valid = false;
-            return Err(ViewportDiagnostic::new(
+            let diagnostic = ViewportDiagnostic::new(
                 ViewportDiagnosticCode::AcknowledgementMismatch,
                 "acknowledgement arrived with no in-flight frame",
                 "unknown",
                 "discard the late acknowledgement and await a current frame",
             )
             .with_frame_token(acknowledgement.frame_token)
-            .with_image_id(acknowledgement.image_id));
+            .with_image_id(acknowledgement.image_id);
+            self.invalidate_and_cleanup();
+            return Err(diagnostic);
         };
         if active.identity.frame_token != acknowledgement.frame_token
             || active.identity.image_id != acknowledgement.image_id
         {
-            self.valid = false;
-            return Err(ViewportDiagnostic::new(
+            let diagnostic = ViewportDiagnostic::new(
                 ViewportDiagnosticCode::AcknowledgementMismatch,
                 "acknowledgement does not match the in-flight frame",
                 &active.identity.revision,
@@ -214,11 +224,13 @@ impl<R: Renderer> RenderCoordinator<R> {
             )
             .with_frame_token(acknowledgement.frame_token)
             .with_generation(active.identity.generation)
-            .with_image_id(acknowledgement.image_id));
+            .with_image_id(acknowledgement.image_id);
+            self.invalidate_and_cleanup();
+            return Err(diagnostic);
         }
 
         if let Err(error) = self.renderer.acknowledge(&acknowledgement) {
-            self.valid = false;
+            self.invalidate_and_cleanup();
             return Err(error);
         }
         let active = self
@@ -237,7 +249,7 @@ impl<R: Renderer> RenderCoordinator<R> {
             match self.start(pending.frame) {
                 Ok(started) => Some(started),
                 Err(error) => {
-                    self.valid = false;
+                    self.invalidate_and_cleanup();
                     return Err(error);
                 }
             }
@@ -257,7 +269,7 @@ impl<R: Renderer> RenderCoordinator<R> {
             in_flight.identity.clone()
         });
         if let Err(error) = self.renderer.request_cancel(active.as_ref()) {
-            self.valid = false;
+            self.invalidate_and_cleanup();
             return Err(error);
         }
         Ok(CancelOutcome {
@@ -267,13 +279,28 @@ impl<R: Renderer> RenderCoordinator<R> {
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.valid = false;
         self.pending = None;
+        self.in_flight = None;
+        self.visible = None;
         self.renderer.cleanup()
     }
 
     pub fn invalidate(&mut self) {
+        self.invalidate_and_cleanup();
+    }
+
+    fn invalidate_and_cleanup(&mut self) {
         self.valid = false;
+        let active = self
+            .in_flight
+            .as_ref()
+            .map(|in_flight| in_flight.identity.clone());
+        let _ = self.renderer.request_cancel(active.as_ref());
+        let _ = self.renderer.cleanup();
         self.pending = None;
+        self.in_flight = None;
+        self.visible = None;
     }
 
     pub fn is_valid(&self) -> bool {

@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::Host;
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
-    FrameAcknowledgement, GhosttyRenderer, ViewportDiagnostic, ViewportDiagnosticCode,
+    CapabilityState, FrameAcknowledgement, GhosttyRenderer, TerminalCapabilityVector,
+    ViewportDiagnostic, ViewportDiagnosticCode,
 };
 
 #[derive(Debug, Default)]
@@ -44,6 +45,25 @@ fn temporary_bundle_root() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("threeterm-tui-viewport-{nanos}"))
 }
 
+fn admitted_renderer<W: Write>(writer: W) -> GhosttyRenderer<W> {
+    let mut renderer = GhosttyRenderer::new(writer);
+    renderer
+        .admit(&TerminalCapabilityVector {
+            state: CapabilityState::Valid,
+            direct_ghostty: true,
+            kitty_rgb_zlib: true,
+            kitty_acknowledgements: true,
+            kitty_keyboard: true,
+            sgr_mouse_cell: true,
+            sgr_mouse_pixel: true,
+            focus_reporting: true,
+            alternate_screen: true,
+            resize_events: true,
+        })
+        .expect("test capability vector admits the renderer");
+    renderer
+}
+
 #[test]
 fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
     let root = temporary_bundle_root();
@@ -54,13 +74,9 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
         .expect("second feature is persisted");
     let before = host.current().expect("canonical state exists");
 
-    let mut session = TuiViewportSession::from_host(
-        &host,
-        64,
-        48,
-        GhosttyRenderer::new(RecordingWriter::default()),
-    )
-    .expect("host projection creates a viewport session");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host projection creates a viewport session");
     let first = session
         .process_terminal_input(b"\x1b[B")
         .expect("first arrow submits a frame");
@@ -124,6 +140,24 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }
 
+#[test]
+fn session_rejects_an_unadmitted_ghostty_renderer() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+
+    let error = TuiViewportSession::from_host(
+        &host,
+        64,
+        48,
+        GhosttyRenderer::new(RecordingWriter::default()),
+    )
+    .expect_err("interactive sessions require capability admission");
+    assert_eq!(error.code, ViewportDiagnosticCode::CapabilityDenied);
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
 fn kitty_transmissions(renderer: &GhosttyRenderer<RecordingWriter>) -> usize {
     renderer
         .writer()
@@ -141,7 +175,7 @@ fn production_write_failure_is_structured_without_host_mutation() {
         .expect("feature is persisted");
     let before = host.current().expect("canonical state exists");
     let mut session =
-        TuiViewportSession::from_host(&host, 64, 48, GhosttyRenderer::new(FailingWriter))
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(FailingWriter))
             .expect("host projection creates a viewport session");
 
     let error = session

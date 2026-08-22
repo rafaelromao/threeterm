@@ -44,7 +44,7 @@ fn environment() -> TerminalEnvironment {
 fn direct_probe_requires_graphics_ack_and_records_attachment_capabilities() {
     let nonce = 77;
     let response = format!(
-        "unrelated\x1b_Gi={nonce};OK\x1b\\\x1b[?3u\x1b[97;1:1u\x1b[97;1:2u\x1b[<0;1;1M\x1b[<0;1;1m\x1b[I\x1b[O\x1b[8;24;80t"
+        "unrelated\x1b_Gi={nonce};OK\x1b\\\x1b[?3u\x1b[97;1:1u\x1b[97;1:2u\x1b[<0;1;1M\x1b[<0;1;1m\x1b[I\x1b[O\x1b[?1049h\x1b[8;24;80t"
     );
     let mut io = ProbeIo {
         writes: Vec::new(),

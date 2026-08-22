@@ -44,6 +44,13 @@ impl TerminalEnvironment {
             height,
         }
     }
+
+    fn identifies_direct_ghostty(&self) -> bool {
+        self.term.as_deref() == Some("xterm-ghostty")
+            && self.term_program.as_deref() == Some("ghostty")
+            && !self.in_tmux
+            && !self.over_ssh
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,6 +77,19 @@ pub struct TerminalCapabilityVector {
 impl TerminalCapabilityVector {
     pub fn is_valid(&self) -> bool {
         self.state == CapabilityState::Valid
+    }
+
+    pub fn supports_interactive(&self) -> bool {
+        self.is_valid()
+            && self.direct_ghostty
+            && self.kitty_rgb_zlib
+            && self.kitty_acknowledgements
+            && self.kitty_keyboard
+            && self.sgr_mouse_cell
+            && self.sgr_mouse_pixel
+            && self.focus_reporting
+            && self.alternate_screen
+            && self.resize_events
     }
 
     pub fn invalidate(&mut self) {
@@ -118,7 +138,7 @@ impl CapabilityProbe {
             frame_token: None,
         };
         let submission = {
-            let mut renderer = GhosttyRenderer::new(&mut *io).with_next_image_id(self.nonce);
+            let mut renderer = GhosttyRenderer::for_probe(&mut *io).with_next_image_id(self.nonce);
             renderer.enter()?;
             let submission = renderer.submit_image(&frame, self.nonce)?;
             renderer.write_control(b"\x1b[?u", "capability-probe")?;
@@ -160,14 +180,15 @@ impl CapabilityProbe {
                 )
             });
         };
-        parse_ack(&response[ack_start..ack_end])
+        let kitty_acknowledgements = parse_ack(&response[ack_start..ack_end])
+            .map(|image_id| image_id == submission.identity.image_id)
             .map_err(|error| error.with_image_id(submission.identity.image_id))?;
 
-        let transcript = CapabilityTranscript::parse(&response);
-        if !transcript.keyboard_query {
+        let transcript = CapabilityTranscript::from_bytes(&response);
+        if !transcript.is_complete() {
             return Err(diagnostic(
                 ViewportDiagnosticCode::CapabilityMalformed,
-                "Kitty keyboard query evidence is missing",
+                "direct attachment capability observations are incomplete",
                 "capability-probe",
                 "restore the terminal and retry the direct probe",
             ));
@@ -181,22 +202,27 @@ impl CapabilityProbe {
         Ok(CapabilityProbeResult {
             capabilities: TerminalCapabilityVector {
                 state: CapabilityState::Valid,
-                direct_ghostty: true,
-                kitty_rgb_zlib: true,
-                kitty_acknowledgements: true,
-                kitty_keyboard: true,
-                sgr_mouse_cell: true,
-                sgr_mouse_pixel: true,
-                focus_reporting: true,
-                alternate_screen: true,
-                resize_events: true,
+                direct_ghostty: environment.identifies_direct_ghostty() && kitty_acknowledgements,
+                kitty_rgb_zlib: kitty_acknowledgements,
+                kitty_acknowledgements,
+                kitty_keyboard: transcript.keyboard_query && transcript.keyboard_event_types,
+                sgr_mouse_cell: transcript.sgr_mouse_cell,
+                sgr_mouse_pixel: transcript.sgr_mouse_pixel,
+                focus_reporting: transcript.focus_reporting,
+                alternate_screen: transcript.alternate_screen,
+                resize_events: transcript.resize_events,
             },
             unrelated_input,
             response_evidence: format!(
-                "image_ack=true;keyboard_query=true;mouse_cell={};mouse_pixel={};focus={};resize={}",
+                "direct_ghostty={};image_ack={};rgb_zlib={};keyboard_query={};mouse_cell={};mouse_pixel={};focus={};alternate_screen={};resize={}",
+                environment.identifies_direct_ghostty() && kitty_acknowledgements,
+                kitty_acknowledgements,
+                kitty_acknowledgements,
+                transcript.keyboard_query && transcript.keyboard_event_types,
                 transcript.sgr_mouse_cell,
                 transcript.sgr_mouse_pixel,
                 transcript.focus_reporting,
+                transcript.alternate_screen,
                 transcript.resize_events
             ),
         })
@@ -204,17 +230,18 @@ impl CapabilityProbe {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct CapabilityTranscript {
-    keyboard_query: bool,
-    keyboard_event_types: bool,
-    sgr_mouse_cell: bool,
-    sgr_mouse_pixel: bool,
-    focus_reporting: bool,
-    resize_events: bool,
+pub struct CapabilityTranscript {
+    pub keyboard_query: bool,
+    pub keyboard_event_types: bool,
+    pub sgr_mouse_cell: bool,
+    pub sgr_mouse_pixel: bool,
+    pub focus_reporting: bool,
+    pub alternate_screen: bool,
+    pub resize_events: bool,
 }
 
 impl CapabilityTranscript {
-    fn parse(bytes: &[u8]) -> Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
         let keyboard_query = bytes.windows(3).any(|window| window == b"\x1b[?")
             && bytes.windows(1).any(|window| window == b"u");
         let keyboard_event_types = bytes.windows(5).any(|window| window == b";1:1u")
@@ -228,8 +255,21 @@ impl CapabilityTranscript {
             sgr_mouse_pixel: mouse,
             focus_reporting: bytes.windows(3).any(|window| window == b"\x1b[I")
                 || bytes.windows(3).any(|window| window == b"\x1b[O"),
+            alternate_screen: bytes
+                .windows(b"\x1b[?1049h".len())
+                .any(|window| window == b"\x1b[?1049h"),
             resize_events: bytes.windows(4).any(|window| window == b"\x1b[8;"),
         }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.keyboard_query
+            && self.keyboard_event_types
+            && self.sgr_mouse_cell
+            && self.sgr_mouse_pixel
+            && self.focus_reporting
+            && self.alternate_screen
+            && self.resize_events
     }
 }
 

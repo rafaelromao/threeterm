@@ -5,7 +5,8 @@ use std::rc::Rc;
 use flate2::read::ZlibDecoder;
 use std::io::Read;
 use threeterm_viewport::{
-    FrameAcknowledgement, GhosttyRenderer, Renderer, TermiosRestorer, ViewportFrame,
+    CapabilityState, FrameAcknowledgement, GhosttyRenderer, Renderer, TerminalCapabilityVector,
+    TermiosRestorer, ViewportDiagnosticCode, ViewportFrame,
 };
 
 #[derive(Debug, Default)]
@@ -15,6 +16,27 @@ struct RecordingWriter {
 
 impl Write for RecordingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct FlakyWriter {
+    bytes: Vec<u8>,
+    failures_remaining: usize,
+}
+
+impl Write for FlakyWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.failures_remaining > 0 {
+            self.failures_remaining -= 1;
+            return Err(io::Error::other("injected cleanup write failure"));
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -58,6 +80,43 @@ fn decode_base64(input: &[u8]) -> Vec<u8> {
     output
 }
 
+fn admitted_backend() -> GhosttyRenderer<RecordingWriter> {
+    let mut backend = GhosttyRenderer::new(RecordingWriter::default());
+    backend
+        .admit(&TerminalCapabilityVector {
+            state: CapabilityState::Valid,
+            direct_ghostty: true,
+            kitty_rgb_zlib: true,
+            kitty_acknowledgements: true,
+            kitty_keyboard: true,
+            sgr_mouse_cell: true,
+            sgr_mouse_pixel: true,
+            focus_reporting: true,
+            alternate_screen: true,
+            resize_events: true,
+        })
+        .expect("test capability vector admits the renderer");
+    backend
+}
+
+#[test]
+fn unadmitted_renderer_rejects_frame_submission() {
+    let frame = ViewportFrame {
+        revision: "revision-gated".to_string(),
+        generation: 1,
+        width: 1,
+        height: 1,
+        rgb: vec![1, 2, 3],
+        frame_token: None,
+    };
+    let mut backend = GhosttyRenderer::new(RecordingWriter::default());
+    let diagnostic = backend
+        .submit_image(&frame, 1)
+        .expect_err("unadmitted renderers fail closed");
+    assert_eq!(diagnostic.code, ViewportDiagnosticCode::CapabilityDenied);
+    assert!(backend.writer().bytes.is_empty());
+}
+
 #[test]
 fn ghostty_backend_emits_decodable_zlib_rgb_and_matches_acknowledgements() {
     let frame = ViewportFrame {
@@ -68,7 +127,7 @@ fn ghostty_backend_emits_decodable_zlib_rgb_and_matches_acknowledgements() {
         rgb: vec![1, 2, 3, 200, 201, 202],
         frame_token: None,
     };
-    let mut backend = GhosttyRenderer::new(RecordingWriter::default());
+    let mut backend = admitted_backend();
     let submission = backend
         .submit_image(&frame, 41)
         .expect("RGB frame is emitted");
@@ -116,7 +175,7 @@ fn image_ids_are_never_reused_after_acknowledged_replacement() {
         rgb: vec![1, 2, 3],
         frame_token: None,
     };
-    let mut backend = GhosttyRenderer::new(RecordingWriter::default());
+    let mut backend = admitted_backend();
     let first = backend
         .submit_image(&frame, 1)
         .expect("first frame is emitted");
@@ -148,7 +207,7 @@ fn large_rgb_frames_use_bounded_continuation_chunks() {
         rgb,
         frame_token: None,
     };
-    let mut backend = GhosttyRenderer::new(RecordingWriter::default());
+    let mut backend = admitted_backend();
     backend
         .submit_image(&frame, 1)
         .expect("large RGB frame is emitted");
@@ -176,6 +235,20 @@ fn cleanup_restores_modes_deletes_the_active_image_and_is_idempotent() {
         RecordingWriter::default(),
         RecordingTermios(Rc::clone(&termios_calls)),
     );
+    backend
+        .admit(&TerminalCapabilityVector {
+            state: CapabilityState::Valid,
+            direct_ghostty: true,
+            kitty_rgb_zlib: true,
+            kitty_acknowledgements: true,
+            kitty_keyboard: true,
+            sgr_mouse_cell: true,
+            sgr_mouse_pixel: true,
+            focus_reporting: true,
+            alternate_screen: true,
+            resize_events: true,
+        })
+        .expect("test capability vector admits the renderer");
     backend.enter().expect("terminal modes enter");
     let frame = ViewportFrame {
         revision: "revision-cleanup".to_string(),
@@ -219,4 +292,48 @@ fn cleanup_restores_modes_deletes_the_active_image_and_is_idempotent() {
             .windows(b"?25h".len())
             .any(|window| window == b"?25h")
     );
+}
+
+#[test]
+fn failed_cleanup_remains_retryable() {
+    let mut backend = GhosttyRenderer::new(FlakyWriter {
+        failures_remaining: 0,
+        ..FlakyWriter::default()
+    });
+    backend
+        .admit(&TerminalCapabilityVector {
+            state: CapabilityState::Valid,
+            direct_ghostty: true,
+            kitty_rgb_zlib: true,
+            kitty_acknowledgements: true,
+            kitty_keyboard: true,
+            sgr_mouse_cell: true,
+            sgr_mouse_pixel: true,
+            focus_reporting: true,
+            alternate_screen: true,
+            resize_events: true,
+        })
+        .expect("test capability vector admits the renderer");
+    backend.enter().expect("terminal modes enter");
+    backend
+        .submit_image(
+            &ViewportFrame {
+                revision: "revision-retry-cleanup".to_string(),
+                generation: 1,
+                width: 1,
+                height: 1,
+                rgb: vec![1, 2, 3],
+                frame_token: None,
+            },
+            1,
+        )
+        .expect("active image is emitted");
+    backend.writer_mut().failures_remaining = 1;
+    let diagnostic = backend
+        .cleanup()
+        .expect_err("the injected cleanup failure is reported");
+    assert_eq!(diagnostic.code, ViewportDiagnosticCode::CleanupFailed);
+    backend
+        .cleanup()
+        .expect("cleanup retries after a transient write failure");
 }

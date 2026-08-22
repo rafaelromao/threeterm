@@ -1901,6 +1901,14 @@ impl<R: Renderer> TuiViewportSession<R> {
             )
             .with_generation(0));
         }
+        if !renderer.is_admitted() {
+            return Err(ViewportDiagnostic::new(
+                ViewportDiagnosticCode::CapabilityDenied,
+                "renderer attachment has not passed the capability gate",
+                "capability-probe",
+                "complete a direct-Ghostty capability probe before starting Interactive Modeling",
+            ));
+        }
         let presentation = host.presentation_snapshot().ok_or_else(|| {
             ViewportDiagnostic::new(
                 ViewportDiagnosticCode::InvalidScene,

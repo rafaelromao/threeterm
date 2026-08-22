@@ -2113,6 +2113,82 @@ fn stable_ids_are_distinct(stable_ids: &[String]) -> bool {
         .all(|(index, stable_id)| stable_ids[..index].iter().all(|prior| prior != stable_id))
 }
 
+/// Structured outcome when a capability probe fails and Interactive Modeling
+/// is refused — the TUI routes to HeadlessOnly with diagnostics while the
+/// canonical host snapshot is preserved.
+#[derive(Debug, Clone)]
+pub struct CapabilityGate {
+    pub viewport_diagnostic: ViewportDiagnostic,
+    pub tui_session: TuiSession,
+    pub tui_diagnostic: Option<TuiDiagnostic>,
+    pub acknowledgement: StateAcknowledgement,
+    pub host_snapshot: threeterm_host::SnapshotView,
+}
+
+pub fn probe_and_route_to_headless<W: threeterm_viewport::CapabilityProbeIo>(
+    host: &Host,
+    io: &mut W,
+    environment: threeterm_viewport::TerminalEnvironment,
+    nonce: u64,
+) -> CapabilityGate {
+    let host_snapshot = host
+        .current()
+        .unwrap_or_else(|| threeterm_host::SnapshotView {
+            feature_graph_hash: String::new(),
+            revision_hash: "unknown".to_string(),
+            recovered_from_previous: false,
+        });
+    let canonical_revision = host_snapshot.revision_hash.clone();
+    // Prefer the host graph's revision if available, else snapshot.
+    let graph_snapshot = host.current_graph();
+    let viewport_diagnostic =
+        match threeterm_viewport::CapabilityProbe::new(nonce).probe(io, environment) {
+            Ok(result) if result.capabilities.supports_interactive() => {
+                // Positive probe — synthesize a headless diagnostic only if caller
+                // still forces headless path; otherwise return interactive-ready path
+                // as a degenerate headless diagnostic that still preserves host state.
+                // For this vertical slice the caller explicitly probes an unattached
+                // terminal, so this branch is unreachable; we still provide a
+                // well-shaped diagnostic to keep the return type stable.
+                ViewportDiagnostic::new(
+                    ViewportDiagnosticCode::CapabilityDenied,
+                    "interactive capability vector is valid but headless routing was requested",
+                    "capability-probe",
+                    "use the interactive path for this attachment",
+                )
+            }
+            Ok(result) => ViewportDiagnostic::new(
+                ViewportDiagnosticCode::CapabilityDenied,
+                format!(
+                    "capability vector is insufficient: {}",
+                    result.response_evidence
+                ),
+                "capability-probe",
+                "complete a direct-Ghostty capability probe before starting Interactive Modeling",
+            ),
+            Err(diagnostic) => diagnostic,
+        };
+    let mut tui_session = if let Some(graph) = graph_snapshot {
+        TuiSession::from_feature_graph_probing(&graph, canonical_revision.clone())
+    } else {
+        TuiSession::new_probing(Vec::<FeatureTarget>::new(), canonical_revision.clone())
+    };
+    let transition = tui_session
+        .transition_lifecycle(LifecycleEvent::ProbeFailed {
+            detail: viewport_diagnostic.detail.clone(),
+        })
+        .expect("Probing->HeadlessOnly is always valid via the production lifecycle");
+    let tui_diagnostic = transition.diagnostic.clone();
+    let acknowledgement = transition.acknowledgement.clone();
+    CapabilityGate {
+        viewport_diagnostic,
+        tui_session,
+        tui_diagnostic,
+        acknowledgement,
+        host_snapshot,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

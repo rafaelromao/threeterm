@@ -1,5 +1,12 @@
+#![allow(clippy::result_large_err)]
+
 use threeterm_domain::FeatureGraph;
+use threeterm_host::Host;
 use threeterm_theme::{NonColorMarker, SemanticToken, TransientState, transient_visuals};
+use threeterm_viewport::{
+    CameraState, FrameAcknowledgement, ProtocolNeutralViewport, RenderCoordinator, Renderer,
+    SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode, ViewportRequest, ViewportScene,
+};
 
 pub fn schema_version() -> &'static str {
     "threeterm.tui/1"
@@ -1843,6 +1850,184 @@ impl TuiSession {
     }
 }
 
+#[derive(Debug)]
+pub enum TuiViewportError {
+    Tui(TuiDiagnostic),
+    Viewport(ViewportDiagnostic),
+}
+
+impl std::fmt::Display for TuiViewportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tui(diagnostic) => write!(formatter, "tui viewport input failed: {diagnostic:?}"),
+            Self::Viewport(diagnostic) => write!(formatter, "{diagnostic}"),
+        }
+    }
+}
+
+impl std::error::Error for TuiViewportError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewportInputOutcome {
+    pub rendered: RenderedInput,
+    pub submission: SubmitOutcome,
+    pub camera: CameraState,
+}
+
+#[derive(Debug)]
+pub struct TuiViewportSession<R: Renderer> {
+    tui: TuiSession,
+    scene: ViewportScene,
+    camera: CameraState,
+    width: u32,
+    height: u32,
+    generation: u64,
+    coordinator: RenderCoordinator<R>,
+}
+
+impl<R: Renderer> TuiViewportSession<R> {
+    pub fn from_host(
+        host: &Host,
+        width: u32,
+        height: u32,
+        renderer: R,
+    ) -> Result<Self, ViewportDiagnostic> {
+        if width == 0 || height == 0 {
+            return Err(ViewportDiagnostic::new(
+                ViewportDiagnosticCode::InvalidDimensions,
+                "viewport dimensions must be non-zero",
+                "unknown",
+                "retry after the terminal reports positive dimensions",
+            )
+            .with_generation(0));
+        }
+        let presentation = host.presentation_snapshot().ok_or_else(|| {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::InvalidScene,
+                "host has no canonical presentation snapshot",
+                "unknown",
+                "load or create a canonical project before starting the viewport",
+            )
+        })?;
+        let revision = presentation.snapshot.revision_hash.clone();
+        let mut scene =
+            ViewportScene::from_feature_graph(revision.clone(), &presentation.graph, None);
+        for result in presentation.layer1_results {
+            scene = scene.with_layer1_reference(result.request_id);
+        }
+        let tui = TuiSession::from_feature_graph(&presentation.graph, revision);
+        Ok(Self {
+            tui,
+            scene,
+            camera: CameraState::default(),
+            width,
+            height,
+            generation: 0,
+            coordinator: RenderCoordinator::new(renderer),
+        })
+    }
+
+    pub fn process_terminal_input(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ViewportInputOutcome, TuiViewportError> {
+        let rendered = self
+            .tui
+            .process_terminal_input(bytes)
+            .map_err(TuiViewportError::Tui)?;
+        if let Some(diagnostic) = rendered.diagnostic.clone() {
+            return Err(TuiViewportError::Tui(diagnostic));
+        }
+        let key = decode_arrow_key(bytes).ok_or_else(|| {
+            TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::InvalidArrowInput,
+                detail: "expected one legacy terminal arrow sequence".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: None,
+                event: None,
+                from: None,
+            })
+        })?;
+        self.camera = match key {
+            ArrowKey::Up => self.camera.rotated(0, -5),
+            ArrowKey::Down => self.camera.rotated(0, 5),
+            ArrowKey::Left => self.camera.rotated(-5, 0),
+            ArrowKey::Right => self.camera.rotated(5, 0),
+        };
+        self.generation = self.generation.saturating_add(1);
+        self.scene.selected_id = self.tui.state().selected_target;
+        let frame = ProtocolNeutralViewport::project(
+            &self.scene,
+            ViewportRequest::new(
+                self.scene.revision.clone(),
+                self.generation,
+                self.width,
+                self.height,
+                self.camera,
+            ),
+        )
+        .map_err(TuiViewportError::Viewport)?;
+        let submission = self
+            .coordinator
+            .submit(frame)
+            .map_err(TuiViewportError::Viewport)?;
+        Ok(ViewportInputOutcome {
+            rendered,
+            submission,
+            camera: self.camera,
+        })
+    }
+
+    pub fn acknowledge(
+        &mut self,
+        acknowledgement: FrameAcknowledgement,
+    ) -> Result<threeterm_viewport::AcknowledgeOutcome, ViewportDiagnostic> {
+        self.coordinator.acknowledge(acknowledgement)
+    }
+
+    pub fn request_cancel(
+        &mut self,
+    ) -> Result<threeterm_viewport::CancelOutcome, ViewportDiagnostic> {
+        self.coordinator.request_cancel()
+    }
+
+    pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.coordinator.cleanup()
+    }
+
+    pub fn report_viewport_failure(
+        &mut self,
+        diagnostic: &ViewportDiagnostic,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.coordinator.invalidate();
+        self.tui
+            .transition_lifecycle(LifecycleEvent::RuntimeFailure {
+                detail: diagnostic.to_string(),
+            })
+    }
+
+    pub fn complete_viewport_restore(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        self.tui
+            .transition_lifecycle(LifecycleEvent::RestoreCompleted)
+    }
+
+    pub fn state(&self) -> TuiState {
+        self.tui.state()
+    }
+
+    pub fn camera(&self) -> CameraState {
+        self.camera
+    }
+
+    pub fn coordinator(&self) -> &RenderCoordinator<R> {
+        &self.coordinator
+    }
+
+    pub fn coordinator_mut(&mut self) -> &mut RenderCoordinator<R> {
+        &mut self.coordinator
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateTransition {
     pub state: TuiState,
@@ -1867,6 +2052,10 @@ fn decode_arrow(bytes: &[u8]) -> Option<ArrowKey> {
         b"\x1b[D" => Some(ArrowKey::Left),
         _ => None,
     }
+}
+
+pub fn decode_arrow_key(bytes: &[u8]) -> Option<ArrowKey> {
+    decode_arrow(bytes)
 }
 
 fn stable_ids_are_distinct(stable_ids: &[String]) -> bool {

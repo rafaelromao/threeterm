@@ -8,11 +8,12 @@ publish.workspace = true
 description = "Keyboard-first TUI adapter for the ThreeTerm domain command API."
 
 [dependencies]
+threeterm-host = { path = "../host" }
 threeterm-domain = { path = "../domain" }
 threeterm-theme = { path = "../theme" }
+threeterm-viewport = { path = "../viewport" }
 
 [dev-dependencies]
-threeterm-host = { path = "../host" }
 threeterm-persistence = { path = "../persistence" }
 
 [lints]

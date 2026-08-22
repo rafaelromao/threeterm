@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use threeterm_domain::FeatureGraph;
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
@@ -428,6 +429,15 @@ impl Host {
 
     pub fn current(&self) -> Option<SnapshotView> {
         self.current.borrow().as_ref().map(SnapshotView::from)
+    }
+
+    /// Return a read-only copy of the canonical feature graph for presentation
+    /// adapters. Transient UI navigation must never borrow mutable host state.
+    pub fn current_graph(&self) -> Option<FeatureGraph> {
+        self.current
+            .borrow()
+            .as_ref()
+            .map(|loaded| loaded.graph.clone())
     }
 
     /// Accept a completed worker lifecycle and publish its one Derived Result.

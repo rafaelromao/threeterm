@@ -60,6 +60,14 @@ impl FeatureGraph {
         Self::default()
     }
 
+    /// Iterate canonical features in deterministic stable-ID order.
+    pub fn features(&self) -> impl Iterator<Item = Feature> + '_ {
+        self.features.iter().map(|(id, kind)| Feature {
+            id: id.clone(),
+            kind: kind.clone(),
+        })
+    }
+
     pub fn add_feature(&mut self, feature: Feature) -> bool {
         let previous = self.features.insert(feature.id, feature.kind.clone());
         previous.as_deref() != Some(feature.kind.as_str())

@@ -4,8 +4,10 @@ use threeterm_host::Host;
 use threeterm_persistence::Bundle;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
-    ArrowKey, CaptureState, CommandPhase, FeatureTarget, FocusState, HistoryState, InteractionMode,
-    LifecycleState, NavigationResult, TuiDiagnosticCode, TuiSession,
+    ArrowKey, CaptureState, CommandEvent, CommandPhase, FeatureTarget, FocusCaptureEvent,
+    FocusState, HistoryEvent, HistoryState, InteractionEvent, InteractionMode, LifecycleEvent,
+    LifecycleState, NavigationResult, PreviewResult, SelectionEvent, SelectionState,
+    TuiDiagnosticCode, TuiSession,
 };
 
 fn temporary_bundle_root() -> std::path::PathBuf {
@@ -39,6 +41,16 @@ fn modeless_arrow_navigation_uses_the_canonical_host_projection() {
 
     assert!(outcome.diagnostic.is_none());
     assert_eq!(outcome.frame.selected_target.as_deref(), Some("feature-a"));
+    assert_eq!(
+        session.state().selection,
+        SelectionState::Selected {
+            stable_ids: vec!["feature-a".to_string()]
+        }
+    );
+    session
+        .transition_selection(SelectionEvent::Clear)
+        .expect("explicit selection clearing updates the public projection");
+    assert_eq!(session.state().selected_target, None);
     assert_eq!(outcome.frame.acknowledgement.sequence, 1);
     assert_eq!(
         outcome.frame.acknowledgement.marker,
@@ -230,4 +242,110 @@ fn terminal_arrow_bytes_drive_selection_and_render_the_visible_acknowledgement()
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_arrow_navigation_rejects_non_ready_states_without_mutation() {
+    let cases = vec![
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_lifecycle(LifecycleEvent::ResizeStarted)
+                .expect("resize starts");
+            session
+        },
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_focus_capture(FocusCaptureEvent::FocusLost)
+                .expect("focus is lost");
+            session
+        },
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_command(CommandEvent::Open {
+                    command: "fillet".to_string(),
+                })
+                .expect("command opens");
+            session
+        },
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_focus_capture(FocusCaptureEvent::PointerPressed {
+                    tool: threeterm_tui::InteractionTool::Selection,
+                    origin: threeterm_tui::PointerOrigin { column: 1, row: 1 },
+                    candidate: Some("feature-a".to_string()),
+                })
+                .expect("capture starts");
+            session
+        },
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_lifecycle(LifecycleEvent::CloseRequested)
+                .expect("close starts");
+            session
+                .transition_lifecycle(LifecycleEvent::CleanupCompleted)
+                .expect("close completes");
+            session
+        },
+        {
+            let mut session =
+                TuiSession::new_probing([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_lifecycle(LifecycleEvent::ProbeFailed {
+                    detail: "headless".to_string(),
+                })
+                .expect("probe failure enters headless mode");
+            session
+        },
+        {
+            let mut session = TuiSession::new([FeatureTarget::new("feature-a", "box")], "r");
+            session
+                .transition_command(CommandEvent::Open {
+                    command: "fillet".to_string(),
+                })
+                .expect("command opens");
+            session
+                .transition_command(CommandEvent::DraftUpdated {
+                    input_fingerprint: "input".to_string(),
+                })
+                .expect("draft updates");
+            session
+                .transition_command(CommandEvent::PreviewRequested)
+                .expect("preview starts");
+            session
+                .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
+                .expect("preview completes");
+            session
+                .transition_command(CommandEvent::CommitRequested)
+                .expect("commit starts");
+            session
+                .transition_command(CommandEvent::CommitAccepted {
+                    source_revision: "r".to_string(),
+                    validated_revision: "r".to_string(),
+                    revision: "r2".to_string(),
+                })
+                .expect("commit completes");
+            session
+                .transition_interaction(InteractionEvent::CloseCommand)
+                .expect("command outcome closes");
+            session
+                .transition_history(HistoryEvent::UndoRequested)
+                .expect("history starts");
+            session
+        },
+    ];
+
+    for mut session in cases {
+        let before = session.state();
+        let outcome = session.press(ArrowKey::Down);
+        let diagnostic = outcome.diagnostic.expect("navigation is diagnosed");
+        assert_eq!(diagnostic.code, TuiDiagnosticCode::InvalidTransition);
+        assert_eq!(diagnostic.axis, Some(threeterm_tui::StateAxis::Selection));
+        assert_eq!(session.state().selection, before.selection);
+        assert_eq!(session.state().selected_target, before.selected_target);
+    }
 }

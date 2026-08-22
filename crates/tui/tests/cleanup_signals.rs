@@ -78,7 +78,7 @@ fn sigint_restores_shell_and_preserves_host() {
     let writer = RecordingWriter::default();
     let renderer =
         GhosttyRenderer::with_termios_restorer(writer, RecordingTermios(Rc::clone(&termios_calls)));
-    let mut renderer = {
+    let renderer = {
         let mut r = renderer;
         r.admit(&valid_capabilities()).expect("admit");
         r
@@ -139,7 +139,7 @@ fn sigterm_parity_with_sigint() {
         RecordingWriter::default(),
         RecordingTermios(Rc::clone(&termios_calls)),
     );
-    let mut renderer = {
+    let renderer = {
         let mut r = renderer;
         r.admit(&valid_capabilities()).expect("admit");
         r

@@ -6,6 +6,7 @@ use threeterm_viewport::{
     CapabilityState, GhosttyRenderer, Renderer, TerminalCapabilityVector, TermiosRestorer,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 struct RecordingWriter {
     bytes: Vec<u8>,

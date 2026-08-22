@@ -416,6 +416,24 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
         TuiDiagnosticCode::SelectionIncompatible
     );
     assert_eq!(session.state(), before_unknown_ambiguity);
+    let duplicate_ambiguity = session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
+            stable_ids: vec!["feature-a".to_string(), "feature-a".to_string()],
+        }))
+        .expect_err("ambiguous verification requires distinct targets");
+    assert_eq!(
+        duplicate_ambiguity.code,
+        TuiDiagnosticCode::SelectionIncompatible
+    );
+    let duplicate_exact = session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["feature-a".to_string(), "feature-a".to_string()],
+        }))
+        .expect_err("exact verification requires distinct targets");
+    assert_eq!(
+        duplicate_exact.code,
+        TuiDiagnosticCode::SelectionIncompatible
+    );
 
     let invalid = session
         .transition(StateEvent::Selection(SelectionEvent::Verify(

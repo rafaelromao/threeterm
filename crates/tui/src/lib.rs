@@ -1011,6 +1011,7 @@ impl TuiSession {
                 stable_ids,
             })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
                 let valid = !stable_ids.is_empty()
+                    && stable_ids_are_distinct(&stable_ids)
                     && stable_ids.iter().all(|stable_id| {
                         matches!(
                             &self.selection,
@@ -1040,6 +1041,7 @@ impl TuiSession {
                 stable_ids,
             })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
                 let valid = stable_ids.len() > 1
+                    && stable_ids_are_distinct(&stable_ids)
                     && stable_ids.iter().all(|stable_id| {
                         matches!(
                             &self.selection,
@@ -1822,6 +1824,13 @@ fn decode_arrow(bytes: &[u8]) -> Option<ArrowKey> {
         b"\x1b[D" => Some(ArrowKey::Left),
         _ => None,
     }
+}
+
+fn stable_ids_are_distinct(stable_ids: &[String]) -> bool {
+    stable_ids
+        .iter()
+        .enumerate()
+        .all(|(index, stable_id)| stable_ids[..index].iter().all(|prior| prior != stable_id))
 }
 
 #[cfg(test)]

@@ -1562,6 +1562,17 @@ impl TuiSession {
             return self.finish(acknowledgement, Some(diagnostic));
         }
 
+        if let Err(diagnostic) = self.guard_navigation() {
+            let acknowledgement = self.acknowledgement(
+                sequence,
+                key,
+                NavigationResult::NoFeatureTarget,
+                &format!("Acknowledgement {sequence}: arrow navigation rejected"),
+                TransientState::Error,
+            );
+            return self.finish(acknowledgement, Some(diagnostic));
+        }
+
         let last_index = self.targets.len() - 1;
         let (index, result) = match (self.selected_index, direction) {
             (None, NavigationDirection::Previous) => (last_index, NavigationResult::Moved),
@@ -1574,10 +1585,26 @@ impl TuiSession {
             }
             (Some(index), _) => (index, NavigationResult::Boundary),
         };
-        self.selected_index = Some(index);
-        self.selection = SelectionState::Selected {
-            stable_ids: vec![self.targets[index].id.clone()],
-        };
+        let stable_id = self.targets[index].id.clone();
+        if let Err(diagnostic) = self
+            .transition_selection(SelectionEvent::Nominate {
+                candidates: vec![stable_id.clone()],
+            })
+            .and_then(|_| {
+                self.transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+                    stable_ids: vec![stable_id.clone()],
+                }))
+            })
+        {
+            let acknowledgement = self.acknowledgement(
+                sequence,
+                key,
+                NavigationResult::NoFeatureTarget,
+                &format!("Acknowledgement {sequence}: arrow navigation rejected"),
+                TransientState::Error,
+            );
+            return self.finish(acknowledgement, Some(diagnostic));
+        }
         let target = &self.targets[index];
         let text = match result {
             NavigationResult::Moved => {
@@ -1599,6 +1626,22 @@ impl TuiSession {
         let acknowledgement =
             self.acknowledgement(sequence, key, result, &text, TransientState::Selected);
         self.finish(acknowledgement, None)
+    }
+
+    fn guard_navigation(&self) -> Result<(), TuiDiagnostic> {
+        let event = StateEventKind::Selection(SelectionEventKind::Nominate);
+        if self.lifecycle != LifecycleState::InteractiveReady
+            || self.focus != FocusState::Focused
+            || self.capture != CaptureState::None
+            || self.interaction_mode != InteractionMode::ModelessReady
+            || self.command_phase != CommandPhase::Idle
+            || !matches!(self.history, HistoryState::Linear { .. })
+        {
+            return Err(self
+                .invalid_transition(StateAxis::Selection, event)
+                .unwrap_err());
+        }
+        Ok(())
     }
 
     pub fn process_terminal_input(&mut self, bytes: &[u8]) -> Result<RenderedInput, TuiDiagnostic> {

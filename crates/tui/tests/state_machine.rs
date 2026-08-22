@@ -276,7 +276,7 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
         .expect("pointer press creates explicit capture");
     assert!(matches!(
         pressed.state.capture,
-        CaptureState::PointerCapture { .. }
+        CaptureState::PointerCapture(..)
     ));
     assert_eq!(pressed.state.focus, FocusState::Focused);
     assert_eq!(

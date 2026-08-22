@@ -3,6 +3,7 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_theme::palettes;
 
 fn run(args: &[&str], palette: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
@@ -49,6 +50,23 @@ fn environment_palette_allows_the_real_machine_command_path() {
     assert!(output.stderr.is_empty());
     let commands: Value = serde_json::from_slice(&output.stdout).expect("list is JSON");
     assert_eq!(commands.as_array().expect("list is an array").len(), 17);
+}
+
+#[test]
+fn every_registered_palette_allows_the_real_machine_command_path() {
+    for palette in palettes() {
+        let output = run(&["--machine", "list"], Some(palette.name));
+
+        assert!(
+            output.status.success(),
+            "{} failed: {}",
+            palette.name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let commands: Value = serde_json::from_slice(&output.stdout).expect("list is JSON");
+        assert_eq!(commands.as_array().expect("list is an array").len(), 17);
+    }
 }
 
 #[test]

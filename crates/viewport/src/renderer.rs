@@ -1,3 +1,4 @@
+use crate::capability::TerminalCapabilityVector;
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 use crate::projection::ViewportFrame;
 
@@ -44,6 +45,23 @@ impl From<&FrameIdentity> for FrameAcknowledgement {
 pub trait Renderer {
     fn is_admitted(&self) -> bool {
         true
+    }
+
+    fn admit(&mut self, capabilities: &TerminalCapabilityVector) -> Result<(), ViewportDiagnostic> {
+        if capabilities.supports_interactive() {
+            Ok(())
+        } else {
+            Err(ViewportDiagnostic::new(
+                ViewportDiagnosticCode::CapabilityDenied,
+                "terminal capability vector is not sufficient for Interactive Modeling",
+                "capability-probe",
+                "complete a fresh direct-Ghostty capability probe",
+            ))
+        }
+    }
+
+    fn initialize(&mut self) -> Result<(), ViewportDiagnostic> {
+        Ok(())
     }
 
     fn submit_image(
@@ -154,6 +172,35 @@ impl<R: Renderer> RenderCoordinator<R> {
         let frame_token = self.next_frame_token;
         let frame = frame.with_frame_token(frame_token);
         let identity = FrameIdentity::pending(&frame, frame_token);
+
+        let newest_generation = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.identity.generation)
+            .into_iter()
+            .chain(
+                self.in_flight
+                    .as_ref()
+                    .map(|in_flight| in_flight.identity.generation),
+            )
+            .max();
+        if newest_generation.is_some_and(|generation| frame.generation < generation) {
+            self.dropped_frames.push(identity.clone());
+            let dropped = ViewportDiagnostic::new(
+                ViewportDiagnosticCode::FrameDropped,
+                "stale viewport frame was older than the current renderer state",
+                &identity.revision,
+                "continue with the newest accepted presentation generation",
+            )
+            .with_frame_token(identity.frame_token)
+            .with_generation(identity.generation);
+            return Ok(SubmitOutcome {
+                started: None,
+                queued: None,
+                replaced: None,
+                dropped: Some(dropped),
+            });
+        }
 
         if self.in_flight.is_some() {
             let replaced = self.pending.replace(Pending {
@@ -276,6 +323,52 @@ impl<R: Renderer> RenderCoordinator<R> {
             cancelled_pending,
             active,
         })
+    }
+
+    pub fn acknowledgement_timeout(&mut self) -> ViewportDiagnostic {
+        let diagnostic = if let Some(active) = self.in_flight.as_ref() {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::AcknowledgementTimeout,
+                "renderer acknowledgement deadline expired",
+                &active.identity.revision,
+                "restore the terminal and run a fresh capability probe",
+            )
+            .with_frame_token(active.identity.frame_token)
+            .with_generation(active.identity.generation)
+            .with_image_id(active.identity.image_id)
+        } else {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::AcknowledgementTimeout,
+                "renderer acknowledgement deadline expired without an active frame",
+                "unknown",
+                "restore the terminal and run a fresh capability probe",
+            )
+        };
+        self.invalidate_and_cleanup();
+        diagnostic
+    }
+
+    pub fn terminal_reset(&mut self, detail: impl Into<String>) -> ViewportDiagnostic {
+        let diagnostic = if let Some(active) = self.in_flight.as_ref() {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::CapabilityInvalidated,
+                detail,
+                &active.identity.revision,
+                "restore the terminal and run a fresh capability probe",
+            )
+            .with_frame_token(active.identity.frame_token)
+            .with_generation(active.identity.generation)
+            .with_image_id(active.identity.image_id)
+        } else {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::CapabilityInvalidated,
+                detail,
+                "unknown",
+                "restore the terminal and run a fresh capability probe",
+            )
+        };
+        self.invalidate_and_cleanup();
+        diagnostic
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {

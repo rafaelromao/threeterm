@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
-use crate::kitty::{GhosttyRenderer, parse_ack};
+use crate::kitty::{ENTER_SEQUENCE, GhosttyRenderer, parse_ack};
 use crate::projection::ViewportFrame;
 use crate::renderer::Renderer;
 
@@ -13,6 +13,33 @@ pub const MAX_PROBE_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub trait CapabilityProbeIo: Write {
     fn read_probe_response(&mut self, max_bytes: usize) -> io::Result<Vec<u8>>;
+}
+
+#[derive(Debug)]
+struct ProbeWriter<'a, W: CapabilityProbeIo> {
+    inner: &'a mut W,
+    bytes: Vec<u8>,
+}
+
+impl<'a, W: CapabilityProbeIo> ProbeWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self {
+            inner,
+            bytes: Vec::new(),
+        }
+    }
+}
+
+impl<W: CapabilityProbeIo> Write for ProbeWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.inner.write_all(bytes)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -137,13 +164,45 @@ impl CapabilityProbe {
             rgb: vec![0, 0, 0],
             frame_token: None,
         };
-        let submission = {
-            let mut renderer = GhosttyRenderer::for_probe(&mut *io).with_next_image_id(self.nonce);
+        let (submission, replacement, wire) = {
+            let mut capture = ProbeWriter::new(&mut *io);
+            let mut renderer =
+                GhosttyRenderer::for_probe(&mut capture).with_next_image_id(self.nonce);
             renderer.enter()?;
             let submission = renderer.submit_image(&frame, self.nonce)?;
+            let replacement_token = self.nonce.checked_add(1).ok_or_else(|| {
+                diagnostic(
+                    ViewportDiagnosticCode::CapabilityMalformed,
+                    "capability probe nonce cannot produce a replacement identity",
+                    "capability-probe",
+                    "start a new probe with a smaller nonce",
+                )
+            })?;
+            let replacement = renderer.submit_image(
+                &ViewportFrame {
+                    generation: 1,
+                    ..frame.clone()
+                },
+                replacement_token,
+            )?;
             renderer.write_control(b"\x1b[?u", "capability-probe")?;
-            submission
+            drop(renderer);
+            (submission, replacement, capture.bytes)
         };
+
+        if count_occurrences(&wire, b"a=T,t=d") < 2
+            || count_occurrences(&wire, b"a=d,d=I") < 2
+            || !wire
+                .windows(ENTER_SEQUENCE.len())
+                .any(|window| window == ENTER_SEQUENCE)
+        {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityMalformed,
+                "capability probe did not complete the direct image lifecycle",
+                "capability-probe",
+                "discard the attachment and retry the direct probe",
+            ));
+        }
 
         let response = io
             .read_probe_response(MAX_PROBE_RESPONSE_BYTES)
@@ -163,7 +222,9 @@ impl CapabilityProbe {
                 "discard the response and retry the direct probe",
             ));
         }
-        let Some((ack_start, ack_end)) = locate_ack(&response, submission.identity.image_id) else {
+        let Some((first_ack_start, first_ack_end)) =
+            locate_ack(&response, submission.identity.image_id)
+        else {
             return Err(if response.is_empty() {
                 diagnostic(
                     ViewportDiagnosticCode::CapabilityTimeout,
@@ -180,11 +241,31 @@ impl CapabilityProbe {
                 )
             });
         };
-        let kitty_acknowledgements = parse_ack(&response[ack_start..ack_end])
+        let Some((replacement_ack_start, replacement_ack_end)) =
+            locate_ack(&response, replacement.identity.image_id)
+        else {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityMalformed,
+                "probe response omitted the replacement Kitty image acknowledgement",
+                "capability-probe",
+                "discard the response and retry the direct probe",
+            ));
+        };
+        let first_acknowledged = parse_ack(&response[first_ack_start..first_ack_end])
             .map(|image_id| image_id == submission.identity.image_id)
             .map_err(|error| error.with_image_id(submission.identity.image_id))?;
+        let replacement_acknowledged =
+            parse_ack(&response[replacement_ack_start..replacement_ack_end])
+                .map(|image_id| image_id == replacement.identity.image_id)
+                .map_err(|error| error.with_image_id(replacement.identity.image_id))?;
+        let kitty_acknowledgements = first_acknowledged && replacement_acknowledged;
 
-        let transcript = CapabilityTranscript::from_bytes(&response);
+        let transcript = CapabilityTranscript::from_setup_and_response(
+            ENTER_SEQUENCE,
+            &response,
+            environment.width,
+            environment.height,
+        );
         if !transcript.is_complete() {
             return Err(diagnostic(
                 ViewportDiagnosticCode::CapabilityMalformed,
@@ -196,7 +277,10 @@ impl CapabilityProbe {
         let unrelated_input = response
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index < ack_start || *index >= ack_end)
+            .filter(|(index, _)| {
+                !(*index >= first_ack_start && *index < first_ack_end)
+                    && !(*index >= replacement_ack_start && *index < replacement_ack_end)
+            })
             .map(|(_, byte)| *byte)
             .collect();
         Ok(CapabilityProbeResult {
@@ -242,17 +326,28 @@ pub struct CapabilityTranscript {
 
 impl CapabilityTranscript {
     pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_bytes_with_terminal_size(bytes, 80, 24)
+    }
+
+    pub fn from_setup_and_response(setup: &[u8], response: &[u8], width: u32, height: u32) -> Self {
+        let mut transcript = Self::from_bytes_with_terminal_size(response, width, height);
+        transcript.alternate_screen = setup
+            .windows(ENTER_SEQUENCE.len())
+            .any(|window| window == ENTER_SEQUENCE);
+        transcript
+    }
+
+    fn from_bytes_with_terminal_size(bytes: &[u8], width: u32, height: u32) -> Self {
         let keyboard_query = bytes.windows(3).any(|window| window == b"\x1b[?")
             && bytes.windows(1).any(|window| window == b"u");
         let keyboard_event_types = bytes.windows(5).any(|window| window == b";1:1u")
-            || bytes.windows(5).any(|window| window == b";1:2u")
-            || bytes.windows(4).any(|window| window == b"[?3u");
-        let mouse = bytes.windows(3).any(|window| window == b"\x1b[<");
+            && bytes.windows(5).any(|window| window == b";1:2u");
+        let mouse = mouse_evidence(bytes, width, height);
         Self {
             keyboard_query,
             keyboard_event_types,
-            sgr_mouse_cell: mouse,
-            sgr_mouse_pixel: mouse,
+            sgr_mouse_cell: mouse.cell_press && mouse.cell_drag && mouse.cell_release,
+            sgr_mouse_pixel: mouse.pixel_press && mouse.pixel_drag && mouse.pixel_release,
             focus_reporting: bytes.windows(3).any(|window| window == b"\x1b[I")
                 || bytes.windows(3).any(|window| window == b"\x1b[O"),
             alternate_screen: bytes
@@ -271,6 +366,69 @@ impl CapabilityTranscript {
             && self.alternate_screen
             && self.resize_events
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MouseEvidence {
+    cell_press: bool,
+    cell_drag: bool,
+    cell_release: bool,
+    pixel_press: bool,
+    pixel_drag: bool,
+    pixel_release: bool,
+}
+
+fn mouse_evidence(bytes: &[u8], width: u32, height: u32) -> MouseEvidence {
+    let mut evidence = MouseEvidence::default();
+    const PREFIX: &[u8] = b"\x1b[<";
+    for start in 0..bytes.len() {
+        if !bytes[start..].starts_with(PREFIX) {
+            continue;
+        }
+        let payload = &bytes[start + PREFIX.len()..];
+        let Some(end) = payload
+            .iter()
+            .position(|byte| *byte == b'M' || *byte == b'm')
+        else {
+            continue;
+        };
+        let fields: Vec<_> = payload[..end].split(|byte| *byte == b';').collect();
+        if fields.len() != 3 {
+            continue;
+        }
+        let Ok(button) = std::str::from_utf8(fields[0])
+            .unwrap_or_default()
+            .parse::<u16>()
+        else {
+            continue;
+        };
+        let Ok(x) = std::str::from_utf8(fields[1])
+            .unwrap_or_default()
+            .parse::<u32>()
+        else {
+            continue;
+        };
+        let Ok(y) = std::str::from_utf8(fields[2])
+            .unwrap_or_default()
+            .parse::<u32>()
+        else {
+            continue;
+        };
+        let pixel = x > width || y > height;
+        let release = payload[end] == b'm';
+        let drag = !release && button & 32 != 0;
+        let press = !release && !drag;
+        match (pixel, press, drag, release) {
+            (false, true, false, false) => evidence.cell_press = true,
+            (false, false, true, false) => evidence.cell_drag = true,
+            (false, false, false, true) => evidence.cell_release = true,
+            (true, true, false, false) => evidence.pixel_press = true,
+            (true, false, true, false) => evidence.pixel_drag = true,
+            (true, false, false, true) => evidence.pixel_release = true,
+            _ => {}
+        }
+    }
+    evidence
 }
 
 fn locate_ack(bytes: &[u8], expected_image_id: u64) -> Option<(usize, usize)> {
@@ -292,6 +450,13 @@ fn locate_ack(bytes: &[u8], expected_image_id: u64) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+fn count_occurrences(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
 }
 
 fn validate_environment(environment: &TerminalEnvironment) -> Result<(), ViewportDiagnostic> {

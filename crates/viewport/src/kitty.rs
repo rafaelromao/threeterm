@@ -11,6 +11,8 @@ use crate::renderer::{FrameAcknowledgement, FrameIdentity, Renderer, RendererSub
 
 pub const MAX_BASE64_CHUNK: usize = 4096;
 pub const MAX_COMPRESSED_PAYLOAD: usize = 64 * 1024 * 1024;
+pub(crate) const ENTER_SEQUENCE: &[u8] =
+    b"\x1b[?1049h\x1b[>3u\x1b[?1002h\x1b[?1006h\x1b[?1016h\x1b[?1004h\x1b[?2026h\x1b[?25l";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KittyPlacement {
@@ -145,16 +147,20 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
         if self.entered {
             return Ok(());
         }
-        self.write_raw(
-            b"\x1b[?1049h\x1b[>3u\x1b[?1002h\x1b[?1006h\x1b[?1016h\x1b[?1004h\x1b[?2026h\x1b[?25l",
-            "unknown",
-            None,
-            None,
-            None,
-        )?;
+        self.write_raw(ENTER_SEQUENCE, "unknown", None, None, None)?;
         self.entered = true;
         self.cleaned = false;
         Ok(())
+    }
+
+    fn initialize_inner(&mut self) -> Result<(), ViewportDiagnostic> {
+        match self.enter() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = self.cleanup_inner();
+                Err(error)
+            }
+        }
     }
 
     pub fn acknowledge_bytes(
@@ -412,6 +418,14 @@ impl<W: Write, T: TermiosRestorer> GhosttyRenderer<W, T> {
 impl<W: Write, T: TermiosRestorer> Renderer for GhosttyRenderer<W, T> {
     fn is_admitted(&self) -> bool {
         self.admitted || self.probe_mode
+    }
+
+    fn admit(&mut self, capabilities: &TerminalCapabilityVector) -> Result<(), ViewportDiagnostic> {
+        GhosttyRenderer::admit(self, capabilities)
+    }
+
+    fn initialize(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.initialize_inner()
     }
 
     fn submit_image(

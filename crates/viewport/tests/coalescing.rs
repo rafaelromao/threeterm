@@ -131,3 +131,38 @@ fn invalidated_attachment_rejects_new_frames_with_structured_state() {
     assert_eq!(coordinator.renderer().cancel_calls, 1);
     assert_eq!(coordinator.renderer().cleanup_calls, 1);
 }
+
+#[test]
+fn stale_pending_generations_are_dropped_instead_of_replacing_newer_state() {
+    let mut coordinator = RenderCoordinator::new(RecordingRenderer::default());
+    coordinator.submit(frame(1)).expect("first frame starts");
+    coordinator
+        .submit(frame(3))
+        .expect("newest frame is pending");
+
+    let outcome = coordinator
+        .submit(frame(2))
+        .expect("stale frame is reported without a renderer failure");
+    assert!(outcome.queued.is_none());
+    assert!(outcome.replaced.is_none());
+    assert_eq!(
+        outcome.dropped.unwrap().code,
+        ViewportDiagnosticCode::FrameDropped
+    );
+    assert_eq!(coordinator.pending().unwrap().generation, 3);
+}
+
+#[test]
+fn timeout_invalidates_the_attachment_and_cleans_up() {
+    let mut coordinator = RenderCoordinator::new(RecordingRenderer::default());
+    coordinator.submit(frame(1)).expect("first frame starts");
+
+    let diagnostic = coordinator.acknowledgement_timeout();
+    assert_eq!(
+        diagnostic.code,
+        ViewportDiagnosticCode::AcknowledgementTimeout
+    );
+    assert_eq!(diagnostic.generation, Some(1));
+    assert!(!coordinator.is_valid());
+    assert_eq!(coordinator.renderer().cleanup_calls, 1);
+}

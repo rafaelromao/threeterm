@@ -210,7 +210,7 @@ impl ProtocolNeutralViewport {
             let row = index / columns.max(1);
             let x = column as f64 - (columns.saturating_sub(1) as f64 / 2.0);
             let y = row as f64 - (rows.saturating_sub(1) as f64 / 2.0);
-            let z = (index % 3) as f64 * 0.18;
+            let z = 0.6 + (index % 3) as f64 * 0.18;
             let rotated_x = x * yaw.cos() - z * yaw.sin();
             let rotated_z = x * yaw.sin() + z * yaw.cos();
             let rotated_y = y * pitch.cos() - rotated_z * pitch.sin();
@@ -222,7 +222,7 @@ impl ProtocolNeutralViewport {
                 .round() as i32;
             let selected = scene.selected_id.as_deref() == Some(feature.id.as_str());
             let color = marker_color(feature, selected);
-            draw_marker(&mut rgb, width, center_x, center_y, marker_size, color);
+            draw_beveled_cuboid(&mut rgb, width, center_x, center_y, marker_size, color);
         }
 
         Ok(ViewportFrame {
@@ -291,7 +291,7 @@ fn stable_hash(first: &[u8], second: &[u8]) -> u64 {
     hash
 }
 
-fn draw_marker(
+fn draw_beveled_cuboid(
     rgb: &mut [u8],
     width: usize,
     center_x: i32,
@@ -300,24 +300,114 @@ fn draw_marker(
     color: [u8; 3],
 ) {
     let half = size / 2;
+    let depth = (size / 4).max(1);
+    let bevel = (size / 8).max(1);
+    let left = center_x - half;
+    let right = center_x + half;
+    let top = center_y - half;
+    let bottom = center_y + half;
+    let top_face = [
+        (left, top),
+        (right, top),
+        (right - depth, top - depth),
+        (left - depth, top - depth),
+    ];
+    fill_quad(rgb, width, top_face, lighten(color, 35));
+    let side_face = [
+        (right, top),
+        (right - depth, top - depth),
+        (right - depth, bottom - depth),
+        (right, bottom),
+    ];
+    fill_quad(rgb, width, side_face, darken(color, 30));
+    draw_rect(rgb, width, left, top, size, size, color);
     draw_rect(
         rgb,
         width,
-        center_x - half,
-        center_y - half,
-        size,
-        size,
-        color,
+        left + bevel,
+        top + bevel,
+        (size - bevel * 2).max(1),
+        (size - bevel * 2).max(1),
+        darken(color, 10),
     );
-    let edge = [
-        color[0].saturating_add(35),
-        color[1].saturating_add(35),
-        color[2].saturating_add(35),
-    ];
-    for offset in 0..size {
-        set_pixel(rgb, width, center_x - half + offset, center_y - half, edge);
-        set_pixel(rgb, width, center_x - half, center_y - half + offset, edge);
+    draw_line(rgb, width, (left, top), (right, top), lighten(color, 45));
+    draw_line(rgb, width, (left, top), (left, bottom), lighten(color, 45));
+    draw_line(
+        rgb,
+        width,
+        (right, top),
+        (right - depth, top - depth),
+        lighten(color, 20),
+    );
+}
+
+fn fill_quad(rgb: &mut [u8], width: usize, points: [(i32, i32); 4], color: [u8; 3]) {
+    fill_triangle(rgb, width, [points[0], points[1], points[2]], color);
+    fill_triangle(rgb, width, [points[0], points[2], points[3]], color);
+}
+
+fn fill_triangle(rgb: &mut [u8], width: usize, points: [(i32, i32); 3], color: [u8; 3]) {
+    let min_x = points.iter().map(|point| point.0).min().unwrap_or(0);
+    let max_x = points.iter().map(|point| point.0).max().unwrap_or(0);
+    let min_y = points.iter().map(|point| point.1).min().unwrap_or(0);
+    let max_y = points.iter().map(|point| point.1).max().unwrap_or(0);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let first = edge(points[0], points[1], (x, y));
+            let second = edge(points[1], points[2], (x, y));
+            let third = edge(points[2], points[0], (x, y));
+            if (first >= 0 && second >= 0 && third >= 0)
+                || (first <= 0 && second <= 0 && third <= 0)
+            {
+                set_pixel(rgb, width, x, y, color);
+            }
+        }
     }
+}
+
+fn edge(first: (i32, i32), second: (i32, i32), point: (i32, i32)) -> i64 {
+    i64::from(second.0 - first.0) * i64::from(point.1 - first.1)
+        - i64::from(second.1 - first.1) * i64::from(point.0 - first.0)
+}
+
+fn draw_line(rgb: &mut [u8], width: usize, start: (i32, i32), end: (i32, i32), color: [u8; 3]) {
+    let dx = (end.0 - start.0).abs();
+    let sx = if start.0 < end.0 { 1 } else { -1 };
+    let dy = -(end.1 - start.1).abs();
+    let sy = if start.1 < end.1 { 1 } else { -1 };
+    let mut error = dx + dy;
+    let (mut x, mut y) = start;
+    loop {
+        set_pixel(rgb, width, x, y, color);
+        if (x, y) == end {
+            break;
+        }
+        let doubled = error * 2;
+        if doubled >= dy {
+            error += dy;
+            x += sx;
+        }
+        if doubled <= dx {
+            error += dx;
+            y += sy;
+        }
+    }
+}
+
+fn lighten(color: [u8; 3], amount: u8) -> [u8; 3] {
+    [
+        color[0].saturating_add(amount),
+        color[1].saturating_add(amount),
+        color[2].saturating_add(amount),
+    ]
+}
+
+fn darken(color: [u8; 3], amount: u8) -> [u8; 3] {
+    [
+        color[0].saturating_sub(amount),
+        color[1].saturating_sub(amount),
+        color[2].saturating_sub(amount),
+    ]
 }
 
 fn draw_rect(

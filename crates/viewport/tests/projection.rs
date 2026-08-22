@@ -34,6 +34,30 @@ fn canonical_graph_projection_produces_revision_bound_rgb_frames() {
 }
 
 #[test]
+fn a_single_feature_moves_when_the_camera_rotates_and_pitches() {
+    let mut graph = FeatureGraph::empty();
+    graph.add_feature(Feature::new("feature-a", "box").expect("feature is valid"));
+    let scene = ViewportScene::from_feature_graph("revision-single", &graph, None);
+    let base = ProtocolNeutralViewport::project(
+        &scene,
+        ViewportRequest::new("revision-single", 1, 64, 48, CameraState::default()),
+    )
+    .expect("single-feature projection succeeds");
+    let rotated = ProtocolNeutralViewport::project(
+        &scene,
+        ViewportRequest::new(
+            "revision-single",
+            2,
+            64,
+            48,
+            CameraState::default().rotated(15, 5),
+        ),
+    )
+    .expect("single-feature camera projection succeeds");
+    assert_ne!(base.rgb, rotated.rgb);
+}
+
+#[test]
 fn invalid_viewport_dimensions_are_structured_without_scene_mutation() {
     let graph = FeatureGraph::empty();
     let scene = ViewportScene::from_feature_graph("revision-empty", &graph, None);

@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::Host;
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
-    CapabilityState, FrameAcknowledgement, GhosttyRenderer, TerminalCapabilityVector,
-    ViewportDiagnostic, ViewportDiagnosticCode,
+    CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer,
+    TerminalCapabilityVector, ViewportDiagnosticCode,
 };
 
 #[derive(Debug, Default)]
@@ -24,16 +24,22 @@ impl Write for RecordingWriter {
     }
 }
 
-#[derive(Debug, Default)]
-struct FailingWriter;
+#[derive(Debug)]
+struct FailingWriter {
+    writes_before_failure: usize,
+}
 
 impl Write for FailingWriter {
-    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-        Err(io::Error::other("injected terminal write failure"))
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.writes_before_failure == 0 {
+            return Err(io::Error::other("injected terminal write failure"));
+        }
+        self.writes_before_failure -= 1;
+        Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::other("injected terminal flush failure"))
+        Ok(())
     }
 }
 
@@ -48,20 +54,32 @@ fn temporary_bundle_root() -> std::path::PathBuf {
 fn admitted_renderer<W: Write>(writer: W) -> GhosttyRenderer<W> {
     let mut renderer = GhosttyRenderer::new(writer);
     renderer
-        .admit(&TerminalCapabilityVector {
-            state: CapabilityState::Valid,
-            direct_ghostty: true,
-            kitty_rgb_zlib: true,
-            kitty_acknowledgements: true,
-            kitty_keyboard: true,
-            sgr_mouse_cell: true,
-            sgr_mouse_pixel: true,
-            focus_reporting: true,
-            alternate_screen: true,
-            resize_events: true,
-        })
+        .admit(&valid_capabilities())
         .expect("test capability vector admits the renderer");
     renderer
+}
+
+fn valid_capabilities() -> TerminalCapabilityVector {
+    TerminalCapabilityVector {
+        state: CapabilityState::Valid,
+        direct_ghostty: true,
+        kitty_rgb_zlib: true,
+        kitty_acknowledgements: true,
+        kitty_keyboard: true,
+        sgr_mouse_cell: true,
+        sgr_mouse_pixel: true,
+        focus_reporting: true,
+        alternate_screen: true,
+        resize_events: true,
+    }
+}
+
+fn probe_result() -> CapabilityProbeResult {
+    CapabilityProbeResult {
+        capabilities: valid_capabilities(),
+        unrelated_input: Vec::new(),
+        response_evidence: "test".to_string(),
+    }
 }
 
 #[test]
@@ -106,16 +124,11 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
     assert_eq!(newest_ack.visible.as_ref().unwrap().generation, 3);
     assert_eq!(session.camera().yaw_degrees, 5);
     assert_eq!(session.camera().pitch_degrees, 20);
+    assert_eq!(session.state().presentation_generation, 3);
     assert_eq!(host.current(), Some(before.clone()));
 
-    let failure = ViewportDiagnostic::new(
-        ViewportDiagnosticCode::AcknowledgementTimeout,
-        "Ghostty acknowledgement timed out",
-        session.state().canonical_revision.clone(),
-        "restore the terminal and run a fresh capability probe",
-    );
     let restoring = session
-        .report_viewport_failure(&failure)
+        .report_acknowledgement_timeout()
         .expect("renderer failure enters restoration");
     assert_eq!(
         restoring.state.lifecycle,
@@ -155,6 +168,14 @@ fn session_rejects_an_unadmitted_ghostty_renderer() {
     )
     .expect_err("interactive sessions require capability admission");
     assert_eq!(error.code, ViewportDiagnosticCode::CapabilityDenied);
+    TuiViewportSession::from_host_with_probe(
+        &host,
+        64,
+        48,
+        GhosttyRenderer::new(RecordingWriter::default()),
+        &probe_result(),
+    )
+    .expect("a successful probe admits the production session");
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }
 
@@ -174,9 +195,15 @@ fn production_write_failure_is_structured_without_host_mutation() {
     host.save(&root, "feature-a", "box")
         .expect("feature is persisted");
     let before = host.current().expect("canonical state exists");
-    let mut session =
-        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(FailingWriter))
-            .expect("host projection creates a viewport session");
+    let mut session = TuiViewportSession::from_host(
+        &host,
+        64,
+        48,
+        admitted_renderer(FailingWriter {
+            writes_before_failure: 1,
+        }),
+    )
+    .expect("host projection creates a viewport session");
 
     let error = session
         .process_terminal_input(b"\x1b[B")

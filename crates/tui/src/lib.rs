@@ -4,8 +4,9 @@ use threeterm_domain::FeatureGraph;
 use threeterm_host::Host;
 use threeterm_theme::{NonColorMarker, SemanticToken, TransientState, transient_visuals};
 use threeterm_viewport::{
-    CameraState, FrameAcknowledgement, ProtocolNeutralViewport, RenderCoordinator, Renderer,
-    SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode, ViewportRequest, ViewportScene,
+    CameraState, CapabilityProbeResult, FrameAcknowledgement, ProtocolNeutralViewport,
+    RenderCoordinator, Renderer, SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode,
+    ViewportRequest, ViewportScene,
 };
 
 pub fn schema_version() -> &'static str {
@@ -1557,6 +1558,7 @@ impl TuiSession {
             );
             return self.finish(acknowledgement, Some(diagnostic));
         }
+        self.presentation_generation = self.presentation_generation.saturating_add(1);
         let target = &self.targets[index];
         let text = match result {
             NavigationResult::Moved => {
@@ -1881,7 +1883,6 @@ pub struct TuiViewportSession<R: Renderer> {
     camera: CameraState,
     width: u32,
     height: u32,
-    generation: u64,
     coordinator: RenderCoordinator<R>,
 }
 
@@ -1891,6 +1892,26 @@ impl<R: Renderer> TuiViewportSession<R> {
         width: u32,
         height: u32,
         renderer: R,
+    ) -> Result<Self, ViewportDiagnostic> {
+        Self::from_host_parts(host, width, height, renderer)
+    }
+
+    pub fn from_host_with_probe(
+        host: &Host,
+        width: u32,
+        height: u32,
+        mut renderer: R,
+        probe: &CapabilityProbeResult,
+    ) -> Result<Self, ViewportDiagnostic> {
+        renderer.admit(&probe.capabilities)?;
+        Self::from_host_parts(host, width, height, renderer)
+    }
+
+    fn from_host_parts(
+        host: &Host,
+        width: u32,
+        height: u32,
+        mut renderer: R,
     ) -> Result<Self, ViewportDiagnostic> {
         if width == 0 || height == 0 {
             return Err(ViewportDiagnostic::new(
@@ -1923,6 +1944,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         for result in presentation.layer1_results {
             scene = scene.with_layer1_reference(result.request_id);
         }
+        renderer.initialize()?;
         let tui = TuiSession::from_feature_graph(&presentation.graph, revision);
         Ok(Self {
             tui,
@@ -1930,7 +1952,6 @@ impl<R: Renderer> TuiViewportSession<R> {
             camera: CameraState::default(),
             width,
             height,
-            generation: 0,
             coordinator: RenderCoordinator::new(renderer),
         })
     }
@@ -1962,13 +1983,13 @@ impl<R: Renderer> TuiViewportSession<R> {
             ArrowKey::Left => self.camera.rotated(-5, 0),
             ArrowKey::Right => self.camera.rotated(5, 0),
         };
-        self.generation = self.generation.saturating_add(1);
         self.scene.selected_id = self.tui.state().selected_target;
+        let generation = self.tui.state().presentation_generation;
         let frame = ProtocolNeutralViewport::project(
             &self.scene,
             ViewportRequest::new(
                 self.scene.revision.clone(),
-                self.generation,
+                generation,
                 self.width,
                 self.height,
                 self.camera,
@@ -1997,6 +2018,25 @@ impl<R: Renderer> TuiViewportSession<R> {
         &mut self,
     ) -> Result<threeterm_viewport::CancelOutcome, ViewportDiagnostic> {
         self.coordinator.request_cancel()
+    }
+
+    pub fn report_acknowledgement_timeout(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        let diagnostic = self.coordinator.acknowledgement_timeout();
+        self.tui
+            .transition_lifecycle(LifecycleEvent::RuntimeFailure {
+                detail: diagnostic.to_string(),
+            })
+    }
+
+    pub fn report_terminal_reset(
+        &mut self,
+        detail: impl Into<String>,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        let diagnostic = self.coordinator.terminal_reset(detail);
+        self.tui
+            .transition_lifecycle(LifecycleEvent::RuntimeFailure {
+                detail: diagnostic.to_string(),
+            })
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {

@@ -51,6 +51,17 @@ pub struct Layer1DerivedResult {
     pub path: PathBuf,
 }
 
+/// Immutable host-owned input for a disposable presentation.
+///
+/// The snapshot keeps the canonical revision and graph together so a
+/// presentation adapter cannot accidentally pair data from two host reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationSnapshot {
+    pub snapshot: SnapshotView,
+    pub graph: FeatureGraph,
+    pub layer1_results: Vec<Layer1DerivedResult>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtrudeCommitView {
     pub snapshot: SnapshotView,
@@ -438,6 +449,26 @@ impl Host {
             .borrow()
             .as_ref()
             .map(|loaded| loaded.graph.clone())
+    }
+
+    /// Capture one immutable presentation projection from the current
+    /// canonical bundle. Derived results remain disposable metadata.
+    pub fn presentation_snapshot(&self) -> Option<PresentationSnapshot> {
+        let current = self.current.borrow();
+        let loaded = current.as_ref()?;
+        let mut layer1_results: Vec<_> = self
+            .layer1_results
+            .borrow()
+            .values()
+            .filter(|result| result.source_revision_id == loaded.manifest.revision_hash)
+            .cloned()
+            .collect();
+        layer1_results.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        Some(PresentationSnapshot {
+            snapshot: SnapshotView::from(loaded),
+            graph: loaded.graph.clone(),
+            layer1_results,
+        })
     }
 
     /// Accept a completed worker lifecycle and publish its one Derived Result.

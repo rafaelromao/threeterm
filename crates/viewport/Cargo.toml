@@ -7,5 +7,10 @@ license.workspace = true
 publish.workspace = true
 description = "Protocol-Neutral Viewport renderer and projection boundary."
 
+[dependencies]
+flate2 = { workspace = true }
+serde = { workspace = true }
+threeterm-domain = { path = "../domain" }
+
 [lints]
 workspace = true

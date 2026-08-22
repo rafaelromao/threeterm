@@ -1,4 +1,5 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -21,6 +22,9 @@ pub use threeterm_protocol::schema::{
     REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{CommandId, find_by_name, iter};
+use threeterm_theme::{
+    PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
+};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_UNKNOWN_COMMAND: i32 = 2;
@@ -28,6 +32,16 @@ pub const EXIT_INTEGRITY_FAILURE: i32 = 2;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
 pub const EXIT_WORKER_FAILURE: i32 = 4;
 pub const EXIT_BREP_INVALID: i32 = 5;
+pub const EXIT_THEME_PALETTE_FAILURE: i32 = 6;
+
+const PALETTE_RECOVERY: &str = "use --palette or THREETERM_PALETTE with one of: catppuccin, tokyo-night, evergreen, gruvbox, sandman-light";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaletteStartupError {
+    value: String,
+    source: PaletteSource,
+    detail: &'static str,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum DispatchPlan {
@@ -142,6 +156,185 @@ enum DispatchPlan {
     Unknown {
         arg: String,
     },
+}
+
+fn extract_palette(
+    args: &[OsString],
+) -> Result<(Vec<OsString>, Option<String>), PaletteStartupError> {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut palette = None;
+    let mut index = 0;
+    let mut global_options = true;
+
+    while index < args.len() {
+        let argument = &args[index];
+        if global_options && argument == "--" {
+            global_options = false;
+            filtered.push(argument.clone());
+            index += 1;
+            continue;
+        }
+        if global_options
+            && let Some((value, consumed)) = parse_palette_argument(args, index, palette.is_some())?
+        {
+            palette = Some(value);
+            index += consumed;
+            continue;
+        }
+        filtered.push(argument.clone());
+        index += 1;
+    }
+
+    Ok((filtered, palette))
+}
+
+fn parse_palette_argument(
+    args: &[OsString],
+    index: usize,
+    already_present: bool,
+) -> Result<Option<(String, usize)>, PaletteStartupError> {
+    let argument = &args[index];
+    if argument == "--palette" {
+        if already_present {
+            return Err(palette_startup_error("<duplicate>", "duplicate_option"));
+        }
+        let Some(value) = args.get(index + 1) else {
+            return Err(palette_startup_error("<missing>", "missing_value"));
+        };
+        return Ok(Some((parse_palette_os_value(value)?, 2)));
+    }
+
+    let Some(argument) = argument.to_str() else {
+        if argument.as_encoded_bytes().starts_with(b"--palette=") {
+            return Err(palette_startup_error("<non-utf8>", "non_utf8_value"));
+        }
+        return Ok(None);
+    };
+    let Some(value) = argument.strip_prefix("--palette=") else {
+        return Ok(None);
+    };
+    if already_present {
+        return Err(palette_startup_error("<duplicate>", "duplicate_option"));
+    }
+    Ok(Some((parse_palette_value(value)?, 1)))
+}
+
+fn parse_palette_os_value(value: &OsStr) -> Result<String, PaletteStartupError> {
+    let Some(value) = value.to_str() else {
+        return Err(palette_startup_error("<non-utf8>", "non_utf8_value"));
+    };
+    parse_palette_value(value)
+}
+
+fn parse_palette_value(value: &str) -> Result<String, PaletteStartupError> {
+    if value.is_empty() {
+        return Err(palette_startup_error("<missing>", "missing_value"));
+    }
+    Ok(value.to_string())
+}
+
+fn palette_startup_error(value: &str, detail: &'static str) -> PaletteStartupError {
+    PaletteStartupError {
+        value: value.to_string(),
+        source: PaletteSource::Cli,
+        detail,
+    }
+}
+
+fn resolve_startup_palette(
+    args: &[OsString],
+    environment: Option<&OsStr>,
+    config: Option<&str>,
+) -> Result<(Vec<OsString>, ResolvedPalette), PaletteStartupError> {
+    let (filtered, cli) = extract_palette(args)?;
+    let resolved = if let Some(cli) = cli.as_deref() {
+        resolve_palette(PaletteSources {
+            cli: Some(cli),
+            environment: None,
+            config: None,
+        })
+    } else if let Some(environment) = environment {
+        let environment = environment.to_str().ok_or_else(|| PaletteStartupError {
+            value: "<non-utf8>".to_string(),
+            source: PaletteSource::Environment,
+            detail: "non_utf8_value",
+        })?;
+        resolve_palette(PaletteSources {
+            cli: None,
+            environment: Some(environment),
+            config: None,
+        })
+    } else {
+        resolve_palette(PaletteSources {
+            cli: None,
+            environment: None,
+            config,
+        })
+    }
+    .map_err(palette_error_to_startup_error)?;
+    Ok((filtered, resolved))
+}
+
+fn palette_error_to_startup_error(error: PaletteError) -> PaletteStartupError {
+    PaletteStartupError {
+        value: if error.value.is_empty() {
+            "<missing>".to_string()
+        } else {
+            error.value
+        },
+        source: error.source,
+        detail: error.reason.as_str(),
+    }
+}
+
+fn load_config_palette() -> Result<Option<String>, PaletteStartupError> {
+    let Some(path) = std::env::var_os("THREETERM_CONFIG") else {
+        return Ok(None);
+    };
+    let path_text = path.to_str().unwrap_or("<non-utf8>");
+    let contents = fs::read(&path).map_err(|_| PaletteStartupError {
+        value: path_text.to_string(),
+        source: PaletteSource::Config,
+        detail: "config_read_failure",
+    })?;
+    let contents = String::from_utf8(contents).map_err(|_| PaletteStartupError {
+        value: "<non-utf8>".to_string(),
+        source: PaletteSource::Config,
+        detail: "non_utf8_value",
+    })?;
+    parse_config_palette(&contents)
+}
+
+fn parse_config_palette(contents: &str) -> Result<Option<String>, PaletteStartupError> {
+    let mut palette = None;
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "palette" {
+            continue;
+        }
+        if palette.is_some() {
+            return Err(PaletteStartupError {
+                value: "<duplicate>".to_string(),
+                source: PaletteSource::Config,
+                detail: "duplicate_option",
+            });
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(value);
+        palette = Some(value.to_string());
+    }
+    Ok(palette)
 }
 
 fn plan(args: &[OsString]) -> DispatchPlan {
@@ -1707,9 +1900,60 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let args: Vec<OsString> = args.into_iter().collect();
+    let environment = std::env::var_os("THREETERM_PALETTE");
+    let cli = match extract_palette(&args) {
+        Ok((_, cli)) => cli,
+        Err(error) => return emit_palette_error(&error, stderr),
+    };
+    let config = if cli.is_none() && environment.is_none() {
+        match load_config_palette() {
+            Ok(config) => config,
+            Err(error) => return emit_palette_error(&error, stderr),
+        }
+    } else {
+        None
+    };
+    dispatch_with_sources(
+        args,
+        environment.as_deref(),
+        config.as_deref(),
+        stdout,
+        stderr,
+    )
+}
+
+pub fn dispatch_with_config<I>(
+    args: I,
+    config: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let environment = std::env::var_os("THREETERM_PALETTE");
+    dispatch_with_sources(args, environment.as_deref(), config, stdout, stderr)
+}
+
+fn dispatch_with_sources<I>(
+    args: I,
+    environment: Option<&OsStr>,
+    config: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let args: Vec<OsString> = args.into_iter().collect();
+    let (args, resolved) = match resolve_startup_palette(&args, environment, config) {
+        Ok(resolved) => resolved,
+        Err(error) => return emit_palette_error(&error, stderr),
+    };
+    let theme = ThemeContext::from(resolved);
     let plan = plan(&args);
     let DispatchPlan::Unknown { arg } = &plan else {
-        return execute_registered(plan, stdout, stderr);
+        return execute_registered(plan, &theme, stdout, stderr);
     };
     emit_unknown_command(arg, stderr)
 }
@@ -1717,11 +1961,17 @@ where
 fn execute_handler(
     plan: DispatchPlan,
     request: &Value,
+    theme: &ThemeContext,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    if theme.palette.name.is_empty() {
+        return emit_internal_error("resolved theme has no palette", stderr);
+    }
     match plan {
-        DispatchPlan::Registered { plan, .. } => execute_handler(*plan, request, stdout, stderr),
+        DispatchPlan::Registered { plan, .. } => {
+            execute_handler(*plan, request, theme, stdout, stderr)
+        }
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
         DispatchPlan::Save {
@@ -2017,7 +2267,23 @@ impl std::fmt::Display for DispatchError {
 
 impl std::error::Error for DispatchError {}
 
-fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+fn execute_registered(
+    plan: DispatchPlan,
+    theme: &ThemeContext,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    execute_registered_with_observer(plan, theme, stdout, stderr, |_| {})
+}
+
+fn execute_registered_with_observer(
+    plan: DispatchPlan,
+    theme: &ThemeContext,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    observe_theme: impl FnOnce(&ThemeContext),
+) -> i32 {
+    observe_theme(theme);
     let DispatchPlan::Registered { command, plan } = plan else {
         return emit_internal_error("parsed command has no registered schema", stderr);
     };
@@ -2028,7 +2294,13 @@ fn execute_registered(plan: DispatchPlan, stdout: &mut dyn Write, stderr: &mut d
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
-        let exit = execute_handler(*plan, &request, &mut handler_stdout, &mut handler_stderr);
+        let exit = execute_handler(
+            *plan,
+            &request,
+            theme,
+            &mut handler_stdout,
+            &mut handler_stderr,
+        );
         if exit != EXIT_OK {
             return Err((exit, handler_stderr));
         }
@@ -3315,6 +3587,19 @@ fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
     EXIT_PERSISTENCE_FAILURE
 }
 
+fn emit_palette_error(error: &PaletteStartupError, stderr: &mut dyn Write) -> i32 {
+    write_diagnostic(
+        stderr,
+        &Diagnostic::theme_palette_invalid(
+            &error.value,
+            error.source.as_str(),
+            error.detail,
+            PALETTE_RECOVERY,
+        ),
+    );
+    EXIT_THEME_PALETTE_FAILURE
+}
+
 fn emit_unknown_command(arg: &str, stderr: &mut dyn Write) -> i32 {
     write_diagnostic(stderr, &Diagnostic::unknown_command(arg));
     EXIT_UNKNOWN_COMMAND
@@ -3359,6 +3644,144 @@ mod tests {
             .find(|command| command["id"] == "list")
             .expect("list is registered");
         assert_eq!(list["schema_version"], "threeterm.command.list/1");
+    }
+
+    #[test]
+    fn palette_option_is_extracted_before_existing_command_planning() {
+        let (filtered, palette) =
+            extract_palette(&args(&["--palette=catppuccin", "--machine", "list"]))
+                .expect("palette option is valid");
+
+        assert_eq!(palette.as_deref(), Some("catppuccin"));
+        assert_eq!(filtered, args(&["--machine", "list"]));
+    }
+
+    #[test]
+    fn startup_resolution_uses_cli_before_environment_and_config() {
+        let (_, resolved) = resolve_startup_palette(
+            &args(&["--palette", "gruvbox", "--machine", "list"]),
+            Some(std::ffi::OsStr::new("evergreen")),
+            Some("sandman-light"),
+        )
+        .expect("startup palette resolves");
+
+        assert_eq!(resolved.palette.name, "gruvbox");
+        assert_eq!(resolved.source, PaletteSource::Cli);
+    }
+
+    #[test]
+    fn invalid_cli_palette_fails_before_registered_command_execution() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = dispatch_with_sources(
+            args(&["--palette", "not-a-palette", "--machine", "list"]),
+            Some(std::ffi::OsStr::new("catppuccin")),
+            None,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit, EXIT_THEME_PALETTE_FAILURE);
+        assert!(stdout.is_empty());
+        let diagnostic: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
+        assert_eq!(diagnostic["code"], "theme_palette_invalid");
+        assert_eq!(diagnostic["arg"], "not-a-palette");
+        assert_eq!(diagnostic["source"], "cli");
+        assert_eq!(diagnostic["detail"], "unknown_palette");
+        assert_eq!(diagnostic["recovery"], PALETTE_RECOVERY);
+    }
+
+    #[test]
+    fn palette_option_errors_are_structured_for_missing_empty_and_duplicate_values() {
+        for (arguments, value, detail) in [
+            (vec!["--palette"], "<missing>", "missing_value"),
+            (vec!["--palette="], "<missing>", "missing_value"),
+            (
+                vec!["--palette", "catppuccin", "--palette", "gruvbox"],
+                "<duplicate>",
+                "duplicate_option",
+            ),
+        ] {
+            let error = extract_palette(&args(&arguments)).expect_err("invalid option");
+            assert_eq!(error.value, value);
+            assert_eq!(error.detail, detail);
+            assert_eq!(error.source, PaletteSource::Cli);
+        }
+    }
+
+    #[test]
+    fn palette_extraction_stops_at_literal_double_dash() {
+        let (filtered, palette) = extract_palette(&args(&[
+            "--machine",
+            "list",
+            "--palette",
+            "catppuccin",
+            "--",
+            "--palette",
+            "gruvbox",
+        ]))
+        .expect("palette option is valid");
+
+        assert_eq!(palette.as_deref(), Some("catppuccin"));
+        assert_eq!(
+            filtered,
+            args(&["--machine", "list", "--", "--palette", "gruvbox"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_palette_value_fails_closed() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = extract_palette(&[
+            OsString::from("--palette"),
+            OsString::from_vec(b"catppuccin\xff".to_vec()),
+        ])
+        .expect_err("non-UTF-8 palette is invalid");
+
+        assert_eq!(error.value, "<non-utf8>");
+        assert_eq!(error.detail, "non_utf8_value");
+        assert_eq!(error.source, PaletteSource::Cli);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_cli_palette_ignores_a_malformed_lower_priority_environment_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (_, resolved) = resolve_startup_palette(
+            &args(&["--palette", "catppuccin", "--machine", "list"]),
+            Some(&OsString::from_vec(b"evergreen\xff".to_vec())),
+            None,
+        )
+        .expect("CLI winner must not inspect the malformed environment value");
+
+        assert_eq!(resolved.palette.name, "catppuccin");
+        assert_eq!(resolved.source, PaletteSource::Cli);
+    }
+
+    #[test]
+    fn registered_execution_receives_the_selected_theme_context() {
+        let resolved = resolve_palette(PaletteSources {
+            cli: None,
+            environment: Some("catppuccin"),
+            config: None,
+        })
+        .expect("palette resolves");
+        let context = ThemeContext::from(resolved);
+        let plan = plan(&args(&["--machine", "list"]));
+        let mut selected = None;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit =
+            execute_registered_with_observer(plan, &context, &mut stdout, &mut stderr, |context| {
+                selected = Some((context.palette.name, context.source))
+            });
+
+        assert_eq!(exit, EXIT_OK);
+        assert_eq!(selected, Some(("catppuccin", PaletteSource::Environment)));
+        assert!(stderr.is_empty());
     }
 
     #[test]

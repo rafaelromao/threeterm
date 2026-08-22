@@ -955,6 +955,7 @@ impl TuiSession {
                 self.capture = CaptureState::None;
                 self.restore_selection_after_cancel();
                 self.invalidate_preview_for_focus_loss();
+                self.cancel_history_application();
                 if matches!(self.interaction_mode, InteractionMode::DragActive { .. }) {
                     self.interaction_mode = InteractionMode::ModelessReady;
                 }
@@ -1037,29 +1038,45 @@ impl TuiSession {
             }
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
                 stable_ids,
-            })) if matches!(self.selection, SelectionState::Candidate { .. })
-                && stable_ids.len() > 1 =>
-            {
-                let previous = self.selected_ids();
-                self.selected_index = None;
-                self.selection = SelectionState::Candidate {
-                    candidates: stable_ids,
-                    previous,
-                };
-                let diagnostic = TuiDiagnostic {
-                    code: TuiDiagnosticCode::AmbiguousSelection,
-                    detail: "authoritative selection has multiple candidates".to_string(),
-                    canonical_revision: self.canonical_revision.clone(),
-                    axis: Some(axis),
-                    event: Some(kind),
-                    from: Some("Candidate".to_string()),
-                };
-                self.finish_transition_with_diagnostic(
-                    kind,
-                    "selection remains pending",
-                    TransientState::Warning,
-                    Some(diagnostic),
-                )
+            })) if matches!(self.selection, SelectionState::Candidate { .. }) => {
+                let valid = stable_ids.len() > 1
+                    && stable_ids.iter().all(|stable_id| {
+                        matches!(
+                            &self.selection,
+                            SelectionState::Candidate { candidates, .. }
+                                if candidates.contains(stable_id)
+                        ) && self.targets.iter().any(|target| target.id == *stable_id)
+                    });
+                if !valid {
+                    Err(self.operation_diagnostic(
+                        TuiDiagnosticCode::SelectionIncompatible,
+                        axis,
+                        kind,
+                        "ambiguous selection contains an unauthoritative id".to_string(),
+                        "Candidate",
+                    ))
+                } else {
+                    let previous = self.selected_ids();
+                    self.selected_index = None;
+                    self.selection = SelectionState::Candidate {
+                        candidates: stable_ids,
+                        previous,
+                    };
+                    let diagnostic = TuiDiagnostic {
+                        code: TuiDiagnosticCode::AmbiguousSelection,
+                        detail: "authoritative selection has multiple candidates".to_string(),
+                        canonical_revision: self.canonical_revision.clone(),
+                        axis: Some(axis),
+                        event: Some(kind),
+                        from: Some("Candidate".to_string()),
+                    };
+                    self.finish_transition_with_diagnostic(
+                        kind,
+                        "selection remains pending",
+                        TransientState::Warning,
+                        Some(diagnostic),
+                    )
+                }
             }
             StateEvent::Selection(SelectionEvent::Verify(SelectionVerification::Lost))
                 if matches!(self.selection, SelectionState::Candidate { .. }) =>
@@ -1730,6 +1747,7 @@ impl TuiSession {
         self.presentation_generation += 1;
         self.capture = CaptureState::None;
         self.restore_selection_after_cancel();
+        self.cancel_history_application();
         if matches!(self.interaction_mode, InteractionMode::DragActive { .. }) {
             self.interaction_mode = InteractionMode::ModelessReady;
         }
@@ -1764,6 +1782,18 @@ impl TuiSession {
                     .expect("a preview has an active command"),
                 input_fingerprint,
             };
+        }
+    }
+
+    fn cancel_history_application(&mut self) {
+        if let HistoryState::Applying {
+            can_undo, can_redo, ..
+        } = self.history.clone()
+        {
+            self.history = HistoryState::Linear { can_undo, can_redo };
+            if self.interaction_mode == InteractionMode::HistoryApplying {
+                self.interaction_mode = InteractionMode::ModelessReady;
+            }
         }
     }
 }

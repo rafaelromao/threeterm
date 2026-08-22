@@ -254,7 +254,10 @@ fn resize_invalidates_capture_and_preview_but_preserves_the_open_draft() {
 #[test]
 fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
     let mut session = TuiSession::new(
-        [threeterm_tui::FeatureTarget::new("feature-a", "box")],
+        [
+            threeterm_tui::FeatureTarget::new("feature-a", "box"),
+            threeterm_tui::FeatureTarget::new("feature-b", "fillet"),
+        ],
         "revision-focus",
     );
 
@@ -402,6 +405,17 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
         ambiguous.state.selection,
         SelectionState::Candidate { .. }
     ));
+    let before_unknown_ambiguity = session.state();
+    let unknown_ambiguity = session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
+            stable_ids: vec!["feature-a".to_string(), "unknown".to_string()],
+        }))
+        .expect_err("ambiguous verification cannot introduce an unknown id");
+    assert_eq!(
+        unknown_ambiguity.code,
+        TuiDiagnosticCode::SelectionIncompatible
+    );
+    assert_eq!(session.state(), before_unknown_ambiguity);
 
     let invalid = session
         .transition(StateEvent::Selection(SelectionEvent::Verify(
@@ -681,6 +695,25 @@ fn history_handlers_keep_one_linear_timeline_and_preserve_divergent_future() {
         applying_undo.state.interaction_mode,
         InteractionMode::HistoryApplying
     );
+    session
+        .transition_focus_capture(FocusCaptureEvent::FocusLost)
+        .expect("focus loss cancels an in-flight history transition");
+    session
+        .transition_focus_capture(FocusCaptureEvent::FocusIn)
+        .expect("history focus recovery begins");
+    session
+        .transition_interaction(InteractionEvent::RecoveryCompleted)
+        .expect("history focus recovery completes");
+    assert_eq!(
+        session.state().history,
+        HistoryState::Linear {
+            can_undo: true,
+            can_redo: false,
+        }
+    );
+    session
+        .transition_history(HistoryEvent::UndoRequested)
+        .expect("history can be retried after recovery");
     session
         .transition(StateEvent::History(HistoryEvent::ApplyCompleted(
             HistoryApplyResult::Applied {

@@ -100,15 +100,27 @@ pub struct TuiFrame {
     pub acknowledgement: GestureAcknowledgement,
 }
 
+impl TuiFrame {
+    pub fn render_overlay(&self) -> String {
+        format!(
+            "[{}] {}",
+            self.acknowledgement.marker.as_str(),
+            self.acknowledgement.text
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiDiagnosticCode {
     NoFeatureTarget,
+    InvalidArrowInput,
 }
 
 impl TuiDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoFeatureTarget => "no_feature_target",
+            Self::InvalidArrowInput => "invalid_arrow_input",
         }
     }
 }
@@ -123,6 +135,13 @@ pub struct TuiDiagnostic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputOutcome {
     pub frame: TuiFrame,
+    pub diagnostic: Option<TuiDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedInput {
+    pub frame: TuiFrame,
+    pub overlay: String,
     pub diagnostic: Option<TuiDiagnostic>,
 }
 
@@ -230,6 +249,21 @@ impl TuiSession {
         self.finish(acknowledgement, None)
     }
 
+    pub fn process_terminal_input(&mut self, bytes: &[u8]) -> Result<RenderedInput, TuiDiagnostic> {
+        let key = decode_arrow(bytes).ok_or_else(|| TuiDiagnostic {
+            code: TuiDiagnosticCode::InvalidArrowInput,
+            detail: "expected one legacy terminal arrow sequence".to_string(),
+            canonical_revision: self.canonical_revision.clone(),
+        })?;
+        let outcome = self.press(key);
+        let overlay = outcome.frame.render_overlay();
+        Ok(RenderedInput {
+            frame: outcome.frame,
+            overlay,
+            diagnostic: outcome.diagnostic,
+        })
+    }
+
     fn finish(
         &mut self,
         acknowledgement: GestureAcknowledgement,
@@ -280,6 +314,16 @@ impl ArrowKey {
             Self::Up | Self::Left => NavigationDirection::Previous,
             Self::Down | Self::Right => NavigationDirection::Next,
         }
+    }
+}
+
+fn decode_arrow(bytes: &[u8]) -> Option<ArrowKey> {
+    match bytes {
+        b"\x1b[A" => Some(ArrowKey::Up),
+        b"\x1b[B" => Some(ArrowKey::Down),
+        b"\x1b[C" => Some(ArrowKey::Right),
+        b"\x1b[D" => Some(ArrowKey::Left),
+        _ => None,
     }
 }
 

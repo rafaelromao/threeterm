@@ -1,8 +1,6 @@
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use std::io::Write as _;
-
 fn temporary_bundle_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::Host;
-use threeterm_tui::{LifecycleState, TuiDiagnosticCode, TuiSession};
+use threeterm_tui::{LifecycleState, TuiDiagnosticCode};
 use threeterm_viewport::{
     CapabilityProbe, CapabilityProbeIo, CapabilityState, TerminalCapabilityVector,
     TerminalEnvironment, ViewportDiagnosticCode,
@@ -169,6 +169,6 @@ fn capability_probe_positive_gate_admits_interactive_when_present() {
         .probe(&mut io, env)
         .expect("probe succeeds with full evidence");
     assert!(result.capabilities.supports_interactive());
-    assert_eq!(valid.supports_interactive(), true);
+    assert!(valid.supports_interactive());
     std::fs::remove_dir_all(root).expect("bundle removed");
 }

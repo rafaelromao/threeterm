@@ -30,6 +30,29 @@ fn state_transition_uses_the_host_projection_without_mutating_canonical_state() 
         .expect("host exposes its read-only canonical graph");
     let mut session = TuiSession::from_feature_graph(&graph, &before.revision_hash);
 
+    let mut probing_session = TuiSession::from_feature_graph_probing(&graph, &before.revision_hash);
+    assert_eq!(probing_session.state().lifecycle, LifecycleState::Probing);
+    let probe_failure = probing_session
+        .transition_lifecycle(LifecycleEvent::ProbeFailed {
+            detail: "graphics capability unavailable".to_string(),
+        })
+        .expect("failed capability gate enters headless-only mode");
+    assert_eq!(probe_failure.state.lifecycle, LifecycleState::HeadlessOnly);
+    assert_eq!(
+        probe_failure
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code),
+        Some(TuiDiagnosticCode::LifecycleFailure)
+    );
+    probing_session
+        .transition_lifecycle(LifecycleEvent::ProbeStarted)
+        .expect("headless mode retries through a fresh probe");
+    probing_session
+        .transition_lifecycle(LifecycleEvent::ProbeSucceeded)
+        .expect("the production projection can become interactive after probing");
+    assert_eq!(host.current(), Some(before.clone()));
+
     let transition = session
         .transition(StateEvent::Lifecycle(LifecycleEvent::ResizeStarted))
         .expect("resize starts from interactive readiness");
@@ -295,6 +318,28 @@ fn focus_capture_and_selection_handlers_cancel_transient_input_safely() {
         NonColorMarker::CancellationGlyph
     );
 
+    let mut pointer_hints = TuiSession::new([], "revision-pointer-hints");
+    pointer_hints
+        .transition_focus_capture(FocusCaptureEvent::PointerPressed {
+            tool: InteractionTool::Selection,
+            origin: PointerOrigin { column: 8, row: 8 },
+            candidate: Some("feature-a".to_string()),
+        })
+        .expect("pointer press creates a candidate");
+    pointer_hints
+        .transition_focus_capture(FocusCaptureEvent::PointerMoved {
+            candidate: Some("feature-b".to_string()),
+        })
+        .expect("motion updates only the transient candidate");
+    let released = pointer_hints
+        .transition_focus_capture(FocusCaptureEvent::PointerReleased)
+        .expect("release is only a finish hint");
+    assert_eq!(released.state.capture, CaptureState::None);
+    assert!(matches!(
+        released.state.selection,
+        SelectionState::Candidate { .. }
+    ));
+
     let ambiguous = session
         .transition(StateEvent::Selection(SelectionEvent::Nominate {
             candidates: vec!["feature-a".to_string(), "feature-b".to_string()],
@@ -461,6 +506,32 @@ fn interaction_and_command_handlers_enforce_one_modal_phase_graph() {
         .transition(StateEvent::Command(CommandEvent::OutcomeDismissed))
         .expect("cancelled outcome can be dismissed");
 
+    let mut preview_failure = TuiSession::new([], "revision-preview-failure");
+    preview_failure
+        .transition_command(CommandEvent::Open {
+            command: "extrude".to_string(),
+        })
+        .expect("preview failure command opens");
+    preview_failure
+        .transition_command(CommandEvent::PreviewRequested)
+        .expect("preview failure enters previewing");
+    let preview_rejected = preview_failure
+        .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Rejected {
+            detail: "preview invalid".to_string(),
+        }))
+        .expect("preview failure returns to a draft");
+    assert!(matches!(
+        preview_rejected.state.command_phase,
+        CommandPhase::Draft { .. }
+    ));
+    assert_eq!(
+        preview_rejected
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code),
+        Some(TuiDiagnosticCode::CommandRejected)
+    );
+
     session
         .transition(StateEvent::FocusCapture(
             FocusCaptureEvent::PointerPressed {
@@ -515,8 +586,22 @@ fn history_handlers_keep_one_linear_timeline_and_preserve_divergent_future() {
     session
         .transition(StateEvent::Command(CommandEvent::CommitRequested))
         .expect("commit starts");
+    let stale = session
+        .transition(StateEvent::Command(CommandEvent::CommitAccepted {
+            source_revision: "stale-preview".to_string(),
+            revision: "revision-history-stale".to_string(),
+        }))
+        .expect_err("a stale preview cannot be promoted");
+    assert_eq!(stale.code, TuiDiagnosticCode::StalePreview);
+    assert_eq!(
+        session.state().command_phase,
+        CommandPhase::Committing {
+            input_fingerprint: String::new()
+        }
+    );
     session
         .transition(StateEvent::Command(CommandEvent::CommitAccepted {
+            source_revision: "revision-history-1".to_string(),
             revision: "revision-history-2".to_string(),
         }))
         .expect("accepted command advances the canonical projection identity");
@@ -644,6 +729,24 @@ fn interaction_axis_has_an_explicit_public_handler() {
         .expect_err("a command modal cannot nest another modal");
     assert_eq!(nested.code, TuiDiagnosticCode::InvalidTransition);
     assert_eq!(nested.axis, Some(StateAxis::InteractionMode));
+
+    let mut close_session = TuiSession::new([], "revision-interaction-close");
+    close_session
+        .transition_command(CommandEvent::Open {
+            command: "close-me".to_string(),
+        })
+        .expect("close test command opens");
+    close_session
+        .transition_command(CommandEvent::CancelRequested)
+        .expect("close test command cancels");
+    close_session
+        .transition_command(CommandEvent::CancellationCompleted {
+            detail: "closed by caller".to_string(),
+        })
+        .expect("close test command has an outcome");
+    close_session
+        .transition_interaction(InteractionEvent::CloseCommand)
+        .expect("interaction handler dismisses the command outcome");
 
     let mut drag_session = TuiSession::new([], "revision-interaction-drag");
     drag_session

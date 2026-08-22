@@ -74,15 +74,26 @@ pub enum PreviewResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandEvent {
-    Open { command: String },
-    DraftUpdated { input_fingerprint: String },
+    Open {
+        command: String,
+    },
+    DraftUpdated {
+        input_fingerprint: String,
+    },
     PreviewRequested,
     PreviewCompleted(PreviewResult),
     CommitRequested,
-    CommitAccepted { revision: String },
-    CommitRejected { detail: String },
+    CommitAccepted {
+        source_revision: String,
+        revision: String,
+    },
+    CommitRejected {
+        detail: String,
+    },
     CancelRequested,
-    CancellationCompleted { detail: String },
+    CancellationCompleted {
+        detail: String,
+    },
     OutcomeDismissed,
 }
 
@@ -485,6 +496,7 @@ pub struct TuiState {
     pub selection: SelectionState,
     pub interaction_mode: InteractionMode,
     pub command_phase: CommandPhase,
+    pub command_source_revision: Option<String>,
     pub history: HistoryState,
     pub recoverable_revisions: Vec<String>,
     pub presentation_generation: u64,
@@ -521,6 +533,7 @@ pub enum TuiDiagnosticCode {
     CommandCancelled,
     SelectionLost,
     SelectionIncompatible,
+    StalePreview,
 }
 
 impl TuiDiagnosticCode {
@@ -536,6 +549,7 @@ impl TuiDiagnosticCode {
             Self::CommandCancelled => "command_cancelled",
             Self::SelectionLost => "selection_lost",
             Self::SelectionIncompatible => "selection_incompatible",
+            Self::StalePreview => "stale_preview",
         }
     }
 }
@@ -574,6 +588,7 @@ pub struct TuiSession {
     interaction_mode: InteractionMode,
     command_phase: CommandPhase,
     active_command: Option<String>,
+    command_source_revision: Option<String>,
     history: HistoryState,
     recoverable_revisions: Vec<String>,
     presentation_generation: u64,
@@ -599,6 +614,7 @@ impl TuiSession {
             interaction_mode: InteractionMode::ModelessReady,
             command_phase: CommandPhase::Idle,
             active_command: None,
+            command_source_revision: None,
             history: HistoryState::Linear {
                 can_undo: false,
                 can_redo: false,
@@ -629,6 +645,16 @@ impl TuiSession {
         Self::new(targets, canonical_revision)
     }
 
+    pub fn from_feature_graph_probing(
+        graph: &FeatureGraph,
+        canonical_revision: impl AsRef<str>,
+    ) -> Self {
+        let targets = graph
+            .features()
+            .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
+        Self::new_probing(targets, canonical_revision)
+    }
+
     pub fn state(&self) -> TuiState {
         TuiState {
             lifecycle: self.lifecycle,
@@ -638,6 +664,7 @@ impl TuiSession {
             selection: self.selection.clone(),
             interaction_mode: self.interaction_mode.clone(),
             command_phase: self.command_phase.clone(),
+            command_source_revision: self.command_source_revision.clone(),
             history: self.history.clone(),
             recoverable_revisions: self.recoverable_revisions.clone(),
             presentation_generation: self.presentation_generation,
@@ -731,6 +758,7 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.command_phase = CommandPhase::Idle;
                 self.active_command = None;
+                self.command_source_revision = None;
                 self.finish_transition(kind, "interactive readiness", TransientState::Ready)
             }
             StateEvent::Lifecycle(LifecycleEvent::ProbeFailed { detail })
@@ -1039,6 +1067,7 @@ impl TuiSession {
                     && !command.is_empty() =>
             {
                 self.active_command = Some(command.clone());
+                self.command_source_revision = Some(self.canonical_revision.clone());
                 self.interaction_mode = InteractionMode::CommandModal;
                 self.command_phase = CommandPhase::Draft {
                     command,
@@ -1080,6 +1109,7 @@ impl TuiSession {
             {
                 self.command_phase = CommandPhase::Idle;
                 self.active_command = None;
+                self.command_source_revision = None;
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.finish_transition(kind, "command outcome dismissed", TransientState::Ready)
             }
@@ -1125,6 +1155,7 @@ impl TuiSession {
                     && !command.is_empty() =>
             {
                 self.active_command = Some(command.clone());
+                self.command_source_revision = Some(self.canonical_revision.clone());
                 self.interaction_mode = InteractionMode::CommandModal;
                 self.command_phase = CommandPhase::Draft {
                     command,
@@ -1206,20 +1237,34 @@ impl TuiSession {
                 self.command_phase = CommandPhase::Committing { input_fingerprint };
                 self.finish_transition(kind, "command committing", TransientState::Drag)
             }
-            StateEvent::Command(CommandEvent::CommitAccepted { revision })
-                if matches!(self.command_phase, CommandPhase::Committing { .. })
-                    && self.interaction_mode == InteractionMode::CommandModal
-                    && !revision.is_empty() =>
+            StateEvent::Command(CommandEvent::CommitAccepted {
+                source_revision,
+                revision,
+            }) if matches!(self.command_phase, CommandPhase::Committing { .. })
+                && self.interaction_mode == InteractionMode::CommandModal
+                && !revision.is_empty() =>
             {
-                self.canonical_revision = revision.clone();
-                self.history = HistoryState::Linear {
-                    can_undo: true,
-                    can_redo: false,
-                };
-                self.command_phase = CommandPhase::Outcome {
-                    outcome: CommandOutcome::Committed { revision },
-                };
-                self.finish_transition(kind, "command committed", TransientState::Selected)
+                if self.command_source_revision.as_deref() != Some(source_revision.as_str()) {
+                    Err(self.operation_diagnostic(
+                        TuiDiagnosticCode::StalePreview,
+                        axis,
+                        kind,
+                        format!(
+                            "commit source revision {source_revision} does not match preview revision"
+                        ),
+                        "Committing",
+                    ))
+                } else {
+                    self.canonical_revision = revision.clone();
+                    self.history = HistoryState::Linear {
+                        can_undo: true,
+                        can_redo: false,
+                    };
+                    self.command_phase = CommandPhase::Outcome {
+                        outcome: CommandOutcome::Committed { revision },
+                    };
+                    self.finish_transition(kind, "command committed", TransientState::Selected)
+                }
             }
             StateEvent::Command(CommandEvent::CommitRejected { detail })
                 if matches!(self.command_phase, CommandPhase::Committing { .. })
@@ -1285,6 +1330,7 @@ impl TuiSession {
             {
                 self.command_phase = CommandPhase::Idle;
                 self.active_command = None;
+                self.command_source_revision = None;
                 self.interaction_mode = InteractionMode::ModelessReady;
                 self.finish_transition(kind, "command outcome dismissed", TransientState::Ready)
             }

@@ -317,11 +317,29 @@ impl ViewportDisplayCache {
         }
         if let Some(scope) = preview_scope {
             let s = scope.command_schema.to_ascii_lowercase();
-            if s.contains("draft") {
+            if s.contains("draft")
+                || s.contains("hover")
+                || s.contains("candidate")
+                || s.contains("pointer")
+                || s.contains("stale")
+                || s.contains("preview-only")
+                || s.contains("worker-internal")
+                || s.contains("tmp/")
+                || s.contains("stderr")
+            {
                 return true;
             }
             let f = scope.input_fingerprint.to_ascii_lowercase();
-            if f.contains("draft") || f.contains("hover") || f.contains("stale") {
+            if f.contains("draft")
+                || f.contains("hover")
+                || f.contains("candidate")
+                || f.contains("pointer")
+                || f.contains("stale")
+                || f.contains("preview-only")
+                || f.contains("worker-internal")
+                || f.contains("tmp/")
+                || f.contains("stderr")
+            {
                 return true;
             }
         }

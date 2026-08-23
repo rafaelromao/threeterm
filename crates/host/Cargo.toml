@@ -12,6 +12,7 @@ threeterm-domain = { path = "../domain" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 threeterm-occt-worker = { path = "../workers/occt" }
+threeterm-viewport = { path = "../viewport" }
 sha2 = { workspace = true }
 
 [dev-dependencies]

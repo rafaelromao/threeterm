@@ -11,6 +11,7 @@ description = "Protocol-Neutral Viewport renderer and projection boundary."
 flate2 = { workspace = true }
 serde = { workspace = true }
 threeterm-domain = { path = "../domain" }
+threeterm-protocol = { path = "../protocol" }
 
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-#![allow(clippy::result_large_err)]
+#![allow(clippy::result_large_err, clippy::redundant_closure)]
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +8,7 @@ use threeterm_occt_worker::{emit_staged_artifact, worker_fingerprint};
 use threeterm_protocol::artifact::{Layer1ArtifactRequest, Stage};
 use threeterm_protocol::diagnostic::DiagnosticCode;
 use threeterm_protocol::frame::FrameParser;
-use threeterm_protocol::supervisor::{Request, StagedArtifact, Supervisor, SupervisorOutcome};
+use threeterm_protocol::supervisor::{Request, Supervisor, SupervisorOutcome};
 use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
 use threeterm_viewport::{
     CameraState, PreviewScope, ProtocolNeutralViewport, ViewportDisplayCache, ViewportRequest,

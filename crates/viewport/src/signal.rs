@@ -1,6 +1,4 @@
-#![allow(clippy::result_large_err)]
-
-use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
+use crate::diagnostic::ViewportDiagnostic;
 use crate::renderer::Renderer;
 
 /// Structured signal identity for renderer cleanup, used by signal handlers
@@ -33,6 +31,7 @@ impl CleanupSignal {
 /// revision for diagnostics. The underlying `Renderer::cleanup` is idempotent
 /// (GhosttyRenderer tracks `cleaned`) and retryable on transient write
 /// failures (returns `CleanupFailed` with recovery hint).
+#[allow(clippy::result_large_err)]
 pub fn cleanup_on_signal<R: Renderer>(
     renderer: &mut R,
     signal: CleanupSignal,
@@ -45,8 +44,8 @@ pub fn cleanup_on_signal<R: Renderer>(
             if diagnostic.detail.is_empty() {
                 diagnostic.detail = format!("{} cleanup failed", signal.as_str());
             }
-            if diagnostic.code != ViewportDiagnosticCode::CleanupFailed {
-                // Preserve original code but ensure recovery hint is present
+            if diagnostic.recovery.is_empty() {
+                // Preserve renderer's own recovery hint when present; only fill when missing
                 diagnostic.recovery =
                     "retry terminal restoration from the owning lifecycle boundary".to_string();
             }
@@ -62,6 +61,7 @@ pub fn cleanup_on_signal<R: Renderer>(
 /// Coordinator-level helper that shares the same signal-aware cleanup path
 /// while also clearing pending/in-flight/visible state. This is the
 /// production path used by `TuiViewportSession` signal handlers.
+#[allow(clippy::result_large_err)]
 pub fn cleanup_coordinator_on_signal<R: Renderer>(
     coordinator: &mut crate::renderer::RenderCoordinator<R>,
     signal: CleanupSignal,

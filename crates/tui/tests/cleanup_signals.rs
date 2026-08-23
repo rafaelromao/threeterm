@@ -341,10 +341,13 @@ fn failure_retryable_preserves_host() {
     assert!(err.detail.contains("SIGINT"));
     assert_eq!(host.current(), Some(before.clone()));
 
-    // retry should succeed – need to reset to Closed? Currently lifecycle is Closed after first despite failure (we transitioned to CleanupCompleted)
-    // For retry test, we check that second cleanup via coordinator succeeds directly
+    // Flaky writer's single failure has been exhausted by the first cleanup attempt, so
+    // the second coordinator cleanup should succeed and demonstrate retryability
     let retry = session.coordinator_mut().cleanup();
-    assert!(retry.is_ok() || retry.is_err()); // at least retryable path exists
+    assert!(
+        retry.is_ok(),
+        "coordinator cleanup should succeed after transient failure is exhausted: {retry:?}"
+    );
     // Ensure host still preserved
     assert_eq!(host.current(), Some(before));
 

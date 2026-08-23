@@ -57,6 +57,7 @@ impl ViewportDisplayCache {
         self.entries.is_empty()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn contains(
         &self,
         revision: &str,
@@ -140,6 +141,7 @@ impl ViewportDisplayCache {
     /// `projection_fn`. On miss calls `projection_fn`; on success stores the
     /// frame unless excluded; on diagnostic error never stores and propagates
     /// the diagnostic so canonical Host state is preserved.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_project<F>(
         &mut self,
         scene: &ViewportScene,

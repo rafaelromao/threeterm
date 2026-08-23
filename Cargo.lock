@@ -292,6 +292,7 @@ dependencies = [
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-viewport",
 ]
 
 [[package]]
@@ -367,6 +368,7 @@ dependencies = [
  "flate2",
  "serde",
  "threeterm-domain",
+ "threeterm-protocol",
 ]
 
 [[package]]

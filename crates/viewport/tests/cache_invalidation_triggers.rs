@@ -26,6 +26,7 @@ fn scene(revision: &str) -> ViewportScene {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn project(
     cache: &mut ViewportDisplayCache,
     scene: &ViewportScene,
@@ -436,7 +437,7 @@ fn capability_loss_clears_all_with_diagnostic() {
 fn bounded_memory_pressure_evicts_oldest_retaining_active_revision() {
     let fp = fingerprint();
     let mut cache = ViewportDisplayCache::new();
-    let cam = CameraState::new(0, 0, 100);
+    let _cam = CameraState::new(0, 0, 100);
     // insert 4 entries: rev-1 band0, rev-1 band~2, rev-2 band0, rev-2 band~2
     for i in 0..2 {
         let rev = if i == 0 { "rev-1" } else { "rev-2" };

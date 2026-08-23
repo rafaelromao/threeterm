@@ -1,4 +1,8 @@
-#![allow(clippy::result_large_err)]
+#![allow(
+    clippy::result_large_err,
+    clippy::redundant_closure,
+    clippy::too_many_arguments
+)]
 use std::fs;
 use threeterm_host::Host;
 use threeterm_protocol::artifact::{Layer1ArtifactRequest, Stage, WorkerFingerprint};

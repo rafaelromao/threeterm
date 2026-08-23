@@ -8,7 +8,10 @@ mod projection;
 mod renderer;
 mod signal;
 
-pub use cache::{PreviewScope, ViewportDisplayCache, frustum_band_from_camera};
+pub use cache::{
+    InvalidationOutcome, InvalidationTrigger, PreviewScope, ViewportDisplayCache,
+    frustum_band_from_camera,
+};
 pub use capability::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, CapabilityState,
     CapabilityTranscript, MAX_PROBE_RESPONSE_BYTES, TerminalCapabilityVector, TerminalEnvironment,

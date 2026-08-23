@@ -5,6 +5,7 @@ mod diagnostic;
 mod kitty;
 mod projection;
 mod renderer;
+mod signal;
 
 pub use capability::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, CapabilityState,
@@ -23,6 +24,7 @@ pub use renderer::{
     AcknowledgeOutcome, CancelOutcome, FrameAcknowledgement, FrameIdentity, RenderCoordinator,
     Renderer, RendererSubmission, SubmitOutcome,
 };
+pub use signal::{CleanupSignal, cleanup_coordinator_on_signal, cleanup_on_signal};
 
 pub fn schema_version() -> &'static str {
     SCHEMA_VERSION

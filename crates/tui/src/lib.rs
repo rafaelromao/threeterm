@@ -2043,6 +2043,60 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.coordinator.cleanup()
     }
 
+    pub fn handle_sigint(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        self.handle_exit_signal("SIGINT")
+    }
+
+    pub fn handle_sigterm(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        self.handle_exit_signal("SIGTERM")
+    }
+
+    pub fn handle_panic(
+        &mut self,
+        detail: impl Into<String>,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.handle_exit_signal(&format!("panic: {}", detail.into()))
+    }
+
+    pub fn handle_close(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        self.handle_exit_signal("close")
+    }
+
+    fn handle_exit_signal(&mut self, detail: &str) -> Result<StateTransition, TuiDiagnostic> {
+        self.tui
+            .transition_lifecycle(LifecycleEvent::CloseRequested)?;
+        let signal = match detail {
+            "SIGINT" => threeterm_viewport::CleanupSignal::Sigint,
+            "SIGTERM" => threeterm_viewport::CleanupSignal::Sigterm,
+            d if d.starts_with("panic") => threeterm_viewport::CleanupSignal::Panic,
+            "close" => threeterm_viewport::CleanupSignal::Close,
+            _ => threeterm_viewport::CleanupSignal::Normal,
+        };
+        let revision = self.tui.state().canonical_revision.clone();
+        if let Err(viewport_diagnostic) = threeterm_viewport::cleanup_coordinator_on_signal(
+            &mut self.coordinator,
+            signal,
+            &revision,
+        ) {
+            let canonical = self.tui.state().canonical_revision.clone();
+            let _ = self
+                .tui
+                .transition_lifecycle(LifecycleEvent::CleanupCompleted);
+            return Err(TuiDiagnostic {
+                code: TuiDiagnosticCode::LifecycleFailure,
+                detail: format!("{detail} cleanup failed: {viewport_diagnostic}"),
+                canonical_revision: canonical,
+                axis: Some(StateAxis::Lifecycle),
+                event: Some(StateEventKind::Lifecycle(
+                    LifecycleEventKind::CloseRequested,
+                )),
+                from: Some(format!("lifecycle={:?}", LifecycleState::Closing)),
+            });
+        }
+        self.tui
+            .transition_lifecycle(LifecycleEvent::CleanupCompleted)
+    }
+
     pub fn report_viewport_failure(
         &mut self,
         diagnostic: &ViewportDiagnostic,

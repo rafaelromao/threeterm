@@ -21,6 +21,39 @@ use threeterm_protocol::supervisor::SupervisorOutcome;
 
 pub const BREP_SUBDIR: &str = "brep";
 
+/// Returns true if a Layer 1 artifact request must never be cached per the
+/// exclusion policy. Mirrors `threeterm_viewport::ViewportDisplayCache::is_excluded`
+/// but on the Host's Layer 1 Derived Result boundary.
+/// Exclusions: Command Drafts, hover/pointer/candidate, stale last-valid
+/// geometry, preview-only beyond session, worker internals (tmp/ / stderr).
+pub fn is_layer1_excluded(request: &Layer1ArtifactRequest) -> bool {
+    if request.source_revision_id.is_empty() {
+        return true;
+    }
+    let fields = [
+        &request.artifact_kind,
+        &request.staging_name,
+        &request.semantic_input_sha256,
+        &request.deterministic_settings_sha256,
+    ];
+    for field in fields {
+        let lower = field.to_ascii_lowercase();
+        if lower.contains("draft")
+            || lower.contains("hover")
+            || lower.contains("candidate")
+            || lower.contains("pointer")
+            || lower.contains("stale")
+            || lower.contains("preview-only")
+            || lower.contains("worker-internal")
+            || lower.contains("tmp/")
+            || lower.contains("stderr")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
     pub feature_graph_hash: String,
@@ -578,6 +611,13 @@ impl Host {
             cleanup_staged_artifact(root, &header_staging_name);
             diagnostic
         };
+        // Exclusion policy: never cache Command Drafts, hover/pointer/candidate,
+        // stale last-valid geometry, preview-only beyond session, worker internals.
+        if is_layer1_excluded(request) {
+            return Err(reject(Diagnostic::artifact_promotion_failure(
+                "excluded_layer1_artifact: draft/hover/candidate/pointer/stale/preview-only/worker-internal/tmp/stderr",
+            )));
+        }
         let current = self.current().ok_or_else(|| {
             reject(Diagnostic::artifact_promotion_failure(
                 "canonical_snapshot_missing",

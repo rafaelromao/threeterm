@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 use std::fs;
 
 use threeterm_host::Host;

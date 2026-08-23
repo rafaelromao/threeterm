@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::redundant_closure)]
 use threeterm_protocol::artifact::WorkerFingerprint;
 use threeterm_viewport::{
     CameraState, PreviewScope, ProtocolNeutralViewport, SceneFeature, ViewportDisplayCache,

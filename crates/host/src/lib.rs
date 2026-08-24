@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use threeterm_domain::FeatureGraph;
+use threeterm_domain::{ComponentCommand, ComponentGraph, FeatureGraph};
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
@@ -540,6 +540,41 @@ impl Host {
             .borrow()
             .as_ref()
             .map(|loaded| loaded.graph.clone())
+    }
+
+    /// Return the replayed component graph. This is a materialized view of
+    /// canonical command transactions, never a separately persisted snapshot.
+    pub fn component_graph(&self, root: impl AsRef<Path>) -> Result<ComponentGraph, HostError> {
+        Ok(Bundle::at(root.as_ref()).open()?.components)
+    }
+
+    /// Validate and atomically append one component command. Validation occurs
+    /// before persistence publication, so a non-resolved reference leaves both
+    /// the host snapshot and sealed bundle unchanged.
+    pub fn apply_component_command(
+        &self,
+        root: impl AsRef<Path>,
+        command: ComponentCommand,
+    ) -> Result<SnapshotView, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let mut graph = if !bundle.canonical_root().exists()
+            && !previous_generation_path(bundle.canonical_root()).exists()
+        {
+            ComponentGraph::default()
+        } else {
+            match bundle.open() {
+                Ok(loaded) => loaded.components,
+                Err(BundleError::BundlePathMissing { .. }) => ComponentGraph::default(),
+                Err(error) => return Err(error.into()),
+            }
+        };
+        graph
+            .apply(&command)
+            .map_err(|detail| HostError::Validation { detail })?;
+        let loaded = bundle.append_component_command(&command)?;
+        let view = SnapshotView::from(&loaded);
+        self.current.replace(Some(loaded));
+        Ok(view)
     }
 
     /// Capture one immutable presentation projection from the current

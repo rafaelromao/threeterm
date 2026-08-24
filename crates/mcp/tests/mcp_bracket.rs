@@ -307,9 +307,11 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
     );
     assert_eq!(structured(&discarded, 2)["status"], "rejected");
     assert_eq!(
-        structured(&discarded, 2)["diagnostic"]["detail"],
-        "command draft edit-discard is invalid: phase request does not match the stored draft values"
+        structured(&discarded, 2)["diagnostic"]["kind"],
+        "draft_input_conflict"
     );
+    assert!(structured(&discarded, 2)["diagnostic"]["source_revision"].is_string());
+    assert!(structured(&discarded, 2)["diagnostic"]["current_revision"].is_string());
     assert_eq!(structured(&discarded, 3)["phase"], "preview");
     assert_ne!(
         structured(&discarded, 3)["preview_revision"],

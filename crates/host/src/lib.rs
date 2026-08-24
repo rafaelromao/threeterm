@@ -288,6 +288,12 @@ pub enum HostError {
         draft_id: String,
         detail: String,
     },
+    DraftInputConflict {
+        draft_id: String,
+        source_revision: String,
+        current_revision: String,
+        recovery: &'static str,
+    },
     DraftSequenceConflict {
         draft_id: String,
         expected: u64,
@@ -378,6 +384,15 @@ impl std::fmt::Display for HostError {
             Self::DraftInvalid { draft_id, detail } => {
                 write!(formatter, "command draft {draft_id} is invalid: {detail}")
             }
+            Self::DraftInputConflict {
+                draft_id,
+                source_revision,
+                current_revision,
+                recovery,
+            } => write!(
+                formatter,
+                "command draft {draft_id} input conflicts: source_revision={source_revision} current_revision={current_revision} recovery={recovery}"
+            ),
             Self::DraftSequenceConflict {
                 draft_id,
                 expected,
@@ -1314,7 +1329,7 @@ impl Host {
             }
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
-        let kind = bracket_kind_with_draft(&request, Some(draft_id));
+        let kind = bracket_kind(&request);
         let existing = match Bundle::at(&root).find_idempotency_key(draft_id) {
             Ok(existing) => existing,
             Err(error) => {
@@ -1518,9 +1533,15 @@ impl Host {
             || request.height != draft.request.height
             || request.thickness != draft.request.thickness
         {
-            return Err(HostError::DraftInvalid {
+            let current_revision = Bundle::at(&root)
+                .open()
+                .map(|bundle| bundle.revision_hash_hex().to_string())
+                .unwrap_or_else(|_| draft.source_revision.clone());
+            return Err(HostError::DraftInputConflict {
                 draft_id: draft_id.to_string(),
-                detail: "phase request does not match the stored draft values".to_string(),
+                source_revision: draft.source_revision,
+                current_revision,
+                recovery: "use_update_or_refresh_draft",
             });
         }
         Ok(())
@@ -2711,11 +2732,6 @@ fn read_verified_worker_brep(result: &BracketResult) -> Result<Vec<u8>, HostErro
 }
 
 fn bracket_kind(request: &BracketRequest) -> String {
-    bracket_kind_with_draft(request, None)
-}
-
-fn bracket_kind_with_draft(request: &BracketRequest, draft_id: Option<&str>) -> String {
-    let _ = draft_id;
     format!(
         "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
         request.length, request.width, request.height, request.thickness,

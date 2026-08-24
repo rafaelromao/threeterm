@@ -3804,6 +3804,14 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DraftInvalid { draft_id, detail } => format!(
             "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"
         ),
+        HostError::DraftInputConflict {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_input_conflict\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
         HostError::DraftSequenceConflict {
             draft_id,
             expected,

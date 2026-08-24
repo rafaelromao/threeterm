@@ -584,6 +584,17 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         diagnostic["recovery"] = Value::String((*recovery).to_string());
         source_revision = authoritative_source.clone();
     }
+    if let HostError::DraftInputConflict {
+        source_revision: authoritative_source,
+        recovery,
+        ..
+    } = error
+    {
+        diagnostic["kind"] = Value::String("draft_input_conflict".to_string());
+        diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+        diagnostic["recovery"] = Value::String((*recovery).to_string());
+        source_revision = authoritative_source.clone();
+    }
     let current_revision = match error {
         HostError::DraftStale {
             source_revision: authoritative_source,
@@ -598,6 +609,12 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
             ..
         }
         | HostError::DraftIdempotencyConflict {
+            source_revision: authoritative_source,
+            current_revision,
+            recovery,
+            ..
+        }
+        | HostError::DraftInputConflict {
             source_revision: authoritative_source,
             current_revision,
             recovery,

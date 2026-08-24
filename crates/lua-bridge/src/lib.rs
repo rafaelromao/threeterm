@@ -314,19 +314,19 @@ fn forbidden_module(
 ) -> mlua::Result<Table> {
     let module_name = module.to_string();
     let index_failure = Rc::clone(forbidden_api);
-    let index = lua.create_function(move |_lua, (_table, member): (Table, String)| {
+    let index = lua.create_function(move |_lua, (_table, member): (Table, LuaValue)| {
         index_failure
             .borrow_mut()
-            .replace(format!("{module_name}.{member}"));
+            .replace(format!("{module_name}.{}", forbidden_member_name(member)));
         Err::<LuaValue, _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
     })?;
     let module_name = module.to_string();
     let new_index_failure = Rc::clone(forbidden_api);
     let new_index = lua.create_function(
-        move |_lua, (_table, member, _value): (Table, String, LuaValue)| {
+        move |_lua, (_table, member, _value): (Table, LuaValue, LuaValue)| {
             new_index_failure
                 .borrow_mut()
-                .replace(format!("{module_name}.{member}"));
+                .replace(format!("{module_name}.{}", forbidden_member_name(member)));
             Err::<(), _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
         },
     )?;
@@ -336,6 +336,17 @@ fn forbidden_module(
     let module_table = lua.create_table()?;
     module_table.set_metatable(Some(metatable))?;
     Ok(module_table)
+}
+
+fn forbidden_member_name(member: LuaValue) -> String {
+    match member {
+        LuaValue::String(value) => value.to_string_lossy(),
+        LuaValue::Integer(value) => value.to_string(),
+        LuaValue::Number(value) => value.to_string(),
+        LuaValue::Boolean(value) => value.to_string(),
+        LuaValue::Nil => "nil".to_string(),
+        value => format!("{value:?}"),
+    }
 }
 
 fn forbidden_global(
@@ -454,6 +465,7 @@ mod integration_contract_tests {
     fn forbidden_modules_cannot_be_replaced_or_accessed_without_a_diagnostic() {
         for (source, api) in [
             ("io.lines('/tmp/not-allowed')", "io.lines"),
+            ("io[1]()", "io.1"),
             ("package.unknown()", "package.unknown"),
             ("io.open = function() end", "io.open"),
             ("package = {}", "package"),

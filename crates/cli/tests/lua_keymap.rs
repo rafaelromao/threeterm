@@ -209,3 +209,25 @@ fn invalid_initial_config_starts_with_safe_empty_bindings_and_diagnostic() {
 
     let _ = fs::remove_file(config);
 }
+
+#[test]
+fn restoring_the_active_config_clears_a_read_failure_diagnostic() {
+    let config = temp_path("restored-config");
+    let source = bracket_lua(&temp_path("restored-root"));
+    fs::write(&config, &source).expect("initial Lua config writes");
+    let mut watcher = LuaConfigWatcher::from_path(&config);
+    fs::remove_file(&config).expect("config removal succeeds");
+
+    let failed = watcher.poll();
+    assert!(matches!(failed, LuaReloadStatus::Failed { .. }));
+    assert_eq!(
+        watcher.diagnostic().map(|diagnostic| diagnostic.code()),
+        Some("lua_config_read_failure")
+    );
+
+    fs::write(&config, source).expect("config restoration succeeds");
+    assert!(matches!(watcher.poll(), LuaReloadStatus::Unchanged { .. }));
+    assert!(watcher.diagnostic().is_none());
+
+    let _ = fs::remove_file(config);
+}

@@ -329,6 +329,14 @@ impl LuaConfigWatcher {
         };
 
         if self.last_attempted_source.as_ref() == Some(&bytes) {
+            if self.active_source.as_bytes() == bytes.as_slice()
+                && self
+                    .diagnostic
+                    .as_ref()
+                    .is_some_and(|diagnostic| diagnostic.code == LUA_CONFIG_READ_FAILURE_CODE)
+            {
+                self.diagnostic = None;
+            }
             return LuaReloadStatus::Unchanged {
                 generation: self.generation,
             };

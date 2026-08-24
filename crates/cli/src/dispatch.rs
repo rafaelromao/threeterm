@@ -27,9 +27,9 @@ pub use threeterm_protocol::schema::{
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
-    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
+    BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
     MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
     TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
@@ -450,6 +450,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
             parse_component(EDIT_COMPONENT_PARAMETER_COMMAND_ID, &args[2..])
         }
         "component-state" => parse_component(COMPONENT_STATE_COMMAND_ID, &args[2..]),
+        "capture-component" => parse_component(CAPTURE_COMPONENT_COMMAND_ID, &args[2..]),
         "historical-edit" => parse_historical_edit(&args[2..]),
         "create-revision" => parse_named_revision(&args[2..], true),
         "restore-revision" => parse_named_revision(&args[2..], false),
@@ -587,6 +588,16 @@ fn parse_component(command: CommandId, args: &[OsString]) -> DispatchPlan {
             };
         };
         let key = name.replace('-', "_");
+        if command == CAPTURE_COMPONENT_COMMAND_ID && key == "feature_id" {
+            request
+                .entry("selected_feature_ids".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("capture feature IDs are stored as an array")
+                .push(Value::String(value.to_string()));
+            index += 2;
+            continue;
+        }
         let value = if key == "transform" {
             match parse_vec3(value, "--transform") {
                 Ok(transform) => json!(transform),
@@ -2679,6 +2690,33 @@ pub fn dispatch_registered_command(
                 json!({"definitions": graph.definitions, "instances": graph.instances, "schema_version": schema.response_schema_version}),
             );
         }
+        if command == CAPTURE_COMPONENT_COMMAND_ID {
+            let selected_feature_ids = request
+                .get("selected_feature_ids")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    DispatchError::Validation("missing selected_feature_ids".to_string())
+                })?
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        DispatchError::Validation(
+                            "selected_feature_ids must contain strings".to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let view = host.capture_component(
+                string_field("bundle_path")?,
+                string_field("definition_id")?,
+                &selected_feature_ids,
+            )?;
+            return Ok(json!({
+                "feature_graph_hash": view.feature_graph_hash,
+                "revision_hash": view.revision_hash,
+                "schema_version": schema.response_schema_version,
+            }));
+        }
         if command == HISTORICAL_EDIT_COMMAND_ID {
             let view = host.historical_edit(
                 string_field("bundle_path")?,
@@ -2760,6 +2798,7 @@ pub fn dispatch_registered_command(
                 DEFINE_COMPONENT_COMMAND_ID => ComponentCommand::Define {
                     definition: ComponentDefinition {
                         id: string_field("definition_id")?.to_string(),
+                        selected_feature_ids: Vec::new(),
                         descriptor: LBracketDescriptor {
                             feature_id: string_field("feature_id")?.to_string(),
                             length: number_field("length")?,
@@ -4449,7 +4488,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 28);
+        assert_eq!(commands.len(), 29);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

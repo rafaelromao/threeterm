@@ -1,15 +1,19 @@
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value as LuaValue};
+use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value as LuaValue, VmState};
 use serde_json::Value;
 use threeterm_protocol::schema::{CommandId, find_by_name};
 use threeterm_protocol::schema_validator::validate;
 
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_BINDINGS: usize = 64;
+const MAX_MEMORY_BYTES: usize = 8 * 1024 * 1024;
+const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
+const MAX_INSTRUCTIONS: u32 = 100_000;
 
 pub fn schema_version() -> &'static str {
     "threeterm.lua-bridge/1"
@@ -111,6 +115,23 @@ impl LuaBridge {
             let lua = Lua::new_with(
                 StdLib::TABLE | StdLib::STRING | StdLib::MATH,
                 LuaOptions::default(),
+            )?;
+            lua.set_memory_limit(MAX_MEMORY_BYTES)?;
+            let instruction_count = Rc::new(Cell::new(0_u32));
+            let hook_count = Rc::clone(&instruction_count);
+            lua.set_hook(
+                HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
+                move |_lua, _debug| {
+                    let count = hook_count.get().saturating_add(HOOK_INSTRUCTION_INTERVAL);
+                    hook_count.set(count);
+                    if count > MAX_INSTRUCTIONS {
+                        Err(mlua::Error::RuntimeError(
+                            "Lua instruction limit exceeded".to_string(),
+                        ))
+                    } else {
+                        Ok(VmState::Continue)
+                    }
+                },
             )?;
             let globals = lua.globals();
             for name in [
@@ -280,6 +301,18 @@ mod integration_contract_tests {
             "dofile('not allowed')",
         ] {
             let error = LuaBridge::load(expression).expect_err("forbidden global is unavailable");
+            assert_eq!(error.code(), "script_failure");
+            assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
+        }
+    }
+
+    #[test]
+    fn resource_limits_fail_infinite_scripts_and_large_allocations_closed() {
+        for source in [
+            "while true do end",
+            "local value = string.rep('x', 16 * 1024 * 1024)",
+        ] {
+            let error = LuaBridge::load(source).expect_err("resource limit rejects script");
             assert_eq!(error.code(), "script_failure");
             assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
         }

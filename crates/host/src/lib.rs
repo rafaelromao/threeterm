@@ -293,6 +293,12 @@ pub enum HostError {
         expected: u64,
         current: u64,
     },
+    DraftIdempotencyConflict {
+        draft_id: String,
+        source_revision: String,
+        current_revision: String,
+        recovery: &'static str,
+    },
     DraftUnknownOutcome {
         draft_id: String,
         source_revision: String,
@@ -379,6 +385,15 @@ impl std::fmt::Display for HostError {
             } => write!(
                 formatter,
                 "command draft {draft_id} update conflicts: expected_sequence={expected} current_sequence={current}"
+            ),
+            Self::DraftIdempotencyConflict {
+                draft_id,
+                source_revision,
+                current_revision,
+                recovery,
+            } => write!(
+                formatter,
+                "command draft {draft_id} idempotency key conflicts: source_revision={source_revision} current_revision={current_revision} recovery={recovery}"
             ),
             Self::DraftUnknownOutcome {
                 draft_id,
@@ -993,7 +1008,11 @@ impl Host {
     ) -> Result<SnapshotView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let mut request = request;
-        let loaded = Bundle::at(&root).open()?;
+        let loaded = if root.exists() {
+            Bundle::at(&root).open()?
+        } else {
+            Bundle::create(&root)?.open()?
+        };
         let stage = preview_stage_path(&root, &format!("create-{}", request.feature_id));
         request = request.with_output_path(&stage, "bracket.brep");
         request
@@ -1316,9 +1335,11 @@ impl Host {
                 });
             }
             remove_preview_stage(&stage);
-            return Err(HostError::DraftInvalid {
+            return Err(HostError::DraftIdempotencyConflict {
                 draft_id: draft_id.to_string(),
-                detail: "idempotency key is already bound to another transaction".to_string(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: committed.revision_hash_hex().to_string(),
+                recovery: "use_new_idempotency_key",
             });
         }
         let snapshot = match self.promote_brep_bytes(
@@ -1336,6 +1357,17 @@ impl Host {
                 if matches!(&error, HostError::Persistence(BundleError::Invalid(_)))
                     && let Ok(current) = Bundle::at(&root).open()
                 {
+                    if let HostError::Persistence(BundleError::Invalid(detail)) = &error
+                        && detail.contains("idempotency key")
+                    {
+                        remove_preview_stage(&stage);
+                        return Err(HostError::DraftIdempotencyConflict {
+                            draft_id: draft_id.to_string(),
+                            source_revision: draft.source_revision.clone(),
+                            current_revision: current.revision_hash_hex().to_string(),
+                            recovery: "use_new_idempotency_key",
+                        });
+                    }
                     if current.revision_hash_hex() != draft.source_revision {
                         remove_preview_stage(&stage);
                         return Err(HostError::DraftStale {

@@ -171,6 +171,9 @@ fn tools_list_advertises_every_registered_command_with_populated_schemas() {
 
 #[test]
 fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let cli_root = fresh_bundle("happy-cli");
     let mcp_root = fresh_bundle("happy-mcp");
 
@@ -253,16 +256,16 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
 
 #[test]
 fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
-    let root = fresh_bundle("bracket-edit-lifecycle");
-    let Ok(worker) = OcctWorker::locate() else {
+    if OcctWorker::locate().is_err() {
         return;
-    };
+    }
+    let root = fresh_bundle("bracket-edit-lifecycle");
     Bundle::create(&root).expect("bundle creates");
     Host::new()
         .create_bracket(
             &root,
             BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("l-1"),
-            &worker,
+            &OcctWorker::locate().expect("worker locates"),
         )
         .expect("initial bracket commits");
     let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");

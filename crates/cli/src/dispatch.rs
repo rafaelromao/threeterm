@@ -3811,6 +3811,14 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         } => format!(
             "{{\"kind\":\"draft_sequence_conflict\",\"draft_id\":{draft_id:?},\"expected_sequence\":{expected},\"current_sequence\":{current},\"recovery\":\"refresh_draft_and_retry\"}}"
         ),
+        HostError::DraftIdempotencyConflict {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_idempotency_conflict\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
         HostError::DraftUnknownOutcome {
             draft_id,
             source_revision,

@@ -273,11 +273,14 @@ impl McpServer {
     }
 
     fn dispatch_bracket_edit_tool(&self, arguments: &Value) -> Result<Value, DispatchError> {
-        for session in self.bracket_edits.borrow_mut().values_mut() {
-            session
-                .host
-                .prune_expired_drafts(Duration::from_secs(30 * 60));
-        }
+        self.bracket_edits
+            .borrow_mut()
+            .retain(|(root, draft_id), session| {
+                session
+                    .host
+                    .prune_expired_drafts(Duration::from_secs(30 * 60));
+                session.host.has_bracket_parameter_draft(root, draft_id)
+            });
         let phase = arguments
             .get("phase")
             .and_then(Value::as_str)
@@ -560,6 +563,17 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         diagnostic["current_sequence"] = Value::from(*current);
         diagnostic["recovery"] = Value::String("refresh_draft_and_retry".to_string());
     }
+    if let HostError::DraftIdempotencyConflict {
+        source_revision: authoritative_source,
+        recovery,
+        ..
+    } = error
+    {
+        diagnostic["kind"] = Value::String("draft_idempotency_conflict".to_string());
+        diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+        diagnostic["recovery"] = Value::String((*recovery).to_string());
+        source_revision = authoritative_source.clone();
+    }
     let current_revision = match error {
         HostError::DraftStale {
             source_revision: authoritative_source,
@@ -572,6 +586,12 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
             current_revision,
             recovery,
             ..
+        }
+        | HostError::DraftIdempotencyConflict {
+            source_revision: authoritative_source,
+            current_revision,
+            recovery,
+            ..
         } => {
             source_revision = authoritative_source.clone();
             diagnostic["source_revision"] = Value::String(authoritative_source.clone());
@@ -580,6 +600,9 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         }
         _ => None,
     };
+    if let Some(current_revision) = current_revision {
+        diagnostic["current_revision"] = Value::String(current_revision.to_string());
+    }
     let mut response = bracket_edit_response(
         phase,
         draft_id,

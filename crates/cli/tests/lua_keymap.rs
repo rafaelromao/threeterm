@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -271,6 +272,70 @@ fn the_shipped_cli_dispatches_the_file_backed_lua_path() {
     );
     assert!(second.stderr.is_empty());
     assert!(second_root.join("transactions.log").is_file());
+
+    let _ = fs::remove_file(config);
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
+}
+
+#[test]
+fn the_shipped_cli_keeps_one_lua_session_alive_across_reload_failures() {
+    let config = temp_path("session-config");
+    let first_root = temp_path("session-first");
+    let second_root = temp_path("session-second");
+    fs::write(&config, bracket_lua(&first_root)).expect("initial Lua config writes");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .args([
+            "--lua-session",
+            config.to_str().expect("config path is UTF-8"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("threeterm session starts");
+    let mut input = child.stdin.take().expect("session stdin is available");
+    let stdout = child.stdout.take().expect("session stdout is available");
+    let mut output = BufReader::new(stdout);
+    let mut first_response = String::new();
+    writeln!(input, "F2").expect("first key writes");
+    input.flush().expect("first key flushes");
+    output
+        .read_line(&mut first_response)
+        .expect("first response reads");
+    assert!(!first_response.trim().is_empty());
+    assert!(first_root.join("transactions.log").is_file());
+
+    fs::write(&config, "keymap.bind(\"F2\", \"missing\", {})").expect("invalid reload writes");
+    let mut failed_response = String::new();
+    writeln!(input, "F2").expect("second key writes");
+    input.flush().expect("second key flushes");
+    output
+        .read_line(&mut failed_response)
+        .expect("failed reload response reads");
+    assert!(!failed_response.trim().is_empty());
+    assert!(first_root.join("transactions.log").is_file());
+
+    fs::write(&config, bracket_lua(&second_root)).expect("recovery reload writes");
+    let mut recovered_response = String::new();
+    writeln!(input, "F2").expect("third key writes");
+    input.flush().expect("third key flushes");
+    output
+        .read_line(&mut recovered_response)
+        .expect("recovered response reads");
+    assert!(!recovered_response.trim().is_empty());
+    assert!(second_root.join("transactions.log").is_file());
+
+    drop(input);
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("session stderr is available")
+        .read_to_string(&mut stderr)
+        .expect("session diagnostics read");
+    assert!(child.wait().expect("session exits").success());
+    assert!(stderr.contains("lua_config_reload_failure"));
 
     let _ = fs::remove_file(config);
     let _ = fs::remove_dir_all(first_root);

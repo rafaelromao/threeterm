@@ -2,9 +2,13 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value as LuaValue, VmState};
+use serde::Serialize;
 use serde_json::Value;
 use threeterm_protocol::schema::{CommandId, find_by_name};
 use threeterm_protocol::schema_validator::validate;
@@ -14,6 +18,8 @@ const MAX_BINDINGS: usize = 64;
 const MAX_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
 const MAX_INSTRUCTIONS: u32 = 100_000;
+pub const LUA_CONFIG_RELOAD_FAILURE_CODE: &str = "lua_config_reload_failure";
+pub const LUA_CONFIG_READ_FAILURE_CODE: &str = "lua_config_read_failure";
 
 pub fn schema_version() -> &'static str {
     "threeterm.lua-bridge/1"
@@ -197,6 +203,225 @@ impl LuaBridge {
             }
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LuaReloadDiagnostic {
+    pub code: String,
+    pub cause_code: String,
+    pub path: String,
+    pub detail: String,
+    pub schema_version: &'static str,
+}
+
+impl LuaReloadDiagnostic {
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LuaReloadStatus {
+    Unchanged {
+        generation: u64,
+    },
+    Reloaded {
+        generation: u64,
+    },
+    Failed {
+        generation: u64,
+        diagnostic: LuaReloadDiagnostic,
+    },
+}
+
+impl LuaReloadStatus {
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Unchanged { generation }
+            | Self::Reloaded { generation }
+            | Self::Failed { generation, .. } => *generation,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&LuaReloadDiagnostic> {
+        match self {
+            Self::Failed { diagnostic, .. } => Some(diagnostic),
+            Self::Unchanged { .. } | Self::Reloaded { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileFingerprint {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LuaConfigWatcher {
+    path: PathBuf,
+    bridge: LuaBridge,
+    active_source: String,
+    last_attempted_source: Option<Vec<u8>>,
+    generation: u64,
+    diagnostic: Option<LuaReloadDiagnostic>,
+}
+
+impl LuaConfigWatcher {
+    pub fn from_path(path: impl AsRef<Path>) -> Self {
+        let mut watcher = Self {
+            path: path.as_ref().to_path_buf(),
+            bridge: LuaBridge::default(),
+            active_source: String::new(),
+            last_attempted_source: None,
+            generation: 0,
+            diagnostic: None,
+        };
+        let _ = watcher.poll();
+        watcher
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn diagnostic(&self) -> Option<&LuaReloadDiagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    pub fn binding_count(&self) -> usize {
+        self.bridge.binding_count()
+    }
+
+    pub fn active_source(&self) -> &str {
+        &self.active_source
+    }
+
+    pub fn poll(&mut self) -> LuaReloadStatus {
+        let bytes = match read_config_bytes(&self.path) {
+            Ok(candidate) => candidate,
+            Err((cause_code, detail)) => {
+                let diagnostic =
+                    self.make_diagnostic(LUA_CONFIG_READ_FAILURE_CODE, cause_code, detail);
+                self.diagnostic = Some(diagnostic.clone());
+                return LuaReloadStatus::Failed {
+                    generation: self.generation,
+                    diagnostic,
+                };
+            }
+        };
+
+        if self.last_attempted_source.as_ref() == Some(&bytes) {
+            return LuaReloadStatus::Unchanged {
+                generation: self.generation,
+            };
+        }
+        self.last_attempted_source = Some(bytes.clone());
+
+        let source = match String::from_utf8(bytes) {
+            Ok(source) => source,
+            Err(error) => {
+                let diagnostic = self.make_diagnostic(
+                    LUA_CONFIG_RELOAD_FAILURE_CODE,
+                    "invalid_utf8",
+                    error.to_string(),
+                );
+                self.diagnostic = Some(diagnostic.clone());
+                return LuaReloadStatus::Failed {
+                    generation: self.generation,
+                    diagnostic,
+                };
+            }
+        };
+        let bridge = match LuaBridge::load(&source) {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                let diagnostic = self.make_diagnostic(
+                    LUA_CONFIG_RELOAD_FAILURE_CODE,
+                    error.code(),
+                    error.to_string(),
+                );
+                self.diagnostic = Some(diagnostic.clone());
+                return LuaReloadStatus::Failed {
+                    generation: self.generation,
+                    diagnostic,
+                };
+            }
+        };
+
+        self.bridge = bridge;
+        self.active_source = source;
+        self.generation = self.generation.saturating_add(1);
+        self.diagnostic = None;
+        LuaReloadStatus::Reloaded {
+            generation: self.generation,
+        }
+    }
+
+    pub fn invoke_key<F, E>(&self, key: &str, dispatcher: F) -> Result<Value, LuaBridgeError>
+    where
+        F: FnOnce(CommandId, Value) -> Result<Value, E>,
+        E: fmt::Display,
+    {
+        self.bridge.invoke_key(key, dispatcher)
+    }
+
+    fn make_diagnostic(&self, code: &str, cause_code: &str, detail: String) -> LuaReloadDiagnostic {
+        LuaReloadDiagnostic {
+            code: code.to_string(),
+            cause_code: cause_code.to_string(),
+            path: self.path.to_string_lossy().into_owned(),
+            detail,
+            schema_version: schema_version(),
+        }
+    }
+}
+
+fn read_config_bytes(path: &Path) -> Result<Vec<u8>, (&'static str, String)> {
+    let before = fs::metadata(path).map_err(|error| ("io", error.to_string()))?;
+    if !before.is_file() {
+        return Err((
+            "not_a_file",
+            "Lua config path is not a regular file".to_string(),
+        ));
+    }
+    if before.len() > MAX_SOURCE_BYTES as u64 {
+        return Err((
+            "source_too_large",
+            format!(
+                "Lua config is {} bytes; maximum is {MAX_SOURCE_BYTES}",
+                before.len()
+            ),
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| ("io", error.to_string()))?;
+    let after = fs::metadata(path).map_err(|error| ("io", error.to_string()))?;
+    let before_fingerprint = FileFingerprint::from_metadata(&before);
+    let after_fingerprint = FileFingerprint::from_metadata(&after);
+    if before_fingerprint != after_fingerprint {
+        return Err((
+            "changed_during_read",
+            "Lua config changed while it was being read".to_string(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn register_binding(

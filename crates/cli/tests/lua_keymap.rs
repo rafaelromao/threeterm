@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_cli::dispatch::{dispatch, dispatch_lua_key};
 use threeterm_host::Host;
+use threeterm_lua_bridge::{LuaConfigWatcher, LuaReloadStatus};
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
@@ -104,4 +105,107 @@ fn lua_dispatch_failure_preserves_the_host_canonical_state() {
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(blocked);
+}
+
+#[test]
+fn saving_lua_config_reloads_the_binding_on_the_production_dispatch_path() {
+    let config = temp_path("reload-config");
+    let first_root = temp_path("reload-first");
+    let second_root = temp_path("reload-second");
+    fs::write(&config, bracket_lua(&first_root)).expect("initial Lua config writes");
+    let mut watcher = LuaConfigWatcher::from_path(&config);
+    let host = Host::new();
+
+    let first = threeterm_cli::dispatch::dispatch_lua_key_file(&mut watcher, "F2", &host)
+        .expect("initial file-backed Lua dispatch succeeds");
+    assert!(matches!(first.reload, LuaReloadStatus::Unchanged { .. }));
+    assert!(first_root.join("transactions.log").is_file());
+
+    fs::write(&config, bracket_lua(&second_root)).expect("updated Lua config writes");
+    let second = threeterm_cli::dispatch::dispatch_lua_key_file(&mut watcher, "F2", &host)
+        .expect("reloaded file-backed Lua dispatch succeeds");
+    assert!(matches!(second.reload, LuaReloadStatus::Reloaded { .. }));
+    assert!(second_root.join("transactions.log").is_file());
+
+    let _ = fs::remove_file(config);
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
+}
+
+#[test]
+fn failed_reload_reports_diagnostic_and_preserves_the_last_valid_host_state() {
+    let config = temp_path("failed-reload-config");
+    let root = temp_path("failed-reload-root");
+    fs::write(&config, bracket_lua(&root)).expect("initial Lua config writes");
+    let mut watcher = LuaConfigWatcher::from_path(&config);
+    let host = Host::new();
+    threeterm_cli::dispatch::dispatch_lua_key_file(&mut watcher, "F2", &host)
+        .expect("initial dispatch succeeds");
+    let current_before = host.current();
+    let manifest_before = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = fs::read(root.join("transactions.log")).expect("transaction log reads");
+
+    fs::write(&config, "keymap.bind(\"F2\", \"missing\", {})").expect("invalid Lua config writes");
+    let status = watcher.poll();
+    let LuaReloadStatus::Failed { diagnostic, .. } = &status else {
+        panic!("invalid config reports a failed reload, got {status:?}");
+    };
+    assert_eq!(diagnostic.code(), "lua_config_reload_failure");
+    assert_eq!(diagnostic.cause_code, "unknown_command");
+    assert_eq!(diagnostic.schema_version(), "threeterm.lua-bridge/1");
+    assert_eq!(diagnostic.path, config.to_string_lossy());
+    let serialized = serde_json::to_value(diagnostic).expect("reload diagnostic serializes");
+    assert_eq!(serialized["code"], "lua_config_reload_failure");
+    assert_eq!(host.current(), current_before);
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log_before);
+
+    assert!(matches!(watcher.poll(), LuaReloadStatus::Unchanged { .. }));
+    assert!(watcher.diagnostic().is_some());
+
+    fs::write(&config, bracket_lua(&root)).expect("valid Lua recovery writes");
+    assert!(matches!(watcher.poll(), LuaReloadStatus::Reloaded { .. }));
+    assert!(watcher.diagnostic().is_none());
+
+    let _ = fs::remove_file(config);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn atomic_config_replacement_is_detected_by_the_file_backed_watcher() {
+    let config = temp_path("atomic-config");
+    let replacement = temp_path("atomic-replacement");
+    let first_root = temp_path("atomic-first");
+    let second_root = temp_path("atomic-second");
+    fs::write(&config, bracket_lua(&first_root)).expect("initial Lua config writes");
+    let mut watcher = LuaConfigWatcher::from_path(&config);
+    fs::write(&replacement, bracket_lua(&second_root)).expect("replacement Lua config writes");
+    fs::rename(&replacement, &config).expect("config replacement succeeds");
+
+    let host = Host::new();
+    let result = threeterm_cli::dispatch::dispatch_lua_key_file(&mut watcher, "F2", &host)
+        .expect("atomic replacement dispatch succeeds");
+    assert!(matches!(result.reload, LuaReloadStatus::Reloaded { .. }));
+    assert!(second_root.join("transactions.log").is_file());
+
+    let _ = fs::remove_file(config);
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
+}
+
+#[test]
+fn invalid_initial_config_starts_with_safe_empty_bindings_and_diagnostic() {
+    let config = temp_path("invalid-initial-config");
+    fs::write(&config, "this is not valid Lua").expect("invalid Lua config writes");
+    let watcher = LuaConfigWatcher::from_path(&config);
+
+    assert_eq!(watcher.binding_count(), 0);
+    let diagnostic = watcher.diagnostic().expect("initial failure is diagnosed");
+    assert_eq!(diagnostic.code(), "lua_config_reload_failure");
+    assert_eq!(diagnostic.cause_code, "script_failure");
+
+    let _ = fs::remove_file(config);
 }

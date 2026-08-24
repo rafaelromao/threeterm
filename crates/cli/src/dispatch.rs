@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError, SnapshotView};
-use threeterm_lua_bridge::LuaBridge;
+use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
@@ -2214,6 +2214,28 @@ pub fn dispatch_lua_key(
         dispatch_registered_command(host, command, request)
             .map_err(|error| error.diagnostic_detail())
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuaDispatchResult {
+    pub response: Value,
+    pub reload: LuaReloadStatus,
+}
+
+/// Poll a real Lua config file before invoking its active keymap. A failed
+/// reload is carried in the result while the watcher keeps its last valid
+/// bridge, so the session can continue without mutating Host state.
+pub fn dispatch_lua_key_file(
+    watcher: &mut LuaConfigWatcher,
+    key: &str,
+    host: &Host,
+) -> Result<LuaDispatchResult, threeterm_lua_bridge::LuaBridgeError> {
+    let reload = watcher.poll();
+    let response = watcher.invoke_key(key, |command, request| {
+        dispatch_registered_command(host, command, request)
+            .map_err(|error| error.diagnostic_detail())
+    })?;
+    Ok(LuaDispatchResult { response, reload })
 }
 
 /// Dispatch semantic JSON through the versioned command registry while

@@ -799,6 +799,24 @@ impl Bundle {
         &self,
         command: &ComponentCommand,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_component_command_with_revision(command, None)
+    }
+
+    /// Append one component command only if the bundle still has the revision
+    /// whose history authorized the command.
+    pub fn append_component_command_if_revision(
+        &self,
+        command: &ComponentCommand,
+        expected_revision: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        self.append_component_command_with_revision(command, Some(expected_revision))
+    }
+
+    fn append_component_command_with_revision(
+        &self,
+        command: &ComponentCommand,
+        expected_revision: Option<&str>,
+    ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
             let loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
                 self.open_locked()?
@@ -812,7 +830,7 @@ impl Bundle {
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             let feature_id = format!("component-transaction-{}", loaded.log.len());
             let kind = format!("{COMPONENT_COMMAND_KIND_PREFIX}{payload}");
-            self.append_features_locked(&[(&feature_id, &kind)], None, None)
+            self.append_features_locked(&[(&feature_id, &kind)], expected_revision, None)
         })
     }
 

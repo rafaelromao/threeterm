@@ -1038,6 +1038,9 @@ fn component_request_schema(fields: &[&str]) -> Value {
             "transform" => {
                 json!({"type":"array", "minItems":3, "maxItems":3, "items":{"type":"number"}})
             }
+            "selected_feature_ids" => {
+                json!({"type":"array", "minItems":1, "uniqueItems":true, "items":{"type":"string", "minLength":1}})
+            }
             "length" | "width" | "height" | "thickness" | "value" => {
                 json!({"type":"number", "exclusiveMinimum":0})
             }
@@ -1185,6 +1188,22 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: component_request_schema(&["bundle_path"]),
             response_schema_version: "threeterm.command.component-state.response/1",
             response_schema: COMPONENT_STATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        CAPTURE_COMPONENT_COMMAND_ID,
+        CommandSchema {
+            id: CAPTURE_COMPONENT_COMMAND_ID,
+            name: "capture-component",
+            schema_version: "threeterm.command.capture-component/1",
+            request_schema_version: "threeterm.command.capture-component.request/1",
+            request_schema: component_request_schema(&[
+                "bundle_path",
+                "definition_id",
+                "selected_feature_ids",
+            ]),
+            response_schema_version: "threeterm.command.capture-component.response/1",
+            response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1407,6 +1426,7 @@ pub const MAKE_COMPONENT_INDEPENDENT_COMMAND_ID: CommandId =
     CommandId("make-component-independent");
 pub const EDIT_COMPONENT_PARAMETER_COMMAND_ID: CommandId = CommandId("edit-component-parameter");
 pub const COMPONENT_STATE_COMMAND_ID: CommandId = CommandId("component-state");
+pub const CAPTURE_COMPONENT_COMMAND_ID: CommandId = CommandId("capture-component");
 pub const HISTORICAL_EDIT_COMMAND_ID: CommandId = CommandId("historical-edit");
 pub const CREATE_REVISION_COMMAND_ID: CommandId = CommandId("create-revision");
 pub const RESTORE_REVISION_COMMAND_ID: CommandId = CommandId("restore-revision");

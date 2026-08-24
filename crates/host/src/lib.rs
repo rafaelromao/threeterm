@@ -1,12 +1,12 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, FeatureGraph,
-    history::{HistoryEvaluation, HistoryState, HistoryTimeline},
+    history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
 };
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
@@ -700,6 +700,67 @@ impl Host {
     /// canonical command transactions, never a separately persisted snapshot.
     pub fn component_graph(&self, root: impl AsRef<Path>) -> Result<ComponentGraph, HostError> {
         Ok(Bundle::at(root.as_ref()).open()?.components)
+    }
+
+    /// Capture one dependency-closed L-bracket feature subset as an immutable
+    /// component definition. The selected history snapshot is checked again
+    /// by persistence under its write lock before publication.
+    pub fn capture_component(
+        &self,
+        root: impl AsRef<Path>,
+        definition_id: &str,
+        selected_feature_ids: &[String],
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let selected = canonical_selected_feature_ids(selected_feature_ids)?;
+        let snapshot = loaded.history.active_snapshot();
+        for feature_id in &selected {
+            let feature =
+                snapshot
+                    .features
+                    .get(feature_id)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!("selected feature reference is lost: {feature_id}"),
+                    })?;
+            if feature.status != HistoryStatus::CurrentValid {
+                return Err(HostError::Validation {
+                    detail: format!("selected feature is not current-valid: {feature_id}"),
+                });
+            }
+            if feature
+                .dependencies
+                .iter()
+                .any(|dependency| !selected.contains(dependency))
+            {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "selected feature subset is not dependency-closed: {feature_id}"
+                    ),
+                });
+            }
+        }
+        let descriptor = descriptor_for_selected_l_bracket(definition_id, &selected, snapshot)?;
+        let command = ComponentCommand::Capture {
+            definition_id: definition_id.to_string(),
+            selected_feature_ids: selected,
+            descriptor,
+        };
+        let expected_revision = loaded.revision_hash_hex().to_string();
+        let updated =
+            match bundle.append_component_command_if_revision(&command, &expected_revision) {
+                Ok(updated) => updated,
+                Err(error) => {
+                    if let Ok(current) = bundle.open() {
+                        self.current.replace(Some(current));
+                    }
+                    return Err(error.into());
+                }
+            };
+        let view = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(view)
     }
 
     /// Validate and atomically append one component command. Validation occurs
@@ -1733,6 +1794,90 @@ impl Host {
         let _ = prior_view;
         Ok(LoftCommitView { snapshot, result })
     }
+}
+
+fn canonical_selected_feature_ids(feature_ids: &[String]) -> Result<Vec<String>, HostError> {
+    let mut selected = BTreeSet::new();
+    for feature_id in feature_ids {
+        if feature_id.is_empty() || !selected.insert(feature_id.clone()) {
+            return Err(HostError::Validation {
+                detail: "selected feature IDs must be non-empty and unique".to_string(),
+            });
+        }
+    }
+    if selected.is_empty() {
+        return Err(HostError::Validation {
+            detail: "selected feature IDs must not be empty".to_string(),
+        });
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn descriptor_for_selected_l_bracket(
+    definition_id: &str,
+    selected: &[String],
+    snapshot: &threeterm_domain::history::HistorySnapshot,
+) -> Result<threeterm_domain::LBracketDescriptor, HostError> {
+    let mut family: Option<&str> = None;
+    let mut values = [None; 4];
+    for feature_id in selected {
+        let Some((candidate_family, role)) = l_bracket_feature_role(feature_id) else {
+            return Err(HostError::Validation {
+                detail: format!("selected feature is not an L-bracket feature: {feature_id}"),
+            });
+        };
+        if family.is_some_and(|existing| existing != candidate_family) {
+            return Err(HostError::Validation {
+                detail: "selected feature subset mixes L-bracket families".to_string(),
+            });
+        }
+        family = Some(candidate_family);
+        let value = snapshot
+            .features
+            .get(feature_id)
+            .map(|feature| feature.input_value)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("selected feature reference is lost: {feature_id}"),
+            })?;
+        match role {
+            "base" => values[0] = Some(value),
+            "bend" => values[1] = Some(value),
+            "finish" => values[2] = Some(value),
+            "independent-base" => values[3] = Some(value),
+            "independent-finish" => {}
+            _ => unreachable!(),
+        }
+    }
+    let [Some(length), Some(width), Some(height), Some(thickness)] = values else {
+        return Err(HostError::Validation {
+            detail: "selected feature subset does not contain all L-bracket parameters".to_string(),
+        });
+    };
+    Ok(threeterm_domain::LBracketDescriptor {
+        feature_id: format!("{definition_id}-feature"),
+        length,
+        width,
+        height,
+        thickness,
+    })
+}
+
+fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
+    for (suffix, role) in [
+        ("-independent-base", "independent-base"),
+        ("-independent-finish", "independent-finish"),
+        ("-base", "base"),
+        ("-bend", "bend"),
+        ("-finish", "finish"),
+    ] {
+        if let Some(family) = feature_id
+            .strip_suffix(suffix)
+            .filter(|family| !family.is_empty())
+        {
+            return Some((family, role));
+        }
+    }
+    None
 }
 
 fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {

@@ -892,6 +892,31 @@ pub static LOAD_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+fn component_request_schema(fields: &[&str]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        let schema = match *field {
+            "transform" => {
+                json!({"type":"array", "minItems":3, "maxItems":3, "items":{"type":"number"}})
+            }
+            "length" | "width" | "height" | "thickness" | "value" => {
+                json!({"type":"number", "exclusiveMinimum":0})
+            }
+            _ => json!({"type":"string", "minLength":1}),
+        };
+        properties.insert((*field).to_string(), schema);
+    }
+    json!({"type":"object", "required":fields, "properties":properties, "additionalProperties":false})
+}
+
+pub static COMPONENT_STATE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type":"object", "required":["definitions","instances","schema_version"],
+        "properties":{"definitions":{"type":"object"},"instances":{"type":"object"},"schema_version":{"type":"string"}},
+        "additionalProperties":false
+    })
+});
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -953,6 +978,75 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: BRACKET_REQUEST_SCHEMA.clone(),
             response_schema_version: BRACKET_RESPONSE_SCHEMA_VERSION,
             response_schema: BRACKET_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    for (id, name, fields) in [
+        (
+            DEFINE_COMPONENT_COMMAND_ID,
+            "define-component",
+            &[
+                "bundle_path",
+                "definition_id",
+                "feature_id",
+                "length",
+                "width",
+                "height",
+                "thickness",
+            ][..],
+        ),
+        (
+            CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+            "create-component-instance",
+            &["bundle_path", "instance_id", "definition_id", "transform"][..],
+        ),
+        (
+            TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+            "transform-component-instance",
+            &["bundle_path", "instance_id", "transform"][..],
+        ),
+        (
+            MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+            "make-component-independent",
+            &[
+                "bundle_path",
+                "source_instance_id",
+                "definition_id",
+                "instance_id",
+                "feature_id",
+            ][..],
+        ),
+        (
+            EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+            "edit-component-parameter",
+            &["bundle_path", "definition_id", "parameter", "value"][..],
+        ),
+    ] {
+        let command = format!("threeterm.command.{name}/1");
+        let request = format!("threeterm.command.{name}.request/1");
+        let response = format!("threeterm.command.{name}.response/1");
+        map.insert(
+            id,
+            CommandSchema {
+                id,
+                name,
+                schema_version: Box::leak(command.into_boxed_str()),
+                request_schema_version: Box::leak(request.into_boxed_str()),
+                request_schema: component_request_schema(fields),
+                response_schema_version: Box::leak(response.into_boxed_str()),
+                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+            },
+        );
+    }
+    map.insert(
+        COMPONENT_STATE_COMMAND_ID,
+        CommandSchema {
+            id: COMPONENT_STATE_COMMAND_ID,
+            name: "component-state",
+            schema_version: "threeterm.command.component-state/1",
+            request_schema_version: "threeterm.command.component-state.request/1",
+            request_schema: component_request_schema(&["bundle_path"]),
+            response_schema_version: "threeterm.command.component-state.response/1",
+            response_schema: COMPONENT_STATE_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1120,6 +1214,14 @@ pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
 pub const BRACKET_EDIT_COMMAND_ID: CommandId = CommandId("bracket-edit");
+pub const DEFINE_COMPONENT_COMMAND_ID: CommandId = CommandId("define-component");
+pub const CREATE_COMPONENT_INSTANCE_COMMAND_ID: CommandId = CommandId("create-component-instance");
+pub const TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID: CommandId =
+    CommandId("transform-component-instance");
+pub const MAKE_COMPONENT_INDEPENDENT_COMMAND_ID: CommandId =
+    CommandId("make-component-independent");
+pub const EDIT_COMPONENT_PARAMETER_COMMAND_ID: CommandId = CommandId("edit-component-parameter");
+pub const COMPONENT_STATE_COMMAND_ID: CommandId = CommandId("component-state");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");

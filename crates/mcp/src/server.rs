@@ -29,7 +29,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
+use threeterm_cli::dispatch::{
+    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command,
+};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
@@ -218,11 +220,7 @@ impl McpServer {
         let result = match schema_entry.id {
             BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
             BRACKET_EDIT_COMMAND_ID => self.dispatch_bracket_edit_tool(&arguments),
-            other => Err(DispatchError::UnsupportedTool {
-                wire_name: name.to_string(),
-                schema_version: schema_entry.schema_version.to_string(),
-                _command: other,
-            }),
+            _ => dispatch_registered_command(&Host::new(), schema_entry.id, arguments.clone()),
         };
 
         match result {

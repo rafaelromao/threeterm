@@ -7,7 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use threeterm_domain::{Feature, FeatureGraph, ProjectGeneration, Revision};
+use threeterm_domain::{
+    ComponentCommand, ComponentGraph, Feature, FeatureGraph, ProjectGeneration, Revision,
+};
+
+const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,13 +390,14 @@ impl TransactionLog {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoadedBundle {
     pub manifest: Manifest,
     pub generation: ProjectGeneration,
     pub transactions: String,
     pub log: TransactionLog,
     pub graph: FeatureGraph,
+    pub components: ComponentGraph,
     /// `true` when the canonical path was unavailable and the immediately
     /// preceding sealed Project Generation was opened instead.
     pub recovered_from_previous: bool,
@@ -720,6 +725,7 @@ impl Bundle {
         }
 
         let mut graph = FeatureGraph::empty();
+        let mut components = ComponentGraph::default();
         let mut feature_ids = Vec::new();
         for entry in log.entries() {
             let feature = Feature::new(&entry.feature_id, &entry.kind).map_err(|error| {
@@ -730,6 +736,19 @@ impl Bundle {
             })?;
             feature_ids.push(feature.id.clone());
             graph.add_feature(feature);
+            if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
+                let command: ComponentCommand =
+                    serde_json::from_str(command).map_err(|error| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: format!("invalid component command: {error}"),
+                    })?;
+                components
+                    .apply(&command)
+                    .map_err(|detail| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail,
+                    })?;
+            }
         }
         if manifest.transaction_count != log.len()
             || manifest.transaction_bytes != transaction_bytes.len()
@@ -757,6 +776,7 @@ impl Bundle {
             transactions,
             log,
             graph,
+            components,
             recovered_from_previous,
         })
     }
@@ -767,6 +787,30 @@ impl Bundle {
         kind: &str,
     ) -> Result<LoadedBundle, BundleError> {
         self.append_features(&[(feature_id, kind)])
+    }
+
+    /// Append one versioned component command as a canonical transaction.
+    /// The command payload is replayed on every open; no component snapshot is
+    /// persisted as an authority.
+    pub fn append_component_command(
+        &self,
+        command: &ComponentCommand,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            let loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
+                self.open_locked()?
+            } else {
+                Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?
+                    .open_locked()?
+            };
+            let mut components = loaded.components.clone();
+            components.apply(command).map_err(BundleError::Invalid)?;
+            let payload = serde_json::to_string(command)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            let feature_id = format!("component-transaction-{}", loaded.log.len());
+            let kind = format!("{COMPONENT_COMMAND_KIND_PREFIX}{payload}");
+            self.append_features_locked(&[(&feature_id, &kind)], None, None, None, None, None)
+        })
     }
 
     /// Append one feature only if the sealed bundle is still at the
@@ -1227,6 +1271,7 @@ fn loaded_with(
         transactions,
         log: stale.log,
         graph: stale.graph,
+        components: stale.components,
         recovered_from_previous: stale.recovered_from_previous || recovered_from_previous,
     }
 }

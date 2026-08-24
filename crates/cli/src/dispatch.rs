@@ -4,7 +4,9 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use serde_json::{Value, json};
-use threeterm_domain::ProjectGeneration;
+use threeterm_domain::{
+    ComponentCommand, ComponentDefinition, ComponentInstance, LBracketDescriptor, ProjectGeneration,
+};
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
@@ -22,7 +24,12 @@ pub use threeterm_protocol::schema::{
     LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
 };
-use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandId, find, find_by_name, iter};
+use threeterm_protocol::schema::{
+    BRACKET_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
+    find_by_name, iter,
+};
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
 };
@@ -69,6 +76,10 @@ enum DispatchPlan {
         width: f64,
         height: f64,
         thickness: f64,
+    },
+    Component {
+        command: CommandId,
+        request: Value,
     },
     Extrude {
         bundle: String,
@@ -400,6 +411,20 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
         "bracket" => parse_bracket(&args[2..]),
+        "define-component" => parse_component(DEFINE_COMPONENT_COMMAND_ID, &args[2..]),
+        "create-component-instance" => {
+            parse_component(CREATE_COMPONENT_INSTANCE_COMMAND_ID, &args[2..])
+        }
+        "transform-component-instance" => {
+            parse_component(TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, &args[2..])
+        }
+        "make-component-independent" => {
+            parse_component(MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, &args[2..])
+        }
+        "edit-component-parameter" => {
+            parse_component(EDIT_COMPONENT_PARAMETER_COMMAND_ID, &args[2..])
+        }
+        "component-state" => parse_component(COMPONENT_STATE_COMMAND_ID, &args[2..]),
         "extrude" => parse_extrude(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
@@ -493,6 +518,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::Save { .. }
         | DispatchPlan::Load { .. }
         | DispatchPlan::BooleanFuse { .. }
+        | DispatchPlan::Component { .. }
         | DispatchPlan::Unknown { .. } => true,
     };
     if finite {
@@ -501,6 +527,57 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         DispatchPlan::Unknown {
             arg: "non-finite numeric value".to_string(),
         }
+    }
+}
+
+fn parse_component(command: CommandId, args: &[OsString]) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: command.0.to_string(),
+        };
+    };
+    let mut request = serde_json::Map::new();
+    request.insert("bundle_path".to_string(), Value::String(bundle.to_string()));
+    let mut index = 1;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        let Some(name) = flag.strip_prefix("--") else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        let Some(value) = args.get(index + 1).and_then(|value| value.to_str()) else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        let key = name.replace('-', "_");
+        let value = if key == "transform" {
+            match parse_vec3(value, "--transform") {
+                Ok(transform) => json!(transform),
+                Err(plan) => return plan,
+            }
+        } else if matches!(
+            key.as_str(),
+            "length" | "width" | "height" | "thickness" | "value"
+        ) {
+            match value.parse::<f64>() {
+                Ok(value) if value.is_finite() => json!(value),
+                _ => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            }
+        } else {
+            Value::String(value.to_string())
+        };
+        request.insert(key, value);
+        index += 2;
+    }
+    DispatchPlan::Component {
+        command,
+        request: Value::Object(request),
     }
 }
 
@@ -2067,6 +2144,13 @@ fn execute_handler(
             stdout,
             stderr,
         ),
+        DispatchPlan::Component { command, request } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, command, request) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -2368,26 +2452,27 @@ pub fn dispatch_registered_command(
     request: Value,
 ) -> Result<Value, DispatchError> {
     let schema = find(command).ok_or(DispatchError::UnknownCommand(command))?;
-    let result =
-        execute(command, request, |request| {
-            if command != BRACKET_COMMAND_ID {
-                return Err(DispatchError::UnsupportedTool {
-                    wire_name: schema.name.to_string(),
-                    schema_version: schema.schema_version.to_string(),
-                    _command: command,
-                });
-            }
-            let string_field = |name: &str| {
-                request.get(name).and_then(Value::as_str).ok_or_else(|| {
-                    DispatchError::Validation(format!("missing string field {name:?}"))
-                })
-            };
-            let number_field = |name: &str| {
-                request.get(name).and_then(Value::as_f64).ok_or_else(|| {
-                    DispatchError::Validation(format!("missing number field {name:?}"))
-                })
-            };
-            let view = dispatch_bracket_with_host(
+    let result = execute(command, request, |request| {
+        let string_field = |name: &str| {
+            request
+                .get(name)
+                .and_then(Value::as_str)
+                .ok_or_else(|| DispatchError::Validation(format!("missing string field {name:?}")))
+        };
+        let number_field = |name: &str| {
+            request
+                .get(name)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| DispatchError::Validation(format!("missing number field {name:?}")))
+        };
+        if command == COMPONENT_STATE_COMMAND_ID {
+            let graph = host.component_graph(string_field("bundle_path")?)?;
+            return Ok(
+                json!({"definitions": graph.definitions, "instances": graph.instances, "schema_version": schema.response_schema_version}),
+            );
+        }
+        let view = if command == BRACKET_COMMAND_ID {
+            dispatch_bracket_with_host(
                 host,
                 string_field("bundle_path")?,
                 string_field("bracket_id")?,
@@ -2395,13 +2480,78 @@ pub fn dispatch_registered_command(
                 number_field("width")?,
                 number_field("height")?,
                 number_field("thickness")?,
-            )?;
-            Ok(json!({
-                "feature_graph_hash": view.feature_graph_hash,
-                "revision_hash": view.revision_hash,
-                "schema_version": BRACKET_RESPONSE_SCHEMA_VERSION,
-            }))
-        });
+            )?
+        } else {
+            let transform = || -> Result<[f64; 3], DispatchError> {
+                let values = request
+                    .get("transform")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| DispatchError::Validation("missing transform".to_string()))?;
+                let values: Vec<f64> = values
+                    .iter()
+                    .map(|value| {
+                        value.as_f64().ok_or_else(|| {
+                            DispatchError::Validation(
+                                "transform values must be numbers".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                values.try_into().map_err(|_| {
+                    DispatchError::Validation("transform must have three values".to_string())
+                })
+            };
+            let component = match command {
+                DEFINE_COMPONENT_COMMAND_ID => ComponentCommand::Define {
+                    definition: ComponentDefinition {
+                        id: string_field("definition_id")?.to_string(),
+                        descriptor: LBracketDescriptor {
+                            feature_id: string_field("feature_id")?.to_string(),
+                            length: number_field("length")?,
+                            width: number_field("width")?,
+                            height: number_field("height")?,
+                            thickness: number_field("thickness")?,
+                        },
+                    },
+                },
+                CREATE_COMPONENT_INSTANCE_COMMAND_ID => ComponentCommand::CreateInstance {
+                    instance: ComponentInstance {
+                        id: string_field("instance_id")?.to_string(),
+                        definition_id: string_field("definition_id")?.to_string(),
+                        transform: transform()?,
+                    },
+                },
+                TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID => ComponentCommand::TransformInstance {
+                    instance_id: string_field("instance_id")?.to_string(),
+                    transform: transform()?,
+                },
+                MAKE_COMPONENT_INDEPENDENT_COMMAND_ID => ComponentCommand::MakeIndependent {
+                    source_instance_id: string_field("source_instance_id")?.to_string(),
+                    definition_id: string_field("definition_id")?.to_string(),
+                    instance_id: string_field("instance_id")?.to_string(),
+                    feature_id: string_field("feature_id")?.to_string(),
+                },
+                EDIT_COMPONENT_PARAMETER_COMMAND_ID => ComponentCommand::EditParameter {
+                    definition_id: string_field("definition_id")?.to_string(),
+                    parameter: string_field("parameter")?.to_string(),
+                    value: number_field("value")?,
+                },
+                _ => {
+                    return Err(DispatchError::UnsupportedTool {
+                        wire_name: schema.name.to_string(),
+                        schema_version: schema.schema_version.to_string(),
+                        _command: command,
+                    });
+                }
+            };
+            host.apply_component_command(string_field("bundle_path")?, component)?
+        };
+        Ok(json!({
+            "feature_graph_hash": view.feature_graph_hash,
+            "revision_hash": view.revision_hash,
+            "schema_version": schema.response_schema_version,
+        }))
+    });
     match result {
         Ok(response) => Ok(response),
         Err(ExecutionError::UnknownCommand(command)) => Err(DispatchError::UnknownCommand(command)),
@@ -2580,6 +2730,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             "height": height,
             "thickness": thickness,
         }),
+        DispatchPlan::Component { request, .. } => request.clone(),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -3880,6 +4031,22 @@ fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
     EXIT_PERSISTENCE_FAILURE
 }
 
+fn emit_dispatch_error(error: &DispatchError, stderr: &mut dyn Write) -> i32 {
+    let detail = error.diagnostic_detail();
+    let diagnostic =
+        if detail.contains("reference is ambiguous") || detail.contains("ID already exists") {
+            Diagnostic::reference_ambiguous(&detail)
+        } else if detail.contains("reference is lost") {
+            Diagnostic::reference_lost(&detail)
+        } else if detail.contains("reference is incompatible") {
+            Diagnostic::reference_incompatible(&detail)
+        } else {
+            Diagnostic::invalid_request(&detail)
+        };
+    write_diagnostic(stderr, &diagnostic);
+    EXIT_INTEGRITY_FAILURE
+}
+
 fn emit_palette_error(error: &PaletteStartupError, stderr: &mut dyn Write) -> i32 {
     write_diagnostic(
         stderr,
@@ -3931,7 +4098,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 18);
+        assert_eq!(commands.len(), 24);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

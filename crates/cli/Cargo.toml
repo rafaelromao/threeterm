@@ -11,6 +11,7 @@ description = "Headless Automation CLI adapter for the ThreeTerm domain command 
 serde_json = { workspace = true }
 threeterm-domain = { path = "../domain" }
 threeterm-host = { path = "../host" }
+threeterm-lua-bridge = { path = "../lua-bridge" }
 threeterm-occt-worker = { path = "../workers/occt" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }

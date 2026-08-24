@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 threeterm-cli = { path = "../cli" }
 threeterm-host = { path = "../host" }
+threeterm-occt-worker = { path = "../workers/occt" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 

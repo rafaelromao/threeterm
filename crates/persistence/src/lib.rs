@@ -753,7 +753,27 @@ impl Bundle {
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision))
+            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision), None)
+        })
+    }
+
+    /// Publish one verified BREP together with its revision-guarded log entry
+    /// in the same sealed generation. The source comparison, BREP staging, log
+    /// rewrite, and generation rotation all occur under the bundle lock, so a
+    /// stale worker can never overwrite a newer writer's canonical artifact.
+    pub fn append_feature_with_brep_if_revision(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+            )
         })
     }
 
@@ -780,13 +800,16 @@ impl Bundle {
         // stay unique, predecessor digests chain, and no writer observes a
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
-        with_bundle_write_lock(&self.root, || self.append_features_locked(entries, None))
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(entries, None, None)
+        })
     }
 
     fn append_features_locked(
         &self,
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
+        brep: Option<(&str, &[u8])>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -850,6 +873,15 @@ impl Bundle {
                     .map_err(|error| BundleError::Invalid(error.to_string()))?,
                 Some(PublicationFailurePoint::ManifestSync),
             )?;
+            if let Some((feature_id, brep_bytes)) = brep {
+                let brep_dir = staging.join("brep");
+                fs::create_dir_all(&brep_dir)?;
+                atomic_write(
+                    &brep_dir.join(format!("{feature_id}.brep")),
+                    brep_bytes,
+                    None,
+                )?;
+            }
             terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
             sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
             Bundle::at(&staging).open_sealed(false)?;

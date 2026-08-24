@@ -4,13 +4,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use threeterm_domain::FeatureGraph;
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest,
-    RevolveResult, ShellRequest, ShellResult, WorkerError,
+    BooleanFuseRequest, BooleanFuseResult, BracketRequest, BracketResult, ChamferRequest,
+    ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest, DraftResult,
+    ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult,
+    LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, ShellRequest,
+    ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -161,6 +163,51 @@ pub struct DraftCommitView {
     pub result: DraftResult,
 }
 
+/// A transient semantic command input bound to one canonical Revision Snapshot.
+/// Drafts are host-session state: they are never written to the project bundle
+/// and their worker output is always disposable until commit promotion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandDraft {
+    pub draft_id: String,
+    pub bundle_root: PathBuf,
+    pub source_feature_id: String,
+    pub source_revision: String,
+    pub source_brep_sha256: String,
+    pub request: DraftRequest,
+    preview_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftPreviewView {
+    pub draft_id: String,
+    pub source_revision: String,
+    pub preview_revision: String,
+    pub input_fingerprint: String,
+    pub result: DraftResult,
+    pub brep_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketParameterDraft {
+    pub draft_id: String,
+    pub bundle_root: PathBuf,
+    pub bracket_id: String,
+    pub source_revision: String,
+    pub source_brep_sha256: String,
+    pub request: BracketRequest,
+    preview_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketPreviewView {
+    pub draft_id: String,
+    pub source_revision: String,
+    pub preview_revision: String,
+    pub input_fingerprint: String,
+    pub result: BracketResult,
+    pub brep_path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoftCommitView {
     pub snapshot: SnapshotView,
@@ -207,6 +254,27 @@ pub enum HostError {
     WorkerTerminated {
         record: Box<threeterm_protocol::supervisor::TerminationRecord>,
     },
+    DraftAlreadyExists {
+        draft_id: String,
+    },
+    DraftNotFound {
+        draft_id: String,
+    },
+    DraftStale {
+        draft_id: String,
+        source_revision: String,
+        current_revision: String,
+        recovery: &'static str,
+    },
+    DraftSourceChanged {
+        draft_id: String,
+        source_feature_id: String,
+        recovery: &'static str,
+    },
+    DraftInvalid {
+        draft_id: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -252,6 +320,32 @@ impl std::fmt::Display for HostError {
             }
             Self::BrepIo { detail } => {
                 write!(formatter, "occt brep io error: {detail}")
+            }
+            Self::DraftAlreadyExists { draft_id } => {
+                write!(formatter, "command draft already exists: {draft_id}")
+            }
+            Self::DraftNotFound { draft_id } => {
+                write!(formatter, "command draft not found: {draft_id}")
+            }
+            Self::DraftStale {
+                draft_id,
+                source_revision,
+                current_revision,
+                recovery,
+            } => write!(
+                formatter,
+                "command draft {draft_id} is stale: source_revision={source_revision} current_revision={current_revision} recovery={recovery}"
+            ),
+            Self::DraftSourceChanged {
+                draft_id,
+                source_feature_id,
+                recovery,
+            } => write!(
+                formatter,
+                "command draft {draft_id} source {source_feature_id} changed: recovery={recovery}"
+            ),
+            Self::DraftInvalid { draft_id, detail } => {
+                write!(formatter, "command draft {draft_id} is invalid: {detail}")
             }
         }
     }
@@ -332,6 +426,8 @@ impl From<WorkerError> for HostError {
 pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
     layer1_results: RefCell<HashMap<Layer1CacheKey, Layer1DerivedResult>>,
+    drafts: RefCell<HashMap<String, CommandDraft>>,
+    bracket_drafts: RefCell<HashMap<String, BracketParameterDraft>>,
 }
 
 impl Host {
@@ -542,6 +638,652 @@ impl Host {
             graph: loaded.graph.clone(),
             layer1_results,
         })
+    }
+
+    /// Open a transient command draft against the current canonical source.
+    /// The caller supplies only the source feature identity; the canonical
+    /// BREP path and source digest are derived by the host.
+    pub fn open_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: impl Into<String>,
+        source_feature_id: impl Into<String>,
+        request: DraftRequest,
+    ) -> Result<CommandDraft, HostError> {
+        let draft_id = draft_id.into();
+        if draft_id.is_empty() {
+            return Err(HostError::DraftInvalid {
+                draft_id,
+                detail: "draft_id must not be empty".to_string(),
+            });
+        }
+        if self.has_draft(&draft_id) {
+            return Err(HostError::DraftAlreadyExists { draft_id });
+        }
+        let source_feature_id = source_feature_id.into();
+        if !valid_feature_path_component(&source_feature_id) {
+            return Err(HostError::DraftInvalid {
+                draft_id,
+                detail: "source_feature_id must be a plain feature id".to_string(),
+            });
+        }
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let loaded = Bundle::at(&root).open()?;
+        let source_path = committed_brep_path(&root, &source_feature_id);
+        let source_brep_sha256 =
+            sha256_path(&source_path).map_err(|error| HostError::DraftInvalid {
+                draft_id: draft_id.clone(),
+                detail: format!("source BREP could not be read: {error}"),
+            })?;
+        let mut request = request;
+        request.base_path = source_path;
+        request = request.with_output_path(&root, "unused.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::DraftInvalid {
+                draft_id: draft_id.clone(),
+                detail,
+            })?;
+        self.current.replace(Some(loaded.clone()));
+        let draft = CommandDraft {
+            draft_id: draft_id.clone(),
+            bundle_root: root,
+            source_feature_id,
+            source_revision: loaded.revision_hash_hex().to_string(),
+            source_brep_sha256,
+            request,
+            preview_path: None,
+        };
+        self.drafts.borrow_mut().insert(draft_id, draft.clone());
+        Ok(draft)
+    }
+
+    /// Replace the semantic values of a draft without changing its source
+    /// binding. Any prior preview is invalidated before the new values land.
+    pub fn update_draft(
+        &self,
+        draft_id: &str,
+        request: DraftRequest,
+    ) -> Result<CommandDraft, HostError> {
+        let mut drafts = self.drafts.borrow_mut();
+        let draft = drafts
+            .get_mut(draft_id)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        if let Some(path) = draft.preview_path.take() {
+            remove_preview_stage(&path);
+        }
+        let mut request = request;
+        request.base_path = committed_brep_path(&draft.bundle_root, &draft.source_feature_id);
+        let request = request.with_output_path(&draft.bundle_root, "unused.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail,
+            })?;
+        draft.request = request;
+        Ok(draft.clone())
+    }
+
+    /// Evaluate a draft through the production OCCT worker without promoting
+    /// its staged BREP or changing any canonical bundle bytes.
+    pub fn preview_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        worker: &OcctWorker,
+    ) -> Result<DraftPreviewView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft = self.drafts.borrow().get(draft_id).cloned().ok_or_else(|| {
+            HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            }
+        })?;
+        if draft.bundle_root != root {
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "draft belongs to a different bundle".to_string(),
+            });
+        }
+        let loaded = Bundle::at(&root).open()?;
+        self.current.replace(Some(loaded.clone()));
+        self.validate_draft_source(&draft, &loaded)?;
+        if let Some(path) = &draft.preview_path {
+            remove_preview_stage(path);
+        }
+        let stage = preview_stage_path(draft_id);
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create preview stage failed: {error}"),
+        })?;
+        let request = draft
+            .request
+            .clone()
+            .with_output_path(&stage, "preview.brep");
+        let result = match worker
+            .clone()
+            .with_revision_id(draft.source_revision.clone())
+            .draft(&request)
+        {
+            Ok(result) if result.is_success() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!("draft preview returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::from(error));
+            }
+        };
+        let input_fingerprint = draft_input_fingerprint(&draft, &result.brep_sha256);
+        let preview_revision = draft_preview_revision(&draft.source_revision, &input_fingerprint);
+        let preview_path = result.brep_path.clone();
+        self.drafts
+            .borrow_mut()
+            .get_mut(draft_id)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?
+            .preview_path = Some(stage);
+        Ok(DraftPreviewView {
+            draft_id: draft_id.to_string(),
+            source_revision: draft.source_revision,
+            preview_revision,
+            input_fingerprint,
+            result,
+            brep_path: preview_path,
+        })
+    }
+
+    /// Re-evaluate and atomically promote a draft. The preview BREP is never
+    /// trusted as commit input; a fresh worker result is required.
+    pub fn commit_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        worker: &OcctWorker,
+    ) -> Result<DraftCommitView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft = self.drafts.borrow().get(draft_id).cloned().ok_or_else(|| {
+            HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            }
+        })?;
+        if draft.bundle_root != root {
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "draft belongs to a different bundle".to_string(),
+            });
+        }
+        let loaded = Bundle::at(&root).open()?;
+        self.current.replace(Some(loaded.clone()));
+        self.validate_draft_source(&draft, &loaded)?;
+        if let Some(path) = draft.preview_path {
+            remove_preview_stage(&path);
+        }
+        let stage = preview_stage_path(&format!("{draft_id}-commit"));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create commit stage failed: {error}"),
+        })?;
+        let request = draft
+            .request
+            .clone()
+            .with_output_path(&stage, "commit.brep");
+        let result = match worker
+            .clone()
+            .with_revision_id(draft.source_revision.clone())
+            .draft(&request)
+        {
+            Ok(result) if result.is_success() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!("draft commit returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::from(error));
+            }
+        };
+        let brep_bytes = fs::read(&result.brep_path).map_err(|error| HostError::BrepIo {
+            detail: format!("read draft commit BREP failed: {error}"),
+        })?;
+        if brep_bytes.len() != result.brep_bytes
+            || format!("{:x}", Sha256::digest(&brep_bytes)) != result.brep_sha256
+        {
+            remove_preview_stage(&stage);
+            return Err(HostError::BrepIo {
+                detail: "draft commit BREP changed after worker verification".to_string(),
+            });
+        }
+        let bundle = Bundle::at(&root);
+        let kind = format!("brep:{}", request.feature_id);
+        let updated = match bundle.append_feature_with_brep_if_revision(
+            &request.feature_id,
+            &kind,
+            &draft.source_revision,
+            &brep_bytes,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        remove_preview_stage(&stage);
+        self.drafts.borrow_mut().remove(draft_id);
+        Ok(DraftCommitView { snapshot, result })
+    }
+
+    /// Refuse a draft and remove every transient preview artifact.
+    pub fn discard_draft(&self, draft_id: &str) -> Result<(), HostError> {
+        let draft =
+            self.drafts
+                .borrow_mut()
+                .remove(draft_id)
+                .ok_or_else(|| HostError::DraftNotFound {
+                    draft_id: draft_id.to_string(),
+                })?;
+        if let Some(path) = draft.preview_path {
+            remove_preview_stage(&path);
+        }
+        Ok(())
+    }
+
+    pub fn has_draft(&self, draft_id: &str) -> bool {
+        self.drafts.borrow().contains_key(draft_id)
+    }
+
+    /// Create the initial parameterized L-bracket through the OCCT worker.
+    pub fn create_bracket(
+        &self,
+        root: impl AsRef<Path>,
+        request: BracketRequest,
+        worker: &OcctWorker,
+    ) -> Result<SnapshotView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let mut request = request;
+        let loaded = Bundle::at(&root).open()?;
+        let stage = preview_stage_path(&format!("create-{}", request.feature_id));
+        request = request.with_output_path(&stage, "bracket.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create bracket stage failed: {error}"),
+        })?;
+        let result = match worker
+            .clone()
+            .with_revision_id(loaded.revision_hash_hex())
+            .bracket(&request)
+        {
+            Ok(result) if result.is_success() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!("bracket returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        let bytes = match read_verified_worker_brep(&result) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error);
+            }
+        };
+        let kind = bracket_kind(&request);
+        let snapshot = match self.promote_brep_bytes(
+            &root,
+            &request.feature_id,
+            &kind,
+            loaded.revision_hash_hex(),
+            &bytes,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error);
+            }
+        };
+        remove_preview_stage(&stage);
+        let _ = result;
+        Ok(snapshot)
+    }
+
+    pub fn open_bracket_parameter_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: impl Into<String>,
+        bracket_id: impl Into<String>,
+        request: BracketRequest,
+    ) -> Result<BracketParameterDraft, HostError> {
+        let draft_id = draft_id.into();
+        let bracket_id = bracket_id.into();
+        if draft_id.is_empty() || !valid_feature_path_component(&bracket_id) {
+            return Err(HostError::DraftInvalid {
+                draft_id,
+                detail: "draft and bracket ids must be non-empty plain identifiers".to_string(),
+            });
+        }
+        if self.bracket_drafts.borrow().contains_key(&draft_id) {
+            return Err(HostError::DraftAlreadyExists { draft_id });
+        }
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let loaded = Bundle::at(&root).open()?;
+        let source_path = committed_brep_path(&root, &bracket_id);
+        let source_brep_sha256 =
+            sha256_path(&source_path).map_err(|error| HostError::DraftInvalid {
+                draft_id: draft_id.clone(),
+                detail: format!("bracket source BREP could not be read: {error}"),
+            })?;
+        let request = request
+            .with_feature_id(&bracket_id)
+            .with_output_path(&root, "unused.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::DraftInvalid {
+                draft_id: draft_id.clone(),
+                detail,
+            })?;
+        let draft = BracketParameterDraft {
+            draft_id: draft_id.clone(),
+            bundle_root: root,
+            bracket_id,
+            source_revision: loaded.revision_hash_hex().to_string(),
+            source_brep_sha256,
+            request,
+            preview_path: None,
+        };
+        self.bracket_drafts
+            .borrow_mut()
+            .insert(draft_id, draft.clone());
+        self.current.replace(Some(loaded));
+        Ok(draft)
+    }
+
+    pub fn preview_bracket_parameter_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        worker: &OcctWorker,
+    ) -> Result<BracketPreviewView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft = self
+            .bracket_drafts
+            .borrow()
+            .get(draft_id)
+            .cloned()
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        if draft.bundle_root != root {
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "draft belongs to a different bundle".to_string(),
+            });
+        }
+        let loaded = Bundle::at(&root).open()?;
+        self.current.replace(Some(loaded.clone()));
+        self.validate_bracket_source(&draft, &loaded)?;
+        if let Some(path) = &draft.preview_path {
+            remove_preview_stage(path);
+        }
+        let stage = preview_stage_path(draft_id);
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create bracket preview stage failed: {error}"),
+        })?;
+        let request = draft
+            .request
+            .clone()
+            .with_output_path(&stage, "preview.brep");
+        let result = match worker
+            .clone()
+            .with_revision_id(draft.source_revision.clone())
+            .bracket(&request)
+        {
+            Ok(result) if result.is_success() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!("bracket preview returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        let preview_revision = draft_preview_revision(&draft.source_revision, &input_fingerprint);
+        let preview_path = result.brep_path.clone();
+        self.bracket_drafts
+            .borrow_mut()
+            .get_mut(draft_id)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?
+            .preview_path = Some(stage);
+        Ok(BracketPreviewView {
+            draft_id: draft_id.to_string(),
+            source_revision: draft.source_revision,
+            preview_revision,
+            input_fingerprint,
+            result,
+            brep_path: preview_path,
+        })
+    }
+
+    pub fn update_bracket_parameter_draft(
+        &self,
+        draft_id: &str,
+        request: BracketRequest,
+    ) -> Result<BracketParameterDraft, HostError> {
+        let mut drafts = self.bracket_drafts.borrow_mut();
+        let draft = drafts
+            .get_mut(draft_id)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        if let Some(path) = &draft.preview_path {
+            remove_preview_stage(path);
+        }
+        let request = request
+            .with_feature_id(&draft.bracket_id)
+            .with_output_path(&draft.bundle_root, "unused.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail,
+            })?;
+        draft.request = request;
+        draft.preview_path = None;
+        Ok(draft.clone())
+    }
+
+    pub fn commit_bracket_parameter_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        worker: &OcctWorker,
+    ) -> Result<SnapshotView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft = self
+            .bracket_drafts
+            .borrow()
+            .get(draft_id)
+            .cloned()
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        let loaded = Bundle::at(&root).open()?;
+        self.current.replace(Some(loaded.clone()));
+        self.validate_bracket_source(&draft, &loaded)?;
+        if let Some(path) = &draft.preview_path {
+            remove_preview_stage(path);
+        }
+        let stage = preview_stage_path(&format!("{draft_id}-commit"));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create bracket commit stage failed: {error}"),
+        })?;
+        let request = draft
+            .request
+            .clone()
+            .with_output_path(&stage, "commit.brep");
+        let result = match worker
+            .clone()
+            .with_revision_id(draft.source_revision.clone())
+            .bracket(&request)
+        {
+            Ok(result) if result.is_success() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!("bracket commit returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        let bytes = match read_verified_worker_brep(&result) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error);
+            }
+        };
+        let snapshot = match self.promote_brep_bytes(
+            &root,
+            &draft.bracket_id,
+            &bracket_kind(&request),
+            &draft.source_revision,
+            &bytes,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error);
+            }
+        };
+        remove_preview_stage(&stage);
+        self.bracket_drafts.borrow_mut().remove(draft_id);
+        Ok(snapshot)
+    }
+
+    pub fn discard_bracket_parameter_draft(&self, draft_id: &str) -> Result<(), HostError> {
+        let draft = self
+            .bracket_drafts
+            .borrow_mut()
+            .remove(draft_id)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        if let Some(path) = draft.preview_path {
+            remove_preview_stage(&path);
+        }
+        Ok(())
+    }
+
+    pub fn has_bracket_parameter_draft(&self, draft_id: &str) -> bool {
+        self.bracket_drafts.borrow().contains_key(draft_id)
+    }
+
+    fn validate_bracket_source(
+        &self,
+        draft: &BracketParameterDraft,
+        loaded: &LoadedBundle,
+    ) -> Result<(), HostError> {
+        if loaded.revision_hash_hex() != draft.source_revision {
+            return Err(HostError::DraftStale {
+                draft_id: draft.draft_id.clone(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: loaded.revision_hash_hex().to_string(),
+                recovery: "discard_and_reopen",
+            });
+        }
+        let source_path = committed_brep_path(&draft.bundle_root, &draft.bracket_id);
+        let source_sha = sha256_path(&source_path).map_err(|_| HostError::DraftSourceChanged {
+            draft_id: draft.draft_id.clone(),
+            source_feature_id: draft.bracket_id.clone(),
+            recovery: "reload_source_and_reopen",
+        })?;
+        if source_sha != draft.source_brep_sha256 {
+            return Err(HostError::DraftSourceChanged {
+                draft_id: draft.draft_id.clone(),
+                source_feature_id: draft.bracket_id.clone(),
+                recovery: "reload_source_and_reopen",
+            });
+        }
+        Ok(())
+    }
+
+    fn promote_brep_bytes(
+        &self,
+        root: &Path,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        bytes: &[u8],
+    ) -> Result<SnapshotView, HostError> {
+        let updated = Bundle::at(root).append_feature_with_brep_if_revision(
+            feature_id,
+            kind,
+            expected_revision,
+            bytes,
+        )?;
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(snapshot)
+    }
+
+    fn validate_draft_source(
+        &self,
+        draft: &CommandDraft,
+        loaded: &LoadedBundle,
+    ) -> Result<(), HostError> {
+        let current_revision = loaded.revision_hash_hex();
+        if current_revision != draft.source_revision {
+            return Err(HostError::DraftStale {
+                draft_id: draft.draft_id.clone(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: current_revision.to_string(),
+                recovery: "discard_and_reopen",
+            });
+        }
+        let source_path = committed_brep_path(&draft.bundle_root, &draft.source_feature_id);
+        let source_sha =
+            sha256_path(&source_path).map_err(|_error| HostError::DraftSourceChanged {
+                draft_id: draft.draft_id.clone(),
+                source_feature_id: draft.source_feature_id.clone(),
+                recovery: "reload_source_and_reopen",
+            })?;
+        if source_sha != draft.source_brep_sha256 {
+            return Err(HostError::DraftSourceChanged {
+                draft_id: draft.draft_id.clone(),
+                source_feature_id: draft.source_feature_id.clone(),
+                recovery: "reload_source_and_reopen",
+            });
+        }
+        Ok(())
     }
 
     /// Accept a completed worker lifecycle and publish its one Derived Result.
@@ -1474,6 +2216,21 @@ impl Host {
     }
 }
 
+impl Drop for Host {
+    fn drop(&mut self) {
+        for draft in self.drafts.get_mut().values() {
+            if let Some(path) = &draft.preview_path {
+                remove_preview_stage(path);
+            }
+        }
+        for draft in self.bracket_drafts.get_mut().values() {
+            if let Some(path) = &draft.preview_path {
+                remove_preview_stage(path);
+            }
+        }
+    }
+}
+
 fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
     match error {
         ArtifactError::HashMismatch { expected, actual } => {
@@ -1481,6 +2238,92 @@ fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
         }
         _ => Diagnostic::artifact_promotion_failure(&error.to_string()),
     }
+}
+
+fn valid_feature_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn committed_brep_path(root: &Path, feature_id: &str) -> PathBuf {
+    root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"))
+}
+
+fn sha256_path(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn read_verified_worker_brep(result: &BracketResult) -> Result<Vec<u8>, HostError> {
+    let bytes = fs::read(&result.brep_path).map_err(|error| HostError::BrepIo {
+        detail: format!("read bracket BREP failed: {error}"),
+    })?;
+    if bytes.len() != result.brep_bytes
+        || format!("{:x}", Sha256::digest(&bytes)) != result.brep_sha256
+    {
+        return Err(HostError::BrepIo {
+            detail: "bracket BREP changed after worker verification".to_string(),
+        });
+    }
+    Ok(bytes)
+}
+
+fn bracket_kind(request: &BracketRequest) -> String {
+    format!(
+        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
+        request.length, request.width, request.height, request.thickness
+    )
+}
+
+fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str) -> String {
+    let semantic = serde_json::json!({
+        "source_revision": draft.source_revision,
+        "source_brep_sha256": draft.source_brep_sha256,
+        "bracket_id": draft.bracket_id,
+        "length": draft.request.length,
+        "width": draft.request.width,
+        "height": draft.request.height,
+        "thickness": draft.request.thickness,
+        "result_sha256": result_sha256,
+    });
+    let bytes = serde_json::to_vec(&semantic).expect("bracket fingerprint serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn preview_stage_path(draft_id: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(draft_id.as_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    let identity = format!("{:x}", hasher.finalize());
+    std::env::temp_dir().join(format!("threeterm-command-draft-{identity}"))
+}
+
+fn remove_preview_stage(path: &Path) {
+    let _ = fs::remove_dir_all(path);
+}
+
+fn draft_input_fingerprint(draft: &CommandDraft, result_sha256: &str) -> String {
+    let semantic = serde_json::json!({
+        "source_revision": draft.source_revision,
+        "source_brep_sha256": draft.source_brep_sha256,
+        "source_feature_id": draft.source_feature_id,
+        "angle": draft.request.angle,
+        "pull_direction": draft.request.pull_direction,
+        "result_sha256": result_sha256,
+    });
+    let bytes = serde_json::to_vec(&semantic).expect("draft fingerprint serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn draft_preview_revision(source_revision: &str, input_fingerprint: &str) -> String {
+    let mut bytes = Vec::with_capacity(source_revision.len() + input_fingerprint.len());
+    bytes.extend_from_slice(source_revision.as_bytes());
+    bytes.extend_from_slice(input_fingerprint.as_bytes());
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn cleanup_staged_artifact(root: &Path, staging_name: &str) {

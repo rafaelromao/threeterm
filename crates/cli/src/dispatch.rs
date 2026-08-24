@@ -3547,6 +3547,30 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
+        HostError::DraftAlreadyExists { draft_id } => {
+            format!("{{\"kind\":\"draft_already_exists\",\"draft_id\":{draft_id:?}}}")
+        }
+        HostError::DraftNotFound { draft_id } => {
+            format!("{{\"kind\":\"draft_not_found\",\"draft_id\":{draft_id:?}}}")
+        }
+        HostError::DraftStale {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_stale\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftSourceChanged {
+            draft_id,
+            source_feature_id,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftInvalid { draft_id, detail } => format!(
+            "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"
+        ),
         HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
             "kind": "worker_terminated",
             "request_id": record.request_id,
@@ -3644,7 +3668,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 17);
+        assert_eq!(commands.len(), 18);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

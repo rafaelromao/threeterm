@@ -30,6 +30,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -967,6 +968,77 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
         << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
         << "\"request_id\":\"" << json_escape(request_id) << "\","
         << "\"operation\":\"extrude\","
+        << "\"status\":\"" << json_escape(status) << "\","
+        << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+        << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+        << "\"brep_bytes\":" << bytes.str().size() << ","
+        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+        << "}";
+    g_result_json = out.str();
+    return status == "ok";
+}
+
+bool handle_bracket(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    double length = get_number(request, "length");
+    double width = get_number(request, "width");
+    double height = get_number(request, "height");
+    double thickness = get_number(request, "thickness");
+    if (request_id.empty() || feature_id.empty() || output_dir.empty() || output_filename.empty()) {
+        error = "bracket request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    for (double value : {length, width, height, thickness}) {
+        if (!(value > 0.0) || !std::isfinite(value)) {
+            error = "bracket dimensions must be positive finite numbers";
+            return false;
+        }
+    }
+    if (thickness >= length || thickness >= width) {
+        error = "bracket thickness must be smaller than length and width";
+        return false;
+    }
+
+    BRepPrimAPI_MakeBox horizontal(length, width, thickness);
+    BRepPrimAPI_MakeBox vertical(thickness, width, height);
+    if (!horizontal.IsDone() || !vertical.IsDone()) {
+        error = "could not construct bracket plates";
+        return false;
+    }
+    BRepAlgoAPI_Fuse fuse(horizontal.Shape(), vertical.Shape());
+    fuse.Build();
+    if (!fuse.IsDone()) {
+        error = "could not fuse bracket plates";
+        return false;
+    }
+    TopoDS_Shape solid = fuse.Shape();
+    std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+    if (output_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(output_path.parent_path(), ec);
+    }
+    if (!write_brep(solid, output_path, error)) return false;
+    std::ifstream stream(output_path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << stream.rdbuf();
+    std::string sha = sha256_hex(bytes.str());
+    std::string status = "ok";
+    if (!analyze_brep(solid)) {
+        error = "brep_invalid: BRepCheck_Analyzer failed";
+        status = "brep_invalid";
+    }
+    std::ostringstream out;
+    out << "{"
+        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"operation\":\"bracket\","
         << "\"status\":\"" << json_escape(status) << "\","
         << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
         << "\"brep_sha256\":\"" << json_escape(sha) << "\","
@@ -2560,6 +2632,8 @@ int main() {
     bool success = false;
     if (command_id == "extrude") {
         success = handle_extrude(*args, error);
+    } else if (command_id == "bracket") {
+        success = handle_bracket(*args, error);
     } else if (command_id == "boolean_fuse") {
         success = handle_boolean_fuse(*args, error);
     } else if (command_id == "fillet") {

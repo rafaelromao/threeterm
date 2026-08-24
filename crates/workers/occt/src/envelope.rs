@@ -39,6 +39,7 @@ fn is_feature_id(value: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Extrude,
+    Bracket,
     BooleanFuse,
     Fillet,
     Chamfer,
@@ -56,6 +57,7 @@ impl Operation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Extrude => "extrude",
+            Self::Bracket => "bracket",
             Self::BooleanFuse => "boolean_fuse",
             Self::Fillet => "fillet",
             Self::Chamfer => "chamfer",
@@ -68,6 +70,119 @@ impl Operation {
             Self::Draft => "draft",
             Self::Loft => "loft",
         }
+    }
+}
+
+/// Construct an L-bracket from its semantic dimensions. The horizontal plate
+/// occupies `length × width × thickness`; the vertical plate occupies
+/// `thickness × width × height` and shares the origin with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BracketRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+    pub thickness: f64,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BracketRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        length: f64,
+        width: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Bracket,
+            length,
+            width,
+            height,
+            thickness,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Bracket {
+            return Err(format!(
+                "operation must be bracket for BracketRequest, got {:?}",
+                self.operation
+            ));
+        }
+        for (name, value) in [
+            ("length", self.length),
+            ("width", self.width),
+            ("height", self.height),
+            ("thickness", self.thickness),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("bracket {name} must be positive and finite"));
+            }
+        }
+        if self.thickness >= self.length || self.thickness >= self.width {
+            return Err("bracket thickness must be smaller than length and width".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BracketResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl BracketResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
     }
 }
 

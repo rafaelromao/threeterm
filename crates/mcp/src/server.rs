@@ -21,13 +21,19 @@
 //! successful load (canonical host state preservation is inherited from the
 //! `Host` and `Bundle` layers).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
+use threeterm_host::{Host, HostError};
+use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
-use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandSchema, iter};
+use threeterm_protocol::schema::{
+    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema, iter,
+};
 use threeterm_protocol::schema_validator::validate;
 
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -109,8 +115,24 @@ impl JsonRpcResponse {
 /// Driver for the MCP server. The request loop reads newline-framed
 /// JSON-RPC 2.0 envelopes from a `BufRead` source and writes responses
 /// to a `Write` sink. One `McpServer` is constructed per process.
-#[derive(Debug, Default)]
-pub struct McpServer {}
+#[derive(Debug)]
+struct BracketEditSession {
+    host: Host,
+    worker: OcctWorker,
+}
+
+#[derive(Debug)]
+pub struct McpServer {
+    bracket_edits: RefCell<HashMap<String, BracketEditSession>>,
+}
+
+impl Default for McpServer {
+    fn default() -> Self {
+        Self {
+            bracket_edits: RefCell::new(HashMap::new()),
+        }
+    }
+}
 
 impl McpServer {
     pub fn new() -> Self {
@@ -200,6 +222,7 @@ impl McpServer {
 
         let result = match schema_entry.id {
             BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
+            BRACKET_EDIT_COMMAND_ID => self.dispatch_bracket_edit_tool(&arguments),
             other => Err(DispatchError::UnsupportedTool {
                 wire_name: name.to_string(),
                 schema_version: schema_entry.schema_version.to_string(),
@@ -239,6 +262,143 @@ impl McpServer {
                     format!("host dispatch failed: {error}"),
                 ),
             },
+        }
+    }
+
+    fn dispatch_bracket_edit_tool(&self, arguments: &Value) -> Result<Value, DispatchError> {
+        let phase = arguments
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let bundle = arguments
+            .get("bundle_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let draft_id = arguments
+            .get("draft_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let bracket_id = arguments
+            .get("bracket_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let request = || {
+            BracketRequest::new(
+                new_request_id(),
+                arguments["length"].as_f64().unwrap_or_default(),
+                arguments["width"].as_f64().unwrap_or_default(),
+                arguments["height"].as_f64().unwrap_or_default(),
+                arguments["thickness"].as_f64().unwrap_or_default(),
+            )
+            .with_feature_id(&bracket_id)
+        };
+        let key = format!("{bundle}\0{draft_id}");
+        match phase {
+            "open" => {
+                let worker = OcctWorker::locate().map_err(|error| {
+                    DispatchError::Host(HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })
+                })?;
+                let host = Host::new();
+                let draft =
+                    host.open_bracket_parameter_draft(&bundle, &draft_id, &bracket_id, request())?;
+                self.bracket_edits
+                    .borrow_mut()
+                    .insert(key, BracketEditSession { host, worker });
+                Ok(bracket_edit_response(
+                    "open",
+                    &draft.draft_id,
+                    &draft.source_revision,
+                    None,
+                    None,
+                ))
+            }
+            "preview" => {
+                let sessions = self.bracket_edits.borrow();
+                let session = sessions.get(&key).ok_or_else(|| {
+                    DispatchError::Host(HostError::DraftNotFound {
+                        draft_id: draft_id.clone(),
+                    })
+                })?;
+                let preview = session.host.preview_bracket_parameter_draft(
+                    &bundle,
+                    &draft_id,
+                    &session.worker,
+                )?;
+                Ok(bracket_edit_response(
+                    "preview",
+                    &preview.draft_id,
+                    &preview.source_revision,
+                    Some(&preview.preview_revision),
+                    Some(&preview.input_fingerprint),
+                ))
+            }
+            "commit" => {
+                let mut sessions = self.bracket_edits.borrow_mut();
+                let session = sessions.get_mut(&key).ok_or_else(|| {
+                    DispatchError::Host(HostError::DraftNotFound {
+                        draft_id: draft_id.clone(),
+                    })
+                })?;
+                let revision = session.host.commit_bracket_parameter_draft(
+                    &bundle,
+                    &draft_id,
+                    &session.worker,
+                )?;
+                sessions.remove(&key);
+                Ok(bracket_edit_response(
+                    "commit",
+                    &draft_id,
+                    &revision.revision_hash,
+                    None,
+                    None,
+                ))
+            }
+            "discard" => {
+                let mut sessions = self.bracket_edits.borrow_mut();
+                let session = sessions.get_mut(&key).ok_or_else(|| {
+                    DispatchError::Host(HostError::DraftNotFound {
+                        draft_id: draft_id.clone(),
+                    })
+                })?;
+                session.host.discard_bracket_parameter_draft(&draft_id)?;
+                sessions.remove(&key);
+                Ok(bracket_edit_response(
+                    "discard",
+                    &draft_id,
+                    &arguments
+                        .get("source_revision")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| "0".repeat(64), str::to_string),
+                    None,
+                    None,
+                ))
+            }
+            "update" => {
+                let mut sessions = self.bracket_edits.borrow_mut();
+                let session = sessions.get_mut(&key).ok_or_else(|| {
+                    DispatchError::Host(HostError::DraftNotFound {
+                        draft_id: draft_id.clone(),
+                    })
+                })?;
+                let draft = session
+                    .host
+                    .update_bracket_parameter_draft(&draft_id, request())?;
+                Ok(bracket_edit_response(
+                    "update",
+                    &draft.draft_id,
+                    &draft.source_revision,
+                    None,
+                    None,
+                ))
+            }
+            _ => Err(DispatchError::Validation(
+                "bracket-edit phase is invalid".to_string(),
+            )),
         }
     }
 
@@ -306,6 +466,29 @@ impl McpServer {
             }
         }
     }
+}
+
+fn bracket_edit_response(
+    phase: &str,
+    draft_id: &str,
+    source_revision: &str,
+    preview_revision: Option<&str>,
+    input_fingerprint: Option<&str>,
+) -> Value {
+    let mut response = json!({
+        "status": "ok",
+        "phase": phase,
+        "draft_id": draft_id,
+        "source_revision": source_revision,
+        "schema_version": threeterm_protocol::schema::BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+    });
+    if let Some(preview_revision) = preview_revision {
+        response["preview_revision"] = Value::String(preview_revision.to_string());
+    }
+    if let Some(input_fingerprint) = input_fingerprint {
+        response["input_fingerprint"] = Value::String(input_fingerprint.to_string());
+    }
+    response
 }
 
 fn dispatch_bracket_tool(arguments: &Value) -> Result<Value, DispatchError> {

@@ -116,7 +116,16 @@ pub enum WorkerError {
     },
     /// The request was cooperatively cancelled and the worker
     /// acknowledged the cancellation inside the grace period.
-    Cancelled { request_id: String },
+    /// `last_progress`, `elapsed`, `stderr_tail` and exit facts are
+    /// retained so the diagnostic surface keeps cancellation context.
+    Cancelled {
+        request_id: String,
+        last_progress: Option<threeterm_protocol::supervisor::Progress>,
+        elapsed: std::time::Duration,
+        stderr_tail: String,
+        exit_signal: Option<i32>,
+        exit_code: Option<i32>,
+    },
     /// The supervised lifecycle ended with a structured termination
     /// record that does not map to a typed failure: the record's stage,
     /// elapsed time, last progress, and stderr tail are preserved so
@@ -176,8 +185,16 @@ impl std::fmt::Display for WorkerError {
                 "worker diagnostic for request {request_id} {} {}: {}",
                 diagnostic.code, diagnostic.arg, diagnostic.schema_version
             ),
-            Self::Cancelled { request_id } => {
-                write!(formatter, "worker request {request_id} cancelled")
+            Self::Cancelled {
+                request_id,
+                last_progress,
+                elapsed,
+                ..
+            } => {
+                write!(
+                    formatter,
+                    "worker request {request_id} cancelled after {elapsed:?} last_progress={last_progress:?}"
+                )
             }
             Self::Supervised { record } => {
                 write!(
@@ -665,13 +682,24 @@ fn map_outcome(
             })
         }
         SupervisorOutcome::Acknowledged {
-            request_id, reason, ..
+            request_id,
+            reason,
+            elapsed,
+            last_progress,
+            stderr_tail,
+            exit_signal,
+            exit_code,
         } => Err(WorkerError::Cancelled {
             request_id: if request_id.is_empty() {
                 reason
             } else {
                 request_id
             },
+            last_progress,
+            elapsed,
+            stderr_tail,
+            exit_signal,
+            exit_code,
         }),
         SupervisorOutcome::ForceTerminated { record } => {
             if let (Some(code), Some(detail)) =

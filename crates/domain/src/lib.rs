@@ -170,16 +170,19 @@ impl ComponentGraph {
                         "component dimensions must be strictly positive finite numbers".to_string(),
                     );
                 }
-                if self.definitions.contains_key(&definition.id) {
-                    return Err("component definition already exists".to_string());
+                if self.id_is_in_use(&definition.id) {
+                    return Err("component ID already exists".to_string());
+                }
+                if self.feature_id_is_in_use(&definition.descriptor.feature_id) {
+                    return Err("component feature ID already exists".to_string());
                 }
                 self.definitions
                     .insert(definition.id.clone(), definition.clone());
             }
             ComponentCommand::CreateInstance { instance } => {
                 self.require_definition(&instance.definition_id)?;
-                if self.instances.contains_key(&instance.id) {
-                    return Err("component instance already exists".to_string());
+                if self.id_is_in_use(&instance.id) {
+                    return Err("component ID already exists".to_string());
                 }
                 self.instances.insert(instance.id.clone(), instance.clone());
             }
@@ -200,8 +203,10 @@ impl ComponentGraph {
             } => {
                 let source = self.require_instance(source_instance_id)?.clone();
                 let mut definition = self.require_definition(&source.definition_id)?.clone();
-                if self.definitions.contains_key(definition_id)
-                    || self.instances.contains_key(instance_id)
+                if definition_id == instance_id
+                    || self.id_is_in_use(definition_id)
+                    || self.id_is_in_use(instance_id)
+                    || self.feature_id_is_in_use(feature_id)
                 {
                     return Err("independent component IDs already exist".to_string());
                 }
@@ -293,6 +298,16 @@ impl ComponentGraph {
                 Err("component instance reference is incompatible".to_string())
             }
         }
+    }
+
+    fn id_is_in_use(&self, id: &str) -> bool {
+        self.definitions.contains_key(id) || self.instances.contains_key(id)
+    }
+
+    fn feature_id_is_in_use(&self, feature_id: &str) -> bool {
+        self.definitions
+            .values()
+            .any(|definition| definition.descriptor.feature_id == feature_id)
     }
 }
 
@@ -480,6 +495,35 @@ mod tests {
         assert_eq!(
             resolve_semantic_reference(&reference, [("different".to_string(), "definition")]),
             ReferenceOutcome::Lost
+        );
+    }
+
+    #[test]
+    fn component_ids_are_unique_across_definitions_and_instances() {
+        let mut graph = ComponentGraph::default();
+        graph
+            .apply(&ComponentCommand::Define {
+                definition: ComponentDefinition {
+                    id: "bracket".to_string(),
+                    descriptor: LBracketDescriptor {
+                        feature_id: "bracket-feature".to_string(),
+                        length: 60.0,
+                        width: 30.0,
+                        height: 40.0,
+                        thickness: 3.0,
+                    },
+                },
+            })
+            .expect("definition is valid");
+        assert_eq!(
+            graph.apply(&ComponentCommand::CreateInstance {
+                instance: ComponentInstance {
+                    id: "bracket".to_string(),
+                    definition_id: "bracket".to_string(),
+                    transform: [0.0, 0.0, 0.0],
+                },
+            }),
+            Err("component ID already exists".to_string())
         );
     }
 }

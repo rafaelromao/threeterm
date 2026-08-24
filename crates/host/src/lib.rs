@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use threeterm_domain::FeatureGraph;
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest,
-    RevolveResult, ShellRequest, ShellResult, WorkerError,
+    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
+    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
+    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
+    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -20,6 +20,128 @@ use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::supervisor::SupervisorOutcome;
 
 pub const BREP_SUBDIR: &str = "brep";
+
+fn write_3mf(stl: &Path, destination: &Path) -> Result<(), HostError> {
+    let source = fs::read_to_string(stl).map_err(|error| HostError::BrepIo {
+        detail: error.to_string(),
+    })?;
+    let vertices: Vec<[f64; 3]> = source
+        .lines()
+        .filter_map(|line| {
+            let values: Vec<_> = line.split_whitespace().collect();
+            (values.first() == Some(&"vertex") && values.len() == 4)
+                .then(|| {
+                    Some([
+                        values[1].parse().ok()?,
+                        values[2].parse().ok()?,
+                        values[3].parse().ok()?,
+                    ])
+                })
+                .flatten()
+        })
+        .collect();
+    if vertices.len() < 3 || vertices.len() % 3 != 0 {
+        return Err(HostError::BrepInvalid {
+            request_id: Some("export".to_string()),
+            detail: "OCCT STL tessellation is empty or malformed".to_string(),
+        });
+    }
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources><object id=\"1\" type=\"model\"><mesh><vertices>",
+    );
+    for vertex in &vertices {
+        xml.push_str(&format!(
+            "<vertex x=\"{}\" y=\"{}\" z=\"{}\"/>",
+            vertex[0], vertex[1], vertex[2]
+        ));
+    }
+    xml.push_str("</vertices><triangles>");
+    for index in (0..vertices.len()).step_by(3) {
+        xml.push_str(&format!(
+            "<triangle v1=\"{index}\" v2=\"{}\" v3=\"{}\"/>",
+            index + 1,
+            index + 2
+        ));
+    }
+    xml.push_str(
+        "</triangles></mesh></object></resources><build><item objectid=\"1\"/></build></model>",
+    );
+    let content_types = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/></Types>";
+    let relationships = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/></Relationships>";
+    let zip = zip_stored(&[
+        ("[Content_Types].xml", content_types.as_slice()),
+        ("_rels/.rels", relationships.as_slice()),
+        ("3D/3dmodel.model", xml.as_bytes()),
+    ]);
+    fs::write(destination, zip).map_err(|error| HostError::BrepIo {
+        detail: error.to_string(),
+    })
+}
+
+fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut zip = Vec::new();
+    let mut entries = Vec::new();
+    for (name, content) in files {
+        let offset = zip.len() as u32;
+        let crc = crc32(content);
+        let name = name.as_bytes();
+        entries.push((offset, crc, name, *content));
+        zip.extend_from_slice(&0x04034b50_u32.to_le_bytes());
+        zip.extend_from_slice(&20_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(content);
+    }
+    let central_start = zip.len();
+    for (offset, crc, name, content) in &entries {
+        zip.extend_from_slice(&0x02014b50_u32.to_le_bytes());
+        zip.extend_from_slice(&20_u16.to_le_bytes());
+        zip.extend_from_slice(&20_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u32.to_le_bytes());
+        zip.extend_from_slice(&offset.to_le_bytes());
+        zip.extend_from_slice(name);
+    }
+    let end = zip.len();
+    zip.extend_from_slice(&0x06054b50_u32.to_le_bytes());
+    zip.extend_from_slice(&0_u16.to_le_bytes());
+    zip.extend_from_slice(&0_u16.to_le_bytes());
+    zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&((end - central_start) as u32).to_le_bytes());
+    zip.extend_from_slice(&(central_start as u32).to_le_bytes());
+    zip.extend_from_slice(&0_u16.to_le_bytes());
+    zip
+}
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb88320 & (0_u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
+}
 
 /// Returns true if a Layer 1 artifact request must never be cached per the
 /// exclusion policy. Mirrors `threeterm_viewport::ViewportDisplayCache::is_excluded`
@@ -353,6 +475,80 @@ pub struct Host {
 }
 
 impl Host {
+    pub fn export(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        formats: &[String],
+        output_dir: &Path,
+        deflection: f64,
+        override_warnings: bool,
+    ) -> Result<Vec<PathBuf>, HostError> {
+        if deflection > 0.5 && !override_warnings {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "{{\"severity\":\"warning\",\"code\":\"coarse_tessellation\",\"affected_feature_id\":\"{feature_id}\",\"recovery\":\"use --override-warnings or deflection <= 0.5\",\"override_eligible\":true}}"
+                ),
+            });
+        }
+        let root = root.as_ref();
+        let brep = bundle_root(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{feature_id}.brep"));
+        if !brep.is_file() {
+            return Err(HostError::BrepFileMissing { path: brep });
+        }
+        if formats
+            .iter()
+            .any(|format| !matches!(format.as_str(), "stl" | "3mf" | "step"))
+        {
+            return Err(HostError::Validation {
+                detail: "unsupported export format".to_string(),
+            });
+        }
+        let prior = Bundle::at(root).open()?;
+        let stage = output_dir.join(format!(".threeterm-export-{}", std::process::id()));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: error.to_string(),
+        })?;
+        let request = ExportRequest::new("export", brep, deflection)
+            .with_output_path(&stage, format!("{feature_id}.stl"))
+            .with_feature_id(feature_id);
+        let result = OcctWorker::locate()
+            .map_err(HostError::from)?
+            .with_revision_id(prior.revision_hash_hex())
+            .export(&request)
+            .map_err(HostError::from)?;
+        if !result.is_success() || !result.step_path.is_file() {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(HostError::BrepInvalid {
+                request_id: Some("export".to_string()),
+                detail: "export worker did not produce validated artifacts".to_string(),
+            });
+        }
+        let mut artifacts = Vec::new();
+        if formats.iter().any(|format| format == "3mf") {
+            write_3mf(&result.brep_path, &stage.join(format!("{feature_id}.3mf")))?;
+        }
+        for format in formats {
+            let source = match format.as_str() {
+                "stl" => result.brep_path.clone(),
+                "step" => result.step_path.clone(),
+                "3mf" => stage.join(format!("{feature_id}.3mf")),
+                _ => unreachable!(),
+            };
+            let final_path = output_dir.join(format!("{feature_id}.{format}"));
+            fs::create_dir_all(output_dir).map_err(|error| HostError::BrepIo {
+                detail: error.to_string(),
+            })?;
+            fs::rename(&source, &final_path).map_err(|error| HostError::BrepIo {
+                detail: error.to_string(),
+            })?;
+            artifacts.push(final_path);
+        }
+        let _ = fs::remove_dir_all(stage);
+        Ok(artifacts)
+    }
     pub fn new() -> Self {
         Self::default()
     }

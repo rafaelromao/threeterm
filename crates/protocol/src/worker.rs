@@ -717,8 +717,12 @@ impl WorkerHost for SubprocessWorkerHost {
         // Wait for descendants to be terminated (or become zombies awaiting init).
         // This closes the window where a setsid descendant is SIGKILLed but
         // still appears in /proc as a zombie before init reaps it.
+        // If any descendant remains running after the deadline, fail closed:
+        // the termination record must not be accepted while an escaped
+        // process is still executing.
         let descendant_deadline = Instant::now() + std::time::Duration::from_millis(500);
         let leader_pid = self.child.id() as i32;
+        let mut all_gone_final = true;
         while Instant::now() < descendant_deadline {
             let mut all_gone = true;
             for pid in &contained {
@@ -747,9 +751,16 @@ impl WorkerHost for SubprocessWorkerHost {
                 }
             }
             if all_gone {
+                all_gone_final = true;
                 break;
             }
+            all_gone_final = false;
             std::thread::sleep(REAP_POLL);
+        }
+        if !all_gone_final {
+            return Err(WorkerError::Io(std::io::Error::other(
+                "worker descendant could not be terminated",
+            )));
         }
         // The worker is reaped; let the detached stdout/stderr reader
         // threads observe EOF and settle their overflow flags before

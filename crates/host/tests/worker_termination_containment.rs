@@ -1,15 +1,16 @@
 //! Host canonical-state preservation across worker termination.
 //!
-//! Each test drives a production `OcctWorker` request that terminates
-//! (cooperative cancel, force-stop, signal, descendant) and asserts the
-//! canonical `Bundle` manifest/transactions are byte-identical and no
-//! staged geometry was promoted.
+//! Each test drives a production `Host::extrude` request with a fixture
+//! worker that terminates (force-stop, signal, failure-then-crash) and
+//! asserts the canonical `Bundle` manifest/transactions are byte-identical,
+//! no staged geometry was promoted, and the structured `HostError` retains
+//! diagnostic context.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use threeterm_host::Host;
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, WorkerError};
+use threeterm_host::{Host, HostError};
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
 const PROTOCOL_SCHEMA: &str = "threeterm.protocol/1";
@@ -47,12 +48,12 @@ impl FixtureDir {
     }
 }
 
-fn retry_fixture<T>(mut attempt: impl FnMut() -> Result<T, WorkerError>) -> Result<T, WorkerError> {
+fn retry_host<T>(mut attempt: impl FnMut() -> Result<T, HostError>) -> Result<T, HostError> {
     let mut last = None;
     for _ in 0..3 {
         match attempt() {
             Ok(v) => return Ok(v),
-            Err(e @ WorkerError::Spawn { .. }) if e.to_string().contains("Text file busy") => {
+            Err(e) if e.to_string().contains("Text file busy") => {
                 last = Some(e);
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -96,8 +97,9 @@ fn snapshot_manifest_transactions(bundle_root: &str) -> (Vec<u8>, Vec<u8>) {
 
 #[test]
 fn cooperative_cancel_does_not_mutate_canonical_state() {
+    // Cooperative cancel via direct worker with HostError projection:
+    // the HostError must be WorkerTerminated with last_progress retained.
     let (dir, host, bundle_root) = create_host_with_bundle("coop-canonical");
-    let bundle_path = PathBuf::from(&bundle_root);
     let (before_manifest, before_log) = snapshot_manifest_transactions(&bundle_root);
     let before_snapshot = host.current().expect("before snapshot");
 
@@ -124,9 +126,38 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
     );
     let request = sample_extrude_fixed_id(&request_id, &dir.root);
     let cancel = std::sync::atomic::AtomicBool::new(true);
-    let err =
-        retry_fixture(|| worker.extrude_with_cancel(&request, &cancel)).expect_err("must cancel");
-    assert!(matches!(err, WorkerError::Cancelled { .. }), "got {err:?}");
+    // Use HostError projection via direct worker then Host conversion to prove diagnostic.
+    let worker_err = {
+        let mut last = None;
+        let mut res = None;
+        for _ in 0..3 {
+            match worker.clone().extrude_with_cancel(&request, &cancel) {
+                Ok(v) => {
+                    res = Some(Ok(v));
+                    break;
+                }
+                Err(e) if e.to_string().contains("Text file busy") => {
+                    last = Some(e);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    res = Some(Err(e));
+                    break;
+                }
+            }
+        }
+        res.unwrap_or_else(|| Err(last.expect("retry")))
+            .expect_err("must cancel")
+    };
+    let host_err = HostError::from(worker_err);
+    match &host_err {
+        HostError::WorkerTerminated { record } => {
+            assert_eq!(record.request_id, request_id);
+            assert_eq!(record.stage, "cancelled");
+            assert!(record.last_progress.is_some(), "last_progress retained");
+        }
+        other => panic!("expected WorkerTerminated for cooperative cancel, got {other:?}"),
+    }
 
     // Canonical must be unchanged
     let (after_manifest, after_log) = snapshot_manifest_transactions(&bundle_root);
@@ -136,12 +167,10 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
     );
     assert_eq!(before_log, after_log, "log unchanged after cancel");
     assert_eq!(host.current().expect("after snapshot"), before_snapshot);
-    // Staged output must not exist
     assert!(
         !dir.root.join("out.brep").exists(),
         "staged output must be discarded"
     );
-    let _ = bundle_path;
 }
 
 #[test]
@@ -165,8 +194,15 @@ fn force_stop_does_not_mutate_canonical_state() {
             .as_nanos()
     );
     let request = sample_extrude_fixed_id(&request_id, &dir.root);
-    let err = retry_fixture(|| worker.extrude(&request)).expect_err("must force-terminate");
-    assert!(matches!(err, WorkerError::Supervised { .. }), "got {err:?}");
+    let err = retry_host(|| host.extrude(&bundle_root, request.clone(), &worker))
+        .expect_err("must force-terminate");
+    match &err {
+        HostError::WorkerTerminated { record } => {
+            assert_eq!(record.request_id, request_id);
+            assert_eq!(record.exit_signal, Some(9));
+        }
+        other => panic!("expected WorkerTerminated, got {other:?}"),
+    }
 
     let (after_manifest, after_log) = snapshot_manifest_transactions(&bundle_root);
     assert_eq!(before_manifest, after_manifest);
@@ -199,14 +235,18 @@ fn signal_crash_does_not_mutate_canonical_state() {
             .as_nanos()
     );
     let request = sample_extrude_fixed_id(&request_id, &dir.root);
-    let err = retry_fixture(|| worker.extrude(&request)).expect_err("must signal");
+    let err = retry_host(|| host.extrude(&bundle_root, request.clone(), &worker))
+        .expect_err("must signal");
     assert!(
         matches!(
-            err,
-            WorkerError::SignalledWithContext { .. } | WorkerError::Supervised { .. }
+            &err,
+            HostError::WorkerTerminated { .. } | HostError::WorkerFailure { .. }
         ),
         "got {err:?}"
     );
+    if let HostError::WorkerTerminated { record } = &err {
+        assert_eq!(record.exit_signal, Some(15));
+    }
 
     let (after_manifest, after_log) = snapshot_manifest_transactions(&bundle_root);
     assert_eq!(before_manifest, after_manifest);
@@ -240,14 +280,18 @@ fn failure_then_crash_does_not_mutate_canonical_state() {
             .as_nanos()
     );
     let request = sample_extrude_fixed_id(&request_id, &dir.root);
-    let err = retry_fixture(|| worker.extrude(&request)).expect_err("must fail");
-    assert!(
-        matches!(
-            err,
-            WorkerError::Supervised { .. } | WorkerError::DiagnosticWithContext { .. }
-        ),
-        "got {err:?}"
-    );
+    let err =
+        retry_host(|| host.extrude(&bundle_root, request.clone(), &worker)).expect_err("must fail");
+    match &err {
+        HostError::WorkerTerminated { record } => {
+            // failure-then-crash retains failed_code and signal
+            assert_eq!(record.failed_code.as_deref(), Some("worker_failed"));
+        }
+        HostError::WorkerFailure { .. } => {
+            // Also acceptable if mapped to WorkerFailure (failed without signal)
+        }
+        other => panic!("expected WorkerTerminated or WorkerFailure, got {other:?}"),
+    }
 
     let (after_manifest, after_log) = snapshot_manifest_transactions(&bundle_root);
     assert_eq!(before_manifest, after_manifest);

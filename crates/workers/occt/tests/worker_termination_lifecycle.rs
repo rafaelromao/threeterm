@@ -391,7 +391,8 @@ fn descendant_in_same_pgroup_is_terminated() {
                 "#!/bin/sh\n\
                  printf '%s\\n' '{{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}}'\n\
                  read line\n\
-                 ( echo $! > \"{pidfile}\"; echo $$ > \"{pidfile}.parent\"; sleep 30 ) &\n\
+                 sleep 30 &\n\
+                 echo $! > \"{pidfile}\"\n\
                  sleep 30\n",
                 pidfile = pidfile.display()
             ),
@@ -412,14 +413,38 @@ fn descendant_in_same_pgroup_is_terminated() {
         start.elapsed() < Duration::from_millis(1500),
         "descendant containment within budget"
     );
-    // Verify child pid is gone
-    std::thread::sleep(Duration::from_millis(100));
-    if let Ok(pid_str) = std::fs::read_to_string(&pidfile)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
-    {
-        let proc_exists = Path::new(&format!("/proc/{pid}")).exists();
+    // Verify child pid is gone — pidfile must exist and contain a valid pid.
+    // Consider zombie (state Z) as terminated, since init will reap.
+    std::thread::sleep(Duration::from_millis(300));
+    let pid_str = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|_| panic!("pidfile must exist at {}", pidfile.display()));
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("pidfile must contain a valid pid, got {pid_str:?}"));
+    let proc_path = format!("/proc/{pid}/stat");
+    if let Ok(stat) = std::fs::read_to_string(&proc_path) {
+        let state = stat
+            .rsplit(") ")
+            .next()
+            .unwrap_or("")
+            .chars()
+            .next()
+            .unwrap_or('?');
         assert!(
-            !proc_exists,
+            state == 'Z',
+            "descendant pid {pid} must be terminated (state={state})"
+        );
+        // Wait for init to reap zombie
+        for _ in 0..5 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
             "descendant pid {pid} must be terminated, still alive"
         );
     }
@@ -468,53 +493,55 @@ fn detached_descendant_with_new_session_is_terminated() {
         start.elapsed()
     );
     std::thread::sleep(Duration::from_millis(300));
-    if let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check via /proc: consider zombie (state Z) as terminated, since init will reap.
-            let proc_path = format!("/proc/{pid}/stat");
-            if let Ok(stat) = std::fs::read_to_string(&proc_path) {
-                // stat format: pid (comm) state ...
-                let state = stat
-                    .rsplit(") ")
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .next()
-                    .unwrap_or('?');
-                // If process is still running (R/S/D), fail; Z is zombie considered terminated.
-                assert!(
-                    state == 'Z' || !Path::new(&format!("/proc/{pid}")).exists(),
-                    "setsid descendant pid {pid} must be terminated (state={state}, stat={stat:?})"
-                );
-                if state == 'Z' {
-                    // Wait briefly for init to reap zombie
-                    for _ in 0..5 {
-                        std::thread::sleep(Duration::from_millis(50));
-                        if !Path::new(&format!("/proc/{pid}")).exists() {
-                            break;
-                        }
-                        if let Ok(s) = std::fs::read_to_string(&proc_path) {
-                            let st = s
-                                .rsplit(") ")
-                                .next()
-                                .unwrap_or("")
-                                .chars()
-                                .next()
-                                .unwrap_or('?');
-                            if st != 'Z' {
-                                break;
-                            }
-                        }
+    let pid_str = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|_| panic!("pidfile must exist at {}", pidfile.display()));
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("pidfile must contain a valid pid, got {pid_str:?}"));
+    // Check via /proc: consider zombie (state Z) as terminated, since init will reap.
+    let proc_path = format!("/proc/{pid}/stat");
+    if let Ok(stat) = std::fs::read_to_string(&proc_path) {
+        // stat format: pid (comm) state ...
+        let state = stat
+            .rsplit(") ")
+            .next()
+            .unwrap_or("")
+            .chars()
+            .next()
+            .unwrap_or('?');
+        // If process is still running (R/S/D), fail; Z is zombie considered terminated.
+        assert!(
+            state == 'Z' || !Path::new(&format!("/proc/{pid}")).exists(),
+            "setsid descendant pid {pid} must be terminated (state={state}, stat={stat:?})"
+        );
+        if state == 'Z' {
+            // Wait briefly for init to reap zombie
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(50));
+                if !Path::new(&format!("/proc/{pid}")).exists() {
+                    break;
+                }
+                if let Ok(s) = std::fs::read_to_string(&proc_path) {
+                    let st = s
+                        .rsplit(") ")
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .next()
+                        .unwrap_or('?');
+                    if st != 'Z' {
+                        break;
                     }
                 }
-            } else {
-                // No stat file means already reaped
-                assert!(
-                    !Path::new(&format!("/proc/{pid}")).exists(),
-                    "setsid descendant pid {pid} must be terminated"
-                );
             }
         }
+    } else {
+        // No stat file means already reaped
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "setsid descendant pid {pid} must be terminated"
+        );
     }
     match error {
         WorkerError::Supervised { record } => {

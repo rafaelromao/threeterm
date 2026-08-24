@@ -105,3 +105,40 @@ fn lua_dispatch_failure_preserves_the_host_canonical_state() {
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(blocked);
 }
+
+#[test]
+fn lua_forbidden_apis_fail_with_structured_diagnostics_before_host_dispatch() {
+    let root = temp_path("forbidden");
+    let host = Host::new();
+    let before = host
+        .save_bracket(&root, "seed", 10.0, 5.0, 5.0, 1.0)
+        .expect("seed bracket commits");
+    let manifest_before = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = fs::read(root.join("transactions.log")).expect("transaction log reads");
+
+    for (expression, api) in [
+        ("os.execute('not allowed')", "os.execute"),
+        ("io.popen('not allowed')", "io.popen"),
+        ("package.loadlib('not allowed', 'entry')", "package.loadlib"),
+        ("io.open('not allowed')", "io.open"),
+        (
+            "local ok = pcall(function() os.execute('not allowed') end)",
+            "os.execute",
+        ),
+    ] {
+        let source = format!("{}\n{}", bracket_lua(&root), expression);
+        let error = dispatch_lua_key(&source, "F2", &host)
+            .expect_err("forbidden Lua API fails before dispatch");
+        assert_eq!(error.code(), "forbidden_api");
+        assert_eq!(error.forbidden_api(), Some(api));
+        assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
+        assert_eq!(host.current(), Some(before.clone()));
+        assert_eq!(
+            fs::read(root.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log_before);
+    }
+
+    let _ = fs::remove_dir_all(root);
+}

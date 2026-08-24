@@ -1,6 +1,6 @@
 use threeterm_theme::{
-    SemanticPalette, ThemeVerificationCode, TransientState, palette, palettes, transient_visuals,
-    verify_palette, verify_semantic_palette, verify_theme_contract,
+    SemanticPalette, SemanticToken, ThemeVerificationCode, TransientState, palette, palettes,
+    transient_visuals, verify_palette, verify_semantic_palette, verify_theme_contract,
     verify_transient_marker_coverage,
 };
 
@@ -202,6 +202,40 @@ fn every_transient_state_color_resolves_in_every_registered_palette() {
     for palette in palettes() {
         verify_theme_contract(palette)
             .unwrap_or_else(|error| panic!("palette {} failed {:?}", palette.name, error));
+    }
+}
+
+#[test]
+fn semantic_tui_tokens_have_deterministic_truecolor_components() {
+    let palette = palette("catppuccin").expect("catppuccin is registered");
+
+    let foreground = palette
+        .rgb(SemanticToken::TuiSelectionForeground)
+        .expect("selection foreground converts to sRGB");
+    let background = palette
+        .rgb(SemanticToken::TuiSelectionBackground)
+        .expect("selection background converts to sRGB");
+
+    assert_eq!(
+        foreground,
+        palette.rgb(SemanticToken::TuiSelectionForeground).unwrap()
+    );
+    assert_eq!(
+        background,
+        palette.rgb(SemanticToken::TuiSelectionBackground).unwrap()
+    );
+    assert_ne!(foreground, background);
+}
+
+#[test]
+fn transient_overlay_colors_are_tui_tokens_only() {
+    for visual in transient_visuals() {
+        let token = visual.color.expect("transient state has a color token");
+        assert!(
+            token.as_str().starts_with("tui."),
+            "{} is not a TUI token",
+            token.as_str()
+        );
     }
 }
 

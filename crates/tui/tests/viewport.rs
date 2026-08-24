@@ -2,6 +2,7 @@ use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::Host;
+use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
     CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer,
@@ -218,6 +219,42 @@ fn production_write_failure_is_structured_without_host_mutation() {
         }
         TuiViewportError::Tui(_) => panic!("terminal failure must retain viewport diagnostics"),
     }
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn host_viewport_path_emits_themed_marker_overlay_without_host_mutation() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let before = host.current().expect("canonical state exists");
+    let theme = ThemeContext::from(
+        resolve_palette(PaletteSources {
+            cli: Some("sandman-light"),
+            environment: None,
+            config: None,
+        })
+        .expect("light palette resolves"),
+    );
+    let mut session = TuiViewportSession::from_host_with_theme(
+        &host,
+        64,
+        48,
+        admitted_renderer(RecordingWriter::default()),
+        theme,
+    )
+    .expect("host-backed viewport accepts the resolved theme");
+
+    let outcome = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("the production viewport path renders the input");
+
+    assert!(outcome.rendered.overlay.contains("[selection-glyph]"));
+    assert!(outcome.rendered.overlay.contains("\x1b[38;2;"));
+    assert!(outcome.rendered.overlay.ends_with("\x1b[0m"));
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");

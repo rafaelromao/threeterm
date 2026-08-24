@@ -895,6 +895,9 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
             .map(|timeline| timeline.feature_id.as_str()),
         Some("l-base")
     );
+    let timeline = session.state().feature_timeline.expect("timeline state");
+    assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(timeline.revisions[0].status, "current-valid");
 
     let rejected = session
         .transition_history(HistoryEvent::RestoreNamedRevision {
@@ -910,18 +913,13 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
     );
     assert_eq!(session.state().canonical_revision, "history-revision-2");
 
-    session
-        .transition_history(HistoryEvent::RestoreNamedRevision {
-            name: "before-edit".to_string(),
-        })
-        .expect("scoped restore starts");
-    session
-        .transition_history(HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
-            revision: "history-revision-1".to_string(),
-            can_undo: true,
-            can_redo: false,
-        }))
-        .expect("scoped restore commits");
+    let restored = session
+        .restore_feature_timeline(&host, &root, "before-edit")
+        .expect("scoped restore commits through the host");
+    assert_eq!(
+        restored.history.active_snapshot().revision_id,
+        "history-revision-1"
+    );
     assert!(session.state().feature_timeline.is_none());
     assert_eq!(session.state().canonical_revision, "history-revision-1");
 

@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use threeterm_domain::FeatureGraph;
-use threeterm_host::Host;
+use threeterm_domain::{FeatureGraph, history::HistoryTimelineStatus};
+use threeterm_host::{HistoryCommitView, Host};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -445,6 +445,17 @@ impl InteractionEvent {
     }
 }
 
+fn history_timeline_status_name(status: &HistoryTimelineStatus) -> String {
+    match status {
+        HistoryTimelineStatus::CurrentValid => "current-valid",
+        HistoryTimelineStatus::Broken => "broken",
+        HistoryTimelineStatus::BlockedByFailure => "blocked-by-failure",
+        HistoryTimelineStatus::Suppressed => "suppressed",
+        HistoryTimelineStatus::Absent => "absent",
+    }
+    .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateAcknowledgement {
     pub sequence: u64,
@@ -464,8 +475,16 @@ pub struct FeatureTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureTimelineView {
     pub feature_id: String,
-    pub revisions: Vec<String>,
+    pub revisions: Vec<FeatureTimelineRevision>,
     pub named_revisions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureTimelineRevision {
+    pub revision_id: String,
+    pub operation: String,
+    pub status: String,
+    pub named_revision_names: Vec<String>,
 }
 
 impl FeatureTarget {
@@ -741,7 +760,7 @@ impl TuiSession {
     pub fn show_feature_timeline(
         &mut self,
         feature_id: &str,
-        revisions: Vec<String>,
+        revisions: Vec<FeatureTimelineRevision>,
         named_revisions: Vec<String>,
     ) -> Result<(), TuiDiagnostic> {
         let kind = StateEventKind::History(HistoryEventKind::RestoreNamedRevision);
@@ -791,7 +810,12 @@ impl TuiSession {
                 .timeline
                 .revisions
                 .iter()
-                .map(|revision| revision.revision_id.clone())
+                .map(|revision| FeatureTimelineRevision {
+                    revision_id: revision.revision_id.clone(),
+                    operation: revision.operation.clone(),
+                    status: history_timeline_status_name(&revision.status),
+                    named_revision_names: revision.named_revision_names.clone(),
+                })
                 .collect(),
             timeline
                 .timeline
@@ -804,6 +828,56 @@ impl TuiSession {
 
     pub fn clear_feature_timeline(&mut self) {
         self.feature_timeline = None;
+    }
+
+    pub fn restore_feature_timeline(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, TuiDiagnostic> {
+        let feature_id = self
+            .feature_timeline
+            .as_ref()
+            .map(|timeline| timeline.feature_id.clone())
+            .ok_or_else(|| {
+                self.operation_diagnostic(
+                    TuiDiagnosticCode::HistoryRejected,
+                    StateAxis::History,
+                    StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                    "no feature timeline is open".to_string(),
+                    "timeline",
+                )
+            })?;
+        let started = self.transition_history(HistoryEvent::RestoreNamedRevision {
+            name: name.to_string(),
+        })?;
+        if let Some(diagnostic) = started.diagnostic {
+            return Err(diagnostic);
+        }
+
+        let view = match host.restore_named_revision(root, &feature_id, name) {
+            Ok(view) => view,
+            Err(error) => {
+                let rejected = self
+                    .transition_history(HistoryEvent::ApplyCompleted(
+                        HistoryApplyResult::Rejected {
+                            detail: error.to_string(),
+                        },
+                    ))
+                    .expect("history rejection returns to the linear state");
+                return Err(rejected
+                    .diagnostic
+                    .expect("history rejection carries a diagnostic"));
+            }
+        };
+        let revision = view.history.active_snapshot().revision_id.clone();
+        self.transition_history(HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
+            revision,
+            can_undo: true,
+            can_redo: false,
+        }))?;
+        Ok(view)
     }
 
     pub fn transition_lifecycle(

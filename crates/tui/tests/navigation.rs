@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::Host;
 use threeterm_persistence::Bundle;
-use threeterm_theme::NonColorMarker;
+use threeterm_theme::{NonColorMarker, PaletteSources, ThemeContext, resolve_palette};
 use threeterm_tui::{
     ArrowKey, CaptureState, CommandEvent, CommandPhase, FeatureTarget, FocusCaptureEvent,
     FocusState, HistoryEvent, HistoryState, InteractionEvent, InteractionMode, LifecycleEvent,
@@ -231,6 +231,9 @@ fn terminal_arrow_bytes_drive_selection_and_render_the_visible_acknowledgement()
     assert!(rendered.overlay.contains("[selection-glyph]"));
     assert!(rendered.overlay.contains("Acknowledgement 1:"));
     assert!(rendered.overlay.contains("feature-a"));
+    assert!(rendered.overlay.contains("\x1b[38;2;"));
+    assert!(rendered.overlay.contains("\x1b[48;2;"));
+    assert!(rendered.overlay.ends_with("\x1b[0m"));
     assert!(rendered.diagnostic.is_none());
     assert_eq!(host.current(), Some(before.clone()));
 
@@ -239,6 +242,37 @@ fn terminal_arrow_bytes_drive_selection_and_render_the_visible_acknowledgement()
         .expect_err("malformed terminal input is diagnosed");
     assert_eq!(invalid.code, TuiDiagnosticCode::InvalidArrowInput);
     assert_eq!(invalid.code.as_str(), "invalid_arrow_input");
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn host_backed_session_renders_the_resolved_palette_without_mutating_canonical_state() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let before = host.current().expect("canonical state exists");
+    let graph = host.current_graph().expect("canonical graph exists");
+    let theme = ThemeContext::from(
+        resolve_palette(PaletteSources {
+            cli: Some("sandman-light"),
+            environment: None,
+            config: None,
+        })
+        .expect("light palette resolves"),
+    );
+    let mut session =
+        TuiSession::from_feature_graph_with_theme(&graph, &before.revision_hash, theme);
+
+    let rendered = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("production input renders with the explicit theme");
+
+    assert!(rendered.overlay.contains("[selection-glyph]"));
+    assert!(rendered.overlay.contains("\x1b[38;2;"));
+    assert!(rendered.overlay.contains("\x1b[48;2;"));
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");

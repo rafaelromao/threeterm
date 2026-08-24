@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -32,6 +33,18 @@ fn bracket_lua(root: &Path) -> String {
         "#,
         root.to_string_lossy().to_string()
     )
+}
+
+fn run_lua_file(config: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .args([
+            "--lua-config",
+            config.to_str().expect("config path is UTF-8"),
+            "--lua-key",
+            "F2",
+        ])
+        .output()
+        .expect("threeterm binary runs")
 }
 
 #[test]
@@ -230,4 +243,36 @@ fn restoring_the_active_config_clears_a_read_failure_diagnostic() {
     assert!(watcher.diagnostic().is_none());
 
     let _ = fs::remove_file(config);
+}
+
+#[test]
+fn the_shipped_cli_dispatches_the_file_backed_lua_path() {
+    let config = temp_path("binary-config");
+    let first_root = temp_path("binary-first");
+    let second_root = temp_path("binary-second");
+    fs::write(&config, bracket_lua(&first_root)).expect("initial Lua config writes");
+
+    let first = run_lua_file(&config);
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(first.stderr.is_empty());
+    assert!(first_root.join("transactions.log").is_file());
+    let _: Value = serde_json::from_slice(&first.stdout).expect("CLI Lua response is JSON");
+
+    fs::write(&config, bracket_lua(&second_root)).expect("updated Lua config writes");
+    let second = run_lua_file(&config);
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(second.stderr.is_empty());
+    assert!(second_root.join("transactions.log").is_file());
+
+    let _ = fs::remove_file(config);
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
 }

@@ -1952,11 +1952,80 @@ where
         Err(error) => return emit_palette_error(&error, stderr),
     };
     let theme = ThemeContext::from(resolved);
+    if let Some(lua_args) = parse_lua_key_args(&args) {
+        return match lua_args {
+            Ok((config, key)) => execute_lua_file(&config, &key, stdout, stderr),
+            Err(arg) => emit_unknown_command(&arg, stderr),
+        };
+    }
     let plan = plan(&args);
     let DispatchPlan::Unknown { arg } = &plan else {
         return execute_registered(plan, &theme, stdout, stderr);
     };
     emit_unknown_command(arg, stderr)
+}
+
+fn parse_lua_key_args(args: &[OsString]) -> Option<Result<(String, String), String>> {
+    if args.len() == 4 && args[0] == "--lua-config" && args[2] == "--lua-key" {
+        let config = args[1].to_str()?.to_string();
+        let key = args[3].to_str()?.to_string();
+        return Some(Ok((config, key)));
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--lua-config" || arg == "--lua-key")
+    {
+        return Some(Err("--lua-config/--lua-key".to_string()));
+    }
+    None
+}
+
+fn execute_lua_file(
+    config: &str,
+    key: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut watcher = LuaConfigWatcher::from_path(config);
+    let host = Host::new();
+    let result = dispatch_lua_key_file(&mut watcher, key, &host);
+    match result {
+        Ok(result) => {
+            if let Err(error) = serde_json::to_writer(&mut *stdout, &result.response) {
+                return emit_internal_error(
+                    &format!("failed to serialize Lua response: {error}"),
+                    stderr,
+                );
+            }
+            let _ = writeln!(stdout);
+            if let Some(diagnostic) = result.reload.diagnostic() {
+                write_lua_diagnostic(stderr, diagnostic);
+            }
+            EXIT_OK
+        }
+        Err(error) => {
+            if let Some(diagnostic) = watcher.diagnostic() {
+                write_lua_diagnostic(stderr, diagnostic);
+            } else {
+                let _ = writeln!(
+                    stderr,
+                    "{{\"code\":\"lua_dispatch_failure\",\"schema_version\":{:?},\"detail\":{:?}}}",
+                    threeterm_lua_bridge::schema_version(),
+                    error.to_string()
+                );
+            }
+            EXIT_UNKNOWN_COMMAND
+        }
+    }
+}
+
+fn write_lua_diagnostic(
+    stderr: &mut dyn Write,
+    diagnostic: &threeterm_lua_bridge::LuaReloadDiagnostic,
+) {
+    if serde_json::to_writer_pretty(&mut *stderr, diagnostic).is_ok() {
+        let _ = writeln!(stderr);
+    }
 }
 
 fn execute_handler(

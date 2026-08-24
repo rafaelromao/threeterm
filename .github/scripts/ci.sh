@@ -55,7 +55,7 @@ missing_dependency() {
 }
 
 verify_pinned_environment() {
-    local rust_version worker
+    local occt_version rust_version worker
 
     rust_version="$(rustc --version 2>&1)" || missing_dependency rust "${CHANNEL}" "rustup toolchain install ${CHANNEL}"
     [[ "${rust_version}" == "rustc ${CHANNEL}"* ]] \
@@ -66,6 +66,9 @@ verify_pinned_environment() {
     if command -v pacman >/dev/null 2>&1; then
         pacman -Qi opencascade >/dev/null 2>&1 \
             || missing_dependency opencascade "system OCCT (pinned V7_9_2 source contract)" "pacman -S opencascade"
+        occt_version="$(pacman -Q opencascade | cut -d ' ' -f 2)"
+        [[ "${occt_version}" == 7.9.2-* ]] \
+            || missing_dependency opencascade "V7_9_2 (7.9.2)" "install the pinned opencascade 7.9.2 package"
     fi
     grep -q 'V7_9_2' crates/workers/occt/build.rs \
         || missing_dependency occt-pin V7_9_2 "restore the pinned OCCT declaration in crates/workers/occt/build.rs"

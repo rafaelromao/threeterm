@@ -4,7 +4,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use threeterm_domain::{ComponentCommand, ComponentGraph, FeatureGraph};
+use threeterm_domain::{
+    ComponentCommand, ComponentGraph, FeatureGraph,
+    history::{HistoryEvaluation, HistoryState},
+};
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
@@ -159,6 +162,20 @@ pub struct ShellCommitView {
 pub struct DraftCommitView {
     pub snapshot: SnapshotView,
     pub result: DraftResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryCommitView {
+    pub snapshot: SnapshotView,
+    pub history: HistoryState,
+    pub evaluation: Option<HistoryEvaluation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayVerification {
+    pub deterministic: bool,
+    pub fingerprint: String,
+    pub mismatch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -429,13 +446,23 @@ impl Host {
 
         let root = root.as_ref();
         let bundle = self.bundle_for_save(root)?;
+        let prior_history = if bundle.canonical_root().exists() {
+            bundle.open()?.history
+        } else {
+            HistoryState::default()
+        };
+        let history_event = prior_history
+            .initialize_l_bracket(bracket_id, length, width, height, thickness)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
         let vertical_id = format!("{bracket_id}-plate-vertical");
         let horizontal_id = format!("{bracket_id}-plate-horizontal");
         let entries = [
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let loaded = match bundle.append_features(&entries) {
+        let loaded = match bundle.append_features_with_history(&entries, &history_event) {
             Ok(loaded) => loaded,
             Err(error) => {
                 // Publication can promote before its final parent sync
@@ -450,6 +477,107 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    pub fn history(&self, root: impl AsRef<Path>) -> Result<HistoryState, HostError> {
+        Ok(Bundle::at(root.as_ref()).open()?.history)
+    }
+
+    pub fn historical_edit(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        parameter: &str,
+        value: f64,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let (event, evaluation) = loaded
+            .history
+            .historical_edit(feature_id, parameter, value)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: Some(evaluation),
+        })
+    }
+
+    pub fn create_named_revision(
+        &self,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .create_named_revision(name)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
+        })
+    }
+
+    pub fn restore_named_revision(
+        &self,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .restore_named_revision(name)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
+        })
+    }
+
+    pub fn verify_history_replay(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<ReplayVerification, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let loaded = bundle.open()?;
+        let (first, second) = bundle.replay_history_states()?;
+        let first_fingerprint = first.fingerprint();
+        let mismatch = if first == second && first == loaded.history {
+            None
+        } else {
+            Some("history replay fingerprints differ from canonical state".to_string())
+        };
+        Ok(ReplayVerification {
+            deterministic: mismatch.is_none(),
+            fingerprint: first_fingerprint,
+            mismatch,
+        })
     }
 
     pub fn load(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
@@ -2049,8 +2177,8 @@ mod tests {
             serde_json::from_slice(&manifest_bytes).expect("manifest parses");
         assert!(manifest.is_object());
         assert_eq!(
-            manifest["transaction_count"], 2,
-            "save_bracket must record exactly two transactions"
+            manifest["transaction_count"], 3,
+            "save_bracket must record two features and one history transaction"
         );
         let transactions =
             std::fs::read_to_string(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME))

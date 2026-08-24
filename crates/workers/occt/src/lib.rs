@@ -268,11 +268,20 @@ impl OcctWorker {
                 return Ok(Self::with_binary_path(candidate).with_expected_worker_id("occt"));
             }
         }
-        Err(WorkerError::Spawn {
+        let error = WorkerError::Spawn {
             binary: target_root.join("debug/bin/threeterm-occt-worker"),
-            detail: "worker binary not found; build the occt worker first".to_string(),
+            detail: "worker binary not found; build the occt worker first; tried the built OUT_DIR worker, THREETERM_OCCTBUILD_WORKER, and target debug/release workers".to_string(),
             request_id: None,
-        })
+        };
+        if env::var_os("THREETERM_REQUIRE_REAL_WORKER").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            panic!(
+                "missing dependency: {error} — remediation: set THREETERM_OCCTBUILD_WORKER or \
+                 build with system OCCT (pacman -S opencascade; pinned V7_9_2)"
+            );
+        }
+        Err(error)
     }
 
     pub fn with_binary_path(binary_path: PathBuf) -> Self {

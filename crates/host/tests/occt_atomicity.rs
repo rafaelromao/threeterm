@@ -136,6 +136,11 @@ fn extrude_commits_brep_into_a_new_revision() {
     assert_eq!(view.result.operation, Operation::Extrude);
     let brep_path = root.join("brep/commit-box-1.brep");
     assert!(brep_path.is_file(), "BREP is on disk at {brep_path:?}");
+    let brep = fs::read(&brep_path).expect("BREP reads");
+    assert!(
+        String::from_utf8_lossy(&brep[..brep.len().min(64)]).contains("DBRep_DrawableShape"),
+        "BREP is a real OCCT shape"
+    );
     let reloaded = Host::new().load(&root).expect("reloads after commit");
     assert_eq!(view.snapshot, reloaded);
 

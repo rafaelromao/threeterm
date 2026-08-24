@@ -97,7 +97,7 @@ fn historical_failure_and_named_restore_use_the_production_cli_path() {
             "--parameter",
             "length",
             "--value",
-            "0",
+            "-1",
         ],
     );
     assert_eq!(edited["status"], "degraded");

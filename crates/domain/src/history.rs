@@ -286,7 +286,7 @@ impl HistoryState {
                 .get(&id)
                 .ok_or_else(|| HistoryError::FeatureNotFound(id.clone()))?
                 .input_value;
-            if input_value == 0.0 {
+            if input_value <= 0.0 {
                 let diagnostic = HistoryDiagnostic {
                     code: "historical_geometry_invalid".to_string(),
                     feature_id: id.clone(),

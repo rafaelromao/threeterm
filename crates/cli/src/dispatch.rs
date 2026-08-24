@@ -3795,9 +3795,11 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DraftSourceChanged {
             draft_id,
             source_feature_id,
+            source_revision,
+            current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::DraftInvalid { draft_id, detail } => format!(
             "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"

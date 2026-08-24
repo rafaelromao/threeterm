@@ -260,6 +260,8 @@ pub struct LogEntry {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_payload: Option<String>,
     pub terminal_digest: String,
 }
 
@@ -271,14 +273,16 @@ impl LogEntry {
             feature_id: feature_id.to_string(),
             kind: kind.to_string(),
             idempotency_key: None,
+            idempotency_payload: None,
             terminal_digest: String::new(),
         };
         entry.terminal_digest = entry.recomputed_digest();
         entry
     }
 
-    fn with_idempotency_key(mut self, key: &str) -> Self {
+    fn with_idempotency_key(mut self, key: &str, payload: Option<&str>) -> Self {
         self.idempotency_key = Some(key.to_string());
+        self.idempotency_payload = payload.map(str::to_string);
         self.terminal_digest = self.recomputed_digest();
         self
     }
@@ -327,11 +331,12 @@ impl TransactionLog {
         feature_id: &str,
         kind: &str,
         idempotency_key: &str,
+        idempotency_payload: Option<&str>,
     ) {
         let previous = self.terminal_digest_hex().to_string();
         self.entries.push(
             LogEntry::new(self.entries.len(), &previous, feature_id, kind)
-                .with_idempotency_key(idempotency_key),
+                .with_idempotency_key(idempotency_key, idempotency_payload),
         );
     }
 
@@ -781,6 +786,7 @@ impl Bundle {
                 None,
                 None,
                 None,
+                None,
             )
         })
     }
@@ -801,6 +807,7 @@ impl Bundle {
                 &[(feature_id, kind)],
                 Some(expected_revision),
                 Some((feature_id, brep_bytes)),
+                None,
                 None,
                 None,
             )
@@ -837,6 +844,27 @@ impl Bundle {
         idempotency_key: Option<&str>,
         brep_bytes: &[u8],
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+            feature_id,
+            kind,
+            expected_revision,
+            expected_source_sha256,
+            idempotency_key,
+            None,
+            brep_bytes,
+        )
+    }
+
+    pub fn append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
             self.append_features_locked(
                 &[(feature_id, kind)],
@@ -844,6 +872,7 @@ impl Bundle {
                 Some((feature_id, brep_bytes)),
                 Some((feature_id, expected_source_sha256)),
                 idempotency_key,
+                idempotency_payload,
             )
         })
     }
@@ -895,7 +924,7 @@ impl Bundle {
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, None, None, None)
+            self.append_features_locked(entries, None, None, None, None, None)
         })
     }
 
@@ -906,6 +935,7 @@ impl Bundle {
         brep: Option<(&str, &[u8])>,
         source_brep: Option<(&str, &str)>,
         idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -917,6 +947,24 @@ impl Bundle {
         } else {
             Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
+        if let Some(idempotency_key) = idempotency_key
+            && let Some(existing) = loaded
+                .log
+                .entries()
+                .iter()
+                .find(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
+        {
+            let same_transaction = entries.len() == 1
+                && existing.feature_id == entries[0].0
+                && existing.kind == entries[0].1
+                && existing.idempotency_payload.as_deref() == idempotency_payload;
+            if same_transaction {
+                return Ok(loaded);
+            }
+            return Err(BundleError::Invalid(format!(
+                "idempotency key {idempotency_key:?} is already bound to another transaction"
+            )));
+        }
         if let Some(expected_revision) = expected_revision
             && loaded.revision_hash_hex() != expected_revision
         {
@@ -943,9 +991,12 @@ impl Bundle {
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             if loaded.graph.add_feature(feature) {
                 if let Some(idempotency_key) = idempotency_key {
-                    loaded
-                        .log
-                        .append_feature_with_idempotency(feature_id, kind, idempotency_key);
+                    loaded.log.append_feature_with_idempotency(
+                        feature_id,
+                        kind,
+                        idempotency_key,
+                        idempotency_payload,
+                    );
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }

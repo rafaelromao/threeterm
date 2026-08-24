@@ -280,6 +280,8 @@ pub enum HostError {
     DraftSourceChanged {
         draft_id: String,
         source_feature_id: String,
+        source_revision: String,
+        current_revision: String,
         recovery: &'static str,
     },
     DraftInvalid {
@@ -360,10 +362,12 @@ impl std::fmt::Display for HostError {
             Self::DraftSourceChanged {
                 draft_id,
                 source_feature_id,
+                source_revision,
+                current_revision,
                 recovery,
             } => write!(
                 formatter,
-                "command draft {draft_id} source {source_feature_id} changed: recovery={recovery}"
+                "command draft {draft_id} source {source_feature_id} changed: source_revision={source_revision} current_revision={current_revision} recovery={recovery}"
             ),
             Self::DraftInvalid { draft_id, detail } => {
                 write!(formatter, "command draft {draft_id} is invalid: {detail}")
@@ -1032,6 +1036,7 @@ impl Host {
             &bytes,
             None,
             None,
+            None,
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1290,20 +1295,32 @@ impl Host {
             }
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
-        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)?
-            && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
-                == Some(result.brep_sha256.clone())
-        {
-            let snapshot = SnapshotView::from(&committed);
-            self.current.replace(Some(committed));
-            self.bracket_drafts.borrow_mut().remove(&draft_key);
+        let kind = bracket_kind_with_draft(&request, Some(draft_id));
+        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
+            let same_transaction =
+                committed.log.entries().iter().any(|entry| {
+                    entry.idempotency_key.as_deref() == Some(draft_id)
+                        && entry.feature_id == draft.bracket_id
+                        && entry.kind == kind
+                        && entry.idempotency_payload.as_deref() == Some(input_fingerprint.as_str())
+                }) && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
+                    == Some(result.brep_sha256.clone());
+            if same_transaction {
+                let snapshot = SnapshotView::from(&committed);
+                self.current.replace(Some(committed));
+                self.bracket_drafts.borrow_mut().remove(&draft_key);
+                remove_preview_stage(&stage);
+                return Ok(BracketCommitView {
+                    snapshot,
+                    input_fingerprint,
+                });
+            }
             remove_preview_stage(&stage);
-            return Ok(BracketCommitView {
-                snapshot,
-                input_fingerprint,
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "idempotency key is already bound to another transaction".to_string(),
             });
         }
-        let kind = bracket_kind_with_draft(&request, Some(draft_id));
         let snapshot = match self.promote_brep_bytes(
             &root,
             &draft.bracket_id,
@@ -1312,18 +1329,46 @@ impl Host {
             &bytes,
             Some(&draft.source_brep_sha256),
             Some(draft_id),
+            Some(&input_fingerprint),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                if matches!(&error, HostError::Persistence(BundleError::Invalid(_)))
+                    && let Ok(current) = Bundle::at(&root).open()
+                {
+                    if current.revision_hash_hex() != draft.source_revision {
+                        remove_preview_stage(&stage);
+                        return Err(HostError::DraftStale {
+                            draft_id: draft_id.to_string(),
+                            source_revision: draft.source_revision.clone(),
+                            current_revision: current.revision_hash_hex().to_string(),
+                            recovery: "discard_and_reopen",
+                        });
+                    }
+                    if sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
+                        != Some(draft.source_brep_sha256.clone())
+                    {
+                        remove_preview_stage(&stage);
+                        return Err(HostError::DraftSourceChanged {
+                            draft_id: draft_id.to_string(),
+                            source_feature_id: draft.bracket_id.clone(),
+                            source_revision: draft.source_revision.clone(),
+                            current_revision: current.revision_hash_hex().to_string(),
+                            recovery: "reload_source_and_reopen",
+                        });
+                    }
+                }
                 // Parent-sync failures can report after publication. Resolve
                 // that durable outcome by looking up the same semantic key
                 // before retrying or surfacing a failure.
                 if let Ok(committed) = Bundle::at(&root).open()
-                    && committed
-                        .log
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.idempotency_key.as_deref() == Some(draft_id))
+                    && committed.log.entries().iter().any(|entry| {
+                        entry.idempotency_key.as_deref() == Some(draft_id)
+                            && entry.feature_id == draft.bracket_id
+                            && entry.kind == kind
+                            && entry.idempotency_payload.as_deref()
+                                == Some(input_fingerprint.as_str())
+                    })
                     && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
                         == Some(result.brep_sha256.clone())
                 {
@@ -1464,12 +1509,16 @@ impl Host {
         let source_sha = sha256_path(&source_path).map_err(|_| HostError::DraftSourceChanged {
             draft_id: draft.draft_id.clone(),
             source_feature_id: draft.bracket_id.clone(),
+            source_revision: draft.source_revision.clone(),
+            current_revision: loaded.revision_hash_hex().to_string(),
             recovery: "reload_source_and_reopen",
         })?;
         if source_sha != draft.source_brep_sha256 {
             return Err(HostError::DraftSourceChanged {
                 draft_id: draft.draft_id.clone(),
                 source_feature_id: draft.bracket_id.clone(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: loaded.revision_hash_hex().to_string(),
                 recovery: "reload_source_and_reopen",
             });
         }
@@ -1486,16 +1535,18 @@ impl Host {
         bytes: &[u8],
         source_brep_sha256: Option<&str>,
         idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
     ) -> Result<SnapshotView, HostError> {
         let bundle = Bundle::at(root);
         let updated = match source_brep_sha256 {
             Some(source_brep_sha256) => bundle
-                .append_feature_with_brep_if_revision_and_source_and_idempotency(
+                .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
                     feature_id,
                     kind,
                     expected_revision,
                     source_brep_sha256,
                     idempotency_key,
+                    idempotency_payload,
                     bytes,
                 )?,
             None => bundle.append_feature_with_brep_if_revision(
@@ -1529,12 +1580,16 @@ impl Host {
             sha256_path(&source_path).map_err(|_error| HostError::DraftSourceChanged {
                 draft_id: draft.draft_id.clone(),
                 source_feature_id: draft.source_feature_id.clone(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: current_revision.to_string(),
                 recovery: "reload_source_and_reopen",
             })?;
         if source_sha != draft.source_brep_sha256 {
             return Err(HostError::DraftSourceChanged {
                 draft_id: draft.draft_id.clone(),
                 source_feature_id: draft.source_feature_id.clone(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: current_revision.to_string(),
                 recovery: "reload_source_and_reopen",
             });
         }
@@ -2594,18 +2649,18 @@ fn bracket_kind_with_draft(request: &BracketRequest, draft_id: Option<&str>) -> 
 }
 
 fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str) -> String {
-    let semantic = format!(
-        "source_revision={}|source_brep_sha256={}|bracket_id={}|length={:.17}|width={:.17}|height={:.17}|thickness={:.17}|result_sha256={}",
-        draft.source_revision,
-        draft.source_brep_sha256,
-        draft.bracket_id,
-        draft.request.length,
-        draft.request.width,
-        draft.request.height,
-        draft.request.thickness,
-        result_sha256,
-    );
-    format!("{:x}", Sha256::digest(semantic.as_bytes()))
+    let semantic = serde_json::json!({
+        "bracket_id": draft.bracket_id,
+        "height": format!("{:.17}", draft.request.height),
+        "length": format!("{:.17}", draft.request.length),
+        "result_sha256": result_sha256,
+        "source_brep_sha256": draft.source_brep_sha256,
+        "source_revision": draft.source_revision,
+        "thickness": format!("{:.17}", draft.request.thickness),
+        "width": format!("{:.17}", draft.request.width),
+    });
+    let bytes = serde_json::to_vec(&semantic).expect("bracket fingerprint serializes");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn preview_stage_path(root: &Path, draft_id: &str) -> PathBuf {

@@ -560,19 +560,25 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         diagnostic["current_sequence"] = Value::from(*current);
         diagnostic["recovery"] = Value::String("refresh_draft_and_retry".to_string());
     }
-    let current_revision = if let HostError::DraftStale {
-        source_revision: authoritative_source,
-        current_revision,
-        recovery,
-        ..
-    } = error
-    {
-        source_revision = authoritative_source.clone();
-        diagnostic["source_revision"] = Value::String(authoritative_source.clone());
-        diagnostic["recovery"] = Value::String((*recovery).to_string());
-        Some(current_revision.as_str())
-    } else {
-        None
+    let current_revision = match error {
+        HostError::DraftStale {
+            source_revision: authoritative_source,
+            current_revision,
+            recovery,
+            ..
+        }
+        | HostError::DraftSourceChanged {
+            source_revision: authoritative_source,
+            current_revision,
+            recovery,
+            ..
+        } => {
+            source_revision = authoritative_source.clone();
+            diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+            diagnostic["recovery"] = Value::String((*recovery).to_string());
+            Some(current_revision.as_str())
+        }
+        _ => None,
     };
     let mut response = bracket_edit_response(
         phase,

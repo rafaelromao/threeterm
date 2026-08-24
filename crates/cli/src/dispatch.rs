@@ -2148,7 +2148,7 @@ fn execute_handler(
             let host = Host::new();
             match dispatch_registered_command(&host, command, request) {
                 Ok(response) => write_success(stdout, &response, stderr),
-                Err(error) => emit_persistence_error(&error.diagnostic_detail(), stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
         DispatchPlan::Extrude {
@@ -3973,6 +3973,22 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
     write_diagnostic(stderr, &Diagnostic::persistence_failure(detail));
     EXIT_PERSISTENCE_FAILURE
+}
+
+fn emit_dispatch_error(error: &DispatchError, stderr: &mut dyn Write) -> i32 {
+    let detail = error.diagnostic_detail();
+    let diagnostic =
+        if detail.contains("reference is ambiguous") || detail.contains("ID already exists") {
+            Diagnostic::reference_ambiguous(&detail)
+        } else if detail.contains("reference is lost") {
+            Diagnostic::reference_lost(&detail)
+        } else if detail.contains("reference is incompatible") {
+            Diagnostic::reference_incompatible(&detail)
+        } else {
+            Diagnostic::invalid_request(&detail)
+        };
+    write_diagnostic(stderr, &diagnostic);
+    EXIT_INTEGRITY_FAILURE
 }
 
 fn emit_palette_error(error: &PaletteStartupError, stderr: &mut dyn Write) -> i32 {

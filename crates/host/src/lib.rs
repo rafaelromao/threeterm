@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -812,7 +813,7 @@ impl Host {
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
         }
-        let stage = preview_stage_path(draft_id);
+        let stage = preview_stage_path(&root, draft_id);
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: format!("create preview stage failed: {error}"),
         })?;
@@ -885,7 +886,7 @@ impl Host {
         if let Some(path) = draft.preview_path {
             remove_preview_stage(&path);
         }
-        let stage = preview_stage_path(&format!("{draft_id}-commit"));
+        let stage = preview_stage_path(&root, &format!("{draft_id}-commit"));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: format!("create commit stage failed: {error}"),
         })?;
@@ -989,7 +990,7 @@ impl Host {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let mut request = request;
         let loaded = Bundle::at(&root).open()?;
-        let stage = preview_stage_path(&format!("create-{}", request.feature_id));
+        let stage = preview_stage_path(&root, &format!("create-{}", request.feature_id));
         request = request.with_output_path(&stage, "bracket.brep");
         request
             .validate()
@@ -1103,6 +1104,17 @@ impl Host {
         draft_id: &str,
         worker: &OcctWorker,
     ) -> Result<BracketPreviewView, HostError> {
+        let cancel = AtomicBool::new(false);
+        self.preview_bracket_parameter_draft_with_cancel(root, draft_id, worker, &cancel)
+    }
+
+    pub fn preview_bracket_parameter_draft_with_cancel(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        worker: &OcctWorker,
+        cancel: &AtomicBool,
+    ) -> Result<BracketPreviewView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let draft_key = draft_map_key(&root, draft_id);
         let draft = self
@@ -1125,7 +1137,7 @@ impl Host {
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
         }
-        let stage = preview_stage_path(draft_id);
+        let stage = preview_stage_path(&root, draft_id);
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: format!("create bracket preview stage failed: {error}"),
         })?;
@@ -1136,7 +1148,7 @@ impl Host {
         let result = match worker
             .clone()
             .with_revision_id(draft.source_revision.clone())
-            .bracket(&request)
+            .bracket_with_cancel(&request, cancel)
         {
             Ok(result) if result.is_success() => result,
             Ok(result) => {
@@ -1244,7 +1256,7 @@ impl Host {
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
         }
-        let stage = preview_stage_path(&format!("{draft_id}-commit"));
+        let stage = preview_stage_path(&root, &format!("{draft_id}-commit"));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: format!("create bracket commit stage failed: {error}"),
         })?;
@@ -2596,10 +2608,17 @@ fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str)
     format!("{:x}", Sha256::digest(semantic.as_bytes()))
 }
 
-fn preview_stage_path(draft_id: &str) -> PathBuf {
+fn preview_stage_path(root: &Path, draft_id: &str) -> PathBuf {
+    static NEXT_STAGE_NONCE: AtomicU64 = AtomicU64::new(0);
     let mut hasher = Sha256::new();
+    hasher.update(root.as_os_str().as_encoded_bytes());
     hasher.update(draft_id.as_bytes());
     hasher.update(std::process::id().to_le_bytes());
+    hasher.update(
+        NEXT_STAGE_NONCE
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
     let identity = format!("{:x}", hasher.finalize());
     std::env::temp_dir().join(format!("threeterm-command-draft-{identity}"))
 }

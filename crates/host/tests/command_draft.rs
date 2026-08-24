@@ -188,11 +188,19 @@ fn bracket_draft_ids_are_scoped_to_their_bundle_root() {
     let request_b = BracketRequest::new(new_request_id(), 110.0, 60.0, 40.0, 4.0);
     host.open_bracket_parameter_draft(&root_a, draft_id, "l-bracket", request_a)
         .expect("first scoped draft opens");
-    host.open_bracket_parameter_draft(&root_b, draft_id, "l-bracket", request_b)
+    let draft_b = host
+        .open_bracket_parameter_draft(&root_b, draft_id, "l-bracket", request_b)
         .expect("second scoped draft opens");
 
     assert!(host.has_bracket_parameter_draft(&root_a, draft_id));
     assert!(host.has_bracket_parameter_draft(&root_b, draft_id));
+    let preview_a = host
+        .preview_bracket_parameter_draft(&root_a, draft_id, &worker)
+        .expect("first scoped preview succeeds");
+    let preview_b = host
+        .preview_bracket_parameter_draft(&root_b, &draft_b.draft_id, &worker)
+        .expect("second scoped preview succeeds");
+    assert_ne!(preview_a.brep_path, preview_b.brep_path);
     host.discard_bracket_parameter_draft(&root_a, draft_id)
         .expect("first scoped draft discards");
     assert!(!host.has_bracket_parameter_draft(&root_a, draft_id));

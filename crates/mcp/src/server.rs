@@ -315,6 +315,11 @@ impl McpServer {
         let key = (canonical_bundle, draft_id.clone());
         match phase {
             "open" => {
+                if self.bracket_edits.borrow().contains_key(&key) {
+                    return Err(DispatchError::Host(HostError::DraftAlreadyExists {
+                        draft_id,
+                    }));
+                }
                 let worker = OcctWorker::locate().map_err(|error| {
                     DispatchError::Host(HostError::WorkerUnavailable {
                         detail: error.to_string(),

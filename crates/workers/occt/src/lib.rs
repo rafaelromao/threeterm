@@ -328,6 +328,23 @@ impl OcctWorker {
         .into_bracket()
     }
 
+    /// Bracket `request` with a cooperative cancellation token. This uses the
+    /// same supervised worker and artifact validation path as `bracket`.
+    pub fn bracket_with_cancel(
+        &self,
+        request: &BracketRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<BracketResult, WorkerError> {
+        let bytes = bounded_serialize(request, "bracket", &request.request_id)?;
+        let value = self.run_with_cancel(&bytes, cancel)?;
+        RawResult {
+            value,
+            request_id: request.request_id.clone(),
+            expected_output: expected_output_path(&request.output_dir, &request.output_filename),
+        }
+        .into_bracket()
+    }
+
     /// Extrude `request` with a cooperative cancellation token. The
     /// caller sets the token to request cancellation; the supervisor
     /// sends `Cancel`, waits the grace period for the worker's

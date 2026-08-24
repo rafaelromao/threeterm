@@ -3571,6 +3571,13 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DraftInvalid { draft_id, detail } => format!(
             "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"
         ),
+        HostError::DraftUnknownOutcome {
+            draft_id,
+            source_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"recovery\":{recovery:?}}}"
+        ),
         HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
             "kind": "worker_terminated",
             "request_id": record.request_id,

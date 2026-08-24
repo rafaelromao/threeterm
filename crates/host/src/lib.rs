@@ -284,6 +284,11 @@ pub enum HostError {
         draft_id: String,
         detail: String,
     },
+    DraftUnknownOutcome {
+        draft_id: String,
+        source_revision: String,
+        recovery: &'static str,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -356,6 +361,14 @@ impl std::fmt::Display for HostError {
             Self::DraftInvalid { draft_id, detail } => {
                 write!(formatter, "command draft {draft_id} is invalid: {detail}")
             }
+            Self::DraftUnknownOutcome {
+                draft_id,
+                source_revision,
+                recovery,
+            } => write!(
+                formatter,
+                "command draft {draft_id} has unknown publication outcome: source_revision={source_revision} recovery={recovery}"
+            ),
         }
     }
 }
@@ -436,7 +449,11 @@ pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
     layer1_results: RefCell<HashMap<Layer1CacheKey, Layer1DerivedResult>>,
     drafts: RefCell<HashMap<String, CommandDraft>>,
-    bracket_drafts: RefCell<HashMap<String, BracketParameterDraft>>,
+    bracket_drafts: RefCell<HashMap<(PathBuf, String), BracketParameterDraft>>,
+}
+
+fn draft_map_key(root: &Path, draft_id: &str) -> (PathBuf, String) {
+    (root.to_path_buf(), draft_id.to_string())
 }
 
 impl Host {
@@ -920,7 +937,10 @@ impl Host {
         {
             remove_preview_stage(&path);
         }
-        if let Some(draft) = self.bracket_drafts.borrow_mut().get_mut(draft_id)
+    }
+
+    fn clear_bracket_draft_preview(&self, draft_key: &(PathBuf, String)) {
+        if let Some(draft) = self.bracket_drafts.borrow_mut().get_mut(draft_key)
             && let Some(path) = draft.preview_path.take()
         {
             remove_preview_stage(&path);
@@ -1006,10 +1026,11 @@ impl Host {
                 detail: "draft and bracket ids must be non-empty plain identifiers".to_string(),
             });
         }
-        if self.bracket_drafts.borrow().contains_key(&draft_id) {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, &draft_id);
+        if self.bracket_drafts.borrow().contains_key(&draft_key) {
             return Err(HostError::DraftAlreadyExists { draft_id });
         }
-        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let loaded = Bundle::at(&root).open()?;
         let source_path = committed_brep_path(&root, &bracket_id);
         let source_brep_sha256 =
@@ -1038,7 +1059,7 @@ impl Host {
         };
         self.bracket_drafts
             .borrow_mut()
-            .insert(draft_id, draft.clone());
+            .insert(draft_key, draft.clone());
         self.current.replace(Some(loaded));
         Ok(draft)
     }
@@ -1050,10 +1071,11 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<BracketPreviewView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
         let draft = self
             .bracket_drafts
             .borrow()
-            .get(draft_id)
+            .get(&draft_key)
             .cloned()
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
@@ -1065,7 +1087,7 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
-        self.clear_draft_preview(draft_id);
+        self.clear_bracket_draft_preview(&draft_key);
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1105,7 +1127,7 @@ impl Host {
         let preview_path = result.brep_path.clone();
         self.bracket_drafts
             .borrow_mut()
-            .get_mut(draft_id)
+            .get_mut(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?
@@ -1122,12 +1144,15 @@ impl Host {
 
     pub fn update_bracket_parameter_draft(
         &self,
+        root: impl AsRef<Path>,
         draft_id: &str,
         request: BracketRequest,
     ) -> Result<BracketParameterDraft, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
         let mut drafts = self.bracket_drafts.borrow_mut();
         let draft = drafts
-            .get_mut(draft_id)
+            .get_mut(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
@@ -1155,10 +1180,11 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<BracketCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
         let draft = self
             .bracket_drafts
             .borrow()
-            .get(draft_id)
+            .get(&draft_key)
             .cloned()
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
@@ -1171,7 +1197,7 @@ impl Host {
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
-        self.clear_draft_preview(draft_id);
+        self.clear_bracket_draft_preview(&draft_key);
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1216,7 +1242,7 @@ impl Host {
         {
             let snapshot = SnapshotView::from(&committed);
             self.current.replace(Some(committed));
-            self.bracket_drafts.borrow_mut().remove(draft_id);
+            self.bracket_drafts.borrow_mut().remove(&draft_key);
             remove_preview_stage(&stage);
             return Ok(BracketCommitView {
                 snapshot,
@@ -1249,7 +1275,7 @@ impl Host {
                 {
                     let snapshot = SnapshotView::from(&committed);
                     self.current.replace(Some(committed));
-                    self.bracket_drafts.borrow_mut().remove(draft_id);
+                    self.bracket_drafts.borrow_mut().remove(&draft_key);
                     remove_preview_stage(&stage);
                     return Ok(BracketCommitView {
                         snapshot,
@@ -1257,22 +1283,39 @@ impl Host {
                     });
                 }
                 remove_preview_stage(&stage);
+                if matches!(
+                    &error,
+                    HostError::Persistence(BundleError::Io(_))
+                        | HostError::Persistence(BundleError::Backup { .. })
+                ) {
+                    return Err(HostError::DraftUnknownOutcome {
+                        draft_id: draft_id.to_string(),
+                        source_revision: draft.source_revision.clone(),
+                        recovery: "retry_same_idempotency_key",
+                    });
+                }
                 return Err(error);
             }
         };
         remove_preview_stage(&stage);
-        self.bracket_drafts.borrow_mut().remove(draft_id);
+        self.bracket_drafts.borrow_mut().remove(&draft_key);
         Ok(BracketCommitView {
             snapshot,
             input_fingerprint,
         })
     }
 
-    pub fn discard_bracket_parameter_draft(&self, draft_id: &str) -> Result<String, HostError> {
+    pub fn discard_bracket_parameter_draft(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+    ) -> Result<String, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
         let draft = self
             .bracket_drafts
             .borrow_mut()
-            .remove(draft_id)
+            .remove(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
@@ -1282,14 +1325,23 @@ impl Host {
         Ok(draft.source_revision)
     }
 
-    pub fn has_bracket_parameter_draft(&self, draft_id: &str) -> bool {
-        self.bracket_drafts.borrow().contains_key(draft_id)
-    }
-
-    pub fn bracket_draft_source_revision(&self, draft_id: &str) -> Option<String> {
+    pub fn has_bracket_parameter_draft(&self, root: impl AsRef<Path>, draft_id: &str) -> bool {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         self.bracket_drafts
             .borrow()
-            .get(draft_id)
+            .contains_key(&draft_map_key(&root, draft_id))
+    }
+
+    pub fn bracket_draft_source_revision(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+    ) -> Option<String> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let key = draft_map_key(&root, draft_id);
+        self.bracket_drafts
+            .borrow()
+            .get(&key)
             .map(|draft| draft.source_revision.clone())
     }
 

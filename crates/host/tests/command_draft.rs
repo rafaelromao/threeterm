@@ -132,7 +132,7 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
         .expect("parameter commit succeeds");
     assert_ne!(committed.snapshot.revision_hash, before.revision_hash);
     assert_eq!(committed.input_fingerprint, preview.input_fingerprint);
-    assert!(!host.has_bracket_parameter_draft(&draft.draft_id));
+    assert!(!host.has_bracket_parameter_draft(&root, &draft.draft_id));
     assert_ne!(
         fs::read(root.join("brep/l-bracket.brep")).unwrap(),
         before_brep
@@ -154,7 +154,7 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
     let refused_preview = host
         .preview_bracket_parameter_draft(&root, &refused.draft_id, &worker)
         .expect("refused preview succeeds");
-    host.discard_bracket_parameter_draft(&refused.draft_id)
+    host.discard_bracket_parameter_draft(&root, &refused.draft_id)
         .expect("refusal discards the draft");
     assert!(!refused_preview.brep_path.exists());
     assert_eq!(
@@ -170,6 +170,38 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
         refused_before_brep
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bracket_draft_ids_are_scoped_to_their_bundle_root() {
+    let Some(worker) = skip_without_worker() else {
+        return;
+    };
+    let root_a = temp_root("bracket-scope-a");
+    let root_b = temp_root("bracket-scope-b");
+    let host = Host::new();
+    seed_solid(&host, &root_a, &worker);
+    seed_solid(&host, &root_b, &worker);
+
+    let draft_id = "same-draft-id";
+    let request_a = BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0);
+    let request_b = BracketRequest::new(new_request_id(), 110.0, 60.0, 40.0, 4.0);
+    host.open_bracket_parameter_draft(&root_a, draft_id, "l-bracket", request_a)
+        .expect("first scoped draft opens");
+    host.open_bracket_parameter_draft(&root_b, draft_id, "l-bracket", request_b)
+        .expect("second scoped draft opens");
+
+    assert!(host.has_bracket_parameter_draft(&root_a, draft_id));
+    assert!(host.has_bracket_parameter_draft(&root_b, draft_id));
+    host.discard_bracket_parameter_draft(&root_a, draft_id)
+        .expect("first scoped draft discards");
+    assert!(!host.has_bracket_parameter_draft(&root_a, draft_id));
+    assert!(host.has_bracket_parameter_draft(&root_b, draft_id));
+    host.discard_bracket_parameter_draft(&root_b, draft_id)
+        .expect("second scoped draft discards");
+
+    let _ = fs::remove_dir_all(root_a);
+    let _ = fs::remove_dir_all(root_b);
 }
 
 #[test]

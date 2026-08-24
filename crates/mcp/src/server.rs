@@ -24,6 +24,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -31,6 +32,7 @@ use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
+use threeterm_persistence::Bundle;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema, iter,
@@ -124,7 +126,7 @@ struct BracketEditSession {
 
 #[derive(Debug, Default)]
 pub struct McpServer {
-    bracket_edits: RefCell<HashMap<String, BracketEditSession>>,
+    bracket_edits: RefCell<HashMap<(PathBuf, String), BracketEditSession>>,
 }
 
 impl McpServer {
@@ -303,7 +305,8 @@ impl McpServer {
             )
             .with_feature_id(&bracket_id)
         };
-        let key = format!("{bundle}\0{draft_id}");
+        let canonical_bundle = Bundle::at(&bundle).canonical_root().to_path_buf();
+        let key = (canonical_bundle, draft_id.clone());
         match phase {
             "open" => {
                 let worker = OcctWorker::locate().map_err(|error| {
@@ -356,7 +359,7 @@ impl McpServer {
                 })?;
                 let source_revision = session
                     .host
-                    .bracket_draft_source_revision(&draft_id)
+                    .bracket_draft_source_revision(&bundle, &draft_id)
                     .ok_or_else(|| {
                         DispatchError::Host(HostError::DraftNotFound {
                             draft_id: draft_id.clone(),
@@ -384,7 +387,9 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
-                let source_revision = session.host.discard_bracket_parameter_draft(&draft_id)?;
+                let source_revision = session
+                    .host
+                    .discard_bracket_parameter_draft(&bundle, &draft_id)?;
                 sessions.remove(&key);
                 Ok(bracket_edit_response(
                     "discard",
@@ -402,9 +407,10 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
-                let draft = session
-                    .host
-                    .update_bracket_parameter_draft(&draft_id, request())?;
+                let draft =
+                    session
+                        .host
+                        .update_bracket_parameter_draft(&bundle, &draft_id, request())?;
                 Ok(bracket_edit_response(
                     "update",
                     &draft.draft_id,
@@ -487,11 +493,12 @@ impl McpServer {
 }
 
 fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value {
-    let source_revision = arguments
+    let mut source_revision = arguments
         .get("source_revision")
         .and_then(Value::as_str)
         .filter(|revision| revision.len() == 64)
-        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000")
+        .to_string();
     let phase = arguments
         .get("phase")
         .and_then(Value::as_str)
@@ -507,6 +514,20 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         "detail": error.to_string(),
         "recovery": "inspect_diagnostic_and_reopen",
     });
+    let status = if let HostError::DraftUnknownOutcome {
+        source_revision: authoritative_source,
+        recovery,
+        ..
+    } = error
+    {
+        diagnostic["kind"] = Value::String("bracket_edit_unknown_outcome".to_string());
+        diagnostic["recovery"] = Value::String((*recovery).to_string());
+        diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+        source_revision = authoritative_source.clone();
+        "unknown"
+    } else {
+        "rejected"
+    };
     let current_revision = if let HostError::DraftStale {
         current_revision,
         recovery,
@@ -521,12 +542,12 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     let mut response = bracket_edit_response(
         phase,
         draft_id,
-        source_revision,
+        &source_revision,
         current_revision,
         None,
         None,
     );
-    response["status"] = Value::String("rejected".to_string());
+    response["status"] = Value::String(status.to_string());
     response["diagnostic"] = diagnostic;
     response
 }

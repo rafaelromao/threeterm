@@ -264,7 +264,7 @@ fn cancellation_does_not_restart_deadline_when_triggered_near_expiry() {
         cancel_clone.store(true, std::sync::atomic::Ordering::SeqCst);
     });
     let start = Instant::now();
-    let error = retry_fixture(|| worker.extrude_with_cancel(&request, &*cancel))
+    let error = retry_fixture(|| worker.extrude_with_cancel(&request, &cancel))
         .expect_err("uncooperative cancel must force-terminate");
     let elapsed = start.elapsed();
     assert!(
@@ -414,14 +414,14 @@ fn descendant_in_same_pgroup_is_terminated() {
     );
     // Verify child pid is gone
     std::thread::sleep(Duration::from_millis(100));
-    if let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            let proc_exists = Path::new(&format!("/proc/{pid}")).exists();
-            assert!(
-                !proc_exists,
-                "descendant pid {pid} must be terminated, still alive"
-            );
-        }
+    if let Ok(pid_str) = std::fs::read_to_string(&pidfile)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        let proc_exists = Path::new(&format!("/proc/{pid}")).exists();
+        assert!(
+            !proc_exists,
+            "descendant pid {pid} must be terminated, still alive"
+        );
     }
     match error {
         WorkerError::Supervised { record } => assert_eq!(record.exit_signal, Some(9)),
@@ -430,6 +430,7 @@ fn descendant_in_same_pgroup_is_terminated() {
 }
 
 #[test]
+#[allow(clippy::collapsible_if)]
 fn detached_descendant_with_new_session_is_terminated() {
     // Child creates new session via setsid. killpg alone would not reach it;
     // descendant or inherited_pipe must. Use direct setsid sleep so child

@@ -82,7 +82,7 @@ fn create_host_with_bundle(label: &str) -> (FixtureDir, Host, String) {
         .expect("seed appends");
     let host = Host::new();
     host.load(&bundle_root).expect("host loads");
-    let current = host.current().expect("host has current");
+    let _current = host.current().expect("host has current");
     (dir, host, bundle_root.display().to_string())
 }
 

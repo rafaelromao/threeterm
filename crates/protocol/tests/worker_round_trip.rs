@@ -201,10 +201,7 @@ fn cooperative_cancellation_returns_structured_acknowledgement() {
     let outcome = supervisor.cancel("req-1", "user pressed stop");
 
     let SupervisorOutcome::Acknowledged {
-        request_id,
-        reason,
-        elapsed: _,
-        ..
+        request_id, reason, ..
     } = outcome
     else {
         panic!("expected Acknowledged; got {outcome:?}");

@@ -6,6 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError, SnapshotView};
+use threeterm_lua_bridge::LuaBridge;
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
@@ -21,7 +22,7 @@ pub use threeterm_protocol::schema::{
     LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
 };
-use threeterm_protocol::schema::{CommandId, find_by_name, iter};
+use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandId, find, find_by_name, iter};
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
 };
@@ -2196,8 +2197,88 @@ pub fn dispatch_bracket(
     height: f64,
     thickness: f64,
 ) -> Result<SnapshotView, DispatchError> {
-    Host::new()
-        .save_bracket(bundle, bracket_id, length, width, height, thickness)
+    let host = Host::new();
+    dispatch_bracket_with_host(&host, bundle, bracket_id, length, width, height, thickness)
+}
+
+/// Load a Lua keymap and invoke one key through the registered command
+/// dispatcher. This is the production composition boundary for non-TTY Lua
+/// automation: Lua owns only key and request capture; the Host owns state.
+pub fn dispatch_lua_key(
+    source: &str,
+    key: &str,
+    host: &Host,
+) -> Result<Value, threeterm_lua_bridge::LuaBridgeError> {
+    let bridge = LuaBridge::load(source)?;
+    bridge.invoke_key(key, |command, request| {
+        dispatch_registered_command(host, command, request)
+            .map_err(|error| error.diagnostic_detail())
+    })
+}
+
+/// Dispatch semantic JSON through the versioned command registry while
+/// retaining the caller's Host context for canonical-state preservation.
+pub fn dispatch_registered_command(
+    host: &Host,
+    command: CommandId,
+    request: Value,
+) -> Result<Value, DispatchError> {
+    let schema = find(command).ok_or(DispatchError::UnknownCommand(command))?;
+    let result =
+        execute(command, request, |request| {
+            if command != BRACKET_COMMAND_ID {
+                return Err(DispatchError::UnsupportedTool {
+                    wire_name: schema.name.to_string(),
+                    schema_version: schema.schema_version.to_string(),
+                    _command: command,
+                });
+            }
+            let string_field = |name: &str| {
+                request.get(name).and_then(Value::as_str).ok_or_else(|| {
+                    DispatchError::Validation(format!("missing string field {name:?}"))
+                })
+            };
+            let number_field = |name: &str| {
+                request.get(name).and_then(Value::as_f64).ok_or_else(|| {
+                    DispatchError::Validation(format!("missing number field {name:?}"))
+                })
+            };
+            let view = dispatch_bracket_with_host(
+                host,
+                string_field("bundle_path")?,
+                string_field("bracket_id")?,
+                number_field("length")?,
+                number_field("width")?,
+                number_field("height")?,
+                number_field("thickness")?,
+            )?;
+            Ok(json!({
+                "feature_graph_hash": view.feature_graph_hash,
+                "revision_hash": view.revision_hash,
+                "schema_version": BRACKET_RESPONSE_SCHEMA_VERSION,
+            }))
+        });
+    match result {
+        Ok(response) => Ok(response),
+        Err(ExecutionError::UnknownCommand(command)) => Err(DispatchError::UnknownCommand(command)),
+        Err(ExecutionError::InvalidRequest(detail)) => Err(DispatchError::Validation(detail)),
+        Err(ExecutionError::Handler(error)) => Err(error),
+        Err(ExecutionError::InvalidResponse(detail)) => Err(DispatchError::Validation(format!(
+            "response violates registered schema: {detail}"
+        ))),
+    }
+}
+
+fn dispatch_bracket_with_host(
+    host: &Host,
+    bundle: &str,
+    bracket_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+) -> Result<SnapshotView, DispatchError> {
+    host.save_bracket(bundle, bracket_id, length, width, height, thickness)
         .map_err(DispatchError::from)
 }
 
@@ -2208,6 +2289,7 @@ pub fn dispatch_bracket(
 pub enum DispatchError {
     Host(HostError),
     Validation(String),
+    UnknownCommand(CommandId),
     /// The transport cannot dispatch this registered tool in the current
     /// slice (e.g. the MCP transport advertises every registry command but
     /// only dispatches `bracket` here). The CLI never emits this variant
@@ -2237,6 +2319,7 @@ impl DispatchError {
                 other => other.to_string(),
             },
             Self::Validation(detail) => format!("dispatch_validation: {detail}"),
+            Self::UnknownCommand(command) => format!("unknown command: {}", command.0),
             Self::UnsupportedTool {
                 wire_name,
                 schema_version,
@@ -2253,6 +2336,7 @@ impl std::fmt::Display for DispatchError {
         match self {
             Self::Host(error) => write!(formatter, "{error}"),
             Self::Validation(detail) => write!(formatter, "dispatch.validation: {detail}"),
+            Self::UnknownCommand(command) => write!(formatter, "unknown command: {}", command.0),
             Self::UnsupportedTool {
                 wire_name,
                 schema_version,
@@ -2576,6 +2660,9 @@ fn emit_bracket(
             }
             DispatchError::UnsupportedTool { .. } => unreachable!(
                 "CLI dispatch_bracket never emits UnsupportedTool; the argv parser rejects unknown commands first"
+            ),
+            DispatchError::UnknownCommand(_) => unreachable!(
+                "CLI dispatch_bracket never emits UnknownCommand; the argv parser resolves the command first"
             ),
         },
     }

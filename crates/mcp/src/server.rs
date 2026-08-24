@@ -233,7 +233,9 @@ impl McpServer {
                     ERROR_METHOD_NOT_FOUND,
                     format!("{error}"),
                 ),
-                DispatchError::Host(_) | DispatchError::Validation(_) => JsonRpcResponse::error(
+                DispatchError::Host(_)
+                | DispatchError::Validation(_)
+                | DispatchError::UnknownCommand(_) => JsonRpcResponse::error(
                     request.id.clone(),
                     ERROR_INTERNAL,
                     format!("host dispatch failed: {error}"),

@@ -560,3 +560,93 @@ fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params(
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
+    let root = fresh_bundle("timeline");
+    let seeded = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(&root)
+        .args([
+            "--bracket-id",
+            "l-1",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("seed bracket process runs");
+    assert!(seeded.status.success());
+
+    let listed = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+    })]);
+    let timeline_tool = listed[0]["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "threeterm.command.timeline/1")
+        .expect("timeline tool is advertised");
+    assert!(
+        timeline_tool["inputSchema"]["required"]
+            .as_array()
+            .expect("timeline request fields")
+            .iter()
+            .any(|field| field == "feature_id")
+    );
+
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.timeline/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": "l-1-base"
+            }
+        }
+    })]);
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0]["error"].is_null());
+    let timeline = &responses[0]["result"]["structuredContent"];
+    assert_eq!(timeline["feature_id"], "l-1-base");
+    assert_eq!(timeline["revisions"][0]["ordinal"], 1);
+    assert_eq!(timeline["revisions"][0]["status"], "current-valid");
+
+    let named = Command::new(threeterm_binary())
+        .args(["--machine", "create-revision"])
+        .arg(&root)
+        .args(["--name", "before-restore"])
+        .output()
+        .expect("create revision process runs");
+    assert!(named.status.success());
+    let restored = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.restore-revision/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": "l-1-base",
+                "name": "before-restore"
+            }
+        }
+    })]);
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0]["error"].is_null());
+    assert_eq!(
+        restored[0]["result"]["structuredContent"]["active_revision"],
+        "history-revision-1"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

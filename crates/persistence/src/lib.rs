@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, Feature, FeatureGraph, ProjectGeneration, Revision,
-    history::{HistoryEvent, HistoryOperation, HistoryState},
+    history::{
+        HistoryEvent, HistoryOperation, HistoryState, HistoryTimeline, project_feature_timeline,
+    },
 };
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
@@ -374,6 +376,7 @@ pub struct LoadedBundle {
     pub graph: FeatureGraph,
     pub components: ComponentGraph,
     pub history: HistoryState,
+    pub history_events: Vec<HistoryEvent>,
     /// `true` when the canonical path was unavailable and the immediately
     /// preceding sealed Project Generation was opened instead.
     pub recovered_from_previous: bool,
@@ -386,6 +389,11 @@ impl LoadedBundle {
 
     pub fn revision_hash_hex(&self) -> &str {
         &self.manifest.revision_hash
+    }
+
+    pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
+        project_feature_timeline(&self.history_events, feature_id)
+            .map_err(|error| BundleError::Invalid(error.to_string()))
     }
 }
 
@@ -703,6 +711,7 @@ impl Bundle {
         let mut graph = FeatureGraph::empty();
         let mut components = ComponentGraph::default();
         let mut history = HistoryState::default();
+        let mut history_events = Vec::new();
         let mut feature_ids = Vec::new();
         for entry in log.entries() {
             if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
@@ -717,6 +726,7 @@ impl Bundle {
                         log_index: entry.log_index,
                         detail: error.to_string(),
                     })?;
+                history_events.push(event);
                 continue;
             }
             let feature = Feature::new(&entry.feature_id, &entry.kind).map_err(|error| {
@@ -769,6 +779,7 @@ impl Bundle {
             graph,
             components,
             history,
+            history_events,
             recovered_from_previous,
         })
     }
@@ -826,6 +837,10 @@ impl Bundle {
         let first = replay_history_events(&loaded.log)?;
         let second = replay_history_events(&loaded.log)?;
         Ok((first, second))
+    }
+
+    pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
+        self.open()?.feature_timeline(feature_id)
     }
 
     /// Append one feature only if the sealed bundle is still at the
@@ -1154,6 +1169,7 @@ fn loaded_with(
         graph: stale.graph,
         components: stale.components,
         history: stale.history,
+        history_events: stale.history_events,
         recovered_from_previous: stale.recovered_from_previous || recovered_from_previous,
     }
 }

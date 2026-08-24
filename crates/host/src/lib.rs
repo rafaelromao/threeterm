@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, FeatureGraph,
-    history::{HistoryEvaluation, HistoryState},
+    history::{HistoryEvaluation, HistoryState, HistoryTimeline},
 };
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
@@ -169,6 +169,12 @@ pub struct HistoryCommitView {
     pub snapshot: SnapshotView,
     pub history: HistoryState,
     pub evaluation: Option<HistoryEvaluation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTimelineView {
+    pub snapshot: SnapshotView,
+    pub timeline: HistoryTimeline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +516,25 @@ impl Host {
         })
     }
 
+    pub fn timeline(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<HistoryTimelineView, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let loaded = bundle.open()?;
+        let timeline =
+            loaded
+                .feature_timeline(feature_id)
+                .map_err(|error| HostError::Validation {
+                    detail: error.to_string(),
+                })?;
+        Ok(HistoryTimelineView {
+            snapshot: SnapshotView::from(&loaded),
+            timeline,
+        })
+    }
+
     pub fn create_named_revision(
         &self,
         root: impl AsRef<Path>,
@@ -538,6 +563,7 @@ impl Host {
     pub fn restore_named_revision(
         &self,
         root: impl AsRef<Path>,
+        feature_id: &str,
         name: &str,
     ) -> Result<HistoryCommitView, HostError> {
         let root = root.as_ref();
@@ -545,7 +571,7 @@ impl Host {
         let loaded = bundle.open()?;
         let event = loaded
             .history
-            .restore_named_revision(name)
+            .restore_named_revision_for_feature(feature_id, name)
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;

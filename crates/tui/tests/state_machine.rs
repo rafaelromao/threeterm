@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::Host;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
-    CaptureState, CommandEvent, CommandOutcome, CommandPhase, FocusCaptureEvent, FocusState,
-    HistoryApplyResult, HistoryDirection, HistoryEvent, HistoryState, InteractionEvent,
+    CaptureState, CommandEvent, CommandOutcome, CommandPhase, FeatureTarget, FocusCaptureEvent,
+    FocusState, HistoryApplyResult, HistoryDirection, HistoryEvent, HistoryState, InteractionEvent,
     InteractionMode, InteractionTool, LifecycleEvent, LifecycleState, PointerOrigin, PreviewResult,
     SelectionEvent, SelectionState, SelectionVerification, StateAxis, StateEvent,
     TuiDiagnosticCode, TuiSession,
@@ -862,6 +862,68 @@ fn history_handlers_keep_one_linear_timeline_and_preserve_divergent_future() {
         failed.state.interaction_mode,
         InteractionMode::ModelessReady
     );
+}
+
+#[test]
+fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+    host.create_named_revision(&root, "before-edit")
+        .expect("named revision persists");
+
+    let mut session = TuiSession::new([FeatureTarget::new("l-base", "base")], "history-revision-2");
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["l-base".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["l-base".to_string()],
+        }))
+        .expect("feature selects");
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("host timeline opens");
+    assert_eq!(
+        session
+            .state()
+            .feature_timeline
+            .as_ref()
+            .map(|timeline| timeline.feature_id.as_str()),
+        Some("l-base")
+    );
+    let timeline = session.state().feature_timeline.expect("timeline state");
+    assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(timeline.revisions[0].status, "current-valid");
+
+    let rejected = session
+        .transition_history(HistoryEvent::RestoreNamedRevision {
+            name: "not-in-view".to_string(),
+        })
+        .expect("out-of-scope restore produces a structured rejection");
+    assert_eq!(
+        rejected
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code),
+        Some(TuiDiagnosticCode::HistoryRejected)
+    );
+    assert_eq!(session.state().canonical_revision, "history-revision-2");
+
+    let restored = session
+        .restore_feature_timeline(&host, &root, "before-edit")
+        .expect("scoped restore commits through the host");
+    assert_eq!(
+        restored.history.active_snapshot().revision_id,
+        "history-revision-1"
+    );
+    assert!(session.state().feature_timeline.is_none());
+    assert_eq!(session.state().canonical_revision, "history-revision-1");
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -2776,16 +2776,15 @@ fn history_commit_response(
     schema_version: &'static str,
     view: &threeterm_host::HistoryCommitView,
 ) -> Value {
-    let diagnostics: Vec<_> = view
-        .history
-        .active
+    let active = view.history.active_snapshot();
+    let diagnostics: Vec<_> = active
         .features
         .values()
         .filter_map(|feature| feature.diagnostic.clone())
         .collect();
     let named_revisions: Vec<_> = view
         .history
-        .named_revisions
+        .named_revisions()
         .values()
         .map(|revision| {
             json!({
@@ -2793,6 +2792,25 @@ fn history_commit_response(
                 "revision_id": revision.snapshot.revision_id,
                 "provenance": revision.provenance,
             })
+        })
+        .collect();
+    let features: Vec<_> = active
+        .features
+        .values()
+        .map(|feature| {
+            let mut value = json!({
+                "id": feature.id,
+                "status": history_status_name(feature.status),
+                "geometry_fingerprint": feature.geometry_fingerprint.clone().unwrap_or_default(),
+                "last_valid_geometry_fingerprint": feature
+                    .last_valid_geometry_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
+            });
+            if let Some(diagnostic) = &feature.diagnostic {
+                value["diagnostic"] = json!(diagnostic);
+            }
+            value
         })
         .collect();
     let (dirty_features, evaluated_features, blocked_features) =
@@ -2806,7 +2824,7 @@ fn history_commit_response(
                 )
             },
         );
-    let degraded = view.history.active.features.values().any(|feature| {
+    let degraded = active.features.values().any(|feature| {
         matches!(
             feature.status,
             threeterm_domain::history::HistoryStatus::Broken
@@ -2816,16 +2834,26 @@ fn history_commit_response(
     json!({
         "status": if degraded { "degraded" } else { "ok" },
         "operation": operation,
-        "active_revision": view.history.active.revision_id,
+        "active_revision": active.revision_id,
         "dirty_features": dirty_features,
         "evaluated_features": evaluated_features,
         "blocked_features": blocked_features,
         "diagnostics": diagnostics,
         "named_revisions": named_revisions,
+        "features": features,
         "feature_graph_hash": view.snapshot.feature_graph_hash,
         "revision_hash": view.snapshot.revision_hash,
         "schema_version": schema_version,
     })
+}
+
+fn history_status_name(status: threeterm_domain::history::HistoryStatus) -> &'static str {
+    match status {
+        threeterm_domain::history::HistoryStatus::CurrentValid => "current-valid",
+        threeterm_domain::history::HistoryStatus::Broken => "broken",
+        threeterm_domain::history::HistoryStatus::BlockedByFailure => "blocked-by-failure",
+        threeterm_domain::history::HistoryStatus::Suppressed => "suppressed",
+    }
 }
 
 /// Structured failure modes emitted by the shared CLI/MCP dispatcher. The

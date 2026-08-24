@@ -65,7 +65,7 @@ fn historical_failure_and_named_restore_use_the_production_cli_path() {
     let root = temp_root();
     let bracket_response = bracket(bin, &root);
     let initial_history = Bundle::at(&root).open().expect("bracket reloads").history;
-    assert_eq!(initial_history.active.features.len(), 5);
+    assert_eq!(initial_history.active_snapshot().features.len(), 5);
 
     let created = run(
         bin,
@@ -123,17 +123,28 @@ fn historical_failure_and_named_restore_use_the_production_cli_path() {
     );
 
     let degraded = Bundle::at(&root).open().expect("degraded bundle reloads");
-    let base = &degraded.history.active.features["l-bracket-base"];
+    let base = &degraded.history.active_snapshot().features["l-bracket-base"];
     assert_eq!(
         base.status,
         threeterm_domain::history::HistoryStatus::Broken
     );
     assert_eq!(
         base.last_valid_geometry_fingerprint,
-        initial_history.active.features["l-bracket-base"].geometry_fingerprint
+        initial_history.active_snapshot().features["l-bracket-base"].geometry_fingerprint
     );
+    assert!(base.geometry_fingerprint.is_none());
+    let base_response = edited["features"]
+        .as_array()
+        .expect("feature recovery metadata")
+        .iter()
+        .find(|feature| feature["id"] == "l-bracket-base")
+        .expect("base response metadata");
+    assert_eq!(base_response["status"], "broken");
+    let bend = &degraded.history.active_snapshot().features["l-bracket-bend"];
+    assert!(bend.geometry_fingerprint.is_none());
+    assert!(bend.last_valid_geometry_fingerprint.is_some());
     assert_eq!(
-        degraded.history.active.features["l-bracket-independent-finish"].status,
+        degraded.history.active_snapshot().features["l-bracket-independent-finish"].status,
         threeterm_domain::history::HistoryStatus::CurrentValid
     );
     assert_eq!(
@@ -187,11 +198,11 @@ fn historical_failure_and_named_restore_use_the_production_cli_path() {
     assert_eq!(restored["status"], "ok");
     assert_eq!(
         restored["active_revision"],
-        initial_history.active.revision_id
+        initial_history.active_snapshot().revision_id
     );
     let recovered = Bundle::at(&root).open().expect("restored bundle reloads");
     assert_eq!(
-        recovered.history.active.features["l-bracket-base"].status,
+        recovered.history.active_snapshot().features["l-bracket-base"].status,
         threeterm_domain::history::HistoryStatus::CurrentValid
     );
 

@@ -904,7 +904,7 @@ impl Bundle {
         }
 
         if let Some(event) = history_event {
-            let rebased_event = if event.ordinal == loaded.history.event_ordinal + 1 {
+            let rebased_event = if event.ordinal == loaded.history.event_ordinal() + 1 {
                 event.clone()
             } else if let HistoryOperation::InitializeLBracket {
                 bracket_id,
@@ -921,7 +921,8 @@ impl Bundle {
             } else {
                 return Err(BundleError::Invalid(format!(
                     "stale history event ordinal {}, current ordinal {}",
-                    event.ordinal, loaded.history.event_ordinal
+                    event.ordinal,
+                    loaded.history.event_ordinal()
                 )));
             };
             loaded

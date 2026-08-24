@@ -15,6 +15,7 @@ pub enum HistoryStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryDiagnostic {
     pub code: String,
     pub feature_id: String,
@@ -22,6 +23,7 @@ pub struct HistoryDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryFeature {
     pub id: String,
     pub dependencies: Vec<String>,
@@ -33,12 +35,14 @@ pub struct HistoryFeature {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistorySnapshot {
     pub revision_id: String,
     pub features: BTreeMap<String, HistoryFeature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamedRevision {
     pub name: String,
     pub snapshot: HistorySnapshot,
@@ -46,13 +50,15 @@ pub struct NamedRevision {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryState {
-    pub active: HistorySnapshot,
-    pub named_revisions: BTreeMap<String, NamedRevision>,
-    pub event_ordinal: u64,
+    active: HistorySnapshot,
+    named_revisions: BTreeMap<String, NamedRevision>,
+    event_ordinal: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryEvent {
     pub schema_version: String,
     pub ordinal: u64,
@@ -63,6 +69,7 @@ pub struct HistoryEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 pub enum HistoryOperation {
     InitializeLBracket {
         bracket_id: String,
@@ -131,6 +138,18 @@ impl Default for HistoryState {
 }
 
 impl HistoryState {
+    pub fn active_snapshot(&self) -> &HistorySnapshot {
+        &self.active
+    }
+
+    pub fn named_revisions(&self) -> &BTreeMap<String, NamedRevision> {
+        &self.named_revisions
+    }
+
+    pub fn event_ordinal(&self) -> u64 {
+        self.event_ordinal
+    }
+
     pub fn apply_event(&mut self, event: &HistoryEvent) -> Result<(), HistoryError> {
         if event.schema_version != HISTORY_EVENT_SCHEMA {
             return Err(HistoryError::InvalidEvent(format!(
@@ -145,8 +164,7 @@ impl HistoryState {
                 event.ordinal
             )));
         }
-        validate_snapshot(&event.active)?;
-        validate_named_revisions(&event.named_revisions)?;
+        validate_event(event)?;
         self.active = event.active.clone();
         self.named_revisions = event.named_revisions.clone();
         self.event_ordinal = event.ordinal;
@@ -207,6 +225,9 @@ impl HistoryState {
             .ok_or_else(|| HistoryError::FeatureNotFound(feature_id.to_string()))?;
         let ordinal = self.event_ordinal + 1;
         let preserved_name = format!("recovered-before-historical-edit-{ordinal}");
+        if self.named_revisions.contains_key(&preserved_name) {
+            return Err(HistoryError::DuplicateName(preserved_name));
+        }
         let mut named_revisions = self.named_revisions.clone();
         named_revisions.insert(
             preserved_name.clone(),
@@ -244,6 +265,10 @@ impl HistoryState {
                     .features
                     .get_mut(&id)
                     .ok_or_else(|| HistoryError::FeatureNotFound(id.clone()))?;
+                if feature.last_valid_geometry_fingerprint.is_none() {
+                    feature.last_valid_geometry_fingerprint = feature.geometry_fingerprint.clone();
+                }
+                feature.geometry_fingerprint = None;
                 feature.status = HistoryStatus::BlockedByFailure;
                 feature.diagnostic = None;
                 blocked_features.push(id);
@@ -272,6 +297,7 @@ impl HistoryState {
                     .get_mut(&id)
                     .ok_or_else(|| HistoryError::FeatureNotFound(id.clone()))?;
                 feature.last_valid_geometry_fingerprint = feature.geometry_fingerprint.clone();
+                feature.geometry_fingerprint = None;
                 feature.status = HistoryStatus::Broken;
                 feature.diagnostic = Some(diagnostic.clone());
                 diagnostics.push(diagnostic);
@@ -346,6 +372,9 @@ impl HistoryState {
             .ok_or_else(|| HistoryError::NamedRevisionNotFound(name.to_string()))?;
         let ordinal = self.event_ordinal + 1;
         let displaced_name = format!("recovered-before-restore-{ordinal}");
+        if self.named_revisions.contains_key(&displaced_name) {
+            return Err(HistoryError::DuplicateName(displaced_name));
+        }
         let mut named_revisions = self.named_revisions.clone();
         named_revisions.insert(
             displaced_name.clone(),
@@ -535,7 +564,38 @@ fn validate_snapshot(snapshot: &HistorySnapshot) -> Result<(), HistoryError> {
                 )));
             }
         }
+        match feature.status {
+            HistoryStatus::CurrentValid => {
+                if feature.geometry_fingerprint.is_none()
+                    || feature.last_valid_geometry_fingerprint.is_some()
+                    || feature.diagnostic.is_some()
+                {
+                    return Err(HistoryError::InvalidEvent(format!(
+                        "current feature state is inconsistent: {id}"
+                    )));
+                }
+            }
+            HistoryStatus::Broken => {
+                if feature.geometry_fingerprint.is_some()
+                    || feature.last_valid_geometry_fingerprint.is_none()
+                    || feature.diagnostic.is_none()
+                {
+                    return Err(HistoryError::InvalidEvent(format!(
+                        "broken feature state is inconsistent: {id}"
+                    )));
+                }
+            }
+            HistoryStatus::BlockedByFailure | HistoryStatus::Suppressed => {
+                if feature.geometry_fingerprint.is_some() || feature.diagnostic.is_some() {
+                    return Err(HistoryError::InvalidEvent(format!(
+                        "non-current feature state is inconsistent: {id}"
+                    )));
+                }
+            }
+        }
     }
+    let all_features = snapshot.features.keys().cloned().collect::<Vec<_>>();
+    topological_order(&snapshot.features, &all_features)?;
     Ok(())
 }
 
@@ -553,6 +613,83 @@ fn validate_named_revisions(
     Ok(())
 }
 
+fn validate_event(event: &HistoryEvent) -> Result<(), HistoryError> {
+    validate_snapshot(&event.active)?;
+    validate_named_revisions(&event.named_revisions)?;
+    match &event.operation {
+        HistoryOperation::InitializeLBracket { bracket_id, .. } => {
+            if bracket_id.is_empty() || event.active.features.is_empty() {
+                return Err(HistoryError::InvalidEvent(
+                    "initialization must contain a bracket graph".to_string(),
+                ));
+            }
+        }
+        HistoryOperation::HistoricalEdit {
+            feature_id,
+            dirty_features,
+            evaluated_features,
+            blocked_features,
+            diagnostics,
+            preserved_name,
+            ..
+        } => {
+            if !event.active.features.contains_key(feature_id)
+                || preserved_name
+                    .as_ref()
+                    .is_none_or(|name| !event.named_revisions.contains_key(name))
+            {
+                return Err(HistoryError::InvalidEvent(
+                    "historical edit references missing state".to_string(),
+                ));
+            }
+            let dirty = dirty_features.iter().collect::<BTreeSet<_>>();
+            if evaluated_features.iter().any(|id| !dirty.contains(id))
+                || blocked_features.iter().any(|id| !dirty.contains(id))
+                || evaluated_features
+                    .iter()
+                    .any(|id| blocked_features.contains(id))
+                || dirty_features
+                    .iter()
+                    .any(|id| !event.active.features.contains_key(id))
+            {
+                return Err(HistoryError::InvalidEvent(
+                    "historical edit affected-set metadata is inconsistent".to_string(),
+                ));
+            }
+            for diagnostic in diagnostics {
+                if event
+                    .active
+                    .features
+                    .get(&diagnostic.feature_id)
+                    .is_none_or(|feature| feature.status != HistoryStatus::Broken)
+                {
+                    return Err(HistoryError::InvalidEvent(
+                        "diagnostic does not identify a broken feature".to_string(),
+                    ));
+                }
+            }
+        }
+        HistoryOperation::CreateNamedRevision { name } => {
+            if !event.named_revisions.contains_key(name) {
+                return Err(HistoryError::InvalidEvent(
+                    "created named revision is missing".to_string(),
+                ));
+            }
+        }
+        HistoryOperation::RestoreNamedRevision { name, .. } => {
+            let named = event.named_revisions.get(name).ok_or_else(|| {
+                HistoryError::InvalidEvent("restored revision is missing".to_string())
+            })?;
+            if named.snapshot.revision_id != event.active.revision_id {
+                return Err(HistoryError::InvalidEvent(
+                    "restore active revision does not match the named snapshot".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fingerprint_bytes(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -565,7 +702,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn historical_failure_stops_only_the_affected_branch() {
+    fn historical_failure_stops_only_the_affected_dependency_path() {
         let state = HistoryState::default();
         let event = state
             .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
@@ -607,5 +744,45 @@ mod tests {
         .expect("round trips")
         .fingerprint();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn positive_historical_edit_recomputes_the_affected_dependency_path() {
+        let mut state = HistoryState::default();
+        let event = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("event");
+        state.apply_event(&event).expect("applies");
+
+        let (event, evaluation) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("valid edit");
+        assert_eq!(evaluation.dirty_features, ["l-base", "l-bend", "l-finish"]);
+        assert_eq!(evaluation.evaluated_features, evaluation.dirty_features);
+        assert!(evaluation.blocked_features.is_empty());
+        assert!(evaluation.diagnostics.is_empty());
+        assert!(
+            event
+                .active
+                .features
+                .values()
+                .all(|feature| feature.status == HistoryStatus::CurrentValid)
+        );
+    }
+
+    #[test]
+    fn generated_recovery_name_collision_preserves_the_existing_named_revision() {
+        let mut state = HistoryState::default();
+        let event = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("event");
+        state.apply_event(&event).expect("applies");
+        let name = "recovered-before-historical-edit-3";
+        let event = state.create_named_revision(name).expect("named revision");
+        state.apply_event(&event).expect("applies");
+        assert!(matches!(
+            state.historical_edit("l-base", "length", 0.0),
+            Err(HistoryError::DuplicateName(_))
+        ));
     }
 }

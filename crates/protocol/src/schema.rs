@@ -813,7 +813,7 @@ pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "required": [
             "status", "operation", "active_revision", "dirty_features",
             "evaluated_features", "blocked_features", "diagnostics",
-            "named_revisions", "feature_graph_hash", "revision_hash", "schema_version"
+            "named_revisions", "features", "feature_graph_hash", "revision_hash", "schema_version"
         ],
         "properties": {
             "status": { "type": "string" },
@@ -822,8 +822,47 @@ pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "dirty_features": { "type": "array", "items": { "type": "string" } },
             "evaluated_features": { "type": "array", "items": { "type": "string" } },
             "blocked_features": { "type": "array", "items": { "type": "string" } },
-            "diagnostics": { "type": "array", "items": { "type": "object" } },
-            "named_revisions": { "type": "array", "items": { "type": "object" } },
+            "diagnostics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["code", "feature_id", "detail"],
+                    "properties": {
+                        "code": { "type": "string", "minLength": 1 },
+                        "feature_id": { "type": "string", "minLength": 1 },
+                        "detail": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "named_revisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "revision_id", "provenance"],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                        "revision_id": { "type": "string", "minLength": 1 },
+                        "provenance": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "features": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "status", "geometry_fingerprint", "last_valid_geometry_fingerprint"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1 },
+                        "status": { "type": "string", "minLength": 1 },
+                        "geometry_fingerprint": { "type": "string" },
+                        "last_valid_geometry_fingerprint": { "type": "string" },
+                        "diagnostic": { "type": "object" }
+                    },
+                    "additionalProperties": false
+                }
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "schema_version": { "type": "string" }

@@ -25,9 +25,10 @@ use std::io::{BufRead, Write};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_bracket};
+use threeterm_cli::dispatch::{DispatchError, EXIT_OK, dispatch_registered_command};
+use threeterm_host::Host;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
-use threeterm_protocol::schema::{BRACKET_COMMAND_ID, CommandSchema, iter};
+use threeterm_protocol::schema::{CommandSchema, iter};
 use threeterm_protocol::schema_validator::validate;
 
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -198,14 +199,7 @@ impl McpServer {
             );
         }
 
-        let result = match schema_entry.id {
-            BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
-            other => Err(DispatchError::UnsupportedTool {
-                wire_name: name.to_string(),
-                schema_version: schema_entry.schema_version.to_string(),
-                _command: other,
-            }),
-        };
+        let result = dispatch_registered_command(&Host::new(), schema_entry.id, arguments);
 
         match result {
             Ok(value) => {
@@ -308,39 +302,6 @@ impl McpServer {
             }
         }
     }
-}
-
-fn dispatch_bracket_tool(arguments: &Value) -> Result<Value, DispatchError> {
-    let bundle = arguments
-        .get("bundle_path")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let bracket_id = arguments
-        .get("bracket_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let length = arguments
-        .get("length")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let width = arguments
-        .get("width")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let height = arguments
-        .get("height")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let thickness = arguments
-        .get("thickness")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let view = dispatch_bracket(bundle, bracket_id, length, width, height, thickness)?;
-    Ok(json!({
-        "feature_graph_hash": view.feature_graph_hash,
-        "revision_hash": view.revision_hash,
-        "schema_version": threeterm_protocol::schema::BRACKET_RESPONSE_SCHEMA_VERSION,
-    }))
 }
 
 fn find_by_wire_name(name: &str) -> Option<&'static CommandSchema> {

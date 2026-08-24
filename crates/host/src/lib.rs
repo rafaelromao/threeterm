@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use threeterm_domain::FeatureGraph;
@@ -175,6 +176,7 @@ pub struct CommandDraft {
     pub source_brep_sha256: String,
     pub request: DraftRequest,
     preview_path: Option<PathBuf>,
+    created_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +198,7 @@ pub struct BracketParameterDraft {
     pub source_brep_sha256: String,
     pub request: BracketRequest,
     preview_path: Option<PathBuf>,
+    created_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +209,12 @@ pub struct BracketPreviewView {
     pub input_fingerprint: String,
     pub result: BracketResult,
     pub brep_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketCommitView {
+    pub snapshot: SnapshotView,
+    pub input_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -693,6 +702,7 @@ impl Host {
             source_brep_sha256,
             request,
             preview_path: None,
+            created_at: Instant::now(),
         };
         self.drafts.borrow_mut().insert(draft_id, draft.clone());
         Ok(draft)
@@ -748,7 +758,6 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
-        self.current.replace(Some(loaded.clone()));
         self.validate_draft_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -953,6 +962,7 @@ impl Host {
             &kind,
             loaded.revision_hash_hex(),
             &bytes,
+            None,
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1008,6 +1018,7 @@ impl Host {
             source_brep_sha256,
             request,
             preview_path: None,
+            created_at: Instant::now(),
         };
         self.bracket_drafts
             .borrow_mut()
@@ -1038,7 +1049,6 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
-        self.current.replace(Some(loaded.clone()));
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1122,7 +1132,7 @@ impl Host {
         root: impl AsRef<Path>,
         draft_id: &str,
         worker: &OcctWorker,
-    ) -> Result<SnapshotView, HostError> {
+    ) -> Result<BracketCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let draft = self
             .bracket_drafts
@@ -1132,6 +1142,12 @@ impl Host {
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
+        if draft.bundle_root != root {
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "draft belongs to a different bundle".to_string(),
+            });
+        }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
         self.validate_bracket_source(&draft, &loaded)?;
@@ -1171,25 +1187,50 @@ impl Host {
                 return Err(error);
             }
         };
+        let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        let kind = bracket_kind_with_draft(&request, Some(draft_id));
         let snapshot = match self.promote_brep_bytes(
             &root,
             &draft.bracket_id,
-            &bracket_kind(&request),
+            &kind,
             &draft.source_revision,
             &bytes,
+            Some(&draft.source_brep_sha256),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                // Parent-sync failures can report after publication. Resolve
+                // that durable outcome by looking up the same semantic key
+                // before retrying or surfacing a failure.
+                if let Ok(committed) = Bundle::at(&root).open()
+                    && committed.graph.features().any(|feature| {
+                        feature.id.as_str() == draft.bracket_id && feature.kind == kind
+                    })
+                    && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
+                        == Some(result.brep_sha256.clone())
+                {
+                    let snapshot = SnapshotView::from(&committed);
+                    self.current.replace(Some(committed));
+                    self.bracket_drafts.borrow_mut().remove(draft_id);
+                    remove_preview_stage(&stage);
+                    return Ok(BracketCommitView {
+                        snapshot,
+                        input_fingerprint,
+                    });
+                }
                 remove_preview_stage(&stage);
                 return Err(error);
             }
         };
         remove_preview_stage(&stage);
         self.bracket_drafts.borrow_mut().remove(draft_id);
-        Ok(snapshot)
+        Ok(BracketCommitView {
+            snapshot,
+            input_fingerprint,
+        })
     }
 
-    pub fn discard_bracket_parameter_draft(&self, draft_id: &str) -> Result<(), HostError> {
+    pub fn discard_bracket_parameter_draft(&self, draft_id: &str) -> Result<String, HostError> {
         let draft = self
             .bracket_drafts
             .borrow_mut()
@@ -1200,11 +1241,51 @@ impl Host {
         if let Some(path) = draft.preview_path {
             remove_preview_stage(&path);
         }
-        Ok(())
+        Ok(draft.source_revision)
     }
 
     pub fn has_bracket_parameter_draft(&self, draft_id: &str) -> bool {
         self.bracket_drafts.borrow().contains_key(draft_id)
+    }
+
+    /// Remove abandoned transient drafts and their staged worker output.
+    /// Session adapters call this at input boundaries; `Host::drop` remains
+    /// the final cleanup guard for sessions that terminate without another
+    /// input.
+    pub fn prune_expired_drafts(&self, max_age: Duration) -> usize {
+        let now = Instant::now();
+        let generic_ids: Vec<_> = self
+            .drafts
+            .borrow()
+            .iter()
+            .filter(|(_, draft)| now.duration_since(draft.created_at) > max_age)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let bracket_ids: Vec<_> = self
+            .bracket_drafts
+            .borrow()
+            .iter()
+            .filter(|(_, draft)| now.duration_since(draft.created_at) > max_age)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut removed = 0;
+        for id in generic_ids {
+            if let Some(draft) = self.drafts.borrow_mut().remove(&id) {
+                if let Some(path) = draft.preview_path {
+                    remove_preview_stage(&path);
+                }
+                removed += 1;
+            }
+        }
+        for id in bracket_ids {
+            if let Some(draft) = self.bracket_drafts.borrow_mut().remove(&id) {
+                if let Some(path) = draft.preview_path {
+                    remove_preview_stage(&path);
+                }
+                removed += 1;
+            }
+        }
+        removed
     }
 
     fn validate_bracket_source(
@@ -1243,13 +1324,24 @@ impl Host {
         kind: &str,
         expected_revision: &str,
         bytes: &[u8],
+        source_brep_sha256: Option<&str>,
     ) -> Result<SnapshotView, HostError> {
-        let updated = Bundle::at(root).append_feature_with_brep_if_revision(
-            feature_id,
-            kind,
-            expected_revision,
-            bytes,
-        )?;
+        let bundle = Bundle::at(root);
+        let updated = match source_brep_sha256 {
+            Some(source_brep_sha256) => bundle.append_feature_with_brep_if_revision_and_source(
+                feature_id,
+                kind,
+                expected_revision,
+                source_brep_sha256,
+                bytes,
+            )?,
+            None => bundle.append_feature_with_brep_if_revision(
+                feature_id,
+                kind,
+                expected_revision,
+                bytes,
+            )?,
+        };
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         Ok(snapshot)
@@ -2273,25 +2365,30 @@ fn read_verified_worker_brep(result: &BracketResult) -> Result<Vec<u8>, HostErro
 }
 
 fn bracket_kind(request: &BracketRequest) -> String {
+    bracket_kind_with_draft(request, None)
+}
+
+fn bracket_kind_with_draft(request: &BracketRequest, draft_id: Option<&str>) -> String {
+    let draft = draft_id.map_or_else(String::new, |draft_id| format!(";draft_id={draft_id}"));
     format!(
-        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
-        request.length, request.width, request.height, request.thickness
+        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}{draft}",
+        request.length, request.width, request.height, request.thickness,
     )
 }
 
 fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str) -> String {
-    let semantic = serde_json::json!({
-        "source_revision": draft.source_revision,
-        "source_brep_sha256": draft.source_brep_sha256,
-        "bracket_id": draft.bracket_id,
-        "length": draft.request.length,
-        "width": draft.request.width,
-        "height": draft.request.height,
-        "thickness": draft.request.thickness,
-        "result_sha256": result_sha256,
-    });
-    let bytes = serde_json::to_vec(&semantic).expect("bracket fingerprint serializes");
-    format!("{:x}", Sha256::digest(bytes))
+    let semantic = format!(
+        "source_revision={}|source_brep_sha256={}|bracket_id={}|length={:.17}|width={:.17}|height={:.17}|thickness={:.17}|result_sha256={}",
+        draft.source_revision,
+        draft.source_brep_sha256,
+        draft.bracket_id,
+        draft.request.length,
+        draft.request.width,
+        draft.request.height,
+        draft.request.thickness,
+        result_sha256,
+    );
+    format!("{:x}", Sha256::digest(semantic.as_bytes()))
 }
 
 fn preview_stage_path(draft_id: &str) -> PathBuf {

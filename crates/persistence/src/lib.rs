@@ -753,7 +753,7 @@ impl Bundle {
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision), None)
+            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision), None, None)
         })
     }
 
@@ -773,6 +773,28 @@ impl Bundle {
                 &[(feature_id, kind)],
                 Some(expected_revision),
                 Some((feature_id, brep_bytes)),
+                None,
+            )
+        })
+    }
+
+    /// Variant of BREP promotion that also authenticates the source BREP while
+    /// holding the bundle write lock, immediately before staging the new
+    /// generation.
+    pub fn append_feature_with_brep_if_revision_and_source(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                Some((feature_id, expected_source_sha256)),
             )
         })
     }
@@ -801,7 +823,7 @@ impl Bundle {
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, None)
+            self.append_features_locked(entries, None, None, None)
         })
     }
 
@@ -810,6 +832,7 @@ impl Bundle {
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
         brep: Option<(&str, &[u8])>,
+        source_brep: Option<(&str, &str)>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -828,6 +851,19 @@ impl Bundle {
                 "worker result belongs to revision {expected_revision:?}, but current revision is {:?}",
                 loaded.revision_hash_hex()
             )));
+        }
+        if let Some((feature_id, expected_sha256)) = source_brep {
+            let source = self.root.join("brep").join(format!("{feature_id}.brep"));
+            let actual = fs::read(&source)
+                .map(|bytes| hash(&bytes))
+                .map_err(|error| {
+                    BundleError::Invalid(format!("source BREP could not be read: {error}"))
+                })?;
+            if actual != expected_sha256 {
+                return Err(BundleError::Invalid(format!(
+                    "source BREP digest mismatch for {feature_id}: expected {expected_sha256}, actual {actual}"
+                )));
+            }
         }
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)

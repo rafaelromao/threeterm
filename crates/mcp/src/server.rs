@@ -344,7 +344,7 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
-                let revision = session.host.commit_bracket_parameter_draft(
+                let committed = session.host.commit_bracket_parameter_draft(
                     &bundle,
                     &draft_id,
                     &session.worker,
@@ -353,9 +353,9 @@ impl McpServer {
                 Ok(bracket_edit_response(
                     "commit",
                     &draft_id,
-                    &revision.revision_hash,
+                    &committed.snapshot.revision_hash,
                     None,
-                    None,
+                    Some(&committed.input_fingerprint),
                 ))
             }
             "discard" => {
@@ -365,15 +365,12 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
-                session.host.discard_bracket_parameter_draft(&draft_id)?;
+                let source_revision = session.host.discard_bracket_parameter_draft(&draft_id)?;
                 sessions.remove(&key);
                 Ok(bracket_edit_response(
                     "discard",
                     &draft_id,
-                    &arguments
-                        .get("source_revision")
-                        .and_then(Value::as_str)
-                        .map_or_else(|| "0".repeat(64), str::to_string),
+                    &source_revision,
                     None,
                     None,
                 ))

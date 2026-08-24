@@ -621,5 +621,32 @@ fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
     assert_eq!(timeline["revisions"][0]["ordinal"], 1);
     assert_eq!(timeline["revisions"][0]["status"], "current-valid");
 
+    let named = Command::new(threeterm_binary())
+        .args(["--machine", "create-revision"])
+        .arg(&root)
+        .args(["--name", "before-restore"])
+        .output()
+        .expect("create revision process runs");
+    assert!(named.status.success());
+    let restored = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.restore-revision/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": "l-1-base",
+                "name": "before-restore"
+            }
+        }
+    })]);
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0]["error"].is_null());
+    assert_eq!(
+        restored[0]["result"]["structuredContent"]["active_revision"],
+        "history-revision-1"
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }

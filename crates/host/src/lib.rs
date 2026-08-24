@@ -315,9 +315,27 @@ impl From<WorkerError> for HostError {
             WorkerError::Spawn {
                 request_id, detail, ..
             } => Self::WorkerFailure { request_id, detail },
-            WorkerError::Cancelled { request_id } => Self::WorkerFailure {
-                request_id: Some(request_id.clone()),
-                detail: format!("worker request {request_id} cancelled"),
+            WorkerError::Cancelled {
+                request_id,
+                last_progress,
+                elapsed,
+                stderr_tail,
+                exit_signal,
+                exit_code,
+            } => Self::WorkerTerminated {
+                record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
+                    request_id: request_id.clone(),
+                    stage: "cancelled".to_string(),
+                    elapsed,
+                    last_progress,
+                    last_artifact_error: None,
+                    exit_signal,
+                    exit_code,
+                    stderr_tail,
+                    failed_code: None,
+                    failed_detail: None,
+                    exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
+                }),
             },
             WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {

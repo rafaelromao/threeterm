@@ -204,6 +204,7 @@ fn cooperative_cancellation_returns_structured_acknowledgement() {
         request_id,
         reason,
         elapsed: _,
+        ..
     } = outcome
     else {
         panic!("expected Acknowledged; got {outcome:?}");

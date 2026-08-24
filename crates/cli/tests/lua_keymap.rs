@@ -121,6 +121,10 @@ fn lua_forbidden_apis_fail_with_structured_diagnostics_before_host_dispatch() {
         ("io.popen('not allowed')", "io.popen"),
         ("package.loadlib('not allowed', 'entry')", "package.loadlib"),
         ("io.open('not allowed')", "io.open"),
+        (
+            "local ok = pcall(function() os.execute('not allowed') end)",
+            "os.execute",
+        ),
     ] {
         let source = format!("{}\n{}", bracket_lua(&root), expression);
         let error = dispatch_lua_key(&source, "F2", &host)

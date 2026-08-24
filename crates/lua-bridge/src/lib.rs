@@ -25,6 +25,10 @@ const FORBIDDEN_GLOBALS: [&str; 8] = [
     "setmetatable",
     "getmetatable",
 ];
+const ALLOWED_GLOBALS: [&str; 15] = [
+    "assert", "error", "ipairs", "next", "pairs", "pcall", "select", "tonumber", "tostring",
+    "type", "warn", "xpcall", "table", "string", "math",
+];
 
 pub fn schema_version() -> &'static str {
     "threeterm.lua-bridge/1"
@@ -198,33 +202,43 @@ impl LuaBridge {
                 },
             )?;
             let environment_metatable = lua.create_table()?;
-            environment_metatable.set("__index", globals)?;
+            let allowed_globals = lua.create_table()?;
+            for name in ALLOWED_GLOBALS {
+                let value: LuaValue = globals.get(name)?;
+                allowed_globals.set(name, value)?;
+            }
+            for name in FORBIDDEN_MODULES {
+                let value: LuaValue = globals.get(name)?;
+                allowed_globals.set(name, value)?;
+            }
+            for name in FORBIDDEN_GLOBALS {
+                let value: LuaValue = globals.get(name)?;
+                allowed_globals.set(name, value)?;
+            }
+            environment_metatable.set("__index", allowed_globals)?;
             environment_metatable.set("__newindex", new_global)?;
             environment.set_metatable(Some(environment_metatable))?;
 
             lua.load(source).set_environment(environment).exec()
         })();
 
-        match result {
-            Ok(()) => Ok(Self {
-                bindings: Rc::try_unwrap(bindings)
-                    .expect("Lua runtime owns no binding references after execution")
-                    .into_inner(),
-            }),
-            Err(error) => {
-                if let Some(api) = forbidden_api.borrow_mut().take() {
-                    Err(LuaBridgeError::ForbiddenApi { api })
-                } else {
-                    callback_failure.borrow_mut().take().map_or_else(
-                        || {
-                            Err(LuaBridgeError::ScriptFailure {
-                                detail: error.to_string(),
-                            })
-                        },
-                        Err,
-                    )
-                }
-            }
+        match forbidden_api.borrow_mut().take() {
+            Some(api) => Err(LuaBridgeError::ForbiddenApi { api }),
+            None => match result {
+                Ok(()) => Ok(Self {
+                    bindings: Rc::try_unwrap(bindings)
+                        .expect("Lua runtime owns no binding references after execution")
+                        .into_inner(),
+                }),
+                Err(error) => callback_failure.borrow_mut().take().map_or_else(
+                    || {
+                        Err(LuaBridgeError::ScriptFailure {
+                            detail: error.to_string(),
+                        })
+                    },
+                    Err,
+                ),
+            },
         }
     }
 

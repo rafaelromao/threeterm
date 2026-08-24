@@ -341,7 +341,7 @@ fn typed_extrude_with_cancel_acknowledges_cooperative_worker() {
     let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
         .expect_err("cancellable extrude must surface the cancellation");
     match error {
-        WorkerError::Cancelled { request_id } => {
+        WorkerError::Cancelled { request_id, .. } => {
             assert_eq!(request_id, "req-1");
         }
         other => panic!("expected Cancelled; got {other:?}"),

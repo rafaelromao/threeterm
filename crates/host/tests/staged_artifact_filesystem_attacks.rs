@@ -96,13 +96,12 @@ fn directory_contains_partial_or_verified(root: &Path) -> bool {
         return false;
     };
     for entry in entries.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.ends_with(".partial")
+        if let Some(name) = entry.file_name().to_str()
+            && (name.ends_with(".partial")
                 || name.ends_with(".verified")
-                || name.contains(".verified")
-            {
-                return true;
-            }
+                || name.contains(".verified"))
+        {
+            return true;
         }
     }
     false
@@ -189,7 +188,7 @@ fn unrelated_file_and_header_mismatch_fail_closed_without_leak() {
         }
         assert_eq!(host.current(), before, "case {case} canonical unchanged");
         // canonical reloadable
-        let reloaded = Bundle::at(&project_root).open().expect("canonical reloads");
+        Bundle::at(&project_root).open().expect("canonical reloads");
         assert_eq!(
             std::fs::read(project_root.join("manifest.json")).expect("manifest re-reads"),
             before_manifest
@@ -282,9 +281,8 @@ fn symlinked_staging_root_is_rejected_and_canonical_preserved() {
     // Even if worker tries to stage through symlink, Host::accept_derived_result should fail closed
     // Use a real artifact_root for staging but pass symlinked link as artifact_root to Host.
     // First stage via real target then attempt promotion via symlink root (which Host will try to open).
-    let emitted =
+    let _emitted =
         emit_staged_artifact(&target, &request, b"hostile bytes").expect("stages via target");
-    let outcome = completed_outcome(&target, &request, wire_round_trip(&emitted));
     // Host opening the symlink root should fail — but we staged in target, not link.
     // Verify that link is indeed rejected as root and canonical unchanged.
     assert!(Stage::open(&link).is_err());
@@ -316,7 +314,7 @@ fn symlinked_partial_file_is_rejected_and_removed() {
     std::fs::remove_file(&partial).expect("remove legit partial");
     std::os::unix::fs::symlink(&target_file, &partial).expect("symlink partial creates");
 
-    let diagnostic = host
+    let _diagnostic = host
         .accept_derived_result(
             &artifact_root,
             &request,
@@ -552,7 +550,7 @@ fn oversized_temporary_and_final_output_rejected_without_authoritative_promotion
             header: header3,
         }],
     };
-    let diag = host
+    let _diag = host
         .accept_derived_result(&artifact_root3, &req3, &fp3, outcome3)
         .expect_err("oversized host promotion must reject");
     assert!(!artifact_root3.join("huge.brep.partial").exists());

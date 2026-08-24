@@ -14,6 +14,17 @@ const MAX_BINDINGS: usize = 64;
 const MAX_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
 const MAX_INSTRUCTIONS: u32 = 100_000;
+const FORBIDDEN_MODULES: [&str; 4] = ["os", "io", "package", "_G"];
+const FORBIDDEN_GLOBALS: [&str; 8] = [
+    "dofile",
+    "loadfile",
+    "load",
+    "require",
+    "rawset",
+    "rawget",
+    "setmetatable",
+    "getmetatable",
+];
 
 pub fn schema_version() -> &'static str {
     "threeterm.lua-bridge/1"
@@ -23,6 +34,7 @@ pub fn schema_version() -> &'static str {
 pub enum LuaBridgeError {
     SourceTooLarge { bytes: usize, maximum: usize },
     BindingLimitExceeded { count: usize, maximum: usize },
+    ForbiddenApi { api: String },
     ScriptFailure { detail: String },
     InvalidKey { key: String },
     DuplicateBinding { key: String },
@@ -37,6 +49,7 @@ impl LuaBridgeError {
         match self {
             Self::SourceTooLarge { .. } => "source_too_large",
             Self::BindingLimitExceeded { .. } => "binding_limit_exceeded",
+            Self::ForbiddenApi { .. } => "forbidden_api",
             Self::ScriptFailure { .. } => "script_failure",
             Self::InvalidKey { .. } => "invalid_key",
             Self::DuplicateBinding { .. } => "duplicate_binding",
@@ -49,6 +62,13 @@ impl LuaBridgeError {
 
     pub fn schema_version(&self) -> &'static str {
         schema_version()
+    }
+
+    pub fn forbidden_api(&self) -> Option<&str> {
+        match self {
+            Self::ForbiddenApi { api } => Some(api),
+            _ => None,
+        }
     }
 }
 
@@ -66,6 +86,9 @@ impl fmt::Display for LuaBridgeError {
                     formatter,
                     "Lua config has {count} bindings; maximum is {maximum}"
                 )
+            }
+            Self::ForbiddenApi { api } => {
+                write!(formatter, "Lua config attempted forbidden API {api:?}")
             }
             Self::ScriptFailure { detail } => write!(formatter, "Lua script failed: {detail}"),
             Self::InvalidKey { key } => write!(formatter, "invalid function key {key:?}"),
@@ -111,6 +134,7 @@ impl LuaBridge {
 
         let bindings = Rc::new(RefCell::new(BTreeMap::new()));
         let callback_failure = Rc::new(RefCell::new(None));
+        let forbidden_api = Rc::new(RefCell::new(None));
         let result = (|| {
             let lua = Lua::new_with(
                 StdLib::TABLE | StdLib::STRING | StdLib::MATH,
@@ -134,10 +158,16 @@ impl LuaBridge {
                 },
             )?;
             let globals = lua.globals();
-            for name in [
-                "os", "io", "package", "debug", "dofile", "loadfile", "load", "require",
-            ] {
+            globals.set("debug", LuaValue::Nil)?;
+            for name in FORBIDDEN_GLOBALS {
                 globals.set(name, LuaValue::Nil)?;
+            }
+
+            for module in FORBIDDEN_MODULES {
+                globals.set(module, forbidden_module(&lua, module, &forbidden_api)?)?;
+            }
+            for global in FORBIDDEN_GLOBALS {
+                globals.set(global, forbidden_global(&lua, global, &forbidden_api)?)?;
             }
 
             let bind_bindings = Rc::clone(&bindings);
@@ -154,9 +184,25 @@ impl LuaBridge {
             )?;
             let keymap = lua.create_table()?;
             keymap.set("bind", bind)?;
-            globals.set("keymap", keymap)?;
+            let environment = lua.create_table()?;
+            environment.set("keymap", keymap)?;
+            let global_failure = Rc::clone(&forbidden_api);
+            let new_global = lua.create_function(
+                move |_lua, (_environment, name, _value): (Table, String, LuaValue)| {
+                    if FORBIDDEN_GLOBALS.contains(&name.as_str())
+                        || FORBIDDEN_MODULES.contains(&name.as_str())
+                    {
+                        global_failure.borrow_mut().replace(name);
+                    }
+                    Err::<(), _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
+                },
+            )?;
+            let environment_metatable = lua.create_table()?;
+            environment_metatable.set("__index", globals)?;
+            environment_metatable.set("__newindex", new_global)?;
+            environment.set_metatable(Some(environment_metatable))?;
 
-            lua.load(source).exec()
+            lua.load(source).set_environment(environment).exec()
         })();
 
         match result {
@@ -165,14 +211,20 @@ impl LuaBridge {
                     .expect("Lua runtime owns no binding references after execution")
                     .into_inner(),
             }),
-            Err(error) => callback_failure.borrow_mut().take().map_or_else(
-                || {
-                    Err(LuaBridgeError::ScriptFailure {
-                        detail: error.to_string(),
-                    })
-                },
-                Err,
-            ),
+            Err(error) => {
+                if let Some(api) = forbidden_api.borrow_mut().take() {
+                    Err(LuaBridgeError::ForbiddenApi { api })
+                } else {
+                    callback_failure.borrow_mut().take().map_or_else(
+                        || {
+                            Err(LuaBridgeError::ScriptFailure {
+                                detail: error.to_string(),
+                            })
+                        },
+                        Err,
+                    )
+                }
+            }
         }
     }
 
@@ -241,6 +293,50 @@ fn register_binding(
     Ok(())
 }
 
+fn forbidden_module(
+    lua: &Lua,
+    module: &str,
+    forbidden_api: &Rc<RefCell<Option<String>>>,
+) -> mlua::Result<Table> {
+    let module_name = module.to_string();
+    let index_failure = Rc::clone(forbidden_api);
+    let index = lua.create_function(move |_lua, (_table, member): (Table, String)| {
+        index_failure
+            .borrow_mut()
+            .replace(format!("{module_name}.{member}"));
+        Err::<LuaValue, _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
+    })?;
+    let module_name = module.to_string();
+    let new_index_failure = Rc::clone(forbidden_api);
+    let new_index = lua.create_function(
+        move |_lua, (_table, member, _value): (Table, String, LuaValue)| {
+            new_index_failure
+                .borrow_mut()
+                .replace(format!("{module_name}.{member}"));
+            Err::<(), _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
+        },
+    )?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", index)?;
+    metatable.set("__newindex", new_index)?;
+    let module_table = lua.create_table()?;
+    module_table.set_metatable(Some(metatable))?;
+    Ok(module_table)
+}
+
+fn forbidden_global(
+    lua: &Lua,
+    global: &str,
+    forbidden_api: &Rc<RefCell<Option<String>>>,
+) -> mlua::Result<mlua::Function> {
+    let api = global.to_string();
+    let failure = Rc::clone(forbidden_api);
+    lua.create_function(move |_lua, _args: mlua::Variadic<LuaValue>| {
+        failure.borrow_mut().replace(api.clone());
+        Err::<LuaValue, _>(mlua::Error::RuntimeError("forbidden Lua API".to_string()))
+    })
+}
+
 fn normalize_key(raw_key: &str) -> Result<String, LuaBridgeError> {
     let key = raw_key.trim().to_ascii_uppercase();
     let valid = key
@@ -294,14 +390,20 @@ mod integration_contract_tests {
 
     #[test]
     fn forbidden_lua_globals_fail_as_structured_script_diagnostics() {
-        for expression in [
-            "os.execute('not allowed')",
-            "io.popen('not allowed')",
-            "package.loaded = {}",
-            "dofile('not allowed')",
+        let error = LuaBridge::load("os.execute('not allowed')")
+            .expect_err("forbidden global is unavailable");
+        assert_eq!(error.code(), "forbidden_api");
+        assert_eq!(error.forbidden_api(), Some("os.execute"));
+        assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
+
+        for (source, api) in [
+            ("io.popen('not allowed')", "io.popen"),
+            ("io.open('not allowed')", "io.open"),
+            ("package.loadlib('not allowed', 'entry')", "package.loadlib"),
         ] {
-            let error = LuaBridge::load(expression).expect_err("forbidden global is unavailable");
-            assert_eq!(error.code(), "script_failure");
+            let error = LuaBridge::load(source).expect_err("forbidden API is unavailable");
+            assert_eq!(error.code(), "forbidden_api");
+            assert_eq!(error.forbidden_api(), Some(api));
             assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
         }
     }
@@ -311,9 +413,44 @@ mod integration_contract_tests {
         for source in [
             "while true do end",
             "local value = string.rep('x', 16 * 1024 * 1024)",
+            "helper = 1",
         ] {
             let error = LuaBridge::load(source).expect_err("resource limit rejects script");
             assert_eq!(error.code(), "script_failure");
+            assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
+        }
+    }
+
+    #[test]
+    fn loader_globals_fail_as_forbidden_api_diagnostics() {
+        for (source, api) in [
+            ("dofile('not allowed')", "dofile"),
+            ("loadfile('not allowed')", "loadfile"),
+            ("load('not allowed')", "load"),
+            ("require('not allowed')", "require"),
+        ] {
+            let error = LuaBridge::load(source).expect_err("loader global is unavailable");
+            assert_eq!(error.code(), "forbidden_api");
+            assert_eq!(error.forbidden_api(), Some(api));
+            assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
+        }
+    }
+
+    #[test]
+    fn forbidden_modules_cannot_be_replaced_or_accessed_without_a_diagnostic() {
+        for (source, api) in [
+            ("io.lines('/tmp/not-allowed')", "io.lines"),
+            ("package.unknown()", "package.unknown"),
+            ("io.open = function() end", "io.open"),
+            ("package = {}", "package"),
+            ("os = {}", "os"),
+            ("_G.os = {}", "_G.os"),
+            ("rawset(_ENV, 'os', {})", "rawset"),
+            ("setmetatable(_ENV, nil)", "setmetatable"),
+        ] {
+            let error = LuaBridge::load(source).expect_err("forbidden module access is rejected");
+            assert_eq!(error.code(), "forbidden_api");
+            assert_eq!(error.forbidden_api(), Some(api));
             assert_eq!(error.schema_version(), "threeterm.lua-bridge/1");
         }
     }

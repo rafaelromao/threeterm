@@ -27,6 +27,30 @@ impl WorkerHost for CompletedWorker {
     }
 }
 
+struct TimeoutWorker {
+    sent_ready: bool,
+}
+
+impl WorkerHost for TimeoutWorker {
+    fn send(&mut self, _envelope: &Envelope) -> Result<(), WorkerError> {
+        Ok(())
+    }
+    fn recv(&mut self, _deadline: std::time::Instant) -> Result<Envelope, WorkerError> {
+        if !self.sent_ready {
+            self.sent_ready = true;
+            Ok(Envelope::WorkerReady {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                worker_id: "fake".to_string(),
+            })
+        } else {
+            Err(WorkerError::TimedOut)
+        }
+    }
+    fn cancel(&mut self, _request_id: &str, _reason: &str) -> Result<(), WorkerError> {
+        Ok(())
+    }
+}
+
 fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "threeterm-host-fsattack-{}-{label}-{}",
@@ -198,16 +222,6 @@ fn unrelated_file_and_header_mismatch_fail_closed_without_leak() {
             before_log
         );
         let _ = std::fs::remove_dir_all(&artifact_root);
-        // also ensure unrelated regular file not promoted
-        // Create an unrelated regular file the worker could try to point at via header's staging_name
-        let unrelated_root = temp_root(&format!("{case}-unrelated"));
-        let unrelated_file = unrelated_root.join("unrelated.brep");
-        std::fs::create_dir_all(&unrelated_root).expect("unrelated dir creates");
-        std::fs::write(&unrelated_file, b"outside bytes").expect("unrelated file writes");
-        // Host must not accept a header pointing at unrelated file content via mismatched digest
-        // (already covered by header mismatch above; here we ensure file remains on disk but not promoted)
-        assert!(unrelated_file.is_file());
-        let _ = std::fs::remove_dir_all(unrelated_root);
     }
 
     let reloaded = Bundle::at(&project_root)
@@ -231,11 +245,25 @@ fn unrelated_regular_file_selected_by_worker_fails_closed() {
     let request = base_request(snapshot.revision_hash.clone(), "box-1.brep");
     let emitted = emit_staged_artifact(&artifact_root, &request, b"legitimate bytes")
         .expect("stages legitimate");
-    // Tamper .partial to mimic unrelated file content (preserve byte_count so HoleMismatch is surfaced as HashMismatch)
+    // Create an independent unrelated regular file with same byte_count but different digest,
+    // then make the hostile staged path refer to it via hard link, proving Host rejects
+    // arbitrary worker-selected files.
+    let unrelated_root = temp_root("unrelated-outside");
+    std::fs::create_dir_all(&unrelated_root).expect("unrelated dir");
+    let outside_path = unrelated_root.join("outside.brep");
+    // Same length as legitimate bytes (16) but different content so HashMismatch is surfaced, not byte_count
+    std::fs::write(&outside_path, b"xxxxxxxxxxxxxxxx").expect("outside writes");
+    assert_eq!(
+        std::fs::metadata(&outside_path)
+            .expect("outside metadata")
+            .len(),
+        std::fs::metadata(artifact_root.join("box-1.brep.partial"))
+            .expect("partial metadata")
+            .len()
+    );
     let partial = artifact_root.join("box-1.brep.partial");
-    let mut tampered = std::fs::read(&partial).expect("read partial");
-    tampered[0] ^= 1;
-    std::fs::write(&partial, tampered).expect("tamper");
+    std::fs::remove_file(&partial).expect("remove staged partial");
+    std::fs::hard_link(&outside_path, &partial).expect("hard link unrelated file to staged path");
     let diagnostic = host
         .accept_derived_result(
             &artifact_root,
@@ -249,10 +277,17 @@ fn unrelated_regular_file_selected_by_worker_fails_closed() {
     assert!(!partial.exists());
     assert!(!artifact_root.join(".box-1.brep.verified").exists());
     assert!(!artifact_root.join("box-1.brep").exists());
+    // Outside unrelated file must remain untouched and not be promoted
+    assert!(outside_path.is_file());
+    assert_eq!(
+        std::fs::read(&outside_path).expect("outside reads"),
+        b"xxxxxxxxxxxxxxxx"
+    );
     // canonical still reloadable
     Bundle::at(&project_root).open().expect("canonical reloads");
     let _ = std::fs::remove_dir_all(project_root);
     let _ = std::fs::remove_dir_all(artifact_root);
+    let _ = std::fs::remove_dir_all(unrelated_root);
 }
 
 // --- Slice 2: symlink attacks ---
@@ -273,21 +308,41 @@ fn symlinked_staging_root_is_rejected_and_canonical_preserved() {
     std::os::unix::fs::symlink(&target, &link).expect("symlink creates");
 
     let request = base_request(snapshot.revision_hash.clone(), "box-1.brep");
-    // Create a staged artifact via the symlinked root path — Stage::open should reject.
-    // Instead simulate hostile Host path where artifact_root is the symlink.
+    // Stage via the real target, then attempt Host promotion through the symlinked root.
+    // Host::accept_derived_result must fail closed when artifact_root is a symlink,
+    // without becoming authoritative and without mutating canonical state.
     let stage_result = Stage::open(&link);
     assert!(stage_result.is_err(), "symlinked root must be rejected");
 
-    // Even if worker tries to stage through symlink, Host::accept_derived_result should fail closed
-    // Use a real artifact_root for staging but pass symlinked link as artifact_root to Host.
-    // First stage via real target then attempt promotion via symlink root (which Host will try to open).
-    let _emitted =
+    let emitted =
         emit_staged_artifact(&target, &request, b"hostile bytes").expect("stages via target");
-    // Host opening the symlink root should fail — but we staged in target, not link.
-    // Verify that link is indeed rejected as root and canonical unchanged.
+    let wire = wire_round_trip(&emitted);
+    let Envelope::Artifact {
+        header,
+        schema_version,
+    } = wire
+    else {
+        panic!("emitted is artifact");
+    };
+    let outcome = SupervisorOutcome::Completed {
+        request_id: request.request_id.clone(),
+        result: serde_json::json!({ "ok": true }),
+        artifact_headers: vec![StagedArtifact {
+            schema_version,
+            header: *header,
+        }],
+    };
+    let diagnostic = host
+        .accept_derived_result(&link, &request, &worker_fingerprint(), outcome)
+        .expect_err("symlinked artifact root must be rejected");
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactPromotionFailure);
+    // Symlink must remain, target staging file must not have been promoted through link
     assert!(Stage::open(&link).is_err());
     assert_eq!(host.current(), before);
     Bundle::at(&project_root).open().expect("canonical reloads");
+    // Cleanup staged file in target that was never promoted via link
+    let _ = std::fs::remove_file(target.join("box-1.brep.partial"));
+    let _ = std::fs::remove_file(target.join(".box-1.brep.verified"));
 
     let _ = std::fs::remove_dir_all(project_root);
     let _ = std::fs::remove_dir_all(target);
@@ -646,56 +701,63 @@ fn success_failure_cancellation_deadline_remove_request_artifacts() {
     assert!(!artifact_root_fail.join(".fail.brep.verified").exists());
     assert!(!directory_contains_partial_or_verified(&artifact_root_fail));
 
-    // Cancellation: Supervisor discards stage
+    // Cancellation: cooperative cancellation discards stage via Supervisor::request_with_cancel
     let artifact_root_cancel = temp_root("cleanup-cancel");
     let stage = Stage::open(&artifact_root_cancel).expect("stage opens");
     stage
         .stage_bytes("cancel.brep", b"cancel bytes")
         .expect("stage cancel");
-    // Simulate cancellation via Supervisor that force-terminates
-    // Use a scripted worker that never completes, then cancel
+    // Worker that will acknowledge cancellation after WorkerReady
     let worker = CompletedWorker {
-        pending: VecDeque::from([wire_round_trip(&Envelope::WorkerReady {
-            schema_version: threeterm_protocol::schema_version().to_string(),
-            worker_id: "fake".to_string(),
-        })]),
+        pending: VecDeque::from([
+            wire_round_trip(&Envelope::WorkerReady {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                worker_id: "fake".to_string(),
+            }),
+            wire_round_trip(&Envelope::Cancelled {
+                schema_version: threeterm_protocol::schema_version().to_string(),
+                request_id: "req-cancel".to_string(),
+                reason: "user pressed stop".to_string(),
+            }),
+        ]),
     };
     let mut supervisor = Supervisor::new(
-        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(200),
         Box::new(worker),
         Some(stage),
     );
-    let outcome = supervisor.request(Request {
-        request_id: "req-cancel".to_string(),
-        command_id: "build".to_string(),
-        args: serde_json::json!({}),
-        revision_id: snapshot.revision_hash.clone(),
-    });
-    // Should be ForceTerminated due to timeout, and stage discarded
+    let cancel_flag = std::sync::atomic::AtomicBool::new(true);
+    let outcome = supervisor.request_with_cancel(
+        Request {
+            request_id: "req-cancel".to_string(),
+            command_id: "build".to_string(),
+            args: serde_json::json!({}),
+            revision_id: snapshot.revision_hash.clone(),
+        },
+        &cancel_flag,
+    );
+    // Cooperative cancellation should be acknowledged and stage discarded
     match outcome {
-        SupervisorOutcome::ForceTerminated { .. } => {}
-        other => panic!("expected ForceTerminated for cancel simulation; got {other:?}"),
+        SupervisorOutcome::Acknowledged { request_id, .. } => {
+            assert_eq!(request_id, "req-cancel");
+        }
+        other => panic!("expected Acknowledged for cooperative cancel; got {other:?}"),
     }
-    // After force-terminate, artifact_root should be gone (Stage::discard removes directory)
+    // After cooperative cancel, artifact_root should be gone (Stage::discard removes directory)
     assert!(
         !artifact_root_cancel.exists()
             || !directory_contains_partial_or_verified(&artifact_root_cancel)
     );
 
-    // Deadline: same as cancellation — grace exceeded removes staging
+    // Deadline: grace exceeded (receive deadline) discards staging — worker never completes
     let artifact_root_deadline = temp_root("cleanup-deadline");
     let stage_deadline = Stage::open(&artifact_root_deadline).expect("stage opens");
     stage_deadline
         .stage_bytes("deadline.brep", b"deadline bytes")
         .expect("stage deadline");
-    let worker2 = CompletedWorker {
-        pending: VecDeque::from([wire_round_trip(&Envelope::WorkerReady {
-            schema_version: threeterm_protocol::schema_version().to_string(),
-            worker_id: "fake".to_string(),
-        })]),
-    };
+    let worker2 = TimeoutWorker { sent_ready: false };
     let mut supervisor2 = Supervisor::new(
-        std::time::Duration::from_micros(1),
+        std::time::Duration::from_millis(30),
         Box::new(worker2),
         Some(stage_deadline),
     );
@@ -706,7 +768,13 @@ fn success_failure_cancellation_deadline_remove_request_artifacts() {
         revision_id: snapshot.revision_hash.clone(),
     });
     match outcome2 {
-        SupervisorOutcome::ForceTerminated { .. } => {}
+        SupervisorOutcome::ForceTerminated { record } => {
+            assert!(
+                record.stage.contains("grace_exceeded") || record.stage.contains("deadline"),
+                "deadline stage should indicate grace exceeded; got {:?}",
+                record.stage
+            );
+        }
         other => panic!("expected deadline ForceTerminated; got {other:?}"),
     }
     assert!(

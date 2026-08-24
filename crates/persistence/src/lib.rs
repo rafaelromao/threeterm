@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, Feature, FeatureGraph, ProjectGeneration, Revision,
+    history::{HistoryEvent, HistoryOperation, HistoryState},
 };
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
+pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,12 +55,12 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, LoadedBundle, LogEntry, MANIFEST_FILENAME,
-        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
-        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
-        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
-        fail_next_publication_at, load, migrate_v0_to_v1, prior_schema_epoch, read_v0,
-        schema_epoch, write_fresh, write_v0_fixture,
+        Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, LoadedBundle,
+        LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
+        PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
+        PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
+        V0Manifest, detect_schema, fail_next_publication_at, load, migrate_v0_to_v1,
+        prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -371,6 +373,7 @@ pub struct LoadedBundle {
     pub log: TransactionLog,
     pub graph: FeatureGraph,
     pub components: ComponentGraph,
+    pub history: HistoryState,
     /// `true` when the canonical path was unavailable and the immediately
     /// preceding sealed Project Generation was opened instead.
     pub recovered_from_previous: bool,
@@ -699,8 +702,23 @@ impl Bundle {
 
         let mut graph = FeatureGraph::empty();
         let mut components = ComponentGraph::default();
+        let mut history = HistoryState::default();
         let mut feature_ids = Vec::new();
         for entry in log.entries() {
+            if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
+                let event: HistoryEvent =
+                    serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: format!("invalid history event: {error}"),
+                    })?;
+                history
+                    .apply_event(&event)
+                    .map_err(|error| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: error.to_string(),
+                    })?;
+                continue;
+            }
             let feature = Feature::new(&entry.feature_id, &entry.kind).map_err(|error| {
                 BundleError::LogBrokenLink {
                     log_index: entry.log_index,
@@ -750,6 +768,7 @@ impl Bundle {
             log,
             graph,
             components,
+            history,
             recovered_from_previous,
         })
     }
@@ -782,8 +801,31 @@ impl Bundle {
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             let feature_id = format!("component-transaction-{}", loaded.log.len());
             let kind = format!("{COMPONENT_COMMAND_KIND_PREFIX}{payload}");
-            self.append_features_locked(&[(&feature_id, &kind)], None)
+            self.append_features_locked(&[(&feature_id, &kind)], None, None)
         })
+    }
+
+    /// Append ordinary feature entries and one accepted history event in the
+    /// same sealed publication. The event is part of the canonical log but is
+    /// filtered from the legacy feature graph during replay.
+    pub fn append_features_with_history(
+        &self,
+        entries: &[(&str, &str)],
+        event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(entries, None, Some(event))
+        })
+    }
+
+    /// Replay the authenticated history event stream twice without touching
+    /// the bundle. The two states are independent materializations used by
+    /// the host's determinism verification boundary.
+    pub fn replay_history_states(&self) -> Result<(HistoryState, HistoryState), BundleError> {
+        let loaded = self.open()?;
+        let first = replay_history_events(&loaded.log)?;
+        let second = replay_history_events(&loaded.log)?;
+        Ok((first, second))
     }
 
     /// Append one feature only if the sealed bundle is still at the
@@ -797,7 +839,7 @@ impl Bundle {
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision))
+            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision), None)
         })
     }
 
@@ -824,13 +866,16 @@ impl Bundle {
         // stay unique, predecessor digests chain, and no writer observes a
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
-        with_bundle_write_lock(&self.root, || self.append_features_locked(entries, None))
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(entries, None, None)
+        })
     }
 
     fn append_features_locked(
         &self,
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
+        history_event: Option<&HistoryEvent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -856,6 +901,41 @@ impl Bundle {
             if loaded.graph.add_feature(feature) {
                 loaded.log.append_feature(feature_id, kind);
             }
+        }
+
+        if let Some(event) = history_event {
+            let rebased_event = if event.ordinal == loaded.history.event_ordinal() + 1 {
+                event.clone()
+            } else if let HistoryOperation::InitializeLBracket {
+                bracket_id,
+                length,
+                width,
+                height,
+                thickness,
+            } = &event.operation
+            {
+                loaded
+                    .history
+                    .initialize_l_bracket(bracket_id, *length, *width, *height, *thickness)
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?
+            } else {
+                return Err(BundleError::Invalid(format!(
+                    "stale history event ordinal {}, current ordinal {}",
+                    event.ordinal,
+                    loaded.history.event_ordinal()
+                )));
+            };
+            loaded
+                .history
+                .apply_event(&rebased_event)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            let payload = serde_json::to_string(&rebased_event)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            let feature_id = format!("history-event-{}", loaded.log.len());
+            loaded.log.append_feature(
+                &feature_id,
+                &format!("{HISTORY_EVENT_KIND_PREFIX}{payload}"),
+            );
         }
 
         let mut encoded = Vec::new();
@@ -1073,8 +1153,30 @@ fn loaded_with(
         log: stale.log,
         graph: stale.graph,
         components: stale.components,
+        history: stale.history,
         recovered_from_previous: stale.recovered_from_previous || recovered_from_previous,
     }
+}
+
+fn replay_history_events(log: &TransactionLog) -> Result<HistoryState, BundleError> {
+    let mut state = HistoryState::default();
+    for entry in log.entries() {
+        let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) else {
+            continue;
+        };
+        let event: HistoryEvent =
+            serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: format!("invalid history event: {error}"),
+            })?;
+        state
+            .apply_event(&event)
+            .map_err(|error| BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: error.to_string(),
+            })?;
+    }
+    Ok(state)
 }
 
 fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {

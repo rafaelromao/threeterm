@@ -16,6 +16,8 @@ pub mod component {
     };
 }
 
+pub mod history;
+
 pub fn schema_version() -> &'static str {
     "threeterm.domain/1"
 }

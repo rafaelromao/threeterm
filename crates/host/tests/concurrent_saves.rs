@@ -324,7 +324,7 @@ fn concurrent_host_save_brackets_serialize_through_the_bundle_lock() {
         handle.join().expect("host save_bracket thread completes");
     }
 
-    assert_linear_log(&root, THREADS * 2);
+    assert_linear_log(&root, THREADS * 3);
 
     let _ = std::fs::remove_dir_all(&root);
     let mut previous = root.clone();
@@ -355,8 +355,8 @@ fn save_bracket_migrates_a_prior_epoch_root() {
     let loaded = Bundle::at(&root).open().expect("bundle opens");
     assert_eq!(
         loaded.log.len(),
-        2,
-        "both bracket plates land in the migrated log"
+        3,
+        "both bracket plates and the history event land in the migrated log"
     );
     assert_eq!(
         loaded.manifest.schema_version,

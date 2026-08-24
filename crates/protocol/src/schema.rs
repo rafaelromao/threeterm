@@ -793,6 +793,119 @@ pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static HISTORICAL_EDIT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "parameter", "value"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "parameter": { "type": "string", "minLength": 1 },
+            "value": { "type": "number" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status", "operation", "active_revision", "dirty_features",
+            "evaluated_features", "blocked_features", "diagnostics",
+            "named_revisions", "features", "feature_graph_hash", "revision_hash", "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string" },
+            "operation": { "type": "string" },
+            "active_revision": { "type": "string", "minLength": 1 },
+            "dirty_features": { "type": "array", "items": { "type": "string" } },
+            "evaluated_features": { "type": "array", "items": { "type": "string" } },
+            "blocked_features": { "type": "array", "items": { "type": "string" } },
+            "diagnostics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["code", "feature_id", "detail"],
+                    "properties": {
+                        "code": { "type": "string", "minLength": 1 },
+                        "feature_id": { "type": "string", "minLength": 1 },
+                        "detail": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "named_revisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "revision_id", "provenance"],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                        "revision_id": { "type": "string", "minLength": 1 },
+                        "provenance": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "features": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "status", "geometry_fingerprint", "last_valid_geometry_fingerprint"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1 },
+                        "status": { "type": "string", "minLength": 1 },
+                        "geometry_fingerprint": { "type": "string" },
+                        "last_valid_geometry_fingerprint": { "type": "string" },
+                        "diagnostic": { "type": "object" }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static NAMED_REVISION_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "name"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REPLAY_VERIFY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path"],
+        "properties": { "bundle_path": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+pub static REPLAY_VERIFY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["deterministic", "fingerprint", "mismatch", "schema_version"],
+        "properties": {
+            "deterministic": { "type": "boolean" },
+            "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "mismatch": { "type": "string" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 /// Canonical request schema document for the `bracket` command. The numeric
 /// dimensions are stored in the canonical transaction log but no OCCT
 /// geometry is computed in this slice — that is the responsibility of a
@@ -1004,6 +1117,49 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        HISTORICAL_EDIT_COMMAND_ID,
+        CommandSchema {
+            id: HISTORICAL_EDIT_COMMAND_ID,
+            name: "historical-edit",
+            schema_version: "threeterm.command.historical-edit/1",
+            request_schema_version: "threeterm.command.historical-edit.request/1",
+            request_schema: HISTORICAL_EDIT_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    for (id, name) in [
+        (CREATE_REVISION_COMMAND_ID, "create-revision"),
+        (RESTORE_REVISION_COMMAND_ID, "restore-revision"),
+    ] {
+        let schema_version = format!("threeterm.command.{name}/1");
+        let request_version = format!("threeterm.command.{name}.request/1");
+        map.insert(
+            id,
+            CommandSchema {
+                id,
+                name,
+                schema_version: Box::leak(schema_version.into_boxed_str()),
+                request_schema_version: Box::leak(request_version.into_boxed_str()),
+                request_schema: NAMED_REVISION_REQUEST_SCHEMA.clone(),
+                response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+                response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+            },
+        );
+    }
+    map.insert(
+        REPLAY_VERIFY_COMMAND_ID,
+        CommandSchema {
+            id: REPLAY_VERIFY_COMMAND_ID,
+            name: "replay-verify",
+            schema_version: "threeterm.command.replay-verify/1",
+            request_schema_version: "threeterm.command.replay-verify.request/1",
+            request_schema: REPLAY_VERIFY_REQUEST_SCHEMA.clone(),
+            response_schema_version: REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION,
+            response_schema: REPLAY_VERIFY_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         EXTRUDE_COMMAND_ID,
         CommandSchema {
             id: EXTRUDE_COMMAND_ID,
@@ -1163,6 +1319,10 @@ pub const MAKE_COMPONENT_INDEPENDENT_COMMAND_ID: CommandId =
     CommandId("make-component-independent");
 pub const EDIT_COMPONENT_PARAMETER_COMMAND_ID: CommandId = CommandId("edit-component-parameter");
 pub const COMPONENT_STATE_COMMAND_ID: CommandId = CommandId("component-state");
+pub const HISTORICAL_EDIT_COMMAND_ID: CommandId = CommandId("historical-edit");
+pub const CREATE_REVISION_COMMAND_ID: CommandId = CommandId("create-revision");
+pub const RESTORE_REVISION_COMMAND_ID: CommandId = CommandId("restore-revision");
+pub const REPLAY_VERIFY_COMMAND_ID: CommandId = CommandId("replay-verify");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
@@ -1192,6 +1352,9 @@ pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
 pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.response/1";
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
+pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/1";
+pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.replay-verify.response/1";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

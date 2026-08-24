@@ -75,7 +75,7 @@ fn timeline(bin: &str, root: &Path, feature_id: &str) -> Value {
     let schema = &find(TIMELINE_COMMAND_ID)
         .expect("timeline is registered")
         .response_schema;
-    validate(&schema, &response).expect("timeline response validates");
+    validate(schema, &response).expect("timeline response validates");
     response
 }
 

@@ -87,15 +87,13 @@ fn feature_timeline_reads_the_canonical_stream_without_publishing() {
     let bundle = Bundle::at(&path);
     write_fresh(&path, ProjectGeneration::with_id("history-timeline")).expect("fresh bundle");
     let mut state = HistoryState::default();
-    for event in [state
+    let event = state
         .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
-        .expect("first event")]
-    {
-        state.apply_event(&event).expect("event applies");
-        bundle
-            .append_features_with_history(&[], &event)
-            .expect("event publishes");
-    }
+        .expect("first event");
+    state.apply_event(&event).expect("event applies");
+    bundle
+        .append_features_with_history(&[], &event)
+        .expect("event publishes");
     let event = state
         .create_named_revision("before-edit")
         .expect("named revision");

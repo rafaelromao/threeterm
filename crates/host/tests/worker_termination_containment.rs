@@ -111,6 +111,7 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
              read line\n\
              rid=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
              printf '%s\\n' '{{\"kind\":\"progress\",\"schema_version\":\"{schema}\",\"request_id\":\"'$rid'\",\"stage\":\"tracing\",\"percent\":10}}'\n\
+             echo \"stderr-marker-host-coop\" >&2\n\
              read cancel_line\n\
              req=$(printf '%s' \"$cancel_line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
              printf '%s\\n' '{{\"kind\":\"cancelled\",\"schema_version\":\"{schema}\",\"request_id\":\"'$req'\",\"reason\":\"cancelled by host\"}}'\n",
@@ -126,35 +127,23 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
     );
     let request = sample_extrude_fixed_id(&request_id, &dir.root);
     let cancel = std::sync::atomic::AtomicBool::new(true);
-    // Use HostError projection via direct worker then Host conversion to prove diagnostic.
-    let worker_err = {
-        let mut last = None;
-        let mut res = None;
-        for _ in 0..3 {
-            match worker.clone().extrude_with_cancel(&request, &cancel) {
-                Ok(v) => {
-                    res = Some(Ok(v));
-                    break;
-                }
-                Err(e) if e.to_string().contains("Text file busy") => {
-                    last = Some(e);
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => {
-                    res = Some(Err(e));
-                    break;
-                }
-            }
-        }
-        res.unwrap_or_else(|| Err(last.expect("retry")))
-            .expect_err("must cancel")
-    };
-    let host_err = HostError::from(worker_err);
+    let host_err =
+        retry_host(|| host.extrude_with_cancel(&bundle_root, request.clone(), &worker, &cancel))
+            .expect_err("must cancel");
     match &host_err {
         HostError::WorkerTerminated { record } => {
             assert_eq!(record.request_id, request_id);
             assert_eq!(record.stage, "cancelled");
-            assert!(record.last_progress.is_some(), "last_progress retained");
+            let prog = record
+                .last_progress
+                .as_ref()
+                .expect("last_progress retained");
+            assert_eq!(prog.stage, "tracing");
+            assert!(
+                record.stderr_tail.contains("stderr-marker-host-coop"),
+                "stderr tail must contain marker, got {:?}",
+                record.stderr_tail
+            );
         }
         other => panic!("expected WorkerTerminated for cooperative cancel, got {other:?}"),
     }

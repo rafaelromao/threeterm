@@ -165,15 +165,10 @@ fn cooperative_cancellation_retains_last_progress_and_stderr() {
                 elapsed < Duration::from_secs(2),
                 "elapsed within budget, got {elapsed:?}"
             );
-            // stderr was written before ack; cooperative path may have empty tail if worker exited quickly,
-            // but we assert it does not panic and contains marker when captured.
-            // Allow empty if pipe drained before capture, but prefer contains.
-            if !stderr_tail.is_empty() {
-                assert!(
-                    stderr_tail.contains("stderr-marker-coop"),
-                    "stderr tail preserved, got {stderr_tail:?}"
-                );
-            }
+            assert!(
+                stderr_tail.contains("stderr-marker-coop"),
+                "stderr tail must contain marker, got {stderr_tail:?}"
+            );
             // Cooperative ack should be clean exit: no signal, code 0 or None.
             assert!(
                 exit_signal.is_none(),
@@ -331,7 +326,7 @@ fn signal_exit_exposes_actual_signal_and_preserves_context() {
             assert_eq!(got, request_id);
             assert_eq!(signal, 15, "actual SIGTERM");
             assert!(
-                stderr.contains("stderr-before-signal") || stderr.is_empty(),
+                stderr.contains("stderr-before-signal"),
                 "stderr preserved: {stderr:?}"
             );
         }
@@ -345,8 +340,9 @@ fn signal_exit_exposes_actual_signal_and_preserves_context() {
                 .expect("progress retained on signal");
             assert_eq!(prog.stage, "tessellating");
             assert!(
-                record.stderr_tail.contains("stderr-before-signal")
-                    || record.stderr_tail.is_empty()
+                record.stderr_tail.contains("stderr-before-signal"),
+                "stderr preserved, got {:?}",
+                record.stderr_tail
             );
         }
         other => panic!("expected signal-bearing error, got {other:?}"),
@@ -627,9 +623,9 @@ fn failure_then_crash_retains_last_progress_and_failure_detail() {
             assert_eq!(prog.percent, 33);
             assert_eq!(record.exit_signal, Some(15));
             assert!(
-                record.stderr_tail.contains("stderr-after-failed")
-                    || !record.stderr_tail.is_empty(),
-                "stderr preserved"
+                record.stderr_tail.contains("stderr-after-failed"),
+                "stderr must contain marker, got {:?}",
+                record.stderr_tail
             );
             assert!(record.elapsed < Duration::from_secs(2));
         }
@@ -683,10 +679,11 @@ fn cancellation_retains_last_progress_when_ignored() {
             assert_eq!(prog.stage, "tracing");
             assert_eq!(prog.percent, 88);
             assert_eq!(record.exit_signal, Some(9));
-            // stderr preserved
-            if !record.stderr_tail.is_empty() {
-                assert!(record.stderr_tail.contains("stderr-ignore-cancel") || true);
-            }
+            assert!(
+                record.stderr_tail.contains("stderr-ignore-cancel"),
+                "stderr must contain marker, got {:?}",
+                record.stderr_tail
+            );
         }
         other => panic!("expected Supervised with progress, got {other:?}"),
     }

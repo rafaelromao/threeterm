@@ -297,6 +297,10 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let draft_sequence = arguments
+            .get("draft_sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX);
         let request = || {
             BracketRequest::new(
                 new_request_id(),
@@ -329,6 +333,7 @@ impl McpServer {
                     None,
                     None,
                     None,
+                    Some(draft.sequence),
                 ))
             }
             "preview" => {
@@ -350,6 +355,12 @@ impl McpServer {
                     Some(&preview.source_revision),
                     Some(&preview.preview_revision),
                     Some(&preview.input_fingerprint),
+                    Some(
+                        session
+                            .host
+                            .bracket_draft_sequence(&bundle, &draft_id)
+                            .expect("preview keeps draft"),
+                    ),
                 ))
             }
             "commit" => {
@@ -380,6 +391,7 @@ impl McpServer {
                     Some(&committed.snapshot.revision_hash),
                     None,
                     Some(&committed.input_fingerprint),
+                    None,
                 ))
             }
             "discard" => {
@@ -400,6 +412,7 @@ impl McpServer {
                     None,
                     None,
                     None,
+                    None,
                 ))
             }
             "update" => {
@@ -409,10 +422,12 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
-                let draft =
-                    session
-                        .host
-                        .update_bracket_parameter_draft(&bundle, &draft_id, request())?;
+                let draft = session.host.update_bracket_parameter_draft(
+                    &bundle,
+                    &draft_id,
+                    draft_sequence,
+                    request(),
+                )?;
                 Ok(bracket_edit_response(
                     "update",
                     &draft.draft_id,
@@ -420,6 +435,7 @@ impl McpServer {
                     None,
                     None,
                     None,
+                    Some(draft.sequence),
                 ))
             }
             _ => Err(DispatchError::Validation(
@@ -530,12 +546,24 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     } else {
         "rejected"
     };
+    if let HostError::DraftSequenceConflict {
+        expected, current, ..
+    } = error
+    {
+        diagnostic["kind"] = Value::String("draft_sequence_conflict".to_string());
+        diagnostic["expected_sequence"] = Value::from(*expected);
+        diagnostic["current_sequence"] = Value::from(*current);
+        diagnostic["recovery"] = Value::String("refresh_draft_and_retry".to_string());
+    }
     let current_revision = if let HostError::DraftStale {
+        source_revision: authoritative_source,
         current_revision,
         recovery,
         ..
     } = error
     {
+        source_revision = authoritative_source.clone();
+        diagnostic["source_revision"] = Value::String(authoritative_source.clone());
         diagnostic["recovery"] = Value::String((*recovery).to_string());
         Some(current_revision.as_str())
     } else {
@@ -546,6 +574,7 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         draft_id,
         &source_revision,
         current_revision,
+        None,
         None,
         None,
     );
@@ -561,6 +590,7 @@ fn bracket_edit_response(
     current_revision: Option<&str>,
     preview_revision: Option<&str>,
     input_fingerprint: Option<&str>,
+    draft_sequence: Option<u64>,
 ) -> Value {
     let mut response = json!({
         "status": "ok",
@@ -577,6 +607,9 @@ fn bracket_edit_response(
     }
     if let Some(input_fingerprint) = input_fingerprint {
         response["input_fingerprint"] = Value::String(input_fingerprint.to_string());
+    }
+    if let Some(draft_sequence) = draft_sequence {
+        response["draft_sequence"] = Value::from(draft_sequence);
     }
     response
 }

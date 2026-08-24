@@ -852,7 +852,8 @@ pub static BRACKET_EDIT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "width": { "type": "number", "exclusiveMinimum": 0 },
             "height": { "type": "number", "exclusiveMinimum": 0 },
             "thickness": { "type": "number", "exclusiveMinimum": 0 },
-            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "draft_sequence": { "type": "integer", "minimum": 0 }
         },
         "additionalProperties": false
     })
@@ -870,6 +871,7 @@ pub static BRACKET_EDIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "current_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "preview_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "input_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "draft_sequence": { "type": "integer", "minimum": 0 },
             "diagnostic": { "type": "object" },
             "schema_version": { "type": "string", "minLength": 1 }
         },

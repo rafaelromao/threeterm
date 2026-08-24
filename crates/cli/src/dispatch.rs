@@ -3802,6 +3802,13 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DraftInvalid { draft_id, detail } => format!(
             "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"
         ),
+        HostError::DraftSequenceConflict {
+            draft_id,
+            expected,
+            current,
+        } => format!(
+            "{{\"kind\":\"draft_sequence_conflict\",\"draft_id\":{draft_id:?},\"expected_sequence\":{expected},\"current_sequence\":{current},\"recovery\":\"refresh_draft_and_retry\"}}"
+        ),
         HostError::DraftUnknownOutcome {
             draft_id,
             source_revision,

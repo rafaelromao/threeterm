@@ -251,3 +251,66 @@ fn stale_bracket_draft_returns_structured_revision_diagnostic_without_worker_use
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn bracket_draft_update_rejects_stale_sequence_without_mutating_newer_values() {
+    let root = temp_root("sequence");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision(
+            "l-bracket",
+            "bracket:length=100.00000000000000000;thickness=5.00000000000000000",
+            &source_revision,
+            b"canonical-brep",
+        )
+        .expect("initial bracket persists");
+    let host = Host::new();
+    let draft = host
+        .open_bracket_parameter_draft(
+            &root,
+            "sequence-draft",
+            "l-bracket",
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 5.0),
+        )
+        .expect("draft opens");
+
+    let updated = host
+        .update_bracket_parameter_draft(
+            &root,
+            &draft.draft_id,
+            0,
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0),
+        )
+        .expect("first update succeeds");
+    assert_eq!(updated.sequence, 1);
+
+    let error = host
+        .update_bracket_parameter_draft(
+            &root,
+            &draft.draft_id,
+            0,
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 3.0),
+        )
+        .expect_err("stale update is rejected");
+    assert!(matches!(
+        error,
+        HostError::DraftSequenceConflict {
+            draft_id,
+            expected: 0,
+            current: 1,
+        } if draft_id == "sequence-draft"
+    ));
+
+    let current = host
+        .bracket_draft_sequence(&root, &draft.draft_id)
+        .expect("draft remains after conflict");
+    assert_eq!(current, 1);
+    host.discard_bracket_parameter_draft(&root, &draft.draft_id)
+        .expect("draft discards");
+    let _ = fs::remove_dir_all(root);
+}

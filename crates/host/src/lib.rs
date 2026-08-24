@@ -197,6 +197,7 @@ pub struct BracketParameterDraft {
     pub source_revision: String,
     pub source_brep_sha256: String,
     pub request: BracketRequest,
+    pub sequence: u64,
     preview_path: Option<PathBuf>,
     created_at: Instant,
 }
@@ -284,6 +285,11 @@ pub enum HostError {
         draft_id: String,
         detail: String,
     },
+    DraftSequenceConflict {
+        draft_id: String,
+        expected: u64,
+        current: u64,
+    },
     DraftUnknownOutcome {
         draft_id: String,
         source_revision: String,
@@ -361,6 +367,14 @@ impl std::fmt::Display for HostError {
             Self::DraftInvalid { draft_id, detail } => {
                 write!(formatter, "command draft {draft_id} is invalid: {detail}")
             }
+            Self::DraftSequenceConflict {
+                draft_id,
+                expected,
+                current,
+            } => write!(
+                formatter,
+                "command draft {draft_id} update conflicts: expected_sequence={expected} current_sequence={current}"
+            ),
             Self::DraftUnknownOutcome {
                 draft_id,
                 source_revision,
@@ -1072,6 +1086,7 @@ impl Host {
             source_revision: loaded.revision_hash_hex().to_string(),
             source_brep_sha256,
             request,
+            sequence: 0,
             preview_path: None,
             created_at: Instant::now(),
         };
@@ -1164,6 +1179,7 @@ impl Host {
         &self,
         root: impl AsRef<Path>,
         draft_id: &str,
+        expected_sequence: u64,
         request: BracketRequest,
     ) -> Result<BracketParameterDraft, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
@@ -1174,6 +1190,13 @@ impl Host {
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
+        if draft.sequence != expected_sequence {
+            return Err(HostError::DraftSequenceConflict {
+                draft_id: draft_id.to_string(),
+                expected: expected_sequence,
+                current: draft.sequence,
+            });
+        }
         let request = request
             .with_feature_id(&draft.bracket_id)
             .with_output_path(&draft.bundle_root, "unused.brep");
@@ -1188,6 +1211,7 @@ impl Host {
         }
         draft.request = request;
         draft.preview_path = None;
+        draft.sequence += 1;
         Ok(draft.clone())
     }
 
@@ -1361,6 +1385,14 @@ impl Host {
             .borrow()
             .get(&key)
             .map(|draft| draft.source_revision.clone())
+    }
+
+    pub fn bracket_draft_sequence(&self, root: impl AsRef<Path>, draft_id: &str) -> Option<u64> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        self.bracket_drafts
+            .borrow()
+            .get(&draft_map_key(&root, draft_id))
+            .map(|draft| draft.sequence)
     }
 
     /// Remove abandoned transient drafts and their staged worker output.

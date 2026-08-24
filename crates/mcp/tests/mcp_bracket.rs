@@ -21,6 +21,9 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_host::Host;
+use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
+use threeterm_persistence::Bundle;
 
 fn fresh_bundle(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -94,6 +97,10 @@ fn run_mcp(requests: &[Value]) -> Vec<Value> {
         responses.push(parsed);
     }
     responses
+}
+
+fn structured(responses: &[Value], index: usize) -> &Value {
+    &responses[index]["result"]["structuredContent"]
 }
 
 #[test]
@@ -242,6 +249,90 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
 
     let _ = std::fs::remove_dir_all(cli_root);
     let _ = std::fs::remove_dir_all(mcp_root);
+}
+
+#[test]
+fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
+    let root = fresh_bundle("bracket-edit-lifecycle");
+    let Ok(worker) = OcctWorker::locate() else {
+        return;
+    };
+    Bundle::create(&root).expect("bundle creates");
+    Host::new()
+        .create_bracket(
+            &root,
+            BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("l-1"),
+            &worker,
+        )
+        .expect("initial bracket commits");
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+    let brep_before = std::fs::read(root.join("brep/l-1.brep")).expect("brep reads");
+    let call = |id, phase, draft_id, thickness, sequence: Option<u64>| {
+        let mut arguments = serde_json::json!({
+            "phase": phase,
+            "bundle_path": root.to_string_lossy(),
+            "draft_id": draft_id,
+            "bracket_id": "l-1",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": thickness,
+        });
+        if let Some(sequence) = sequence {
+            arguments["draft_sequence"] = sequence.into();
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": "threeterm.command.bracket-edit/1", "arguments": arguments }
+        })
+    };
+    let discarded = run_mcp(&[
+        call(1, "open", "edit-discard", 3.0, None),
+        call(2, "preview", "edit-discard", 5.0, None),
+        call(3, "discard", "edit-discard", 5.0, None),
+    ]);
+    assert_eq!(discarded.len(), 3);
+    assert_eq!(structured(&discarded, 1)["phase"], "preview");
+    assert_ne!(
+        structured(&discarded, 1)["preview_revision"],
+        structured(&discarded, 1)["source_revision"]
+    );
+    assert_eq!(structured(&discarded, 2)["phase"], "discard");
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).unwrap(),
+        log_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("brep/l-1.brep")).unwrap(),
+        brep_before
+    );
+    let committed = run_mcp(&[
+        call(4, "open", "edit-commit", 3.0, None),
+        call(5, "update", "edit-commit", 4.0, Some(0)),
+        call(6, "preview", "edit-commit", 4.0, None),
+        call(7, "commit", "edit-commit", 4.0, None),
+    ]);
+    assert_eq!(committed.len(), 4);
+    assert_eq!(structured(&committed, 0)["draft_sequence"], 0);
+    assert_eq!(structured(&committed, 1)["draft_sequence"], 1);
+    assert_eq!(structured(&committed, 2)["phase"], "preview");
+    assert_eq!(structured(&committed, 3)["phase"], "commit");
+    assert_ne!(
+        structured(&committed, 3)["current_revision"],
+        structured(&committed, 3)["source_revision"]
+    );
+    assert_ne!(
+        std::fs::read(root.join("brep/l-1.brep")).unwrap(),
+        brep_before
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

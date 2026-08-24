@@ -24,6 +24,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -121,17 +122,9 @@ struct BracketEditSession {
     worker: OcctWorker,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct McpServer {
     bracket_edits: RefCell<HashMap<String, BracketEditSession>>,
-}
-
-impl Default for McpServer {
-    fn default() -> Self {
-        Self {
-            bracket_edits: RefCell::new(HashMap::new()),
-        }
-    }
 }
 
 impl McpServer {
@@ -276,6 +269,11 @@ impl McpServer {
     }
 
     fn dispatch_bracket_edit_tool(&self, arguments: &Value) -> Result<Value, DispatchError> {
+        for session in self.bracket_edits.borrow_mut().values_mut() {
+            session
+                .host
+                .prune_expired_drafts(Duration::from_secs(30 * 60));
+        }
         let phase = arguments
             .get("phase")
             .and_then(Value::as_str)
@@ -734,6 +732,42 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "threeterm.command.bracket/1")
+        );
+    }
+
+    #[test]
+    fn bracket_edit_open_returns_a_schema_validated_structured_lifecycle_result() {
+        let server = McpServer::new();
+        let request = JsonRpcRequest {
+            id: Value::Number(1.into()),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "threeterm.command.bracket-edit/1",
+                "arguments": {
+                    "phase": "open",
+                    "bundle_path": "/tmp/missing-bracket-edit-bundle",
+                    "draft_id": "draft-1",
+                    "bracket_id": "l-bracket",
+                    "length": 100.0,
+                    "width": 60.0,
+                    "height": 40.0,
+                    "thickness": 5.0
+                }
+            }),
+        };
+        let response = server.handle_request(&request);
+        let result = response
+            .result
+            .expect("lifecycle failures remain structured");
+        validate(
+            &threeterm_protocol::schema::BRACKET_EDIT_RESPONSE_SCHEMA,
+            &result["structuredContent"],
+        )
+        .expect("lifecycle response satisfies its registered schema");
+        assert_eq!(result["structuredContent"]["status"], "rejected");
+        assert_eq!(
+            result["structuredContent"]["diagnostic"]["idempotency_key"],
+            "draft-1"
         );
     }
 

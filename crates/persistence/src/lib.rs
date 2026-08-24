@@ -848,6 +848,29 @@ impl Bundle {
         })
     }
 
+    /// Look up a previously published transaction by its durable idempotency
+    /// key while holding the same bundle lock used by promotion.
+    pub fn find_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<LoadedBundle>, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            Ok(
+                if loaded
+                    .log
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
+                {
+                    Some(loaded)
+                } else {
+                    None
+                },
+            )
+        })
+    }
+
     /// Atomically append one or more `(feature_id, kind)` pairs to the
     /// bundle's Canonical Transaction Log and revision graph. The bundle
     /// is opened once, every entry is applied to the in-memory graph and

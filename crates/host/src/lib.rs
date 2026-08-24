@@ -721,9 +721,6 @@ impl Host {
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
-        if let Some(path) = draft.preview_path.take() {
-            remove_preview_stage(&path);
-        }
         let mut request = request;
         request.base_path = committed_brep_path(&draft.bundle_root, &draft.source_feature_id);
         let request = request.with_output_path(&draft.bundle_root, "unused.brep");
@@ -733,6 +730,9 @@ impl Host {
                 draft_id: draft_id.to_string(),
                 detail,
             })?;
+        if let Some(path) = draft.preview_path.take() {
+            remove_preview_stage(&path);
+        }
         draft.request = request;
         Ok(draft.clone())
     }
@@ -758,6 +758,7 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
+        self.clear_draft_preview(draft_id);
         self.validate_draft_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -830,6 +831,7 @@ impl Host {
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
+        self.clear_draft_preview(draft_id);
         self.validate_draft_source(&draft, &loaded)?;
         if let Some(path) = draft.preview_path {
             remove_preview_stage(&path);
@@ -910,6 +912,19 @@ impl Host {
 
     pub fn has_draft(&self, draft_id: &str) -> bool {
         self.drafts.borrow().contains_key(draft_id)
+    }
+
+    fn clear_draft_preview(&self, draft_id: &str) {
+        if let Some(draft) = self.drafts.borrow_mut().get_mut(draft_id)
+            && let Some(path) = draft.preview_path.take()
+        {
+            remove_preview_stage(&path);
+        }
+        if let Some(draft) = self.bracket_drafts.borrow_mut().get_mut(draft_id)
+            && let Some(path) = draft.preview_path.take()
+        {
+            remove_preview_stage(&path);
+        }
     }
 
     /// Create the initial parameterized L-bracket through the OCCT worker.
@@ -1050,6 +1065,7 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
+        self.clear_draft_preview(draft_id);
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1080,6 +1096,10 @@ impl Host {
                 return Err(error.into());
             }
         };
+        if let Err(error) = read_verified_worker_brep(&result) {
+            remove_preview_stage(&stage);
+            return Err(error);
+        }
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
         let preview_revision = draft_preview_revision(&draft.source_revision, &input_fingerprint);
         let preview_path = result.brep_path.clone();
@@ -1111,9 +1131,6 @@ impl Host {
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
-        if let Some(path) = &draft.preview_path {
-            remove_preview_stage(path);
-        }
         let request = request
             .with_feature_id(&draft.bracket_id)
             .with_output_path(&draft.bundle_root, "unused.brep");
@@ -1123,6 +1140,9 @@ impl Host {
                 draft_id: draft_id.to_string(),
                 detail,
             })?;
+        if let Some(path) = &draft.preview_path {
+            remove_preview_stage(path);
+        }
         draft.request = request;
         draft.preview_path = None;
         Ok(draft.clone())
@@ -1151,6 +1171,7 @@ impl Host {
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
+        self.clear_draft_preview(draft_id);
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1189,6 +1210,19 @@ impl Host {
             }
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)?
+            && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
+                == Some(result.brep_sha256.clone())
+        {
+            let snapshot = SnapshotView::from(&committed);
+            self.current.replace(Some(committed));
+            self.bracket_drafts.borrow_mut().remove(draft_id);
+            remove_preview_stage(&stage);
+            return Ok(BracketCommitView {
+                snapshot,
+                input_fingerprint,
+            });
+        }
         let kind = bracket_kind_with_draft(&request, Some(draft_id));
         let snapshot = match self.promote_brep_bytes(
             &root,

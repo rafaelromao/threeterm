@@ -44,11 +44,17 @@ pub enum SupervisorOutcome {
         artifact_headers: Vec<StagedArtifact>,
     },
     /// The worker acknowledged the cooperative cancellation inside the
-    /// grace period and exited cleanly.
+    /// grace period and exited cleanly. `last_progress` and
+    /// `stderr_tail` are retained so the diagnostic surface keeps
+    /// cancellation context without requiring a force-terminate.
     Acknowledged {
         request_id: String,
         reason: String,
         elapsed: Duration,
+        last_progress: Option<Progress>,
+        stderr_tail: String,
+        exit_signal: Option<i32>,
+        exit_code: Option<i32>,
     },
     /// The supervisor finished the lifecycle with a structured terminal
     /// record. `exit_kind` distinguishes a cooperative worker-emitted
@@ -300,11 +306,12 @@ impl Supervisor {
                     // reporting an acknowledgement. A worker that acks
                     // and then dies by signal or with a non-zero status
                     // is surfaced as a structured termination.
+                    let ack_progress = last_progress.take();
                     if let Some(outcome) = self.verify_clean_exit(
                         &ack_request_id,
                         started,
                         "cancelled_reap",
-                        last_progress.take(),
+                        ack_progress.clone(),
                     ) {
                         return outcome;
                     }
@@ -312,6 +319,10 @@ impl Supervisor {
                         request_id: ack_request_id,
                         reason: ack_reason,
                         elapsed: started.elapsed(),
+                        last_progress: ack_progress,
+                        stderr_tail: self.host.stderr_tail(),
+                        exit_signal: self.host.exit_signal(),
+                        exit_code: self.host.exit_code(),
                     };
                 }
                 Ok(Envelope::Progress {

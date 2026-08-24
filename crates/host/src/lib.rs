@@ -315,9 +315,27 @@ impl From<WorkerError> for HostError {
             WorkerError::Spawn {
                 request_id, detail, ..
             } => Self::WorkerFailure { request_id, detail },
-            WorkerError::Cancelled { request_id } => Self::WorkerFailure {
-                request_id: Some(request_id.clone()),
-                detail: format!("worker request {request_id} cancelled"),
+            WorkerError::Cancelled {
+                request_id,
+                last_progress,
+                elapsed,
+                stderr_tail,
+                exit_signal,
+                exit_code,
+            } => Self::WorkerTerminated {
+                record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
+                    request_id: request_id.clone(),
+                    stage: "cancelled".to_string(),
+                    elapsed,
+                    last_progress,
+                    last_artifact_error: None,
+                    exit_signal,
+                    exit_code,
+                    stderr_tail,
+                    failed_code: None,
+                    failed_detail: None,
+                    exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
+                }),
             },
             WorkerError::Supervised { record } => Self::WorkerTerminated { record },
             other => Self::WorkerFailure {
@@ -874,6 +892,60 @@ impl Host {
             .clone()
             .with_revision_id(prior_view.revision_hash.clone())
             .extrude(&request)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
+                detail: format!(
+                    "extrude returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = match self.commit_brep_feature_verified_at_revision(
+            root,
+            &feature_id,
+            &result.brep_path,
+            &prior_view.revision_hash,
+            result.brep_bytes,
+            &result.brep_sha256,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(error);
+            }
+        };
+        let _ = prior_view;
+        Ok(ExtrudeCommitView { snapshot, result })
+    }
+
+    /// Extrude `request` with a cooperative cancellation token. Mirrors
+    /// `OcctWorker::extrude_with_cancel` but preserves the host's
+    /// canonical-state atomicity and `HostError` projection.
+    pub fn extrude_with_cancel(
+        &self,
+        root: impl AsRef<Path>,
+        request: ExtrudeRequest,
+        worker: &OcctWorker,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<ExtrudeCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .extrude_with_cancel(&request, cancel)
         {
             Ok(result) => result,
             Err(error) => {

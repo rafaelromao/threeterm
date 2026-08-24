@@ -855,6 +855,7 @@ impl Bundle {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
         &self,
         feature_id: &str,

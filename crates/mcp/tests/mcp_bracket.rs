@@ -296,20 +296,26 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
         call(1, "open", "edit-discard", 3.0, None),
         call(2, "open", "edit-discard", 5.0, None),
         call(3, "preview", "edit-discard", 5.0, None),
-        call(4, "discard", "edit-discard", 5.0, None),
+        call(4, "preview", "edit-discard", 3.0, None),
+        call(5, "discard", "edit-discard", 3.0, None),
     ]);
-    assert_eq!(discarded.len(), 4);
+    assert_eq!(discarded.len(), 5);
     assert_eq!(structured(&discarded, 1)["status"], "rejected");
     assert_eq!(
         structured(&discarded, 1)["diagnostic"]["draft_id"],
         "edit-discard"
     );
-    assert_eq!(structured(&discarded, 2)["phase"], "preview");
-    assert_ne!(
-        structured(&discarded, 2)["preview_revision"],
-        structured(&discarded, 2)["source_revision"]
+    assert_eq!(structured(&discarded, 2)["status"], "rejected");
+    assert_eq!(
+        structured(&discarded, 2)["diagnostic"]["detail"],
+        "command draft edit-discard is invalid: phase request does not match the stored draft values"
     );
-    assert_eq!(structured(&discarded, 3)["phase"], "discard");
+    assert_eq!(structured(&discarded, 3)["phase"], "preview");
+    assert_ne!(
+        structured(&discarded, 3)["preview_revision"],
+        structured(&discarded, 3)["source_revision"]
+    );
+    assert_eq!(structured(&discarded, 4)["phase"], "discard");
     assert_eq!(
         std::fs::read(root.join("manifest.json")).unwrap(),
         manifest_before

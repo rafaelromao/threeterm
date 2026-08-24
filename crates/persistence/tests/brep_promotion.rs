@@ -61,11 +61,16 @@ fn revision_guarded_brep_promotion_publishes_log_and_bytes_together() {
 fn parameterized_idempotency_retries_only_the_same_payload() {
     let root = temp_root("idempotency");
     let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
     let initial = bundle
         .append_feature_with_brep_if_revision(
             "l-bracket",
             "bracket:length=100.00000000000000000;thickness=5.00000000000000000",
-            &bundle.open().expect("bundle opens").revision_hash_hex(),
+            &source_revision,
             b"old-brep",
         )
         .expect("initial promotion succeeds");

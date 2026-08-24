@@ -1315,7 +1315,14 @@ impl Host {
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
         let kind = bracket_kind_with_draft(&request, Some(draft_id));
-        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
+        let existing = match Bundle::at(&root).find_idempotency_key(draft_id) {
+            Ok(existing) => existing,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        if let Some(committed) = existing {
             let same_transaction =
                 committed.log.entries().iter().any(|entry| {
                     entry.idempotency_key.as_deref() == Some(draft_id)
@@ -1482,6 +1489,41 @@ impl Host {
             .borrow()
             .get(&draft_map_key(&root, draft_id))
             .map(|draft| draft.sequence)
+    }
+
+    pub fn validate_bracket_parameter_draft_request(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+        request: BracketRequest,
+    ) -> Result<(), HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft = self
+            .bracket_drafts
+            .borrow()
+            .get(&draft_map_key(&root, draft_id))
+            .cloned()
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?;
+        let request = request.with_feature_id(&draft.bracket_id);
+        request
+            .validate()
+            .map_err(|detail| HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail,
+            })?;
+        if request.length != draft.request.length
+            || request.width != draft.request.width
+            || request.height != draft.request.height
+            || request.thickness != draft.request.thickness
+        {
+            return Err(HostError::DraftInvalid {
+                draft_id: draft_id.to_string(),
+                detail: "phase request does not match the stored draft values".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Remove abandoned transient drafts and their staged worker output.

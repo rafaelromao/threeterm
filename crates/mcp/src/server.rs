@@ -351,6 +351,11 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
+                session.host.validate_bracket_parameter_draft_request(
+                    &bundle,
+                    &draft_id,
+                    request(),
+                )?;
                 let preview = session.host.preview_bracket_parameter_draft(
                     &bundle,
                     &draft_id,
@@ -378,6 +383,11 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
+                session.host.validate_bracket_parameter_draft_request(
+                    &bundle,
+                    &draft_id,
+                    request(),
+                )?;
                 let source_revision = session
                     .host
                     .bracket_draft_source_revision(&bundle, &draft_id)

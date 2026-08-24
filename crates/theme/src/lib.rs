@@ -127,6 +127,13 @@ pub struct Palette {
     pub variables: PaletteVariables,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RgbColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
 const INHERITED_REVIEWING_ACCENT: &str = "oklch(0.65 0.16 285)";
 const ACCENT_WEAK: &str = "color-mix(in oklch, var(--accent) 14%, var(--surface))";
 
@@ -414,6 +421,28 @@ impl Palette {
     pub fn semantic(&self) -> &SemanticPalette<'static> {
         &self.variables.semantic
     }
+
+    pub fn rgb(&self, token: SemanticToken) -> Result<RgbColor, ThemeVerificationError> {
+        let value = self
+            .semantic()
+            .token(token)
+            .ok_or_else(|| ThemeVerificationError {
+                code: ThemeVerificationCode::MissingToken,
+                palette: self.name.to_string(),
+                state: None,
+                token: Some(token),
+                related_token: None,
+                observed: None,
+                required: None,
+                value: None,
+            })?;
+        let parsed = parse_oklch(self.name, token, value)?;
+        Ok(RgbColor {
+            red: srgb_channel(parsed.rgb[0]),
+            green: srgb_channel(parsed.rgb[1]),
+            blue: srgb_channel(parsed.rgb[2]),
+        })
+    }
 }
 
 impl<'a> SemanticPalette<'a> {
@@ -492,6 +521,7 @@ impl NonColorMarker {
 pub struct TransientVisual {
     pub state: TransientState,
     pub color: Option<SemanticToken>,
+    pub background: Option<SemanticToken>,
     pub marker: Option<NonColorMarker>,
 }
 
@@ -511,52 +541,62 @@ const EXPECTED_TRANSIENT_STATES: [TransientState; 10] = [
 const TRANSIENT_VISUALS: [TransientVisual; 10] = [
     TransientVisual {
         state: TransientState::Hover,
-        color: Some(SemanticToken::ViewportEdge),
+        color: Some(SemanticToken::TuiForeground),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::Outline),
     },
     TransientVisual {
         state: TransientState::Candidate,
-        color: Some(SemanticToken::ViewportCandidateEdge),
+        color: Some(SemanticToken::TuiAccent),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::DashedOutline),
     },
     TransientVisual {
         state: TransientState::Drag,
-        color: Some(SemanticToken::ViewportDragFeedback),
+        color: Some(SemanticToken::TuiAccent),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::MotionTrail),
     },
     TransientVisual {
         state: TransientState::Selected,
-        color: Some(SemanticToken::ViewportSelectedEdge),
+        color: Some(SemanticToken::TuiSelectionForeground),
+        background: Some(SemanticToken::TuiSelectionBackground),
         marker: Some(NonColorMarker::SelectionGlyph),
     },
     TransientVisual {
         state: TransientState::Warning,
-        color: Some(SemanticToken::ViewportWarning),
+        color: Some(SemanticToken::TuiWarning),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::WarningGlyph),
     },
     TransientVisual {
         state: TransientState::Error,
-        color: Some(SemanticToken::ViewportError),
+        color: Some(SemanticToken::TuiError),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::ErrorGlyph),
     },
     TransientVisual {
         state: TransientState::Cancelled,
         color: Some(SemanticToken::TuiMuted),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::CancellationGlyph),
     },
     TransientVisual {
         state: TransientState::FocusRecovery,
         color: Some(SemanticToken::TuiAccent),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::FocusRecoveryBanner),
     },
     TransientVisual {
         state: TransientState::ResizeRecovery,
         color: Some(SemanticToken::TuiAccent),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::ResizeRecoveryGlyph),
     },
     TransientVisual {
         state: TransientState::Ready,
         color: Some(SemanticToken::TuiForeground),
+        background: Some(SemanticToken::TuiBackground),
         marker: Some(NonColorMarker::ReadyStatus),
     },
 ];
@@ -641,6 +681,13 @@ fn verify_transient_marker_coverage_named(
                 state,
             ));
         }
+        if visual.background.is_none() {
+            return Err(state_error(
+                ThemeVerificationCode::MissingStateColor,
+                palette_name,
+                state,
+            ));
+        }
         if visual.marker.is_none() {
             return Err(state_error(
                 ThemeVerificationCode::MissingStateMarker,
@@ -674,6 +721,7 @@ struct ParsedOklch {
     lightness: f64,
     hue: f64,
     luminance: f64,
+    rgb: [f64; 3],
 }
 
 pub fn verify_palette(palette: &Palette) -> Result<(), ThemeVerificationError> {
@@ -697,6 +745,25 @@ pub fn verify_theme_contract(palette: &Palette) -> Result<(), ThemeVerificationE
                 palette: palette.name.to_string(),
                 state: Some(visual.state),
                 token: Some(token),
+                related_token: None,
+                observed: None,
+                required: None,
+                value: None,
+            });
+        }
+        let Some(background) = visual.background else {
+            return Err(state_error(
+                ThemeVerificationCode::MissingStateColor,
+                palette.name,
+                visual.state,
+            ));
+        };
+        if palette.semantic().token(background).is_none() {
+            return Err(ThemeVerificationError {
+                code: ThemeVerificationCode::MissingToken,
+                palette: palette.name.to_string(),
+                state: Some(visual.state),
+                token: Some(background),
                 related_token: None,
                 observed: None,
                 required: None,
@@ -948,21 +1015,22 @@ fn parse_oklch(
         });
     }
     let hue = hue.rem_euclid(360.0);
-    let luminance =
-        oklch_luminance(lightness, chroma, hue).ok_or_else(|| ThemeVerificationError {
-            code: ThemeVerificationCode::OutOfGamut,
-            palette: palette_name.to_string(),
-            state: None,
-            token: Some(token),
-            related_token: None,
-            observed: None,
-            required: None,
-            value: Some(value.to_string()),
-        })?;
+    let rgb = oklch_rgb(lightness, chroma, hue).ok_or_else(|| ThemeVerificationError {
+        code: ThemeVerificationCode::OutOfGamut,
+        palette: palette_name.to_string(),
+        state: None,
+        token: Some(token),
+        related_token: None,
+        observed: None,
+        required: None,
+        value: Some(value.to_string()),
+    })?;
+    let luminance = 0.2126 * rgb[0].max(0.0) + 0.7152 * rgb[1].max(0.0) + 0.0722 * rgb[2].max(0.0);
     Ok(ParsedOklch {
         lightness,
         hue,
         luminance,
+        rgb,
     })
 }
 
@@ -987,7 +1055,7 @@ fn parse_color_component(
         })
 }
 
-fn oklch_luminance(lightness: f64, chroma: f64, hue: f64) -> Option<f64> {
+fn oklch_rgb(lightness: f64, chroma: f64, hue: f64) -> Option<[f64; 3]> {
     let hue = hue.to_radians();
     let a = chroma * hue.cos();
     let b = chroma * hue.sin();
@@ -1008,7 +1076,17 @@ fn oklch_luminance(lightness: f64, chroma: f64, hue: f64) -> Option<f64> {
     {
         return None;
     }
-    Some(0.2126 * rgb[0].max(0.0) + 0.7152 * rgb[1].max(0.0) + 0.0722 * rgb[2].max(0.0))
+    Some(rgb)
+}
+
+fn srgb_channel(linear: f64) -> u8 {
+    let linear = linear.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
 }
 
 fn contrast_ratio(first: f64, second: f64) -> f64 {

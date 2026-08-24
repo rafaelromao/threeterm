@@ -2,7 +2,9 @@
 
 use threeterm_domain::FeatureGraph;
 use threeterm_host::Host;
-use threeterm_theme::{NonColorMarker, SemanticToken, TransientState, transient_visuals};
+use threeterm_theme::{
+    NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
+};
 use threeterm_viewport::{
     CameraState, CapabilityProbeResult, FrameAcknowledgement, ProtocolNeutralViewport,
     RenderCoordinator, Renderer, SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode,
@@ -448,6 +450,7 @@ pub struct StateAcknowledgement {
     pub text: String,
     pub marker: NonColorMarker,
     pub color: Option<SemanticToken>,
+    pub background: Option<SemanticToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +497,7 @@ pub struct GestureAcknowledgement {
     pub text: String,
     pub marker: NonColorMarker,
     pub color: Option<SemanticToken>,
+    pub background: Option<SemanticToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,6 +532,16 @@ impl TuiFrame {
             self.acknowledgement.text
         )
     }
+
+    pub fn render_overlay_with_theme(&self, theme: &ThemeContext) -> Result<String, TuiThemeError> {
+        render_overlay_text(
+            self.acknowledgement.marker,
+            &self.acknowledgement.text,
+            self.acknowledgement.color,
+            self.acknowledgement.background,
+            theme,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,6 +557,7 @@ pub enum TuiDiagnosticCode {
     SelectionLost,
     SelectionIncompatible,
     StalePreview,
+    ThemeRenderingFailure,
 }
 
 impl TuiDiagnosticCode {
@@ -559,6 +574,7 @@ impl TuiDiagnosticCode {
             Self::SelectionLost => "selection_lost",
             Self::SelectionIncompatible => "selection_incompatible",
             Self::StalePreview => "stale_preview",
+            Self::ThemeRenderingFailure => "theme_rendering_failure",
         }
     }
 }
@@ -606,6 +622,7 @@ pub struct TuiSession {
     last_acknowledgement: Option<GestureAcknowledgement>,
     transition_sequence: u64,
     last_transition_acknowledgement: Option<StateAcknowledgement>,
+    theme: ThemeContext,
 }
 
 impl TuiSession {
@@ -635,7 +652,21 @@ impl TuiSession {
             last_acknowledgement: None,
             transition_sequence: 0,
             last_transition_acknowledgement: None,
+            theme: ThemeContext {
+                palette: default_dark(),
+                source: threeterm_theme::PaletteSource::Default,
+            },
         }
+    }
+
+    pub fn new_with_theme(
+        targets: impl IntoIterator<Item = FeatureTarget>,
+        canonical_revision: impl AsRef<str>,
+        theme: ThemeContext,
+    ) -> Self {
+        let mut session = Self::new(targets, canonical_revision);
+        session.theme = theme;
+        session
     }
 
     pub fn new_probing(
@@ -652,6 +683,17 @@ impl TuiSession {
             .features()
             .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
         Self::new(targets, canonical_revision)
+    }
+
+    pub fn from_feature_graph_with_theme(
+        graph: &FeatureGraph,
+        canonical_revision: impl AsRef<str>,
+        theme: ThemeContext,
+    ) -> Self {
+        let targets = graph
+            .features()
+            .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
+        Self::new_with_theme(targets, canonical_revision, theme)
     }
 
     pub fn from_feature_graph_probing(
@@ -1608,7 +1650,10 @@ impl TuiSession {
             from: None,
         })?;
         let outcome = self.press(key);
-        let overlay = outcome.frame.render_overlay();
+        let overlay = outcome
+            .frame
+            .render_overlay_with_theme(&self.theme)
+            .map_err(|error| self.theme_diagnostic(error))?;
         Ok(RenderedInput {
             frame: outcome.frame,
             overlay,
@@ -1658,11 +1703,21 @@ impl TuiSession {
             text: text.to_string(),
             marker: visual.marker.expect("theme marker is present"),
             color: visual.color,
+            background: visual.background,
         };
         self.last_transition_acknowledgement = Some(acknowledgement.clone());
+        let overlay = render_overlay_text(
+            acknowledgement.marker,
+            &acknowledgement.text,
+            acknowledgement.color,
+            acknowledgement.background,
+            &self.theme,
+        )
+        .map_err(|error| self.theme_diagnostic(error))?;
         Ok(StateTransition {
             state: self.state(),
             acknowledgement,
+            overlay,
             diagnostic,
         })
     }
@@ -1754,6 +1809,18 @@ impl TuiSession {
             text: text.to_string(),
             marker: visual.marker.expect("theme marker is present"),
             color: visual.color,
+            background: visual.background,
+        }
+    }
+
+    fn theme_diagnostic(&self, error: TuiThemeError) -> TuiDiagnostic {
+        TuiDiagnostic {
+            code: TuiDiagnosticCode::ThemeRenderingFailure,
+            detail: error.to_string(),
+            canonical_revision: self.canonical_revision.clone(),
+            axis: None,
+            event: None,
+            from: None,
         }
     }
 
@@ -1852,6 +1919,66 @@ impl TuiSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiThemeError {
+    pub token: Option<SemanticToken>,
+    pub detail: String,
+}
+
+impl std::fmt::Display for TuiThemeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "TUI theme token {:?} failed: {}",
+            self.token, self.detail
+        )
+    }
+}
+
+impl std::error::Error for TuiThemeError {}
+
+fn render_overlay_text(
+    marker: NonColorMarker,
+    text: &str,
+    foreground: Option<SemanticToken>,
+    background: Option<SemanticToken>,
+    theme: &ThemeContext,
+) -> Result<String, TuiThemeError> {
+    let foreground = foreground.ok_or_else(|| TuiThemeError {
+        token: None,
+        detail: "overlay has no foreground token".to_string(),
+    })?;
+    let background = background.ok_or_else(|| TuiThemeError {
+        token: None,
+        detail: "overlay has no background token".to_string(),
+    })?;
+    let foreground_rgb = theme
+        .palette
+        .rgb(foreground)
+        .map_err(|error| TuiThemeError {
+            token: Some(foreground),
+            detail: format!("{error:?}"),
+        })?;
+    let background_rgb = theme
+        .palette
+        .rgb(background)
+        .map_err(|error| TuiThemeError {
+            token: Some(background),
+            detail: format!("{error:?}"),
+        })?;
+    Ok(format!(
+        "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m[{}] {}\x1b[0m",
+        foreground_rgb.red,
+        foreground_rgb.green,
+        foreground_rgb.blue,
+        background_rgb.red,
+        background_rgb.green,
+        background_rgb.blue,
+        marker.as_str(),
+        text
+    ))
+}
+
 #[derive(Debug)]
 pub enum TuiViewportError {
     Tui(TuiDiagnostic),
@@ -1893,7 +2020,26 @@ impl<R: Renderer> TuiViewportSession<R> {
         height: u32,
         renderer: R,
     ) -> Result<Self, ViewportDiagnostic> {
-        Self::from_host_parts(host, width, height, renderer)
+        Self::from_host_parts(
+            host,
+            width,
+            height,
+            renderer,
+            ThemeContext {
+                palette: default_dark(),
+                source: threeterm_theme::PaletteSource::Default,
+            },
+        )
+    }
+
+    pub fn from_host_with_theme(
+        host: &Host,
+        width: u32,
+        height: u32,
+        renderer: R,
+        theme: ThemeContext,
+    ) -> Result<Self, ViewportDiagnostic> {
+        Self::from_host_parts(host, width, height, renderer, theme)
     }
 
     pub fn from_host_with_probe(
@@ -1904,7 +2050,16 @@ impl<R: Renderer> TuiViewportSession<R> {
         probe: &CapabilityProbeResult,
     ) -> Result<Self, ViewportDiagnostic> {
         renderer.admit(&probe.capabilities)?;
-        Self::from_host_parts(host, width, height, renderer)
+        Self::from_host_parts(
+            host,
+            width,
+            height,
+            renderer,
+            ThemeContext {
+                palette: default_dark(),
+                source: threeterm_theme::PaletteSource::Default,
+            },
+        )
     }
 
     fn from_host_parts(
@@ -1912,6 +2067,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         width: u32,
         height: u32,
         mut renderer: R,
+        theme: ThemeContext,
     ) -> Result<Self, ViewportDiagnostic> {
         if width == 0 || height == 0 {
             return Err(ViewportDiagnostic::new(
@@ -1945,7 +2101,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             scene = scene.with_layer1_reference(result.request_id);
         }
         renderer.initialize()?;
-        let tui = TuiSession::from_feature_graph(&presentation.graph, revision);
+        let tui = TuiSession::from_feature_graph_with_theme(&presentation.graph, revision, theme);
         Ok(Self {
             tui,
             scene,
@@ -2134,6 +2290,7 @@ impl<R: Renderer> TuiViewportSession<R> {
 pub struct StateTransition {
     pub state: TuiState,
     pub acknowledgement: StateAcknowledgement,
+    pub overlay: String,
     pub diagnostic: Option<TuiDiagnostic>,
 }
 

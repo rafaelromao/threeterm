@@ -629,6 +629,8 @@ fn interaction_and_command_handlers_enforce_one_modal_phase_graph() {
         }
     );
     assert_eq!(dragging.acknowledgement.marker, NonColorMarker::MotionTrail);
+    assert!(dragging.overlay.contains("[motion-trail]"));
+    assert!(dragging.overlay.contains("\x1b[38;2;"));
     let finished = session
         .transition(StateEvent::FocusCapture(FocusCaptureEvent::DragFinished))
         .expect("drag can finish without release correctness");
@@ -637,6 +639,58 @@ fn interaction_and_command_handlers_enforce_one_modal_phase_graph() {
         finished.state.interaction_mode,
         InteractionMode::ModelessReady
     );
+}
+
+#[test]
+fn transient_transition_overlays_cover_focus_and_both_cancellation_paths() {
+    let mut session = TuiSession::new([], "revision-overlay-transitions");
+    session
+        .transition_focus_capture(FocusCaptureEvent::PointerPressed {
+            tool: InteractionTool::Orbit,
+            origin: PointerOrigin { column: 2, row: 2 },
+            candidate: None,
+        })
+        .expect("capture starts");
+    session
+        .transition_focus_capture(FocusCaptureEvent::DragStarted)
+        .expect("drag starts");
+
+    let focus_lost = session
+        .transition_focus_capture(FocusCaptureEvent::FocusLost)
+        .expect("focus loss is acknowledged");
+    assert!(focus_lost.overlay.contains("[focus-recovery-banner]"));
+    assert!(focus_lost.overlay.contains("\x1b[38;2;"));
+    assert!(focus_lost.overlay.ends_with("\x1b[0m"));
+
+    session
+        .transition_focus_capture(FocusCaptureEvent::FocusIn)
+        .expect("focus returns");
+    session
+        .transition_focus_capture(FocusCaptureEvent::RecoveryCompleted)
+        .expect("focus recovery completes");
+    session
+        .transition_focus_capture(FocusCaptureEvent::PointerPressed {
+            tool: InteractionTool::Selection,
+            origin: PointerOrigin { column: 3, row: 3 },
+            candidate: None,
+        })
+        .expect("capture restarts");
+    let pointer_cancelled = session
+        .transition_focus_capture(FocusCaptureEvent::CaptureCancelled)
+        .expect("pointer cancellation is acknowledged");
+    assert!(pointer_cancelled.overlay.contains("[cancellation-glyph]"));
+    assert!(pointer_cancelled.overlay.contains("\x1b[38;2;"));
+
+    session
+        .transition_command(CommandEvent::Open {
+            command: "extrude".to_string(),
+        })
+        .expect("command opens");
+    let command_cancelled = session
+        .transition_command(CommandEvent::CancelRequested)
+        .expect("command cancellation is acknowledged");
+    assert!(command_cancelled.overlay.contains("[cancellation-glyph]"));
+    assert!(command_cancelled.overlay.contains("\x1b[38;2;"));
 }
 
 #[test]

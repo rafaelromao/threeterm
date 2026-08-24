@@ -104,6 +104,7 @@ pub enum HistoryError {
     DuplicateName(String),
     EmptyName,
     NamedRevisionNotFound(String),
+    FeatureNotInNamedRevision { feature_id: String, name: String },
     InvalidValue,
 }
 
@@ -117,6 +118,10 @@ impl std::fmt::Display for HistoryError {
             Self::NamedRevisionNotFound(name) => {
                 write!(formatter, "named revision not found: {name}")
             }
+            Self::FeatureNotInNamedRevision { feature_id, name } => write!(
+                formatter,
+                "feature {feature_id} is not present in named revision {name}"
+            ),
             Self::InvalidValue => formatter.write_str("historical edit value must be finite"),
         }
     }
@@ -394,6 +399,27 @@ impl HistoryState {
         ))
     }
 
+    pub fn restore_named_revision_for_feature(
+        &self,
+        feature_id: &str,
+        name: &str,
+    ) -> Result<HistoryEvent, HistoryError> {
+        if !self.active.features.contains_key(feature_id) {
+            return Err(HistoryError::FeatureNotFound(feature_id.to_string()));
+        }
+        let named = self
+            .named_revisions
+            .get(name)
+            .ok_or_else(|| HistoryError::NamedRevisionNotFound(name.to_string()))?;
+        if !named.snapshot.features.contains_key(feature_id) {
+            return Err(HistoryError::FeatureNotInNamedRevision {
+                feature_id: feature_id.to_string(),
+                name: name.to_string(),
+            });
+        }
+        self.restore_named_revision(name)
+    }
+
     pub fn fingerprint(&self) -> String {
         fingerprint_bytes(&serde_json::to_vec(self).expect("history state serializes"))
     }
@@ -420,6 +446,149 @@ pub struct HistoryEvaluation {
     pub evaluated_features: Vec<String>,
     pub blocked_features: Vec<String>,
     pub diagnostics: Vec<HistoryDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryTimelineStatus {
+    CurrentValid,
+    Broken,
+    BlockedByFailure,
+    Suppressed,
+    Absent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryTimelineEntry {
+    pub ordinal: u64,
+    pub revision_id: String,
+    pub operation: String,
+    pub status: HistoryTimelineStatus,
+    pub named_revision_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryNamedRevisionSummary {
+    pub name: String,
+    pub revision_id: String,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryTimeline {
+    pub feature_id: String,
+    pub active_revision: String,
+    pub revisions: Vec<HistoryTimelineEntry>,
+    pub named_revisions: Vec<HistoryNamedRevisionSummary>,
+}
+
+pub fn project_feature_timeline(
+    events: &[HistoryEvent],
+    feature_id: &str,
+) -> Result<HistoryTimeline, HistoryError> {
+    if feature_id.is_empty() {
+        return Err(HistoryError::FeatureNotFound(feature_id.to_string()));
+    }
+
+    let mut state = HistoryState::default();
+    let mut seen = false;
+    let mut revisions = Vec::new();
+    for event in events {
+        let before = state.clone();
+        state.apply_event(event)?;
+        let after_feature = state.active.features.get(feature_id);
+        let before_feature = before.active.features.get(feature_id);
+        seen |= after_feature.is_some()
+            || before_feature.is_some()
+            || state
+                .named_revisions
+                .values()
+                .any(|revision| revision.snapshot.features.contains_key(feature_id));
+
+        let mut named_revision_names = state
+            .named_revisions
+            .iter()
+            .filter(|(name, revision)| {
+                !before.named_revisions.contains_key(*name)
+                    && revision.snapshot.features.contains_key(feature_id)
+            })
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        named_revision_names.sort();
+
+        let active_changed = before_feature != after_feature;
+        let operation_targets_feature = match &event.operation {
+            HistoryOperation::InitializeLBracket { .. } => active_changed,
+            HistoryOperation::HistoricalEdit {
+                feature_id: edited_feature,
+                dirty_features,
+                ..
+            } => edited_feature == feature_id || dirty_features.iter().any(|id| id == feature_id),
+            HistoryOperation::CreateNamedRevision { .. } => false,
+            HistoryOperation::RestoreNamedRevision { name, .. } => {
+                before_feature.is_some()
+                    || after_feature.is_some()
+                    || state
+                        .named_revisions
+                        .get(name)
+                        .is_some_and(|revision| revision.snapshot.features.contains_key(feature_id))
+            }
+        };
+
+        if active_changed || operation_targets_feature || !named_revision_names.is_empty() {
+            revisions.push(HistoryTimelineEntry {
+                ordinal: event.ordinal,
+                revision_id: event.active.revision_id.clone(),
+                operation: history_operation_name(&event.operation).to_string(),
+                status: after_feature
+                    .map(|feature| history_timeline_status(feature.status))
+                    .unwrap_or(HistoryTimelineStatus::Absent),
+                named_revision_names,
+            });
+        }
+    }
+
+    if !seen {
+        return Err(HistoryError::FeatureNotFound(feature_id.to_string()));
+    }
+
+    let named_revisions = state
+        .named_revisions
+        .values()
+        .filter(|revision| revision.snapshot.features.contains_key(feature_id))
+        .map(|revision| HistoryNamedRevisionSummary {
+            name: revision.name.clone(),
+            revision_id: revision.snapshot.revision_id.clone(),
+            provenance: revision.provenance.clone(),
+        })
+        .collect();
+    Ok(HistoryTimeline {
+        feature_id: feature_id.to_string(),
+        active_revision: state.active.revision_id,
+        revisions,
+        named_revisions,
+    })
+}
+
+fn history_operation_name(operation: &HistoryOperation) -> &'static str {
+    match operation {
+        HistoryOperation::InitializeLBracket { .. } => "initialize-l-bracket",
+        HistoryOperation::HistoricalEdit { .. } => "historical-edit",
+        HistoryOperation::CreateNamedRevision { .. } => "create-named-revision",
+        HistoryOperation::RestoreNamedRevision { .. } => "restore-named-revision",
+    }
+}
+
+fn history_timeline_status(status: HistoryStatus) -> HistoryTimelineStatus {
+    match status {
+        HistoryStatus::CurrentValid => HistoryTimelineStatus::CurrentValid,
+        HistoryStatus::Broken => HistoryTimelineStatus::Broken,
+        HistoryStatus::BlockedByFailure => HistoryTimelineStatus::BlockedByFailure,
+        HistoryStatus::Suppressed => HistoryTimelineStatus::Suppressed,
+    }
 }
 
 fn l_bracket_snapshot(
@@ -680,9 +849,9 @@ fn validate_event(event: &HistoryEvent) -> Result<(), HistoryError> {
             let named = event.named_revisions.get(name).ok_or_else(|| {
                 HistoryError::InvalidEvent("restored revision is missing".to_string())
             })?;
-            if named.snapshot.revision_id != event.active.revision_id {
+            if named.snapshot != event.active {
                 return Err(HistoryError::InvalidEvent(
-                    "restore active revision does not match the named snapshot".to_string(),
+                    "restore active snapshot does not match the named snapshot".to_string(),
                 ));
             }
         }
@@ -784,5 +953,92 @@ mod tests {
             state.historical_edit("l-base", "length", 0.0),
             Err(HistoryError::DuplicateName(_))
         ));
+    }
+
+    #[test]
+    fn feature_timeline_scopes_active_revisions_and_named_markers() {
+        let mut state = HistoryState::default();
+        let mut events = Vec::new();
+        let event = state
+            .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+            .expect("first bracket");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+        let event = state
+            .create_named_revision("before-second")
+            .expect("named revision");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+        let event = state
+            .initialize_l_bracket("second", 8.0, 4.0, 2.0, 1.0)
+            .expect("second bracket");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+        let (event, _) = state
+            .historical_edit("first-base", "length", 12.0)
+            .expect("historical edit");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+
+        let first = project_feature_timeline(&events, "first-base").expect("first timeline");
+        assert_eq!(
+            first
+                .revisions
+                .iter()
+                .map(|entry| entry.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4]
+        );
+        assert_eq!(first.named_revisions[0].name, "before-second");
+
+        let second = project_feature_timeline(&events, "second-base").expect("second timeline");
+        assert_eq!(
+            second
+                .revisions
+                .iter()
+                .map(|entry| entry.ordinal)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(
+            second.revisions[1].named_revision_names,
+            ["recovered-before-historical-edit-4"]
+        );
+        assert!(matches!(
+            project_feature_timeline(&events, "missing"),
+            Err(HistoryError::FeatureNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn feature_scoped_restore_rejects_a_named_snapshot_without_the_feature() {
+        let mut state = HistoryState::default();
+        let event = state
+            .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+            .expect("first bracket");
+        state.apply_event(&event).expect("event applies");
+        let event = state
+            .create_named_revision("before-second")
+            .expect("named revision");
+        state.apply_event(&event).expect("event applies");
+        let event = state
+            .initialize_l_bracket("second", 8.0, 4.0, 2.0, 1.0)
+            .expect("second bracket");
+        state.apply_event(&event).expect("event applies");
+
+        assert_eq!(
+            state
+                .restore_named_revision_for_feature("second-base", "before-second")
+                .expect_err("scope mismatch"),
+            HistoryError::FeatureNotInNamedRevision {
+                feature_id: "second-base".to_string(),
+                name: "before-second".to_string(),
+            }
+        );
+        let event = state
+            .restore_named_revision_for_feature("first-base", "before-second")
+            .expect("matching scope restores");
+        assert_eq!(event.active.revision_id, "history-revision-1");
+        assert!(!event.active.features.contains_key("second-base"));
     }
 }

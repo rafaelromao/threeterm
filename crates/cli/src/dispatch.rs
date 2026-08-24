@@ -24,14 +24,14 @@ pub use threeterm_protocol::schema::{
     LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
     LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
-    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
     CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
     EDIT_COMPONENT_PARAMETER_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
     MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
@@ -96,7 +96,12 @@ enum DispatchPlan {
     },
     RestoreRevision {
         bundle: String,
+        feature_id: String,
         name: String,
+    },
+    Timeline {
+        bundle: String,
+        feature_id: String,
     },
     ReplayVerify {
         bundle: String,
@@ -448,6 +453,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "historical-edit" => parse_historical_edit(&args[2..]),
         "create-revision" => parse_named_revision(&args[2..], true),
         "restore-revision" => parse_named_revision(&args[2..], false),
+        "timeline" => parse_timeline(&args[2..]),
         "replay-verify" => parse_replay_verify(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
@@ -545,6 +551,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::Component { .. }
         | DispatchPlan::CreateRevision { .. }
         | DispatchPlan::RestoreRevision { .. }
+        | DispatchPlan::Timeline { .. }
         | DispatchPlan::ReplayVerify { .. }
         | DispatchPlan::Unknown { .. } => true,
         DispatchPlan::HistoricalEdit { value, .. } => value.is_finite(),
@@ -744,7 +751,7 @@ fn parse_named_revision(args: &[OsString], create: bool) -> DispatchPlan {
             .to_string(),
         };
     };
-    if args.len() != 3 || args[1] != "--name" {
+    if create && (args.len() != 3 || args[1] != "--name") {
         return DispatchPlan::Unknown {
             arg: args.get(1).map_or_else(
                 || "--name".to_string(),
@@ -752,7 +759,25 @@ fn parse_named_revision(args: &[OsString], create: bool) -> DispatchPlan {
             ),
         };
     }
-    let Some(name) = args[2].to_str() else {
+    if !create && (args.len() != 5 || args[1] != "--feature-id" || args[3] != "--name") {
+        return DispatchPlan::Unknown {
+            arg: args.get(1).map_or_else(
+                || "--feature-id".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    let (feature_id, name_index) = if create {
+        (None, 2)
+    } else {
+        let Some(feature_id) = args[2].to_str() else {
+            return DispatchPlan::Unknown {
+                arg: "--feature-id".to_string(),
+            };
+        };
+        (Some(feature_id.to_string()), 4)
+    };
+    let Some(name) = args[name_index].to_str() else {
         return DispatchPlan::Unknown {
             arg: "--name".to_string(),
         };
@@ -765,8 +790,34 @@ fn parse_named_revision(args: &[OsString], create: bool) -> DispatchPlan {
     } else {
         DispatchPlan::RestoreRevision {
             bundle: bundle.to_string(),
+            feature_id: feature_id.expect("restore feature id"),
             name: name.to_string(),
         }
+    }
+}
+
+fn parse_timeline(args: &[OsString]) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: "timeline".to_string(),
+        };
+    };
+    if args.len() != 3 || args[1] != "--feature-id" {
+        return DispatchPlan::Unknown {
+            arg: args.get(1).map_or_else(
+                || "--feature-id".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    let Some(feature_id) = args[2].to_str() else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    DispatchPlan::Timeline {
+        bundle: bundle.to_string(),
+        feature_id: feature_id.to_string(),
     }
 }
 
@@ -2292,11 +2343,13 @@ fn execute_handler(
         DispatchPlan::HistoricalEdit { .. }
         | DispatchPlan::CreateRevision { .. }
         | DispatchPlan::RestoreRevision { .. }
+        | DispatchPlan::Timeline { .. }
         | DispatchPlan::ReplayVerify { .. } => {
             let command = match &plan {
                 DispatchPlan::HistoricalEdit { .. } => HISTORICAL_EDIT_COMMAND_ID,
                 DispatchPlan::CreateRevision { .. } => CREATE_REVISION_COMMAND_ID,
                 DispatchPlan::RestoreRevision { .. } => RESTORE_REVISION_COMMAND_ID,
+                DispatchPlan::Timeline { .. } => TIMELINE_COMMAND_ID,
                 DispatchPlan::ReplayVerify { .. } => REPLAY_VERIFY_COMMAND_ID,
                 _ => unreachable!(),
             };
@@ -2649,13 +2702,20 @@ pub fn dispatch_registered_command(
             ));
         }
         if command == RESTORE_REVISION_COMMAND_ID {
-            let view =
-                host.restore_named_revision(string_field("bundle_path")?, string_field("name")?)?;
+            let view = host.restore_named_revision(
+                string_field("bundle_path")?,
+                string_field("feature_id")?,
+                string_field("name")?,
+            )?;
             return Ok(history_commit_response(
                 "restore-revision",
                 schema.response_schema_version,
                 &view,
             ));
+        }
+        if command == TIMELINE_COMMAND_ID {
+            let view = host.timeline(string_field("bundle_path")?, string_field("feature_id")?)?;
+            return Ok(timeline_response(schema.response_schema_version, &view));
         }
         if command == REPLAY_VERIFY_COMMAND_ID {
             let verification = host.verify_history_replay(string_field("bundle_path")?)?;
@@ -2856,6 +2916,46 @@ fn history_status_name(status: threeterm_domain::history::HistoryStatus) -> &'st
     }
 }
 
+fn timeline_response(
+    schema_version: &'static str,
+    view: &threeterm_host::HistoryTimelineView,
+) -> Value {
+    let timeline = &view.timeline;
+    let revisions = timeline
+        .revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "ordinal": revision.ordinal,
+                "revision_id": revision.revision_id,
+                "operation": revision.operation,
+                "status": serde_json::to_value(&revision.status).expect("timeline status serializes"),
+                "named_revision_names": revision.named_revision_names,
+            })
+        })
+        .collect::<Vec<_>>();
+    let named_revisions = timeline
+        .named_revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "name": revision.name,
+                "revision_id": revision.revision_id,
+                "provenance": revision.provenance,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "feature_id": timeline.feature_id,
+        "active_revision": timeline.active_revision,
+        "revisions": revisions,
+        "named_revisions": named_revisions,
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "schema_version": schema_version,
+    })
+}
+
 /// Structured failure modes emitted by the shared CLI/MCP dispatcher. The
 /// CLI renders these as JSON diagnostics on stderr; the MCP server
 /// converts them to JSON-RPC error envelopes.
@@ -3022,9 +3122,20 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             "parameter": parameter,
             "value": value,
         }),
-        DispatchPlan::CreateRevision { bundle, name }
-        | DispatchPlan::RestoreRevision { bundle, name } => {
+        DispatchPlan::CreateRevision { bundle, name } => {
             json!({ "bundle_path": bundle, "name": name })
+        }
+        DispatchPlan::RestoreRevision {
+            bundle,
+            feature_id,
+            name,
+        } => json!({
+            "bundle_path": bundle,
+            "feature_id": feature_id,
+            "name": name,
+        }),
+        DispatchPlan::Timeline { bundle, feature_id } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id })
         }
         DispatchPlan::ReplayVerify { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Extrude {
@@ -4338,7 +4449,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 27);
+        assert_eq!(commands.len(), 28);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

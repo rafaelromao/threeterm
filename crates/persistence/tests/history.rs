@@ -80,3 +80,55 @@ fn history_publication_failure_preserves_the_prior_generation() {
 
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn feature_timeline_reads_the_canonical_stream_without_publishing() {
+    let path = root("timeline");
+    let bundle = Bundle::at(&path);
+    write_fresh(&path, ProjectGeneration::with_id("history-timeline")).expect("fresh bundle");
+    let mut state = HistoryState::default();
+    for event in [state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("first event")]
+    {
+        state.apply_event(&event).expect("event applies");
+        bundle
+            .append_features_with_history(&[], &event)
+            .expect("event publishes");
+    }
+    let event = state
+        .create_named_revision("before-edit")
+        .expect("named revision");
+    state.apply_event(&event).expect("event applies");
+    bundle
+        .append_features_with_history(&[], &event)
+        .expect("named revision publishes");
+
+    let manifest_before = fs::read(path.join("manifest.json")).expect("manifest");
+    let log_before = fs::read(path.join("transactions.log")).expect("log");
+    let loaded = bundle.open().expect("bundle opens");
+    let timeline = loaded
+        .feature_timeline("first-base")
+        .expect("timeline projects");
+    assert_eq!(timeline.feature_id, "first-base");
+    assert_eq!(timeline.named_revisions[0].name, "before-edit");
+    assert_eq!(
+        fs::read(path.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(path.join("transactions.log")).expect("log"),
+        log_before
+    );
+    assert!(bundle.feature_timeline("missing").is_err());
+    assert_eq!(
+        fs::read(path.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(path.join("transactions.log")).expect("log"),
+        log_before
+    );
+
+    let _ = fs::remove_dir_all(path);
+}

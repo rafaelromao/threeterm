@@ -1,12 +1,12 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError, SnapshotView};
-use threeterm_lua_bridge::LuaBridge;
+use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
@@ -1952,11 +1952,80 @@ where
         Err(error) => return emit_palette_error(&error, stderr),
     };
     let theme = ThemeContext::from(resolved);
+    if let Some(lua_args) = parse_lua_key_args(&args) {
+        return match lua_args {
+            Ok((config, key)) => execute_lua_file(&config, &key, stdout, stderr),
+            Err(arg) => emit_unknown_command(&arg, stderr),
+        };
+    }
     let plan = plan(&args);
     let DispatchPlan::Unknown { arg } = &plan else {
         return execute_registered(plan, &theme, stdout, stderr);
     };
     emit_unknown_command(arg, stderr)
+}
+
+fn parse_lua_key_args(args: &[OsString]) -> Option<Result<(String, String), String>> {
+    if args.len() == 4 && args[0] == "--lua-config" && args[2] == "--lua-key" {
+        let config = args[1].to_str()?.to_string();
+        let key = args[3].to_str()?.to_string();
+        return Some(Ok((config, key)));
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--lua-config" || arg == "--lua-key")
+    {
+        return Some(Err("--lua-config/--lua-key".to_string()));
+    }
+    None
+}
+
+fn execute_lua_file(
+    config: &str,
+    key: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut watcher = LuaConfigWatcher::from_path(config);
+    let host = Host::new();
+    let result = dispatch_lua_key_file(&mut watcher, key, &host);
+    match result {
+        Ok(result) => {
+            if let Err(error) = serde_json::to_writer(&mut *stdout, &result.response) {
+                return emit_internal_error(
+                    &format!("failed to serialize Lua response: {error}"),
+                    stderr,
+                );
+            }
+            let _ = writeln!(stdout);
+            if let Some(diagnostic) = result.reload.diagnostic() {
+                write_lua_diagnostic(stderr, diagnostic);
+            }
+            EXIT_OK
+        }
+        Err(error) => {
+            if let Some(diagnostic) = watcher.diagnostic() {
+                write_lua_diagnostic(stderr, diagnostic);
+            } else {
+                let _ = writeln!(
+                    stderr,
+                    "{{\"code\":\"lua_dispatch_failure\",\"schema_version\":{:?},\"detail\":{:?}}}",
+                    threeterm_lua_bridge::schema_version(),
+                    error.to_string()
+                );
+            }
+            EXIT_UNKNOWN_COMMAND
+        }
+    }
+}
+
+fn write_lua_diagnostic(
+    stderr: &mut dyn Write,
+    diagnostic: &threeterm_lua_bridge::LuaReloadDiagnostic,
+) {
+    if serde_json::to_writer_pretty(&mut *stderr, diagnostic).is_ok() {
+        let _ = writeln!(stderr);
+    }
 }
 
 fn execute_handler(
@@ -2214,6 +2283,81 @@ pub fn dispatch_lua_key(
         dispatch_registered_command(host, command, request)
             .map_err(|error| error.diagnostic_detail())
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuaDispatchResult {
+    pub response: Value,
+    pub reload: LuaReloadStatus,
+}
+
+/// Poll a real Lua config file before invoking its active keymap. A failed
+/// reload is carried in the result while the watcher keeps its last valid
+/// bridge, so the session can continue without mutating Host state.
+pub fn dispatch_lua_key_file(
+    watcher: &mut LuaConfigWatcher,
+    key: &str,
+    host: &Host,
+) -> Result<LuaDispatchResult, threeterm_lua_bridge::LuaBridgeError> {
+    let reload = watcher.poll();
+    let response = watcher.invoke_key(key, |command, request| {
+        dispatch_registered_command(host, command, request)
+            .map_err(|error| error.diagnostic_detail())
+    })?;
+    Ok(LuaDispatchResult { response, reload })
+}
+
+/// Run the production stdin-driven Lua input session. The watcher and Host
+/// live for the whole session, so each key event observes the latest config
+/// while failed reloads retain the last valid binding and canonical state.
+pub fn dispatch_lua_session<R: BufRead>(
+    config: &str,
+    input: &mut R,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut watcher = LuaConfigWatcher::from_path(config);
+    let host = Host::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) => return EXIT_OK,
+            Ok(_) => {
+                let key = line.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                match dispatch_lua_key_file(&mut watcher, key, &host) {
+                    Ok(result) => {
+                        if serde_json::to_writer(&mut *stdout, &result.response).is_err() {
+                            return emit_internal_error("failed to serialize Lua response", stderr);
+                        }
+                        let _ = writeln!(stdout);
+                        let _ = stdout.flush();
+                        if let Some(diagnostic) = result.reload.diagnostic() {
+                            write_lua_diagnostic(stderr, diagnostic);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(diagnostic) = watcher.diagnostic() {
+                            write_lua_diagnostic(stderr, diagnostic);
+                        } else {
+                            let _ = writeln!(
+                                stderr,
+                                "{{\"code\":\"lua_dispatch_failure\",\"schema_version\":{:?},\"detail\":{:?}}}",
+                                threeterm_lua_bridge::schema_version(),
+                                error.to_string()
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                return emit_internal_error(&format!("failed to read Lua input: {error}"), stderr);
+            }
+        }
+    }
 }
 
 /// Dispatch semantic JSON through the versioned command registry while

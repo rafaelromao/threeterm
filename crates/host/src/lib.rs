@@ -963,6 +963,7 @@ impl Host {
             loaded.revision_hash_hex(),
             &bytes,
             None,
+            None,
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1196,6 +1197,7 @@ impl Host {
             &draft.source_revision,
             &bytes,
             Some(&draft.source_brep_sha256),
+            Some(draft_id),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1203,9 +1205,11 @@ impl Host {
                 // that durable outcome by looking up the same semantic key
                 // before retrying or surfacing a failure.
                 if let Ok(committed) = Bundle::at(&root).open()
-                    && committed.graph.features().any(|feature| {
-                        feature.id.as_str() == draft.bracket_id && feature.kind == kind
-                    })
+                    && committed
+                        .log
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.idempotency_key.as_deref() == Some(draft_id))
                     && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
                         == Some(result.brep_sha256.clone())
                 {
@@ -1246,6 +1250,13 @@ impl Host {
 
     pub fn has_bracket_parameter_draft(&self, draft_id: &str) -> bool {
         self.bracket_drafts.borrow().contains_key(draft_id)
+    }
+
+    pub fn bracket_draft_source_revision(&self, draft_id: &str) -> Option<String> {
+        self.bracket_drafts
+            .borrow()
+            .get(draft_id)
+            .map(|draft| draft.source_revision.clone())
     }
 
     /// Remove abandoned transient drafts and their staged worker output.
@@ -1317,6 +1328,7 @@ impl Host {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn promote_brep_bytes(
         &self,
         root: &Path,
@@ -1325,16 +1337,19 @@ impl Host {
         expected_revision: &str,
         bytes: &[u8],
         source_brep_sha256: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<SnapshotView, HostError> {
         let bundle = Bundle::at(root);
         let updated = match source_brep_sha256 {
-            Some(source_brep_sha256) => bundle.append_feature_with_brep_if_revision_and_source(
-                feature_id,
-                kind,
-                expected_revision,
-                source_brep_sha256,
-                bytes,
-            )?,
+            Some(source_brep_sha256) => bundle
+                .append_feature_with_brep_if_revision_and_source_and_idempotency(
+                    feature_id,
+                    kind,
+                    expected_revision,
+                    source_brep_sha256,
+                    idempotency_key,
+                    bytes,
+                )?,
             None => bundle.append_feature_with_brep_if_revision(
                 feature_id,
                 kind,
@@ -2369,9 +2384,9 @@ fn bracket_kind(request: &BracketRequest) -> String {
 }
 
 fn bracket_kind_with_draft(request: &BracketRequest, draft_id: Option<&str>) -> String {
-    let draft = draft_id.map_or_else(String::new, |draft_id| format!(";draft_id={draft_id}"));
+    let _ = draft_id;
     format!(
-        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}{draft}",
+        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
         request.length, request.width, request.height, request.thickness,
     )
 }

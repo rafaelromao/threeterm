@@ -256,6 +256,16 @@ impl McpServer {
                     ERROR_METHOD_NOT_FOUND,
                     format!("{error}"),
                 ),
+                DispatchError::Host(error) if schema_entry.id == BRACKET_EDIT_COMMAND_ID => {
+                    let value = bracket_edit_failure_response(&arguments, &error);
+                    JsonRpcResponse::success(
+                        request.id.clone(),
+                        json!({
+                            "content": [{"type": "json", "data": value.clone()}],
+                            "structuredContent": value,
+                        }),
+                    )
+                }
                 DispatchError::Host(_) | DispatchError::Validation(_) => JsonRpcResponse::error(
                     request.id.clone(),
                     ERROR_INTERNAL,
@@ -315,6 +325,7 @@ impl McpServer {
                     &draft.source_revision,
                     None,
                     None,
+                    None,
                 ))
             }
             "preview" => {
@@ -333,6 +344,7 @@ impl McpServer {
                     "preview",
                     &preview.draft_id,
                     &preview.source_revision,
+                    Some(&preview.source_revision),
                     Some(&preview.preview_revision),
                     Some(&preview.input_fingerprint),
                 ))
@@ -344,6 +356,14 @@ impl McpServer {
                         draft_id: draft_id.clone(),
                     })
                 })?;
+                let source_revision = session
+                    .host
+                    .bracket_draft_source_revision(&draft_id)
+                    .ok_or_else(|| {
+                        DispatchError::Host(HostError::DraftNotFound {
+                            draft_id: draft_id.clone(),
+                        })
+                    })?;
                 let committed = session.host.commit_bracket_parameter_draft(
                     &bundle,
                     &draft_id,
@@ -353,7 +373,8 @@ impl McpServer {
                 Ok(bracket_edit_response(
                     "commit",
                     &draft_id,
-                    &committed.snapshot.revision_hash,
+                    &source_revision,
+                    Some(&committed.snapshot.revision_hash),
                     None,
                     Some(&committed.input_fingerprint),
                 ))
@@ -373,6 +394,7 @@ impl McpServer {
                     &source_revision,
                     None,
                     None,
+                    None,
                 ))
             }
             "update" => {
@@ -389,6 +411,7 @@ impl McpServer {
                     "update",
                     &draft.draft_id,
                     &draft.source_revision,
+                    None,
                     None,
                     None,
                 ))
@@ -465,10 +488,56 @@ impl McpServer {
     }
 }
 
+fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value {
+    let source_revision = arguments
+        .get("source_revision")
+        .and_then(Value::as_str)
+        .filter(|revision| revision.len() == 64)
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+    let phase = arguments
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let draft_id = arguments
+        .get("draft_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut diagnostic = json!({
+        "kind": "bracket_edit_rejected",
+        "draft_id": draft_id,
+        "idempotency_key": draft_id,
+        "detail": error.to_string(),
+        "recovery": "inspect_diagnostic_and_reopen",
+    });
+    let current_revision = if let HostError::DraftStale {
+        current_revision,
+        recovery,
+        ..
+    } = error
+    {
+        diagnostic["recovery"] = Value::String((*recovery).to_string());
+        Some(current_revision.as_str())
+    } else {
+        None
+    };
+    let mut response = bracket_edit_response(
+        phase,
+        draft_id,
+        source_revision,
+        current_revision,
+        None,
+        None,
+    );
+    response["status"] = Value::String("rejected".to_string());
+    response["diagnostic"] = diagnostic;
+    response
+}
+
 fn bracket_edit_response(
     phase: &str,
     draft_id: &str,
     source_revision: &str,
+    current_revision: Option<&str>,
     preview_revision: Option<&str>,
     input_fingerprint: Option<&str>,
 ) -> Value {
@@ -481,6 +550,9 @@ fn bracket_edit_response(
     });
     if let Some(preview_revision) = preview_revision {
         response["preview_revision"] = Value::String(preview_revision.to_string());
+    }
+    if let Some(current_revision) = current_revision {
+        response["current_revision"] = Value::String(current_revision.to_string());
     }
     if let Some(input_fingerprint) = input_fingerprint {
         response["input_fingerprint"] = Value::String(input_fingerprint.to_string());

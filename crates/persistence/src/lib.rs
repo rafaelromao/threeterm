@@ -2241,6 +2241,7 @@ fn atomic_write(
     atomic_write_with_points(path, bytes, sync_point, None, None, None, None, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn atomic_write_with_points(
     path: &Path,
     bytes: &[u8],

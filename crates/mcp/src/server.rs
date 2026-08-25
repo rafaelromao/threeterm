@@ -302,6 +302,10 @@ impl McpServer {
             .get("draft_sequence")
             .and_then(Value::as_u64)
             .unwrap_or(u64::MAX);
+        let draft_fingerprint = arguments
+            .get("draft_fingerprint")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let request = || {
             BracketRequest::new(
                 new_request_id(),
@@ -340,6 +344,9 @@ impl McpServer {
                 let host = Host::new();
                 let draft =
                     host.open_bracket_parameter_draft(&bundle, &draft_id, &bracket_id, request())?;
+                let draft_fingerprint = host
+                    .bracket_draft_fingerprint(&bundle, &draft_id)
+                    .expect("open keeps draft");
                 self.bracket_edits
                     .borrow_mut()
                     .insert(key, BracketEditSession { host, worker });
@@ -349,7 +356,7 @@ impl McpServer {
                     &draft.source_revision,
                     None,
                     None,
-                    None,
+                    Some(&draft_fingerprint),
                     Some(draft.sequence),
                 ))
             }
@@ -453,15 +460,20 @@ impl McpServer {
                     &bundle,
                     &draft_id,
                     draft_sequence,
+                    draft_fingerprint,
                     request(),
                 )?;
+                let draft_fingerprint = session
+                    .host
+                    .bracket_draft_fingerprint(&bundle, &draft_id)
+                    .expect("update keeps draft");
                 Ok(bracket_edit_response(
                     "update",
                     &draft.draft_id,
                     &draft.source_revision,
                     None,
                     None,
-                    None,
+                    Some(&draft_fingerprint),
                     Some(draft.sequence),
                 ))
             }

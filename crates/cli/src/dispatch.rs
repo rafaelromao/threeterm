@@ -3023,6 +3023,7 @@ fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, 
                 "phase": "open",
                 "draft_id": draft.draft_id,
                 "source_revision": draft.source_revision,
+                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
                 "draft_sequence": draft.sequence,
                 "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
             }))
@@ -3036,13 +3037,27 @@ fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, 
                         "missing integer field \"draft_sequence\"".to_string(),
                     )
                 })?;
-            let draft =
-                host.update_bracket_parameter_draft(bundle, draft_id, sequence, dimensions()?)?;
+            let draft_fingerprint = request
+                .get("draft_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    DispatchError::Validation(
+                        "missing string field \"draft_fingerprint\"".to_string(),
+                    )
+                })?;
+            let draft = host.update_bracket_parameter_draft(
+                bundle,
+                draft_id,
+                sequence,
+                draft_fingerprint,
+                dimensions()?,
+            )?;
             Ok(json!({
                 "status": "ok",
                 "phase": "update",
                 "draft_id": draft.draft_id,
                 "source_revision": draft.source_revision,
+                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
                 "draft_sequence": draft.sequence,
                 "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
             }))
@@ -4715,10 +4730,14 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         }
         HostError::BrepIo { detail } => detail.clone(),
         HostError::DraftAlreadyExists { draft_id } => {
-            format!("{{\"kind\":\"draft_already_exists\",\"draft_id\":{draft_id:?}}}")
+            format!(
+                "{{\"kind\":\"draft_already_exists\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?}}}"
+            )
         }
         HostError::DraftNotFound { draft_id } => {
-            format!("{{\"kind\":\"draft_not_found\",\"draft_id\":{draft_id:?}}}")
+            format!(
+                "{{\"kind\":\"draft_not_found\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?}}}"
+            )
         }
         HostError::DraftStale {
             draft_id,
@@ -4726,7 +4745,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_stale\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_stale\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::DraftSourceChanged {
             draft_id,
@@ -4735,10 +4754,10 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::DraftInvalid { draft_id, detail } => format!(
-            "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"detail\":{detail:?}}}"
+            "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"detail\":{detail:?}}}"
         ),
         HostError::DraftInputConflict {
             draft_id,
@@ -4746,14 +4765,14 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_input_conflict\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_input_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::DraftSequenceConflict {
             draft_id,
             expected,
             current,
         } => format!(
-            "{{\"kind\":\"draft_sequence_conflict\",\"draft_id\":{draft_id:?},\"expected_sequence\":{expected},\"current_sequence\":{current},\"recovery\":\"refresh_draft_and_retry\"}}"
+            "{{\"kind\":\"draft_sequence_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"expected_sequence\":{expected},\"current_sequence\":{current},\"recovery\":\"refresh_draft_and_retry\"}}"
         ),
         HostError::DraftIdempotencyConflict {
             draft_id,
@@ -4761,7 +4780,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_idempotency_conflict\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_idempotency_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::DraftUnknownOutcome {
             draft_id,
@@ -4769,7 +4788,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
             "kind": "worker_terminated",

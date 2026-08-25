@@ -342,20 +342,25 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
         std::fs::read(root.join("brep/l-1.brep")).unwrap(),
         brep_before
     );
+    let opened = run_mcp(&[call(4, "open", "edit-commit", 3.0, None)]);
+    let draft_fingerprint = structured(&opened, 0)["input_fingerprint"]
+        .as_str()
+        .expect("open returns the draft fingerprint")
+        .to_string();
+    let mut update = call(5, "update", "edit-commit", 4.0, Some(0));
+    update["params"]["arguments"]["draft_fingerprint"] = draft_fingerprint.into();
     let committed = run_mcp(&[
-        call(4, "open", "edit-commit", 3.0, None),
-        call(5, "update", "edit-commit", 4.0, Some(0)),
+        update,
         call(6, "preview", "edit-commit", 4.0, None),
         call(7, "commit", "edit-commit", 4.0, None),
     ]);
-    assert_eq!(committed.len(), 4);
-    assert_eq!(structured(&committed, 0)["draft_sequence"], 0);
-    assert_eq!(structured(&committed, 1)["draft_sequence"], 1);
-    assert_eq!(structured(&committed, 2)["phase"], "preview");
-    assert_eq!(structured(&committed, 3)["phase"], "commit");
+    assert_eq!(committed.len(), 3);
+    assert_eq!(structured(&committed, 0)["draft_sequence"], 1);
+    assert_eq!(structured(&committed, 1)["phase"], "preview");
+    assert_eq!(structured(&committed, 2)["phase"], "commit");
     assert_ne!(
-        structured(&committed, 3)["current_revision"],
-        structured(&committed, 3)["source_revision"]
+        structured(&committed, 2)["current_revision"],
+        structured(&committed, 2)["source_revision"]
     );
     assert_ne!(
         std::fs::read(root.join("brep/l-1.brep")).unwrap(),

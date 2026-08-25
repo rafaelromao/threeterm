@@ -697,7 +697,7 @@ impl From<WorkerError> for HostError {
 pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
     layer1_results: RefCell<HashMap<Layer1CacheKey, Layer1DerivedResult>>,
-    drafts: RefCell<HashMap<String, CommandDraft>>,
+    drafts: RefCell<HashMap<(PathBuf, String), CommandDraft>>,
     bracket_drafts: RefCell<HashMap<(PathBuf, String), BracketParameterDraft>>,
 }
 
@@ -1267,7 +1267,8 @@ impl Host {
                 detail: "draft_id must not be empty".to_string(),
             });
         }
-        if self.has_draft(&draft_id) {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        if self.has_draft(&root, &draft_id) {
             return Err(HostError::DraftAlreadyExists { draft_id });
         }
         let source_feature_id = source_feature_id.into();
@@ -1277,7 +1278,6 @@ impl Host {
                 detail: "source_feature_id must be a plain feature id".to_string(),
             });
         }
-        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let loaded = Bundle::at(&root).open()?;
         let source_path = committed_brep_path(&root, &source_feature_id);
         let source_brep_sha256 =
@@ -1297,7 +1297,7 @@ impl Host {
         self.current.replace(Some(loaded.clone()));
         let draft = CommandDraft {
             draft_id: draft_id.clone(),
-            bundle_root: root,
+            bundle_root: root.clone(),
             source_feature_id,
             source_revision: loaded.revision_hash_hex().to_string(),
             source_brep_sha256,
@@ -1305,7 +1305,9 @@ impl Host {
             preview_path: None,
             created_at: Instant::now(),
         };
-        self.drafts.borrow_mut().insert(draft_id, draft.clone());
+        self.drafts
+            .borrow_mut()
+            .insert((root, draft_id), draft.clone());
         Ok(draft)
     }
 
@@ -1313,12 +1315,15 @@ impl Host {
     /// binding. Any prior preview is invalidated before the new values land.
     pub fn update_draft(
         &self,
+        root: impl AsRef<Path>,
         draft_id: &str,
         request: DraftRequest,
     ) -> Result<CommandDraft, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
         let mut drafts = self.drafts.borrow_mut();
         let draft = drafts
-            .get_mut(draft_id)
+            .get_mut(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?;
@@ -1347,11 +1352,15 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<DraftPreviewView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
-        let draft = self.drafts.borrow().get(draft_id).cloned().ok_or_else(|| {
-            HostError::DraftNotFound {
+        let draft_key = draft_map_key(&root, draft_id);
+        let draft = self
+            .drafts
+            .borrow()
+            .get(&draft_key)
+            .cloned()
+            .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
-            }
-        })?;
+            })?;
         if draft.bundle_root != root {
             return Err(HostError::DraftInvalid {
                 draft_id: draft_id.to_string(),
@@ -1359,7 +1368,7 @@ impl Host {
             });
         }
         let loaded = Bundle::at(&root).open()?;
-        self.clear_draft_preview(draft_id);
+        self.clear_draft_preview(&draft_key);
         self.validate_draft_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
             remove_preview_stage(path);
@@ -1395,7 +1404,7 @@ impl Host {
         let preview_path = result.brep_path.clone();
         self.drafts
             .borrow_mut()
-            .get_mut(draft_id)
+            .get_mut(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?
@@ -1419,11 +1428,15 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<DraftCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
-        let draft = self.drafts.borrow().get(draft_id).cloned().ok_or_else(|| {
-            HostError::DraftNotFound {
+        let draft_key = draft_map_key(&root, draft_id);
+        let draft = self
+            .drafts
+            .borrow()
+            .get(&draft_key)
+            .cloned()
+            .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
-            }
-        })?;
+            })?;
         if draft.bundle_root != root {
             return Err(HostError::DraftInvalid {
                 draft_id: draft_id.to_string(),
@@ -1432,7 +1445,7 @@ impl Host {
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
-        self.clear_draft_preview(draft_id);
+        self.clear_draft_preview(&draft_key);
         self.validate_draft_source(&draft, &loaded)?;
         if let Some(path) = draft.preview_path {
             remove_preview_stage(&path);
@@ -1492,31 +1505,34 @@ impl Host {
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         remove_preview_stage(&stage);
-        self.drafts.borrow_mut().remove(draft_id);
+        self.drafts.borrow_mut().remove(&draft_key);
         Ok(DraftCommitView { snapshot, result })
     }
 
     /// Refuse a draft and remove every transient preview artifact.
-    pub fn discard_draft(&self, draft_id: &str) -> Result<(), HostError> {
-        let draft =
-            self.drafts
-                .borrow_mut()
-                .remove(draft_id)
-                .ok_or_else(|| HostError::DraftNotFound {
-                    draft_id: draft_id.to_string(),
-                })?;
+    pub fn discard_draft(&self, root: impl AsRef<Path>, draft_id: &str) -> Result<(), HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let draft_key = draft_map_key(&root, draft_id);
+        let draft = self.drafts.borrow_mut().remove(&draft_key).ok_or_else(|| {
+            HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            }
+        })?;
         if let Some(path) = draft.preview_path {
             remove_preview_stage(&path);
         }
         Ok(())
     }
 
-    pub fn has_draft(&self, draft_id: &str) -> bool {
-        self.drafts.borrow().contains_key(draft_id)
+    pub fn has_draft(&self, root: impl AsRef<Path>, draft_id: &str) -> bool {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        self.drafts
+            .borrow()
+            .contains_key(&draft_map_key(&root, draft_id))
     }
 
-    fn clear_draft_preview(&self, draft_id: &str) {
-        if let Some(draft) = self.drafts.borrow_mut().get_mut(draft_id)
+    fn clear_draft_preview(&self, draft_key: &(PathBuf, String)) {
+        if let Some(draft) = self.drafts.borrow_mut().get_mut(draft_key)
             && let Some(path) = draft.preview_path.take()
         {
             remove_preview_stage(&path);
@@ -1788,6 +1804,7 @@ impl Host {
         root: impl AsRef<Path>,
         draft_id: &str,
         expected_sequence: u64,
+        expected_fingerprint: &str,
         request: BracketRequest,
     ) -> Result<BracketParameterDraft, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
@@ -1803,6 +1820,14 @@ impl Host {
                 draft_id: draft_id.to_string(),
                 expected: expected_sequence,
                 current: draft.sequence,
+            });
+        }
+        if bracket_draft_fingerprint(draft) != expected_fingerprint {
+            return Err(HostError::DraftInputConflict {
+                draft_id: draft_id.to_string(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: draft.source_revision.clone(),
+                recovery: "refresh_draft_and_retry",
             });
         }
         let request = request
@@ -1843,6 +1868,30 @@ impl Host {
             return Err(HostError::DraftInvalid {
                 draft_id: draft_id.to_string(),
                 detail: "draft belongs to a different bundle".to_string(),
+            });
+        }
+        let kind = bracket_kind(&draft.request);
+        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
+            let matching_entry = committed.log.entries().iter().find(|entry| {
+                entry.idempotency_key.as_deref() == Some(draft_id)
+                    && entry.feature_id == draft.bracket_id
+                    && entry.kind == kind
+            });
+            if let Some(entry) = matching_entry {
+                let snapshot = SnapshotView::from(&committed);
+                let input_fingerprint = entry.idempotency_payload.clone().unwrap_or_default();
+                self.current.replace(Some(committed));
+                self.bracket_drafts.borrow_mut().remove(&draft_key);
+                return Ok(BracketCommitView {
+                    snapshot,
+                    input_fingerprint,
+                });
+            }
+            return Err(HostError::DraftIdempotencyConflict {
+                draft_id: draft_id.to_string(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: committed.revision_hash_hex().to_string(),
+                recovery: "use_new_idempotency_key",
             });
         }
         let loaded = Bundle::at(&root).open()?;
@@ -1886,41 +1935,6 @@ impl Host {
             }
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
-        let kind = bracket_kind(&request);
-        let existing = match Bundle::at(&root).find_idempotency_key(draft_id) {
-            Ok(existing) => existing,
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
-            }
-        };
-        if let Some(committed) = existing {
-            let same_transaction =
-                committed.log.entries().iter().any(|entry| {
-                    entry.idempotency_key.as_deref() == Some(draft_id)
-                        && entry.feature_id == draft.bracket_id
-                        && entry.kind == kind
-                        && entry.idempotency_payload.as_deref() == Some(input_fingerprint.as_str())
-                }) && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
-                    == Some(result.brep_sha256.clone());
-            if same_transaction {
-                let snapshot = SnapshotView::from(&committed);
-                self.current.replace(Some(committed));
-                self.bracket_drafts.borrow_mut().remove(&draft_key);
-                remove_preview_stage(&stage);
-                return Ok(BracketCommitView {
-                    snapshot,
-                    input_fingerprint,
-                });
-            }
-            remove_preview_stage(&stage);
-            return Err(HostError::DraftIdempotencyConflict {
-                draft_id: draft_id.to_string(),
-                source_revision: draft.source_revision.clone(),
-                current_revision: committed.revision_hash_hex().to_string(),
-                recovery: "use_new_idempotency_key",
-            });
-        }
         let snapshot = match self.promote_brep_bytes(
             &root,
             &draft.bracket_id,
@@ -1990,11 +2004,7 @@ impl Host {
                     }
                 }
                 remove_preview_stage(&stage);
-                if matches!(
-                    &error,
-                    HostError::Persistence(BundleError::Io(_))
-                        | HostError::Persistence(BundleError::Backup { .. })
-                ) {
+                if matches!(&error, HostError::Persistence(_)) {
                     return Err(HostError::DraftUnknownOutcome {
                         draft_id: draft_id.to_string(),
                         source_revision: draft.source_revision.clone(),
@@ -2064,6 +2074,18 @@ impl Host {
             .map(|draft| draft.sequence)
     }
 
+    pub fn bracket_draft_fingerprint(
+        &self,
+        root: impl AsRef<Path>,
+        draft_id: &str,
+    ) -> Option<String> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        self.bracket_drafts
+            .borrow()
+            .get(&draft_map_key(&root, draft_id))
+            .map(bracket_draft_fingerprint)
+    }
+
     pub fn validate_bracket_parameter_draft_request(
         &self,
         root: impl AsRef<Path>,
@@ -2116,7 +2138,7 @@ impl Host {
             .borrow()
             .iter()
             .filter(|(_, draft)| now.duration_since(draft.created_at) > max_age)
-            .map(|(id, _)| id.clone())
+            .map(|(key, _)| key.clone())
             .collect();
         let bracket_ids: Vec<_> = self
             .bracket_drafts
@@ -2126,8 +2148,8 @@ impl Host {
             .map(|(id, _)| id.clone())
             .collect();
         let mut removed = 0;
-        for id in generic_ids {
-            if let Some(draft) = self.drafts.borrow_mut().remove(&id) {
+        for key in generic_ids {
+            if let Some(draft) = self.drafts.borrow_mut().remove(&key) {
                 if let Some(path) = draft.preview_path {
                     remove_preview_stage(&path);
                 }
@@ -3414,6 +3436,20 @@ fn bracket_kind(request: &BracketRequest) -> String {
         "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
         request.length, request.width, request.height, request.thickness,
     )
+}
+
+fn bracket_draft_fingerprint(draft: &BracketParameterDraft) -> String {
+    let semantic = serde_json::json!({
+        "bracket_id": draft.bracket_id,
+        "height": format!("{:.17}", draft.request.height),
+        "length": format!("{:.17}", draft.request.length),
+        "source_brep_sha256": draft.source_brep_sha256,
+        "source_revision": draft.source_revision,
+        "thickness": format!("{:.17}", draft.request.thickness),
+        "width": format!("{:.17}", draft.request.width),
+    });
+    let bytes = serde_json::to_vec(&semantic).expect("bracket draft fingerprint serializes");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str) -> String {

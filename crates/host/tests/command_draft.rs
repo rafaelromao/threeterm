@@ -82,11 +82,55 @@ fn command_draft_preview_is_revision_bound_and_non_mutating() {
     );
     assert!(!preview.brep_path.starts_with(&root));
 
-    host.discard_draft(&draft.draft_id)
+    host.discard_draft(&root, &draft.draft_id)
         .expect("discard removes draft");
-    assert!(!host.has_draft(&draft.draft_id));
+    assert!(!host.has_draft(&root, &draft.draft_id));
     assert!(!preview.brep_path.exists());
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn generic_draft_ids_are_scoped_to_their_canonical_bundle_root() {
+    let Some(worker) = skip_without_worker() else {
+        return;
+    };
+    let first_root = temp_root("generic-scope-first");
+    let second_root = temp_root("generic-scope-second");
+    let host = Host::new();
+    let first_feature = seed_solid(&host, &first_root, &worker);
+    let second_feature = seed_solid(&host, &second_root, &worker);
+    let request = |root: &Path, feature_id: &str| {
+        DraftRequest::new(
+            new_request_id(),
+            root.join(format!("brep/{feature_id}.brep")),
+            std::f64::consts::FRAC_PI_2 / 12.0,
+            [0.0, 0.0, 1.0],
+        )
+    };
+
+    host.open_draft(
+        &first_root,
+        "shared-draft",
+        &first_feature,
+        request(&first_root, &first_feature),
+    )
+    .expect("first bundle draft opens");
+    host.open_draft(
+        &second_root,
+        "shared-draft",
+        &second_feature,
+        request(&second_root, &second_feature),
+    )
+    .expect("second bundle draft opens independently");
+
+    assert!(host.has_draft(&first_root, "shared-draft"));
+    assert!(host.has_draft(&second_root, "shared-draft"));
+    host.discard_draft(&first_root, "shared-draft")
+        .expect("first draft discards");
+    host.discard_draft(&second_root, "shared-draft")
+        .expect("second draft discards");
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
 }
 
 #[test]
@@ -139,6 +183,23 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
     );
     let committed_log = fs::read_to_string(root.join("transactions.log")).expect("log reads");
     assert!(committed_log.contains("bracket:length=100.00000000000000000"));
+
+    let retry = host
+        .open_bracket_parameter_draft(
+            &root,
+            "bracket-edit-1",
+            "l-bracket",
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0),
+        )
+        .expect("same idempotency key can be retried");
+    let retried = host
+        .commit_bracket_parameter_draft(&root, &retry.draft_id, &worker)
+        .expect("idempotent retry returns the sealed commit");
+    assert_eq!(
+        retried.snapshot.revision_hash,
+        committed.snapshot.revision_hash
+    );
+    assert_eq!(retried.input_fingerprint, committed.input_fingerprint);
 
     let refused_before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let refused_before_log = fs::read(root.join("transactions.log")).expect("log reads");
@@ -286,12 +347,16 @@ fn bracket_draft_update_rejects_stale_sequence_without_mutating_newer_values() {
             BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 5.0),
         )
         .expect("draft opens");
+    let draft_fingerprint = host
+        .bracket_draft_fingerprint(&root, &draft.draft_id)
+        .expect("draft fingerprint exists");
 
     let updated = host
         .update_bracket_parameter_draft(
             &root,
             &draft.draft_id,
             0,
+            &draft_fingerprint,
             BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0),
         )
         .expect("first update succeeds");
@@ -302,6 +367,7 @@ fn bracket_draft_update_rejects_stale_sequence_without_mutating_newer_values() {
             &root,
             &draft.draft_id,
             0,
+            &draft_fingerprint,
             BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 3.0),
         )
         .expect_err("stale update is rejected");

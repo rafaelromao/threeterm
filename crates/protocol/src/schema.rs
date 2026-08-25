@@ -1189,6 +1189,78 @@ pub static COMPONENT_STATE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "additionalProperties":false
     })
 });
+
+pub static SKETCH_SOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "entities", "constraints"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "phase": { "type": "string", "enum": ["preview", "commit"] },
+            "source_revision": { "type": "string", "minLength": 1 },
+            "entities": {
+                "type": "array", "minItems": 1, "uniqueItems": true,
+                "items": {
+                    "oneOf": [
+                        { "type": "object", "required": ["kind", "id", "x", "y"], "properties": {
+                            "kind": { "const": "point" }, "id": { "type": "string", "minLength": 1 },
+                            "x": { "type": "number" }, "y": { "type": "number" }
+                        }, "additionalProperties": false },
+                        { "type": "object", "required": ["kind", "id", "start", "end"], "properties": {
+                            "kind": { "const": "line_segment" }, "id": { "type": "string", "minLength": 1 },
+                            "start": { "type": "string", "minLength": 1 }, "end": { "type": "string", "minLength": 1 }
+                        }, "additionalProperties": false },
+                        { "type": "object", "required": ["kind", "id", "center", "radius"], "properties": {
+                            "kind": { "const": "circle" }, "id": { "type": "string", "minLength": 1 },
+                            "center": { "type": "string", "minLength": 1 }, "radius": { "type": "number", "exclusiveMinimum": 0 }
+                        }, "additionalProperties": false },
+                        { "type": "object", "required": ["kind", "id", "center", "start", "end"], "properties": {
+                            "kind": { "const": "arc" }, "id": { "type": "string", "minLength": 1 },
+                            "center": { "type": "string", "minLength": 1 }, "start": { "type": "string", "minLength": 1 },
+                            "end": { "type": "string", "minLength": 1 }
+                        }, "additionalProperties": false }
+                    ]
+                }
+            },
+            "constraints": {
+                "type": "array", "uniqueItems": true,
+                "items": { "type": "object", "required": ["id", "kind", "entities"], "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "kind": { "type": "string", "enum": ["coincident", "distance", "horizontal", "vertical", "equal_length", "parallel", "perpendicular", "fixed"] },
+                    "entities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                    "value": { "type": "number" }
+                }, "additionalProperties": false }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static SKETCH_SOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["status", "dof", "entity_ids", "related_constraint_ids", "diagnostics", "schema_version"],
+        "properties": {
+            "status": { "type": "string", "enum": ["solved", "underconstrained", "redundant", "inconsistent", "nonconvergent", "invalid_request"] },
+            "dof": { "type": "integer", "minimum": 0 },
+            "entity_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+            "related_constraint_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+            "diagnostics": { "type": "array", "items": { "type": "object", "required": ["code", "detail", "constraint_ids"], "properties": {
+                "code": { "type": "string", "minLength": 1 }, "detail": { "type": "string", "minLength": 1 },
+                "constraint_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }, "additionalProperties": false } },
+            "solved_coordinates": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["entity_id", "x", "y"], "properties": {
+                "entity_id": { "type": "string", "minLength": 1 }, "x": { "type": "number" }, "y": { "type": "number" }
+            }, "additionalProperties": false } },
+            "schema_version": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "operation": { "const": "sketch_solve" },
+            "feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
 /// The static command registry, keyed by `CommandId`.
 pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = LazyLock::new(|| {
     let mut map = BTreeMap::new();
@@ -1319,6 +1391,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: component_request_schema(&["bundle_path"]),
             response_schema_version: "threeterm.command.component-state.response/1",
             response_schema: COMPONENT_STATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        SKETCH_SOLVE_COMMAND_ID,
+        CommandSchema {
+            id: SKETCH_SOLVE_COMMAND_ID,
+            name: "sketch-solve",
+            schema_version: "threeterm.command.sketch-solve/1",
+            request_schema_version: "threeterm.command.sketch-solve.request/1",
+            request_schema: SKETCH_SOLVE_REQUEST_SCHEMA.clone(),
+            response_schema_version: SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION,
+            response_schema: SKETCH_SOLVE_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1601,6 +1685,7 @@ pub const SHELL_COMMAND_ID: CommandId = CommandId("shell");
 pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
 pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
+pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
@@ -1620,6 +1705,7 @@ pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.respons
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
 pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/2";
+pub const SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.sketch-solve.response/1";
 pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/2";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.replay-verify.response/1";

@@ -15,6 +15,7 @@ use threeterm_domain::{
 };
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
+const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
 pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
@@ -772,14 +773,40 @@ impl Bundle {
                 history_events.push(event);
                 continue;
             }
-            let feature = Feature::new(&entry.feature_id, &entry.kind).map_err(|error| {
+            let sketch_payload = entry
+                .kind
+                .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
+                .map(|payload| {
+                    serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(
+                        |error| BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!("invalid sketch payload: {error}"),
+                        },
+                    )
+                })
+                .transpose()?;
+            let feature_kind = if sketch_payload.is_some() {
+                "sketch"
+            } else {
+                &entry.kind
+            };
+            let feature = Feature::new(&entry.feature_id, feature_kind).map_err(|error| {
                 BundleError::LogBrokenLink {
                     log_index: entry.log_index,
                     detail: error.to_string(),
                 }
             })?;
             feature_ids.push(feature.id.clone());
-            graph.add_feature(feature);
+            if let Some(payload) = sketch_payload {
+                graph.add_sketch(feature, payload).map_err(|detail| {
+                    BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail,
+                    }
+                })?;
+            } else {
+                graph.add_feature(feature);
+            }
             if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
                 let command: ComponentCommand =
                     serde_json::from_str(command).map_err(|error| BundleError::LogBrokenLink {
@@ -833,6 +860,23 @@ impl Bundle {
         kind: &str,
     ) -> Result<LoadedBundle, BundleError> {
         self.append_features(&[(feature_id, kind)])
+    }
+
+    /// Append a revision-bound sketch result as canonical transaction data.
+    /// The payload is encoded inside the authenticated log entry so old
+    /// bundles remain readable while replay reconstructs the sketch graph.
+    pub fn append_sketch_if_revision(
+        &self,
+        payload: &threeterm_domain::SketchPayload,
+        expected_revision: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        payload.validate().map_err(BundleError::Invalid)?;
+        let encoded = format!(
+            "{SKETCH_COMMAND_KIND_PREFIX}{}",
+            serde_json::to_string(payload)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?
+        );
+        self.append_feature_if_revision(&payload.feature_id, &encoded, expected_revision)
     }
 
     /// Append one versioned component command as a canonical transaction.
@@ -1178,9 +1222,30 @@ impl Bundle {
             }
         }
         for (feature_id, kind) in entries {
-            let feature = Feature::new(*feature_id, *kind)
+            let sketch_payload = kind
+                .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
+                .map(|payload| {
+                    serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(
+                        |error| BundleError::Invalid(format!("invalid sketch payload: {error}")),
+                    )
+                })
+                .transpose()?;
+            let feature_kind = if sketch_payload.is_some() {
+                "sketch"
+            } else {
+                *kind
+            };
+            let feature = Feature::new(*feature_id, feature_kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
-            if loaded.graph.add_feature(feature) {
+            let graph_changed = if let Some(payload) = sketch_payload {
+                loaded
+                    .graph
+                    .add_sketch(feature, payload)
+                    .map_err(BundleError::Invalid)?
+            } else {
+                loaded.graph.add_feature(feature)
+            };
+            if graph_changed {
                 if let Some(idempotency_key) = idempotency_key {
                     loaded.log.append_feature_with_idempotency(
                         feature_id,

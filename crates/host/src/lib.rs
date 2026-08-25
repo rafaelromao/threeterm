@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, FeatureGraph,
+    ComponentCommand, ComponentGraph, FeatureGraph, SketchConstraint as DomainSketchConstraint,
+    SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
+    SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
 };
 use threeterm_occt_worker::{
@@ -26,6 +28,7 @@ use threeterm_protocol::artifact::{
 };
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::supervisor::SupervisorOutcome;
+use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
 
 pub const BREP_SUBDIR: &str = "brep";
 
@@ -566,6 +569,12 @@ pub struct LoftCommitView {
     pub result: LoftResult,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchSolveCommitView {
+    pub snapshot: SnapshotView,
+    pub result: SketchSolveResponse,
+}
+
 #[derive(Debug)]
 pub enum HostError {
     BundlePathMissing {
@@ -880,6 +889,101 @@ impl From<WorkerError> for HostError {
     }
 }
 
+impl From<threeterm_slvs_worker::WorkerError> for HostError {
+    fn from(error: threeterm_slvs_worker::WorkerError) -> Self {
+        Self::WorkerFailure {
+            request_id: None,
+            detail: error.to_string(),
+        }
+    }
+}
+
+fn sketch_payload(
+    request: &SketchSolveRequest,
+    result: &SketchSolveResponse,
+) -> Result<SketchPayload, HostError> {
+    let entities = request
+        .entities
+        .iter()
+        .map(|entity| match entity {
+            threeterm_slvs_worker::SketchEntity::Point { id, x, y } => DomainSketchEntity::Point {
+                id: id.clone(),
+                x: *x,
+                y: *y,
+            },
+            threeterm_slvs_worker::SketchEntity::LineSegment { id, start, end } => {
+                DomainSketchEntity::LineSegment {
+                    id: id.clone(),
+                    start: start.clone(),
+                    end: end.clone(),
+                }
+            }
+            threeterm_slvs_worker::SketchEntity::Circle { id, center, radius } => {
+                DomainSketchEntity::Circle {
+                    id: id.clone(),
+                    center: center.clone(),
+                    radius: *radius,
+                }
+            }
+            threeterm_slvs_worker::SketchEntity::Arc {
+                id,
+                center,
+                start,
+                end,
+            } => DomainSketchEntity::Arc {
+                id: id.clone(),
+                center: center.clone(),
+                start: start.clone(),
+                end: end.clone(),
+            },
+        })
+        .collect();
+    let constraints = request
+        .constraints
+        .iter()
+        .map(|constraint| DomainSketchConstraint {
+            id: constraint.id.clone(),
+            kind: constraint.kind.clone(),
+            entities: constraint.entities.clone(),
+            value: constraint.value,
+        })
+        .collect();
+    let diagnostics = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| DomainSketchDiagnostic {
+            code: diagnostic.code.clone(),
+            detail: diagnostic.detail.clone(),
+            constraint_ids: diagnostic.constraint_ids.clone(),
+        })
+        .collect();
+    let solved_coordinates = result.solved_coordinates.as_ref().map(|coordinates| {
+        coordinates
+            .iter()
+            .map(|coordinate| DomainSolvedCoordinate {
+                entity_id: coordinate.entity_id.clone(),
+                x: coordinate.x,
+                y: coordinate.y,
+            })
+            .collect()
+    });
+    let payload = SketchPayload {
+        feature_id: request.feature_id.clone(),
+        entities,
+        constraints,
+        status: result.status.clone(),
+        dof: result.dof,
+        entity_ids: result.entity_ids.clone(),
+        related_constraint_ids: result.related_constraint_ids.clone(),
+        diagnostics,
+        solved_coordinates,
+    };
+    payload
+        .validate()
+        .map_err(|detail| HostError::Validation { detail })?;
+    Ok(payload)
+}
+
 #[derive(Debug, Default)]
 pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
@@ -1050,6 +1154,99 @@ impl Host {
     }
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn preview_sketch_solve(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let loaded = Bundle::at(root.as_ref()).open()?;
+        let source_revision = if request.source_revision.is_empty() {
+            loaded.revision_hash_hex().to_string()
+        } else {
+            request.source_revision.clone()
+        };
+        if source_revision != loaded.revision_hash_hex() {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "sketch solve source revision {source_revision:?} does not match current revision {:?}",
+                    loaded.revision_hash_hex()
+                ),
+            });
+        }
+        let request = request
+            .clone()
+            .with_source_revision(source_revision.clone());
+        request
+            .validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        SlvsWorker::locate()?
+            .with_revision_id(source_revision)
+            .solve(&request)
+            .map_err(HostError::from)
+    }
+
+    pub fn commit_sketch_solve(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+    ) -> Result<SketchSolveCommitView, HostError> {
+        let worker = SlvsWorker::locate()?;
+        self.commit_sketch_solve_with_worker(root, request, &worker)
+    }
+
+    pub fn commit_sketch_solve_with_worker(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+        worker: &SlvsWorker,
+    ) -> Result<SketchSolveCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let source_revision = if request.source_revision.is_empty() {
+            loaded.revision_hash_hex().to_string()
+        } else {
+            request.source_revision.clone()
+        };
+        if source_revision != loaded.revision_hash_hex() {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "sketch solve source revision {source_revision:?} does not match current revision {:?}",
+                    loaded.revision_hash_hex()
+                ),
+            });
+        }
+        let request = request
+            .clone()
+            .with_source_revision(source_revision.clone());
+        request
+            .validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        let result = worker
+            .clone()
+            .with_revision_id(source_revision.clone())
+            .solve(&request)
+            .map_err(HostError::from)?;
+        if !result.is_success() {
+            return Err(HostError::Validation {
+                detail: serde_json::to_string(&result).expect("sketch result serializes"),
+            });
+        }
+        let payload = sketch_payload(&request, &result)?;
+        let updated = match bundle.append_sketch_if_revision(&payload, &source_revision) {
+            Ok(updated) => updated,
+            Err(error) => {
+                if let Ok(reopened) = bundle.open() {
+                    self.current.replace(Some(reopened));
+                }
+                return Err(error.into());
+            }
+        };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(SketchSolveCommitView { snapshot, result })
     }
 
     pub fn save(

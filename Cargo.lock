@@ -477,8 +477,10 @@ dependencies = [
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-slvs-worker",
  "threeterm-theme",
  "threeterm-tui",
+ "threeterm-viewport",
 ]
 
 [[package]]
@@ -501,6 +503,7 @@ dependencies = [
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-slvs-worker",
  "threeterm-viewport",
 ]
 
@@ -561,6 +564,12 @@ dependencies = [
 [[package]]
 name = "threeterm-slvs-worker"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "threeterm-protocol",
+]
 
 [[package]]
 name = "threeterm-theme"

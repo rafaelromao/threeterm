@@ -1,4 +1,6 @@
-use threeterm_domain::FeatureGraph;
+use std::collections::BTreeMap;
+
+use threeterm_domain::{FeatureGraph, SketchEntity};
 
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 
@@ -62,13 +64,40 @@ impl ViewportScene {
         graph: &FeatureGraph,
         selected_id: Option<String>,
     ) -> Self {
-        let features = graph
+        let mut features: Vec<SceneFeature> = graph
             .features()
             .map(|feature| SceneFeature {
                 id: feature.id.as_str().to_string(),
                 kind: feature.kind,
             })
             .collect();
+        for feature in graph.features() {
+            let Some(sketch) = graph.sketch(feature.id.as_str()) else {
+                continue;
+            };
+            let Some(coordinates) = &sketch.solved_coordinates else {
+                continue;
+            };
+            let coordinates: BTreeMap<_, _> = coordinates
+                .iter()
+                .map(|coordinate| (coordinate.entity_id.as_str(), (coordinate.x, coordinate.y)))
+                .collect();
+            for entity in &sketch.entities {
+                let SketchEntity::LineSegment { id, start, end } = entity else {
+                    continue;
+                };
+                let (Some((x1, y1)), Some((x2, y2))) = (
+                    coordinates.get(start.as_str()),
+                    coordinates.get(end.as_str()),
+                ) else {
+                    continue;
+                };
+                features.push(SceneFeature {
+                    id: format!("{}/segment/{}", feature.id.as_str(), id),
+                    kind: format!("sketch-segment:{x1},{y1},{x2},{y2}"),
+                });
+            }
+        }
         Self {
             revision: revision.into(),
             features,
@@ -206,6 +235,9 @@ impl ProtocolNeutralViewport {
             .clamp(3.0, (min_dimension * 0.4).max(3.0)) as i32;
 
         for (index, feature) in scene.features.iter().enumerate() {
+            if feature.kind.starts_with("sketch-segment:") {
+                continue;
+            }
             let column = index % columns.max(1);
             let row = index / columns.max(1);
             let x = column as f64 - (columns.saturating_sub(1) as f64 / 2.0);
@@ -223,6 +255,24 @@ impl ProtocolNeutralViewport {
             let selected = scene.selected_id.as_deref() == Some(feature.id.as_str());
             let color = marker_color(feature, selected);
             draw_beveled_cuboid(&mut rgb, width, center_x, center_y, marker_size, color);
+        }
+
+        for feature in &scene.features {
+            let Some((x1, y1, x2, y2)) = sketch_segment_coordinates(&feature.kind) else {
+                continue;
+            };
+            let scale = f64::from(request.camera.zoom_percent) / 100.0 * min_dimension / 8.0;
+            let center_x = width as f64 / 2.0;
+            let center_y = height as f64 / 2.0;
+            draw_sketch_line(
+                &mut rgb,
+                width,
+                (center_x + x1 * scale).round() as i32,
+                (center_y - y1 * scale).round() as i32,
+                (center_x + x2 * scale).round() as i32,
+                (center_y - y2 * scale).round() as i32,
+                [105, 220, 190],
+            );
         }
 
         Ok(ViewportFrame {
@@ -280,6 +330,49 @@ fn marker_color(feature: &SceneFeature, selected: bool) -> [u8; 3] {
         80 + (((hash >> 8) & 0x7f) as u8),
         100 + (((hash >> 16) & 0x7f) as u8),
     ]
+}
+
+fn sketch_segment_coordinates(kind: &str) -> Option<(f64, f64, f64, f64)> {
+    let values = kind.strip_prefix("sketch-segment:")?;
+    let values: Vec<f64> = values
+        .split(',')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    (values.len() == 4).then(|| (values[0], values[1], values[2], values[3]))
+}
+
+fn draw_sketch_line(
+    rgb: &mut [u8],
+    width: usize,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: [u8; 3],
+) {
+    let mut x = x1;
+    let mut y = y1;
+    let dx = (x2 - x1).abs();
+    let sx = if x1 < x2 { 1 } else { -1 };
+    let dy = -(y2 - y1).abs();
+    let sy = if y1 < y2 { 1 } else { -1 };
+    let mut error = dx + dy;
+    loop {
+        set_pixel(rgb, width, x, y, color);
+        if x == x2 && y == y2 {
+            break;
+        }
+        let doubled = 2 * error;
+        if doubled >= dy {
+            error += dy;
+            x += sx;
+        }
+        if doubled <= dx {
+            error += dx;
+            y += sy;
+        }
+    }
 }
 
 fn stable_hash(first: &[u8], second: &[u8]) -> u64 {

@@ -250,7 +250,7 @@ pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                             },
                             "additionalProperties": false
                         },
-                        "same_order_of_magnitude": { "type": "boolean" }
+                        "same_order_of_magnitude": { "const": true }
                     },
                     "additionalProperties": false
                 }

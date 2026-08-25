@@ -40,6 +40,12 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
         .as_object()
         .expect("schema is an object after the outer match");
 
+    if let Some(expected) = schema_object.get("const")
+        && expected != value
+    {
+        return Err(format!("value {value} does not match const {expected}"));
+    }
+
     if let Some(expected_type) = schema_object.get("type") {
         let expected_type = expected_type
             .as_str()

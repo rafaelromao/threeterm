@@ -113,4 +113,10 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
     validate(&REHEARSE_RESPONSE_SCHEMA, &response).expect("response validates");
     validate(&REHEARSE_RUN_RESPONSE_SCHEMA, &response["runs"][0])
         .expect("per-run response validates");
+
+    response["comparisons"][0]["same_order_of_magnitude"] = serde_json::json!(false);
+    assert!(
+        validate(&REHEARSE_RESPONSE_SCHEMA, &response).is_err(),
+        "a successful response cannot publish a failed comparison"
+    );
 }

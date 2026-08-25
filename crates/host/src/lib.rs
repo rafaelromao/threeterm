@@ -2096,59 +2096,15 @@ impl Host {
         }
         let kind = bracket_kind(&draft.request);
         let draft_semantic_fingerprint = bracket_semantic_fingerprint(&draft);
-        if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
-            let matching_entry = committed.log.entries().iter().find(|entry| {
-                let payload = serde_json::from_str::<serde_json::Value>(
-                    entry.idempotency_payload.as_deref().unwrap_or_default(),
-                )
-                .ok();
-                let payload_source_revision = payload
-                    .as_ref()
-                    .and_then(|payload| payload["source_revision"].as_str());
-                let payload_result_sha256 = payload
-                    .as_ref()
-                    .and_then(|payload| payload["result_sha256"].as_str());
-                let canonical_result_sha256 =
-                    sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok();
-                let source_matches = payload_source_revision
-                    == Some(draft.source_revision.as_str())
-                    || (draft.source_revision == committed.revision_hash_hex()
-                        && entry.log_index + 1 == committed.log.entries().len());
-                entry.idempotency_key.as_deref() == Some(draft_id)
-                    && entry.feature_id == draft.bracket_id
-                    && entry.kind == kind
-                    && entry.log_index + 1 == committed.log.entries().len()
-                    && source_matches
-                    && payload_result_sha256 == canonical_result_sha256.as_deref()
-                    && payload
-                        .as_ref()
-                        .and_then(|payload| {
-                            payload["semantic_fingerprint"].as_str().map(str::to_owned)
-                        })
-                        .as_deref()
-                        == Some(draft_semantic_fingerprint.as_str())
-            });
-            if let Some(entry) = matching_entry {
-                let snapshot = SnapshotView::from(&committed);
-                let input_fingerprint = serde_json::from_str::<serde_json::Value>(
-                    entry.idempotency_payload.as_deref().unwrap_or_default(),
-                )
-                .ok()
-                .and_then(|payload| payload["input_fingerprint"].as_str().map(str::to_owned))
-                .unwrap_or_default();
-                self.current.replace(Some(committed));
-                self.bracket_drafts.borrow_mut().remove(&draft_key);
-                return Ok(BracketCommitView {
-                    snapshot,
-                    input_fingerprint,
-                });
-            }
-            return Err(HostError::DraftIdempotencyConflict {
-                draft_id: draft_id.to_string(),
-                source_revision: draft.source_revision.clone(),
-                current_revision: committed.revision_hash_hex().to_string(),
-                recovery: "use_new_idempotency_key",
-            });
+        if let Some(committed) = self.reconcile_bracket_idempotency(
+            &root,
+            &draft_key,
+            draft_id,
+            &draft,
+            &kind,
+            &draft_semantic_fingerprint,
+        )? {
+            return Ok(committed);
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
@@ -2205,81 +2161,17 @@ impl Host {
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                if !matches!(
+                if let Some(committed) = self.reconcile_bracket_promotion(
+                    &root,
+                    draft_id,
+                    &draft,
+                    &result.brep_sha256,
                     &error,
-                    HostError::Persistence(BundleError::PublicationUnknown(_))
-                ) && let Ok(committed) = Bundle::at(&root).open()
-                    && committed.log.entries().iter().any(|entry| {
-                        entry.idempotency_key.as_deref() == Some(draft_id)
-                            && entry.feature_id == draft.bracket_id
-                            && entry.kind == kind
-                            && entry.idempotency_payload.as_deref()
-                                == Some(idempotency_payload.as_str())
-                    })
-                    && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
-                        == Some(result.brep_sha256.clone())
-                {
-                    let snapshot = SnapshotView::from(&committed);
-                    self.current.replace(Some(committed));
-                    self.bracket_drafts.borrow_mut().remove(&draft_key);
-                    remove_preview_stage(&stage);
-                    return Ok(BracketCommitView {
-                        snapshot,
-                        input_fingerprint,
-                    });
-                }
-                if matches!(&error, HostError::Persistence(BundleError::Invalid(_)))
-                    && let Ok(current) = Bundle::at(&root).open()
-                {
-                    if let HostError::Persistence(BundleError::Invalid(detail)) = &error
-                        && detail.contains("idempotency key")
-                    {
-                        remove_preview_stage(&stage);
-                        return Err(HostError::DraftIdempotencyConflict {
-                            draft_id: draft_id.to_string(),
-                            source_revision: draft.source_revision.clone(),
-                            current_revision: current.revision_hash_hex().to_string(),
-                            recovery: "use_new_idempotency_key",
-                        });
-                    }
-                    if current.revision_hash_hex() != draft.source_revision {
-                        remove_preview_stage(&stage);
-                        return Err(HostError::DraftStale {
-                            draft_id: draft_id.to_string(),
-                            source_revision: draft.source_revision.clone(),
-                            current_revision: current.revision_hash_hex().to_string(),
-                            recovery: "discard_and_reopen",
-                        });
-                    }
-                    if sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
-                        != Some(draft.source_brep_sha256.clone())
-                    {
-                        remove_preview_stage(&stage);
-                        return Err(HostError::DraftSourceChanged {
-                            draft_id: draft_id.to_string(),
-                            source_feature_id: draft.bracket_id.clone(),
-                            source_revision: draft.source_revision.clone(),
-                            current_revision: current.revision_hash_hex().to_string(),
-                            recovery: "reload_source_and_reopen",
-                        });
-                    }
+                ) {
+                    return Ok(committed);
                 }
                 remove_preview_stage(&stage);
-                if matches!(
-                    &error,
-                    HostError::Persistence(BundleError::PublicationUnknown(_))
-                ) {
-                    return Err(HostError::DraftUnknownOutcome {
-                        draft_id: draft_id.to_string(),
-                        source_revision: draft.source_revision.clone(),
-                        current_revision: Bundle::at(&root)
-                            .open()
-                            .map(|current| current.revision_hash_hex().to_string())
-                            .unwrap_or_else(|_| draft.source_revision.clone()),
-                        recovery: "retry_same_idempotency_key",
-                    });
-                }
-                return Err(error);
+                return Err(self.classify_bracket_promotion_error(&root, draft_id, &draft, error));
             }
         };
         remove_preview_stage(&stage);
@@ -2288,6 +2180,169 @@ impl Host {
             snapshot,
             input_fingerprint,
         })
+    }
+
+    fn reconcile_bracket_idempotency(
+        &self,
+        root: &Path,
+        draft_key: &(PathBuf, String),
+        draft_id: &str,
+        draft: &BracketParameterDraft,
+        kind: &str,
+        semantic_fingerprint: &str,
+    ) -> Result<Option<BracketCommitView>, HostError> {
+        let Some(committed) = Bundle::at(root).find_idempotency_key(draft_id)? else {
+            return Ok(None);
+        };
+        let matching_entry = committed.log.entries().iter().find(|entry| {
+            let payload = serde_json::from_str::<serde_json::Value>(
+                entry.idempotency_payload.as_deref().unwrap_or_default(),
+            )
+            .ok();
+            let payload_source_revision = payload
+                .as_ref()
+                .and_then(|payload| payload["source_revision"].as_str());
+            let payload_result_sha256 = payload
+                .as_ref()
+                .and_then(|payload| payload["result_sha256"].as_str());
+            let canonical_result_sha256 =
+                sha256_path(&committed_brep_path(root, &draft.bracket_id)).ok();
+            let source_matches = payload_source_revision == Some(draft.source_revision.as_str())
+                || (draft.source_revision == committed.revision_hash_hex()
+                    && entry.log_index + 1 == committed.log.entries().len());
+            entry.idempotency_key.as_deref() == Some(draft_id)
+                && entry.feature_id == draft.bracket_id
+                && entry.kind == kind
+                && entry.log_index + 1 == committed.log.entries().len()
+                && source_matches
+                && payload_result_sha256 == canonical_result_sha256.as_deref()
+                && payload
+                    .as_ref()
+                    .and_then(|payload| payload["semantic_fingerprint"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(semantic_fingerprint)
+        });
+        let Some(entry) = matching_entry else {
+            return Err(HostError::DraftIdempotencyConflict {
+                draft_id: draft_id.to_string(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: committed.revision_hash_hex().to_string(),
+                recovery: "use_new_idempotency_key",
+            });
+        };
+        let input_fingerprint = serde_json::from_str::<serde_json::Value>(
+            entry.idempotency_payload.as_deref().unwrap_or_default(),
+        )
+        .ok()
+        .and_then(|payload| payload["input_fingerprint"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+        let snapshot = SnapshotView::from(&committed);
+        self.current.replace(Some(committed));
+        self.bracket_drafts.borrow_mut().remove(draft_key);
+        Ok(Some(BracketCommitView {
+            snapshot,
+            input_fingerprint,
+        }))
+    }
+
+    fn reconcile_bracket_promotion(
+        &self,
+        root: &Path,
+        draft_id: &str,
+        draft: &BracketParameterDraft,
+        result_sha256: &str,
+        error: &HostError,
+    ) -> Option<BracketCommitView> {
+        if matches!(
+            error,
+            HostError::Persistence(BundleError::PublicationUnknown(_))
+        ) {
+            return None;
+        }
+        let draft_key = draft_map_key(root, draft_id);
+        let kind = bracket_kind(&draft.request);
+        let input_fingerprint = bracket_input_fingerprint(draft, result_sha256);
+        let idempotency_payload =
+            bracket_idempotency_payload(draft, result_sha256, &input_fingerprint);
+        let stage = preview_stage_path(root, &format!("{draft_id}-commit"));
+        let committed = Bundle::at(root).open().ok()?;
+        let published = committed.log.entries().iter().any(|entry| {
+            entry.idempotency_key.as_deref() == Some(draft_id)
+                && entry.feature_id == draft.bracket_id
+                && entry.kind == kind
+                && entry.idempotency_payload.as_deref() == Some(idempotency_payload.as_str())
+        });
+        if !published
+            || sha256_path(&committed_brep_path(root, &draft.bracket_id)).ok()
+                != Some(result_sha256.to_string())
+        {
+            return None;
+        }
+        let snapshot = SnapshotView::from(&committed);
+        self.current.replace(Some(committed));
+        self.bracket_drafts.borrow_mut().remove(&draft_key);
+        remove_preview_stage(&stage);
+        Some(BracketCommitView {
+            snapshot,
+            input_fingerprint,
+        })
+    }
+
+    fn classify_bracket_promotion_error(
+        &self,
+        root: &Path,
+        draft_id: &str,
+        draft: &BracketParameterDraft,
+        error: HostError,
+    ) -> HostError {
+        if matches!(&error, HostError::Persistence(BundleError::Invalid(_)))
+            && let Ok(current) = Bundle::at(root).open()
+        {
+            if let HostError::Persistence(BundleError::Invalid(detail)) = &error
+                && detail.contains("idempotency key")
+            {
+                return HostError::DraftIdempotencyConflict {
+                    draft_id: draft_id.to_string(),
+                    source_revision: draft.source_revision.clone(),
+                    current_revision: current.revision_hash_hex().to_string(),
+                    recovery: "use_new_idempotency_key",
+                };
+            }
+            if current.revision_hash_hex() != draft.source_revision {
+                return HostError::DraftStale {
+                    draft_id: draft_id.to_string(),
+                    source_revision: draft.source_revision.clone(),
+                    current_revision: current.revision_hash_hex().to_string(),
+                    recovery: "discard_and_reopen",
+                };
+            }
+            if sha256_path(&committed_brep_path(root, &draft.bracket_id)).ok()
+                != Some(draft.source_brep_sha256.clone())
+            {
+                return HostError::DraftSourceChanged {
+                    draft_id: draft_id.to_string(),
+                    source_feature_id: draft.bracket_id.clone(),
+                    source_revision: draft.source_revision.clone(),
+                    current_revision: current.revision_hash_hex().to_string(),
+                    recovery: "reload_source_and_reopen",
+                };
+            }
+        }
+        if matches!(
+            &error,
+            HostError::Persistence(BundleError::PublicationUnknown(_))
+        ) {
+            return HostError::DraftUnknownOutcome {
+                draft_id: draft_id.to_string(),
+                source_revision: draft.source_revision.clone(),
+                current_revision: Bundle::at(root)
+                    .open()
+                    .map(|current| current.revision_hash_hex().to_string())
+                    .unwrap_or_else(|_| draft.source_revision.clone()),
+                recovery: "retry_same_idempotency_key",
+            };
+        }
+        error
     }
 
     pub fn discard_bracket_parameter_draft(

@@ -128,6 +128,42 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
             .expect("create revision entry")["named_revision_names"],
         serde_json::json!(["before-second"])
     );
+    let manifest_before_rejection = fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before_rejection = fs::read(root.join("transactions.log")).expect("log");
+    for (name, code) in [
+        ("", "unknown_command"),
+        ("before-second", "invalid_request"),
+    ] {
+        let diagnostic = run_failed(
+            bin,
+            &[
+                "--machine",
+                "create-revision",
+                root.to_str().expect("utf-8 path"),
+                "--name",
+                name,
+            ],
+        );
+        assert_eq!(diagnostic["code"], code);
+        if code == "unknown_command" {
+            assert!(
+                diagnostic["arg"]
+                    .as_str()
+                    .is_some_and(|arg| arg.contains("property \"name\""))
+            );
+        } else {
+            assert!(diagnostic.to_string().contains("named revision"));
+        }
+        assert_eq!(
+            fs::read(root.join("manifest.json")).expect("manifest"),
+            manifest_before_rejection
+        );
+        assert_eq!(
+            fs::read(root.join("transactions.log")).expect("log"),
+            log_before_rejection
+        );
+        assert_eq!(timeline(bin, &root, "first-base"), created_timeline);
+    }
     bracket(bin, &root, "second");
     run(
         bin,

@@ -301,6 +301,9 @@ fn named_revision_creation_rejects_empty_and_duplicate_names_without_publication
     host.create_named_revision(&root, "before-edit")
         .expect("named revision succeeds");
     let current = host.current();
+    let reloaded = Bundle::at(&root).open().expect("bundle opens");
+    let timeline = host.timeline(&root, "l-base").expect("timeline opens");
+    let generation = generation_snapshot(&root);
     let manifest = std::fs::read(root.join("manifest.json")).expect("manifest reads");
     let log = std::fs::read(root.join("transactions.log")).expect("log reads");
 
@@ -318,6 +321,12 @@ fn named_revision_creation_rejects_empty_and_duplicate_names_without_publication
             log
         );
         assert_eq!(host.current(), current);
+        assert_eq!(Bundle::at(&root).open().expect("bundle reopens"), reloaded);
+        assert_eq!(
+            host.timeline(&root, "l-base").expect("timeline reopens"),
+            timeline
+        );
+        assert_eq!(generation_snapshot(&root), generation);
     }
 
     assert_eq!(

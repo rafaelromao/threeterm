@@ -480,6 +480,7 @@ dependencies = [
  "threeterm-slvs-worker",
  "threeterm-theme",
  "threeterm-tui",
+ "threeterm-viewport",
 ]
 
 [[package]]

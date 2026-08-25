@@ -7,15 +7,18 @@ use threeterm_domain::{
 };
 use threeterm_persistence::{Bundle, write_fresh};
 
-fn root() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("threeterm-sketch-replay-{}", std::process::id()));
+fn root(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "threeterm-sketch-replay-{label}-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&path);
     path
 }
 
 #[test]
 fn failed_sketch_diagnostics_are_canonical_without_partial_coordinates() {
-    let path = root();
+    let path = root("diagnostic");
     let bundle = Bundle::at(&path);
     write_fresh(&path, ProjectGeneration::with_id("sketch-diagnostic")).expect("fresh bundle");
     let payload = SketchPayload {
@@ -58,7 +61,7 @@ fn failed_sketch_diagnostics_are_canonical_without_partial_coordinates() {
 
 #[test]
 fn solved_sketch_is_canonical_and_replays_after_reload() {
-    let path = root();
+    let path = root("solved");
     let bundle = Bundle::at(&path);
     write_fresh(&path, ProjectGeneration::with_id("sketch")).expect("fresh bundle");
     let payload = SketchPayload {

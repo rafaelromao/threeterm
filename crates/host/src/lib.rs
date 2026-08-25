@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, FeatureGraph, SketchConstraint as DomainSketchConstraint,
-    SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
-    SolvedCoordinate as DomainSolvedCoordinate,
+    ComponentCommand, ComponentGraph, FeatureGraph, FitDimension,
+    SketchConstraint as DomainSketchConstraint, SketchDiagnostic as DomainSketchDiagnostic,
+    SketchEntity as DomainSketchEntity, SketchPayload, SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
 };
 use threeterm_occt_worker::{
@@ -350,6 +350,12 @@ pub struct SnapshotView {
     pub feature_graph_hash: String,
     pub revision_hash: String,
     pub recovered_from_previous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FitDimensionCommitView {
+    pub snapshot: SnapshotView,
+    pub fit: FitDimension,
 }
 
 impl From<&LoadedBundle> for SnapshotView {
@@ -1044,6 +1050,39 @@ fn sketch_payload(
     Ok(payload)
 }
 
+fn sketch_dimension_value(
+    graph: &FeatureGraph,
+    feature_id: &str,
+    dimension_id: &str,
+) -> Result<f64, HostError> {
+    let sketch = graph
+        .sketch(feature_id)
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("fit dimension sketch is missing: {feature_id}"),
+        })?;
+    let constraint = sketch
+        .constraints
+        .iter()
+        .find(|constraint| constraint.id == dimension_id)
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("fit dimension constraint is missing: {feature_id}/{dimension_id}"),
+        })?;
+    if constraint.kind != "distance" {
+        return Err(HostError::Validation {
+            detail: format!("fit dimension constraint is not a distance: {dimension_id}"),
+        });
+    }
+    let value = constraint.value.ok_or_else(|| HostError::Validation {
+        detail: format!("fit dimension constraint has no value: {dimension_id}"),
+    })?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(HostError::Validation {
+            detail: format!("fit dimension constraint value is invalid: {dimension_id}"),
+        });
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Default)]
 pub struct Host {
     current: RefCell<Option<LoadedBundle>>,
@@ -1366,6 +1405,69 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    /// Commit a fit relationship using dimensions already present in the
+    /// canonical sketches. The expected revision is checked again by
+    /// persistence under its write lock before the relation is published.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_dimension(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        source_feature_id: &str,
+        target_feature_id: &str,
+        source_dimension_id: &str,
+        target_dimension_id: &str,
+        dimension: &str,
+        clearance: f64,
+    ) -> Result<FitDimensionCommitView, HostError> {
+        if !clearance.is_finite() || clearance <= 0.0 {
+            return Err(HostError::Validation {
+                detail: "fit clearance must be strictly positive and finite".to_string(),
+            });
+        }
+        let bundle = Bundle::at(root.as_ref());
+        let loaded = bundle.open()?;
+        if loaded.revision_hash_hex() != expected_revision {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "fit dimension source revision {expected_revision:?} does not match current revision {:?}",
+                    loaded.revision_hash_hex()
+                ),
+            });
+        }
+        let source_value =
+            sketch_dimension_value(&loaded.graph, source_feature_id, source_dimension_id)?;
+        let target_value =
+            sketch_dimension_value(&loaded.graph, target_feature_id, target_dimension_id)?;
+        let fit = FitDimension {
+            id: format!(
+                "fit:{source_feature_id}:{target_feature_id}:{dimension}:{source_dimension_id}:{target_dimension_id}"
+            ),
+            source_feature_id: source_feature_id.to_string(),
+            target_feature_id: target_feature_id.to_string(),
+            source_dimension_id: source_dimension_id.to_string(),
+            target_dimension_id: target_dimension_id.to_string(),
+            dimension: dimension.to_string(),
+            source_value,
+            target_value,
+            clearance,
+        };
+        fit.validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        let updated = match bundle.append_fit_dimension_if_revision(&fit, expected_revision) {
+            Ok(updated) => updated,
+            Err(error) => {
+                if let Ok(reopened) = bundle.open() {
+                    self.current.replace(Some(reopened));
+                }
+                return Err(error.into());
+            }
+        };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(FitDimensionCommitView { snapshot, fit })
     }
 
     /// Persist an L-bracket into `root` by appending the two plate features

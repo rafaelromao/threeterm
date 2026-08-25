@@ -70,6 +70,8 @@ pub struct FeatureGraph {
     features: BTreeMap<FeatureId, String>,
     #[serde(default)]
     sketches: BTreeMap<FeatureId, SketchPayload>,
+    #[serde(default)]
+    fit_dimensions: BTreeMap<String, FitDimension>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,6 +282,53 @@ impl SketchPayload {
             }
         } else if self.solved_coordinates.is_some() {
             return Err("failed sketches must not carry solved coordinates".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FitDimension {
+    pub id: String,
+    pub source_feature_id: String,
+    pub target_feature_id: String,
+    pub source_dimension_id: String,
+    pub target_dimension_id: String,
+    pub dimension: String,
+    pub source_value: f64,
+    pub target_value: f64,
+    pub clearance: f64,
+}
+
+impl Eq for FitDimension {}
+
+impl FitDimension {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty()
+            || self.source_feature_id.is_empty()
+            || self.target_feature_id.is_empty()
+            || self.source_dimension_id.is_empty()
+            || self.target_dimension_id.is_empty()
+            || self.dimension.is_empty()
+        {
+            return Err("fit dimension IDs and dimension must not be empty".to_string());
+        }
+        if self.source_feature_id == self.target_feature_id {
+            return Err("fit dimension source and target must differ".to_string());
+        }
+        if ![self.source_value, self.target_value, self.clearance]
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        {
+            return Err("fit dimension values must be strictly positive and finite".to_string());
+        }
+        let expected_target = self.source_value - 2.0 * self.clearance;
+        if expected_target <= 0.0 || (expected_target - self.target_value).abs() > 1e-9 {
+            return Err(
+                "fit dimension target must equal source dimension minus twice the clearance"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -610,12 +659,34 @@ impl FeatureGraph {
             .find_map(|(id, sketch)| (id.as_str() == feature_id).then_some(sketch))
     }
 
+    pub fn add_fit_dimension(&mut self, fit: FitDimension) -> Result<bool, String> {
+        fit.validate()?;
+        match self.fit_dimensions.get(&fit.id) {
+            Some(existing) if existing == &fit => Ok(false),
+            Some(_) => Err("fit dimension ID already exists with different values".to_string()),
+            None => {
+                self.fit_dimensions.insert(fit.id.clone(), fit);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn fit_dimensions(&self) -> impl Iterator<Item = &FitDimension> {
+        self.fit_dimensions.values()
+    }
+
     pub fn graph_hash_hex(&self) -> String {
         let mut bytes = serde_json::to_vec(&self.features).expect("feature graph serializes");
         if !self.sketches.is_empty() {
             bytes.push(b'\n');
             bytes.extend_from_slice(
                 &serde_json::to_vec(&self.sketches).expect("sketch graph serializes"),
+            );
+        }
+        if !self.fit_dimensions.is_empty() {
+            bytes.push(b'\n');
+            bytes.extend_from_slice(
+                &serde_json::to_vec(&self.fit_dimensions).expect("fit dimensions serialize"),
             );
         }
         hash_hex(&bytes)
@@ -749,6 +820,32 @@ mod tests {
             one_feature.revision_hash_hex(&"0".repeat(64))
         );
         assert_eq!(empty_revision.len(), 64);
+    }
+
+    #[test]
+    fn fit_dimension_is_validated_and_included_in_graph_identity() {
+        let fit = FitDimension {
+            id: "fit:box:lid:width".to_string(),
+            source_feature_id: "box-sketch".to_string(),
+            target_feature_id: "lid-sketch".to_string(),
+            source_dimension_id: "box-width".to_string(),
+            target_dimension_id: "lid-width".to_string(),
+            dimension: "width".to_string(),
+            source_value: 10.0,
+            target_value: 9.6,
+            clearance: 0.2,
+        };
+        let mut graph = FeatureGraph::empty();
+        let before = graph.graph_hash_hex();
+        assert!(graph.add_fit_dimension(fit.clone()).expect("fit is valid"));
+        assert_eq!(graph.fit_dimensions().collect::<Vec<_>>(), vec![&fit]);
+        assert_ne!(graph.graph_hash_hex(), before);
+
+        let invalid = FitDimension {
+            target_value: 9.5,
+            ..fit
+        };
+        assert!(graph.add_fit_dimension(invalid).is_err());
     }
 
     #[test]

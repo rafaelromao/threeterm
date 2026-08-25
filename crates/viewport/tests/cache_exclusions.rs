@@ -23,6 +23,7 @@ fn scene(revision: &str) -> ViewportScene {
         }],
         selected_id: None,
         layer1_references: vec!["derived-abc".to_string()],
+        fit_relationships: vec![],
     }
 }
 
@@ -538,6 +539,7 @@ fn layer2_failures_preserve_state_with_structured_diagnostics() {
         features: vec![],
         selected_id: None,
         layer1_references: vec![],
+        fit_relationships: vec![],
     };
     let mut fresh_cache = ViewportDisplayCache::new();
     let err4 = fresh_cache

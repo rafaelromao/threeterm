@@ -9,7 +9,9 @@
 
 use std::time::Duration;
 
-use threeterm_occt_worker::{ExtrudeRequest, OcctDiagnostic, OcctWorker, WorkerError};
+use threeterm_occt_worker::{
+    BooleanPatternRequest, ExtrudeRequest, OcctDiagnostic, OcctWorker, WorkerError,
+};
 
 const PROTOCOL_SCHEMA: &str = "threeterm.protocol/1";
 
@@ -98,6 +100,22 @@ fn sample_extrude_request_at(output_dir: impl Into<std::path::PathBuf>) -> Extru
     ExtrudeRequest::new("req-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 2.0)
         .with_output_path(output_dir, "out.brep")
         .with_feature_id("box-1")
+}
+
+fn sample_boolean_pattern_request_at(
+    output_dir: impl Into<std::path::PathBuf>,
+) -> BooleanPatternRequest {
+    BooleanPatternRequest::new(
+        "req-1",
+        "/tmp/base.brep",
+        [6.0, 6.0, -1.0],
+        [6.0, 6.0],
+        18,
+        18,
+        2.0,
+    )
+    .with_output_path(output_dir, "pattern.brep")
+    .with_feature_id("pattern-1")
 }
 
 fn assert_id_bound_malformed(error: WorkerError, detail_fragment: &str) {
@@ -341,11 +359,54 @@ fn typed_extrude_with_cancel_acknowledges_cooperative_worker() {
     let error = retry_fixture(|| worker.extrude_with_cancel(&sample_extrude_request(), &cancel))
         .expect_err("cancellable extrude must surface the cancellation");
     match error {
-        WorkerError::Cancelled { request_id, .. } => {
+        WorkerError::Cancelled {
+            request_id, reason, ..
+        } => {
             assert_eq!(request_id, "req-1");
+            assert_eq!(reason, "cancelled by host");
         }
         other => panic!("expected Cancelled; got {other:?}"),
     }
+}
+
+#[test]
+fn typed_boolean_pattern_preserves_structured_cooperative_acknowledgement() {
+    let dir = FixtureDir::new("boolean-pattern-cancel-ack");
+    let worker = dir.worker_script(
+        "worker.sh",
+        "#!/bin/sh\n\
+         printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
+         read line\n\
+         printf '%s\\n' '{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"stage\":\"boolean_pattern:1/324\",\"percent\":1}'\n\
+         read cancel_line\n\
+         printf '%s\\n' '{\"kind\":\"cancelled\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"req-1\",\"reason\":\"cancelled after observed progress\"}'\n",
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut observed = false;
+    let mut on_progress = |progress: &threeterm_protocol::supervisor::Progress| {
+        if progress.stage == "boolean_pattern:1/324" {
+            observed = true;
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let error = retry_fixture(|| {
+        worker.boolean_pattern_with_cancel_and_progress(
+            &sample_boolean_pattern_request_at(&dir.root),
+            &cancel,
+            &mut on_progress,
+        )
+    })
+    .expect_err("boolean pattern cancellation must surface");
+    match error {
+        WorkerError::Cancelled {
+            request_id, reason, ..
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(reason, "cancelled after observed progress");
+        }
+        other => panic!("expected structured cancellation, got {other:?}"),
+    }
+    assert!(observed);
 }
 
 #[test]

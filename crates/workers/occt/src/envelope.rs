@@ -50,6 +50,7 @@ pub enum Operation {
     Shell,
     Draft,
     Loft,
+    BooleanPattern,
 }
 
 impl Operation {
@@ -67,6 +68,7 @@ impl Operation {
             Self::Shell => "shell",
             Self::Draft => "draft",
             Self::Loft => "loft",
+            Self::BooleanPattern => "boolean_pattern",
         }
     }
 }
@@ -1629,6 +1631,131 @@ impl LoftResult {
     }
 }
 
+/// Sequential Boolean-cut pattern request. The worker creates one
+/// through-cylinder per grid position and cuts it from the input BREP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanPatternRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub origin: [f64; 3],
+    pub spacing: [f64; 2],
+    pub columns: u32,
+    pub rows: u32,
+    pub diameter: f64,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BooleanPatternRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        origin: [f64; 3],
+        spacing: [f64; 2],
+        columns: u32,
+        rows: u32,
+        diameter: f64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::BooleanPattern,
+            base_path: base_path.into(),
+            origin,
+            spacing,
+            columns,
+            rows,
+            diameter,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::BooleanPattern {
+            return Err(format!(
+                "operation must be boolean_pattern for BooleanPatternRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self.origin.iter().all(|component| component.is_finite()) {
+            return Err("boolean_pattern origin components must be finite".to_string());
+        }
+        if self.columns == 0 || self.rows == 0 {
+            return Err("boolean_pattern rows and columns must be positive".to_string());
+        }
+        if !self
+            .spacing
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        {
+            return Err("boolean_pattern spacing must be positive finite values".to_string());
+        }
+        if !self.diameter.is_finite() || self.diameter <= 0.0 {
+            return Err("boolean_pattern diameter must be positive and finite".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanPatternResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+    pub cut_count: u32,
+}
+
+impl BooleanPatternResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1650,6 +1777,26 @@ mod tests {
             .with_feature_id("fuse-1");
         request.schema_version = SCHEMA_VERSION.to_string();
         request.validate().expect("boolean-fuse envelope is valid");
+    }
+
+    #[test]
+    fn validate_accepts_a_324_cut_boolean_pattern() {
+        let request = BooleanPatternRequest::new(
+            "req-1",
+            "/tmp/base.brep",
+            [6.0, 6.0, -1.0],
+            [6.0, 6.0],
+            18,
+            18,
+            2.0,
+        )
+        .with_output_path("/tmp", "pattern.brep")
+        .with_feature_id("pattern-1");
+
+        request
+            .validate()
+            .expect("boolean pattern envelope is valid");
+        assert_eq!(request.columns * request.rows, 324);
     }
 
     #[test]

@@ -151,6 +151,7 @@ fn cooperative_cancellation_retains_last_progress_and_stderr() {
     match err {
         WorkerError::Cancelled {
             request_id: got,
+            reason,
             last_progress,
             elapsed,
             stderr_tail,
@@ -158,6 +159,7 @@ fn cooperative_cancellation_retains_last_progress_and_stderr() {
             exit_code,
         } => {
             assert_eq!(got, request_id);
+            assert_eq!(reason, "cancelled by host");
             let prog = last_progress.expect("last_progress retained on cooperative cancel");
             assert_eq!(prog.stage, "tessellating");
             assert_eq!(prog.percent, 77);

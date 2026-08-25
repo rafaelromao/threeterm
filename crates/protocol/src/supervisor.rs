@@ -13,6 +13,7 @@
 //! Derived Result so no partial artifact can compete with the
 //! authoritative Revision Snapshot.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,42 @@ pub struct Request {
     pub command_id: String,
     pub args: Value,
     pub revision_id: String,
+}
+
+/// Operation-specific cooperative cancellation grace periods.
+///
+/// The supervisor's request deadline remains independent from this policy:
+/// the policy only controls how long a worker gets to acknowledge a cancel
+/// after the host sends it. Unknown operations use `default`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationGracePolicy {
+    default: Duration,
+    operations: BTreeMap<String, Duration>,
+}
+
+impl CancellationGracePolicy {
+    pub fn new(default: Duration) -> Self {
+        Self {
+            default,
+            operations: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_operation(mut self, command_id: impl Into<String>, grace: Duration) -> Self {
+        self.operations.insert(command_id.into(), grace);
+        self
+    }
+
+    pub fn default_grace(&self) -> Duration {
+        self.default
+    }
+
+    pub fn for_operation(&self, command_id: &str) -> Duration {
+        self.operations
+            .get(command_id)
+            .copied()
+            .unwrap_or(self.default)
+    }
 }
 
 /// Outcome of a single `Supervisor::request` / `Supervisor::cancel` invocation.
@@ -80,6 +117,9 @@ pub struct StagedArtifact {
 pub struct TerminationRecord {
     pub request_id: String,
     pub stage: String,
+    /// Worker-provided reason when the terminal transition was a
+    /// cooperative cancellation acknowledgement.
+    pub cancel_reason: Option<String>,
     pub elapsed: Duration,
     pub last_progress: Option<Progress>,
     /// Most recent `Stage::write` failure (`HashMismatch`,
@@ -155,7 +195,8 @@ pub struct Progress {
 /// the production wiring spawns a fresh disposable worker per
 /// `Supervisor` (closed issue #49: one disposable worker per request).
 pub struct Supervisor {
-    grace: Duration,
+    request_grace: Duration,
+    cancellation_grace: CancellationGracePolicy,
     host: Box<dyn WorkerHost>,
     stage: Option<Stage>,
     expected_worker_id: Option<String>,
@@ -172,7 +213,8 @@ impl fmt::Debug for Supervisor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Supervisor")
-            .field("grace", &self.grace)
+            .field("request_grace", &self.request_grace)
+            .field("cancellation_grace", &self.cancellation_grace)
             .field(
                 "stage",
                 &self.stage.as_ref().map(|stage| stage.root().to_path_buf()),
@@ -185,7 +227,8 @@ impl fmt::Debug for Supervisor {
 impl Supervisor {
     pub fn new(grace: Duration, host: Box<dyn WorkerHost>, stage: Option<Stage>) -> Self {
         Self {
-            grace,
+            request_grace: grace,
+            cancellation_grace: CancellationGracePolicy::new(grace),
             host,
             stage,
             expected_worker_id: None,
@@ -196,7 +239,18 @@ impl Supervisor {
 
     /// Returns the configured grace period.
     pub fn grace(&self) -> Duration {
-        self.grace
+        self.request_grace
+    }
+
+    /// Configure cooperative cancellation grace independently from the
+    /// request deadline.
+    pub fn with_cancellation_grace_policy(mut self, policy: CancellationGracePolicy) -> Self {
+        self.cancellation_grace = policy;
+        self
+    }
+
+    pub fn cancellation_grace_for(&self, command_id: &str) -> Duration {
+        self.cancellation_grace.for_operation(command_id)
     }
 
     /// Require the handshake to identify the configured worker before a
@@ -216,7 +270,13 @@ impl Supervisor {
     /// method does not re-consume it.
     pub fn cancel(&mut self, request_id: &str, reason: &str) -> SupervisorOutcome {
         let started = Instant::now();
-        self.cancel_with_deadline(request_id, reason, started, started + self.grace, None)
+        self.cancel_with_deadline(
+            request_id,
+            reason,
+            started,
+            started + self.cancellation_grace.default_grace(),
+            None,
+        )
     }
 
     fn cancel_with_deadline(
@@ -438,12 +498,26 @@ impl Supervisor {
         request: Request,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> SupervisorOutcome {
+        let mut ignore_progress = |_progress: &Progress| {};
+        self.request_with_cancel_and_progress(request, cancel, &mut ignore_progress)
+    }
+
+    /// Request lifecycle with cooperative cancellation and a progress
+    /// observer. The observer runs only after a request-bound progress
+    /// envelope has been accepted, making it a safe seam for a host to
+    /// cancel at a completed worker boundary.
+    pub fn request_with_cancel_and_progress(
+        &mut self,
+        request: Request,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> SupervisorOutcome {
         let started = Instant::now();
 
         // Phase 1: consume one WorkerReady handshake. The worker must
         // advertise the canonical schema_version or the host fails
         // closed before sending any `Request`.
-        let deadline = started + self.grace;
+        let deadline = started + self.request_grace;
         if let Some(outcome) = self.consume_worker_ready(&request.request_id, started, deadline) {
             return outcome;
         }
@@ -485,17 +559,24 @@ impl Supervisor {
             // (send `Cancel`, await `Cancelled` inside the grace period,
             // then force-terminate if the worker does not acknowledge).
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                let cancel_deadline = deadline.min(
+                    Instant::now() + self.cancellation_grace.for_operation(&request.command_id),
+                );
                 return self.cancel_with_deadline(
                     &request.request_id,
                     "cancelled by host",
                     started,
-                    deadline,
+                    cancel_deadline,
                     last_progress.take(),
                 );
             }
-            if let Some(outcome) =
-                self.receive_request_envelope(&request, started, deadline, &mut last_progress)
-            {
+            if let Some(outcome) = self.receive_request_envelope(
+                &request,
+                started,
+                deadline,
+                &mut last_progress,
+                on_progress,
+            ) {
                 return outcome;
             }
 
@@ -521,6 +602,7 @@ impl Supervisor {
         started: Instant,
         deadline: Instant,
         last_progress: &mut Option<Progress>,
+        on_progress: &mut dyn FnMut(&Progress),
     ) -> Option<SupervisorOutcome> {
         match self.host.recv(deadline) {
             Ok(envelope) if envelope.schema_version() != crate::schema_version() => {
@@ -563,7 +645,9 @@ impl Supervisor {
                         }),
                     ));
                 }
-                *last_progress = Some(Progress { stage, percent });
+                let progress = Progress { stage, percent };
+                on_progress(&progress);
+                *last_progress = Some(progress);
                 None
             }
             Ok(Envelope::Artifact {
@@ -988,6 +1072,7 @@ impl Supervisor {
         TerminationRecord {
             request_id,
             stage,
+            cancel_reason: None,
             elapsed: started.elapsed(),
             last_progress,
             last_artifact_error,
@@ -1100,6 +1185,27 @@ mod tests {
             args: serde_json::json!({}),
             revision_id: "rev-0".to_string(),
         }
+    }
+
+    #[test]
+    fn cancellation_grace_policy_selects_the_active_operation() {
+        let policy = CancellationGracePolicy::new(Duration::from_millis(250))
+            .with_operation("boolean_pattern", Duration::from_millis(75));
+        let supervisor = Supervisor::new(
+            Duration::from_secs(10),
+            Box::new(ScriptedWorker::new(vec![])),
+            None,
+        )
+        .with_cancellation_grace_policy(policy);
+
+        assert_eq!(
+            supervisor.cancellation_grace_for("boolean_pattern"),
+            Duration::from_millis(75)
+        );
+        assert_eq!(
+            supervisor.cancellation_grace_for("extrude"),
+            Duration::from_millis(250)
+        );
     }
 
     fn timed_out_transport() -> (

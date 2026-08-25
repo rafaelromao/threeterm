@@ -14,9 +14,9 @@ use std::{
 };
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, ExtrudeRequest, FilletRequest,
-    HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, OcctDiagnostic, OcctWorker,
-    Operation, RevolveRequest, WorkerError, schema_version,
+    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
+    ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
+    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -1034,6 +1034,123 @@ fn circular_pattern_request(
         4,
     )
     .with_feature_id(feature_id.to_string())
+}
+
+fn boolean_pattern_request(
+    label: &str,
+    feature_id: &str,
+    base_path: &std::path::Path,
+) -> BooleanPatternRequest {
+    BooleanPatternRequest::new(
+        unique_request_id(label),
+        base_path,
+        [6.0, 6.0, -1.0],
+        [6.0, 6.0],
+        18,
+        18,
+        2.0,
+    )
+    .with_feature_id(feature_id.to_string())
+}
+
+#[test]
+fn boolean_pattern_cuts_324_holes_with_real_occt() {
+    let Some(worker) = locate_worker() else {
+        eprintln!("boolean_pattern_cuts_324_holes_with_real_occt: skipped; OCCT is unavailable");
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-boolean-pattern-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base_request = ExtrudeRequest::new(
+        unique_request_id("boolean-pattern-base"),
+        vec![(0.0, 0.0), (120.0, 0.0), (120.0, 120.0), (0.0, 120.0)],
+        20.0,
+    )
+    .with_output_path(&temp, "base.brep")
+    .with_feature_id("boolean-pattern-base-1");
+    let base = worker.extrude(&base_request).expect("base extrude");
+    let request = boolean_pattern_request("boolean-pattern", "boolean-pattern-1", &base.brep_path)
+        .with_output_path(&temp, "pattern.brep");
+
+    let result = worker
+        .boolean_pattern(&request)
+        .expect("boolean pattern returns");
+    assert_eq!(result.status, "ok", "boolean pattern returned {result:?}");
+    assert_eq!(result.operation, Operation::BooleanPattern);
+    assert_eq!(result.cut_count, 324);
+    assert!(result.brep_path.is_file());
+    assert_eq!(
+        result.brep_bytes,
+        std::fs::metadata(&result.brep_path).unwrap().len() as usize
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn boolean_pattern_acknowledges_cooperative_cancel_after_progress() {
+    let Some(worker) = locate_worker() else {
+        eprintln!(
+            "boolean_pattern_acknowledges_cooperative_cancel_after_progress: skipped; OCCT is unavailable"
+        );
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-boolean-pattern-cancel-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+    let base_request = ExtrudeRequest::new(
+        unique_request_id("boolean-pattern-cancel-base"),
+        vec![(0.0, 0.0), (120.0, 0.0), (120.0, 120.0), (0.0, 120.0)],
+        20.0,
+    )
+    .with_output_path(&temp, "base.brep")
+    .with_feature_id("boolean-pattern-cancel-base-1");
+    let base = worker.extrude(&base_request).expect("base extrude");
+    let request = boolean_pattern_request(
+        "boolean-pattern-cancel",
+        "boolean-pattern-cancel-1",
+        &base.brep_path,
+    )
+    .with_output_path(&temp, "cancelled-pattern.brep");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut observed = None;
+    let mut on_progress = |progress: &threeterm_protocol::supervisor::Progress| {
+        if progress.stage.starts_with("boolean_pattern:") {
+            observed = Some(progress.clone());
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+
+    let error = worker
+        .boolean_pattern_with_cancel_and_progress(&request, &cancel, &mut on_progress)
+        .expect_err("pattern cancellation must be surfaced");
+    match error {
+        WorkerError::Cancelled {
+            request_id,
+            exit_signal,
+            ..
+        } => {
+            assert_eq!(request_id, request.request_id);
+            assert!(
+                exit_signal.is_none(),
+                "cooperative cancellation must not signal"
+            );
+        }
+        other => panic!("expected cooperative cancellation, got {other:?}"),
+    }
+    assert!(
+        observed.is_some(),
+        "cancel must follow observed OCCT progress"
+    );
+    assert!(!request.output_dir.join(&request.output_filename).exists());
+
+    let _ = std::fs::remove_dir_all(temp);
 }
 
 #[test]

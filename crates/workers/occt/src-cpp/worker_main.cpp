@@ -1011,8 +1011,10 @@ bool handle_bracket(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    BRepPrimAPI_MakeBox horizontal(length, width, thickness);
-    BRepPrimAPI_MakeBox vertical(thickness, width, height);
+    BRepPrimAPI_MakeBox horizontal(gp_Pnt(0.0, 0.0, 0.0), length, width, thickness);
+    BRepPrimAPI_MakeBox vertical(gp_Pnt(0.0, 0.0, 0.0), thickness, width, height);
+    horizontal.Build();
+    vertical.Build();
     if (!horizontal.IsDone() || !vertical.IsDone()) {
         error = "could not construct bracket plates";
         return false;

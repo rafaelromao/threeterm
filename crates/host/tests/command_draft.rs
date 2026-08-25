@@ -106,6 +106,7 @@ fn generic_draft_ids_are_scoped_to_their_canonical_bundle_root() {
             std::f64::consts::FRAC_PI_2 / 12.0,
             [0.0, 0.0, 1.0],
         )
+        .with_feature_id(feature_id)
     };
 
     host.open_draft(

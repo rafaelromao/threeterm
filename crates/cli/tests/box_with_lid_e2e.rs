@@ -46,12 +46,30 @@ fn sketch_request(path: &Path, feature_id: &str, dimension_id: &str, value: f64)
         "entities": [
             {"kind": "point", "id": p0, "x": 0.0, "y": 0.0},
             {"kind": "point", "id": p1, "x": value, "y": 0.0},
-            {"kind": "line_segment", "id": e0, "start": format!("{feature_id}-p0"), "end": format!("{feature_id}-p1")}
+            {
+                "kind": "line_segment",
+                "id": e0,
+                "start": format!("{feature_id}-p0"),
+                "end": format!("{feature_id}-p1")
+            }
         ],
         "constraints": [
-            {"id": format!("{feature_id}-anchor"), "kind": "fixed", "entities": [format!("{feature_id}-p0")]},
-            {"id": dimension_id, "kind": "distance", "entities": [format!("{feature_id}-p0"), format!("{feature_id}-p1")], "value": value},
-            {"id": format!("{feature_id}-horizontal"), "kind": "horizontal", "entities": [e0]}
+            {
+                "id": format!("{feature_id}-anchor"),
+                "kind": "fixed",
+                "entities": [format!("{feature_id}-p0")]
+            },
+            {
+                "id": dimension_id,
+                "kind": "distance",
+                "entities": [format!("{feature_id}-p0"), format!("{feature_id}-p1")],
+                "value": value
+            },
+            {
+                "id": format!("{feature_id}-horizontal"),
+                "kind": "horizontal",
+                "entities": [e0]
+            }
         ]
     });
     fs::write(

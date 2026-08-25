@@ -17,7 +17,7 @@ use threeterm_domain::{
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
 const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
-const FIT_DIMENSION_KIND_PREFIX: &str = "fit-dimension:";
+const FIT_DIMENSION_KIND_PREFIX: &str = "fit-dimension/1:";
 pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.

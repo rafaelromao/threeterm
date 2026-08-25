@@ -82,3 +82,6 @@ never canonical.
 A versioned command that evaluates a Sketch through a disposable libslvs worker and
 normalizes status, degrees of freedom, entity IDs, related constraints, diagnostics,
 and successful solved coordinates.
+
+**Fit Dimension**:
+A revision-bound relationship between stable sketch dimension constraints for a source solid and a target solid. The host derives both values from canonical sketches and validates the target against the source clearance before persisting the relationship.

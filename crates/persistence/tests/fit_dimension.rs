@@ -91,7 +91,7 @@ fn fit_dimension_is_relation_only_revision_bound_and_reloadable() {
         loaded.graph.fit_dimensions().collect::<Vec<_>>(),
         vec![&fit]
     );
-    assert!(loaded.transactions.contains("fit-dimension:"));
+    assert!(loaded.transactions.contains("fit-dimension/1:"));
 
     let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let log = fs::read(root.join("transactions.log")).expect("log reads");

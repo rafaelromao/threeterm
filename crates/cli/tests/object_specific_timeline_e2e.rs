@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{TIMELINE_COMMAND_ID, find};
+use threeterm_protocol::schema::{CREATE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
 fn temp_root() -> PathBuf {
@@ -80,6 +80,24 @@ fn timeline(bin: &str, root: &Path, feature_id: &str) -> Value {
     response
 }
 
+fn create_revision(bin: &str, root: &Path, name: &str) -> Value {
+    let response = run(
+        bin,
+        &[
+            "--machine",
+            "create-revision",
+            root.to_str().expect("utf-8 path"),
+            "--name",
+            name,
+        ],
+    );
+    let schema = &find(CREATE_REVISION_COMMAND_ID)
+        .expect("create revision is registered")
+        .response_schema;
+    validate(schema, &response).expect("create revision response validates");
+    response
+}
+
 #[test]
 fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
     if OcctWorker::locate().is_err() {
@@ -89,16 +107,68 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     bracket(bin, &root, "first");
-    run(
-        bin,
-        &[
-            "--machine",
-            "create-revision",
-            root.to_str().expect("utf-8 path"),
-            "--name",
-            "before-second",
-        ],
+    let named = create_revision(bin, &root, "before-second");
+    assert_eq!(named["active_revision"], "history-revision-1");
+    assert_eq!(named["named_revisions"][0]["provenance"], "explicit-create");
+    let named_snapshot = Bundle::at(&root)
+        .open()
+        .expect("named revision bundle opens")
+        .history
+        .active_snapshot()
+        .clone();
+    let created_timeline = timeline(bin, &root, "first-base");
+    assert_eq!(
+        created_timeline["revisions"]
+            .as_array()
+            .expect("created revisions")
+            .last()
+            .expect("create revision entry")["operation"],
+        "create-named-revision"
     );
+    assert_eq!(
+        created_timeline["revisions"]
+            .as_array()
+            .expect("created revisions")
+            .last()
+            .expect("create revision entry")["named_revision_names"],
+        serde_json::json!(["before-second"])
+    );
+    let manifest_before_rejection = fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before_rejection = fs::read(root.join("transactions.log")).expect("log");
+    for (name, code) in [
+        ("", "unknown_command"),
+        ("before-second", "invalid_request"),
+    ] {
+        let diagnostic = run_failed(
+            bin,
+            &[
+                "--machine",
+                "create-revision",
+                root.to_str().expect("utf-8 path"),
+                "--name",
+                name,
+            ],
+        );
+        assert_eq!(diagnostic["code"], code);
+        if code == "unknown_command" {
+            assert!(
+                diagnostic["arg"]
+                    .as_str()
+                    .is_some_and(|arg| arg.contains("property \"name\""))
+            );
+        } else {
+            assert!(diagnostic.to_string().contains("named revision"));
+        }
+        assert_eq!(
+            fs::read(root.join("manifest.json")).expect("manifest"),
+            manifest_before_rejection
+        );
+        assert_eq!(
+            fs::read(root.join("transactions.log")).expect("log"),
+            log_before_rejection
+        );
+        assert_eq!(timeline(bin, &root, "first-base"), created_timeline);
+    }
     bracket(bin, &root, "second");
     run(
         bin,
@@ -129,6 +199,32 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
             .expect("named revisions")
             .iter()
             .any(|revision| revision["name"] == "before-second")
+    );
+    assert_eq!(
+        first["named_revisions"]
+            .as_array()
+            .expect("named revisions")
+            .iter()
+            .find(|revision| revision["name"] == "before-second")
+            .expect("explicit revision")["provenance"],
+        "explicit-create"
+    );
+    assert_eq!(
+        first["named_revisions"]
+            .as_array()
+            .expect("named revisions")
+            .iter()
+            .find(|revision| revision["name"] == "recovered-before-historical-edit-4")
+            .expect("divergent revision")["provenance"],
+        "historical-edit:first-base"
+    );
+    assert_eq!(
+        first["revisions"]
+            .as_array()
+            .expect("first revisions")
+            .last()
+            .expect("historical edit revision")["named_revision_names"],
+        serde_json::json!(["recovered-before-historical-edit-4"])
     );
 
     let second = timeline(bin, &root, "second-base");
@@ -196,6 +292,7 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
         loaded.history.active_snapshot().revision_id,
         "history-revision-1"
     );
+    assert_eq!(loaded.history.active_snapshot(), &named_snapshot);
     assert!(
         !loaded
             .history

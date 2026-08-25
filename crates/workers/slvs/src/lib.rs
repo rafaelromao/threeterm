@@ -105,6 +105,14 @@ impl SlvsWorker {
     }
 
     pub fn solve(&self, request: &SketchSolveRequest) -> Result<SketchSolveResponse, WorkerError> {
+        self.solve_with_cancel(request, &AtomicBool::new(false))
+    }
+
+    pub fn solve_with_cancel(
+        &self,
+        request: &SketchSolveRequest,
+        cancel: &AtomicBool,
+    ) -> Result<SketchSolveResponse, WorkerError> {
         request
             .validate()
             .map_err(|detail| WorkerError::Malformed { detail })?;
@@ -137,7 +145,7 @@ impl SlvsWorker {
                     .clone()
                     .unwrap_or_else(|| request.source_revision.clone()),
             },
-            &AtomicBool::new(false),
+            cancel,
         );
         let response = map_outcome(outcome, &request_id)?;
         response

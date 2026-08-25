@@ -2866,12 +2866,14 @@ pub fn dispatch_registered_command(
             );
         }
         if command == SKETCH_SOLVE_COMMAND_ID {
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(new_request_id);
             let typed_request =
                 SketchSolveRequest::new(
-                    request
-                        .get("request_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("cli-sketch-solve"),
+                    request_id,
                     string_field("feature_id")?,
                     serde_json::from_value(request.get("entities").cloned().ok_or_else(|| {
                         DispatchError::Validation("missing entities".to_string())
@@ -2892,18 +2894,32 @@ pub fn dispatch_registered_command(
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
                 );
-            let worker = SlvsWorker::locate().map_err(|error| {
-                DispatchError::Host(HostError::WorkerUnavailable {
-                    detail: error.to_string(),
-                })
-            })?;
-            let view = host.commit_sketch_solve_with_worker(
-                string_field("bundle_path")?,
-                &typed_request,
-                &worker,
-            )?;
-            let mut response = serde_json::to_value(view.result)
-                .map_err(|error| DispatchError::Validation(error.to_string()))?;
+            let phase = request
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("commit");
+            let mut response = if phase == "preview" {
+                let result =
+                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
+                serde_json::to_value(result)
+            } else if phase == "commit" {
+                let worker = SlvsWorker::locate().map_err(|error| {
+                    DispatchError::Host(HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })
+                })?;
+                let view = host.commit_sketch_solve_with_worker(
+                    string_field("bundle_path")?,
+                    &typed_request,
+                    &worker,
+                )?;
+                serde_json::to_value(view.result)
+            } else {
+                return Err(DispatchError::Validation(
+                    "phase must be preview or commit".to_string(),
+                ));
+            }
+            .map_err(|error| DispatchError::Validation(error.to_string()))?;
             response["schema_version"] = Value::String(schema.response_schema_version.to_string());
             return Ok(response);
         }

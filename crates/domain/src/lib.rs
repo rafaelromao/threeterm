@@ -160,9 +160,58 @@ impl SketchPayload {
                     }
                     id
                 }
-                SketchEntity::LineSegment { id, .. }
-                | SketchEntity::Circle { id, .. }
-                | SketchEntity::Arc { id, .. } => id,
+                SketchEntity::LineSegment { id, start, end } => {
+                    if start == end {
+                        return Err("sketch line endpoints must differ".to_string());
+                    }
+                    if !self
+                        .entities
+                        .iter()
+                        .any(|candidate| entity_id(candidate) == start)
+                        || !self
+                            .entities
+                            .iter()
+                            .any(|candidate| entity_id(candidate) == end)
+                    {
+                        return Err("sketch line references an unknown point".to_string());
+                    }
+                    id
+                }
+                SketchEntity::Circle { id, center, radius } => {
+                    if !self
+                        .entities
+                        .iter()
+                        .any(|candidate| entity_id(candidate) == center)
+                        || !radius.is_finite()
+                        || *radius <= 0.0
+                    {
+                        return Err("sketch circle must have a valid center and radius".to_string());
+                    }
+                    id
+                }
+                SketchEntity::Arc {
+                    id,
+                    center,
+                    start,
+                    end,
+                } => {
+                    if !self
+                        .entities
+                        .iter()
+                        .any(|candidate| entity_id(candidate) == center)
+                        || !self
+                            .entities
+                            .iter()
+                            .any(|candidate| entity_id(candidate) == start)
+                        || !self
+                            .entities
+                            .iter()
+                            .any(|candidate| entity_id(candidate) == end)
+                    {
+                        return Err("sketch arc references an unknown point".to_string());
+                    }
+                    id
+                }
             };
             if id.is_empty() || !ids.insert(id.clone()) {
                 return Err("sketch entity IDs must be unique".to_string());
@@ -186,14 +235,46 @@ impl SketchPayload {
                 return Err("sketch constraint references an unknown entity".to_string());
             }
         }
+        if !matches!(
+            self.status.as_str(),
+            "solved"
+                | "underconstrained"
+                | "redundant"
+                | "inconsistent"
+                | "nonconvergent"
+                | "invalid_request"
+        ) {
+            return Err("sketch status is not normalized".to_string());
+        }
+        let expected_entity_ids: Vec<_> = self.entities.iter().map(entity_id).cloned().collect();
+        if self.entity_ids != expected_entity_ids {
+            return Err("sketch entity_ids must match entity order".to_string());
+        }
+        if self.status == "solved" && self.dof != 0 {
+            return Err("solved sketches must have zero degrees of freedom".to_string());
+        }
         if self.status == "solved" {
             let coordinates = self
                 .solved_coordinates
                 .as_ref()
                 .ok_or_else(|| "solved sketches require coordinates".to_string())?;
-            if coordinates
+            let point_ids: std::collections::BTreeSet<_> = self
+                .entities
                 .iter()
-                .any(|coordinate| !coordinate.x.is_finite() || !coordinate.y.is_finite())
+                .filter_map(|entity| match entity {
+                    SketchEntity::Point { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let coordinate_ids: std::collections::BTreeSet<_> = coordinates
+                .iter()
+                .map(|coordinate| coordinate.entity_id.as_str())
+                .collect();
+            if coordinate_ids != point_ids
+                || coordinates.len() != coordinate_ids.len()
+                || coordinates
+                    .iter()
+                    .any(|coordinate| !coordinate.x.is_finite() || !coordinate.y.is_finite())
             {
                 return Err("solved sketch coordinates must be finite".to_string());
             }
@@ -201,6 +282,15 @@ impl SketchPayload {
             return Err("failed sketches must not carry solved coordinates".to_string());
         }
         Ok(())
+    }
+}
+
+fn entity_id(entity: &SketchEntity) -> &String {
+    match entity {
+        SketchEntity::Point { id, .. }
+        | SketchEntity::LineSegment { id, .. }
+        | SketchEntity::Circle { id, .. }
+        | SketchEntity::Arc { id, .. } => id,
     }
 }
 

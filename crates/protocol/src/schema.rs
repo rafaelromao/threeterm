@@ -1167,6 +1167,7 @@ pub static SKETCH_SOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "phase": { "type": "string", "enum": ["preview", "commit"] },
             "source_revision": { "type": "string", "minLength": 1 },
             "entities": {
                 "type": "array", "minItems": 1, "uniqueItems": true,

@@ -953,11 +953,30 @@ impl Bundle {
         brep_bytes: &[u8],
         history_event: &HistoryEvent,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_features_with_brep_if_revision_and_history(
+            &[(feature_id, kind)],
+            feature_id,
+            expected_revision,
+            brep_bytes,
+            history_event,
+        )
+    }
+
+    /// Publish several feature entries, one verified BREP, and its initial
+    /// history event in one sealed generation.
+    pub fn append_features_with_brep_if_revision_and_history(
+        &self,
+        entries: &[(&str, &str)],
+        brep_feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
             self.append_features_locked(
-                &[(feature_id, kind)],
+                entries,
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
+                Some((brep_feature_id, brep_bytes)),
                 None,
                 None,
                 None,

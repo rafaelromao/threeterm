@@ -1476,6 +1476,9 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<SnapshotView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        if root.exists() && !root.is_dir() {
+            return Err(HostError::BundlePathNotDirectory { path: root });
+        }
         let mut request = request;
         let loaded = if root.exists() {
             Bundle::at(&root).open()?
@@ -1528,9 +1531,16 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let snapshot = match Bundle::at(&root).append_feature_with_brep_if_revision_and_history(
+        let vertical_id = format!("{}-plate-vertical", request.feature_id);
+        let horizontal_id = format!("{}-plate-horizontal", request.feature_id);
+        let entries = [
+            (request.feature_id.as_str(), kind.as_str()),
+            (vertical_id.as_str(), "plate-vertical"),
+            (horizontal_id.as_str(), "plate-horizontal"),
+        ];
+        let snapshot = match Bundle::at(&root).append_features_with_brep_if_revision_and_history(
+            &entries,
             &request.feature_id,
-            &kind,
             loaded.revision_hash_hex(),
             &bytes,
             &history_event,

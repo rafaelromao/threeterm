@@ -185,6 +185,61 @@ fn rollback_export_artifacts(published: &[PathBuf], previous: &[(PathBuf, Option
     }
 }
 
+fn prepare_3mf_bodies(
+    root: &Path,
+    prior: &LoadedBundle,
+    body_ids: &[String],
+    stage: &Path,
+    deflection: f64,
+    accept_stale_geometry: bool,
+    worker: &OcctWorker,
+) -> Result<Vec<ThreeMfBody>, HostError> {
+    let mut bodies = Vec::with_capacity(body_ids.len());
+    for body_id in body_ids {
+        let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
+        if !accept_stale_geometry && !stale_body_features.is_empty() {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: body_id.clone(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features: stale_body_features,
+            });
+        }
+        if !prior
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == body_id)
+        {
+            return Err(HostError::Validation {
+                detail: format!("3MF body is not a canonical feature: {body_id}"),
+            });
+        }
+        let body_brep = bundle_root(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{body_id}.brep"));
+        if !body_brep.is_file() {
+            return Err(HostError::BrepFileMissing { path: body_brep });
+        }
+        let body_request = ExportRequest::new(format!("export-{body_id}"), body_brep, deflection)
+            .with_output_path(stage.join("bodies"), format!("{body_id}.stl"))
+            .with_feature_id(body_id);
+        let body_result = worker
+            .clone()
+            .export(&body_request)
+            .map_err(HostError::from)?;
+        if !body_result.is_success() || !body_result.brep_path.is_file() {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("export-{body_id}")),
+                detail: format!("3MF body export did not produce a mesh: {body_id}"),
+            });
+        }
+        bodies.push(ThreeMfBody {
+            label: body_id.clone(),
+            stl: body_result.brep_path,
+        });
+    }
+    Ok(bodies)
+}
+
 fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = Vec::new();
     let mut entries = Vec::new();
@@ -696,31 +751,6 @@ impl Host {
                 detail: "duplicate or empty 3MF body ID".to_string(),
             });
         }
-        for body_id in &body_ids {
-            let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
-            if !accept_stale_geometry && !stale_body_features.is_empty() {
-                return Err(HostError::StaleLastValidGeometry {
-                    feature_id: body_id.clone(),
-                    active_revision: prior.history.active_snapshot().revision_id.clone(),
-                    stale_features: stale_body_features,
-                });
-            }
-            if !prior
-                .graph
-                .features()
-                .any(|feature| feature.id.as_str() == body_id)
-            {
-                return Err(HostError::Validation {
-                    detail: format!("3MF body is not a canonical feature: {body_id}"),
-                });
-            }
-            let body_brep = bundle_root(root)
-                .join(BREP_SUBDIR)
-                .join(format!("{body_id}.brep"));
-            if !body_brep.is_file() {
-                return Err(HostError::BrepFileMissing { path: body_brep });
-            }
-        }
         let stage = output_dir.join(format!(".threeterm-export-{}", std::process::id()));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: error.to_string(),
@@ -745,35 +775,23 @@ impl Host {
                 detail: "export worker did not produce validated artifacts".to_string(),
             });
         }
+        let bodies = if formats.iter().any(|format| format == "3mf") {
+            prepare_3mf_bodies(
+                root,
+                &prior,
+                &body_ids,
+                &stage,
+                deflection,
+                accept_stale_geometry,
+                &worker,
+            )
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&stage);
+            })?
+        } else {
+            Vec::new()
+        };
         if formats.iter().any(|format| format == "3mf") {
-            let mut bodies = Vec::new();
-            for body_id in &body_ids {
-                let body_stage = stage.join("bodies");
-                let body_request = ExportRequest::new(
-                    format!("export-{body_id}"),
-                    bundle_root(root)
-                        .join(BREP_SUBDIR)
-                        .join(format!("{body_id}.brep")),
-                    deflection,
-                )
-                .with_output_path(&body_stage, format!("{body_id}.stl"))
-                .with_feature_id(body_id);
-                let body_result = worker.clone().export(&body_request).map_err(|error| {
-                    let _ = fs::remove_dir_all(&stage);
-                    HostError::from(error)
-                })?;
-                if !body_result.is_success() || !body_result.brep_path.is_file() {
-                    let _ = fs::remove_dir_all(&stage);
-                    return Err(HostError::BrepInvalid {
-                        request_id: Some(format!("export-{body_id}")),
-                        detail: format!("3MF body export did not produce a mesh: {body_id}"),
-                    });
-                }
-                bodies.push(ThreeMfBody {
-                    label: body_id.clone(),
-                    stl: body_result.brep_path,
-                });
-            }
             let feature_ids = prior
                 .generation
                 .revisions

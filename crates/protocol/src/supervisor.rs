@@ -22,6 +22,11 @@ use serde_json::Value;
 use crate::artifact::{ArtifactHeader, Stage};
 use crate::worker::{Envelope, WorkerError, WorkerHost};
 
+/// Bounded window for draining frames already emitted after a terminal
+/// envelope. A completed lifecycle is not accepted while a trailing frame is
+/// still observable.
+const TERMINAL_DRAIN_WAIT: Duration = Duration::from_millis(200);
+
 /// A host-issued worker request.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -204,6 +209,9 @@ pub struct Supervisor {
     /// `Completed` arm returns them as worker lifecycle facts; `discard_stage`
     /// clears them without publishing.
     artifact_headers: Vec<StagedArtifact>,
+    /// Stage ownership can leave the supervisor only after a completed
+    /// lifecycle has been reaped and stream state has settled.
+    completed: bool,
     /// Most recent artifact binding or validation failure. The supervisor
     /// surfaces staging errors here so the host's diagnostic taxonomy sees them.
     last_artifact_error: Option<String>,
@@ -233,6 +241,7 @@ impl Supervisor {
             stage,
             expected_worker_id: None,
             artifact_headers: Vec::new(),
+            completed: false,
             last_artifact_error: None,
         }
     }
@@ -950,6 +959,7 @@ impl Supervisor {
             self.discard_stage();
             return outcome;
         }
+        self.completed = true;
         SupervisorOutcome::Completed {
             request_id,
             result,
@@ -967,6 +977,11 @@ impl Supervisor {
         stage_prefix: &str,
         last_progress: Option<Progress>,
     ) -> Option<SupervisorOutcome> {
+        if let Some(outcome) =
+            self.verify_no_trailing_frames(request_id, started, stage_prefix, &last_progress)
+        {
+            return Some(outcome);
+        }
         // A stream overflow is checked independently of the exit status:
         // a worker that exits cleanly (code 0) after flooding a stream
         // must still fail the terminal outcome closed.
@@ -988,6 +1003,94 @@ impl Supervisor {
                 ),
             }
         })
+    }
+
+    fn verify_no_trailing_frames(
+        &mut self,
+        request_id: &str,
+        started: Instant,
+        stage_prefix: &str,
+        last_progress: &Option<Progress>,
+    ) -> Option<SupervisorOutcome> {
+        let deadline = Instant::now() + TERMINAL_DRAIN_WAIT;
+        loop {
+            if let Some(stream) = self.host.stream_overflowed() {
+                let context = TerminationContext {
+                    last_progress: last_progress.clone(),
+                    last_artifact_error: self.last_artifact_error.take(),
+                    failed: None,
+                };
+                return Some(SupervisorOutcome::ForceTerminated {
+                    record: self.termination_record(
+                        request_id.to_string(),
+                        format!("{stage_prefix}:stream_overflow:{stream}"),
+                        started,
+                        context,
+                        ExitKind::ForceAfterGrace,
+                    ),
+                });
+            }
+            match self.host.recv(deadline) {
+                Ok(envelope) => {
+                    let context = TerminationContext {
+                        last_progress: last_progress.clone(),
+                        last_artifact_error: self.last_artifact_error.take(),
+                        failed: None,
+                    };
+                    return Some(SupervisorOutcome::ForceTerminated {
+                        record: self.termination_record(
+                            request_id.to_string(),
+                            format!(
+                                "{stage_prefix}:trailing_envelope:{}",
+                                envelope_kind_label(&envelope)
+                            ),
+                            started,
+                            context,
+                            ExitKind::ForceAfterGrace,
+                        ),
+                    });
+                }
+                Err(WorkerError::Closed) => return None,
+                Err(WorkerError::TimedOut) if Instant::now() < deadline => continue,
+                Err(WorkerError::StreamOverflow { stream, .. }) => {
+                    let context = TerminationContext {
+                        last_progress: last_progress.clone(),
+                        last_artifact_error: self.last_artifact_error.take(),
+                        failed: None,
+                    };
+                    return Some(SupervisorOutcome::ForceTerminated {
+                        record: self.termination_record(
+                            request_id.to_string(),
+                            format!("{stage_prefix}:stream_overflow:{stream}"),
+                            started,
+                            context,
+                            ExitKind::ForceAfterGrace,
+                        ),
+                    });
+                }
+                Err(error) => {
+                    let context = TerminationContext {
+                        last_progress: last_progress.clone(),
+                        last_artifact_error: self.last_artifact_error.take(),
+                        failed: None,
+                    };
+                    let stage = self
+                        .host
+                        .stream_overflowed()
+                        .map(|stream| format!("{stage_prefix}:stream_overflow:{stream}"))
+                        .unwrap_or_else(|| format!("{stage_prefix}:trailing_drain_failed:{error}"));
+                    return Some(SupervisorOutcome::ForceTerminated {
+                        record: self.termination_record(
+                            request_id.to_string(),
+                            stage,
+                            started,
+                            context,
+                            ExitKind::ForceAfterGrace,
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     fn cooperative_termination_outcome(
@@ -1019,8 +1122,20 @@ impl Supervisor {
 
     fn discard_stage(&mut self) {
         self.artifact_headers.clear();
+        self.completed = false;
         if let Some(stage) = self.stage.take() {
             let _ = stage.discard();
+        }
+    }
+
+    /// Transfer a completed request's private stage to the Host. Failure
+    /// paths use `discard_stage` instead, so a caller can only retain a stage
+    /// after the worker emitted a completed lifecycle.
+    pub fn take_stage(&mut self) -> Option<Stage> {
+        if self.completed {
+            self.stage.take()
+        } else {
+            None
         }
     }
 
@@ -1100,7 +1215,7 @@ impl Supervisor {
 /// raced the handshake.
 fn envelope_kind_label(envelope: &Envelope) -> String {
     match envelope {
-        Envelope::WorkerReady { .. } => unreachable!("filtered by caller"),
+        Envelope::WorkerReady { worker_id, .. } => format!("worker_ready:{worker_id}"),
         Envelope::Request { request_id, .. } => format!("request:{request_id}"),
         Envelope::Cancel { request_id, .. } => format!("cancel:{request_id}"),
         Envelope::Progress { stage, .. } => format!("progress:{stage}"),
@@ -1114,7 +1229,7 @@ fn envelope_kind_label(envelope: &Envelope) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::{FramedWorkerHost, WorkerHost};
+    use crate::worker::{FramedWorkerHost, WorkerHost, encode_frame};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex, mpsc};
 
@@ -1168,10 +1283,16 @@ mod tests {
 
         fn recv(&mut self, _deadline: Instant) -> Result<Envelope, WorkerError> {
             // An exhausted script behaves like the real transport's
-            // post-deadline receive: the worker has gone silent.
-            self.script
-                .pop_front()
-                .unwrap_or(Err(WorkerError::TimedOut))
+            // post-deadline receive: the worker has gone silent. Once the
+            // supervisor has terminated it, report a closed stream so the
+            // terminal drain can prove no frames remain.
+            self.script.pop_front().unwrap_or_else(|| {
+                if *self.terminated.lock().expect("termination log mutex") > 0 {
+                    Err(WorkerError::Closed)
+                } else {
+                    Err(WorkerError::TimedOut)
+                }
+            })
         }
 
         fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
@@ -1332,6 +1453,101 @@ mod tests {
             SupervisorOutcome::Completed { .. }
         ));
         assert_eq!(*terminated.lock().expect("termination log mutex"), 1);
+    }
+
+    #[test]
+    fn completed_request_rejects_a_trailing_worker_envelope() {
+        let worker = ScriptedWorker::new(vec![
+            ready_envelope(),
+            Envelope::Completed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                result: serde_json::json!({}),
+            },
+            Envelope::Progress {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                stage: "late-progress".to_string(),
+                percent: 100,
+            },
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), None);
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected trailing envelope to fail closed");
+        };
+        assert_eq!(
+            record.stage,
+            "completed_reap:trailing_envelope:progress:late-progress"
+        );
+    }
+
+    #[test]
+    fn completed_request_rejects_a_malformed_trailing_frame() {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, _outbound_rx) = mpsc::channel();
+        inbound_tx
+            .send(encode_frame(&ready_envelope()).expect("ready envelope encodes"))
+            .expect("ready frame queues");
+        inbound_tx
+            .send(
+                encode_frame(&Envelope::Completed {
+                    schema_version: crate::schema_version().to_string(),
+                    request_id: "req-1".to_string(),
+                    result: serde_json::json!({}),
+                })
+                .expect("completed envelope encodes"),
+            )
+            .expect("completed frame queues");
+        inbound_tx
+            .send(b"{malformed-json}\n".to_vec())
+            .expect("malformed frame queues");
+        let mut supervisor = Supervisor::new(
+            Duration::from_secs(1),
+            Box::new(FramedWorkerHost::new(inbound_rx, outbound_tx)),
+            None,
+        );
+
+        let SupervisorOutcome::ForceTerminated { record } = supervisor.request(sample_request())
+        else {
+            panic!("expected malformed trailing frame to fail closed");
+        };
+        assert!(
+            record
+                .stage
+                .starts_with("completed_reap:trailing_drain_failed:")
+        );
+    }
+
+    #[test]
+    fn stage_ownership_cannot_leave_before_a_completed_lifecycle() {
+        let root = std::env::temp_dir().join(format!(
+            "threeterm-supervisor-stage-gate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let stage = crate::artifact::Stage::open(&root).expect("stage opens");
+        let worker = ScriptedWorker::new(vec![
+            ready_envelope(),
+            Envelope::Completed {
+                schema_version: crate::schema_version().to_string(),
+                request_id: "req-1".to_string(),
+                result: serde_json::json!({}),
+            },
+        ]);
+        let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(worker), Some(stage));
+
+        assert!(supervisor.take_stage().is_none());
+        assert!(matches!(
+            supervisor.request(sample_request()),
+            SupervisorOutcome::Completed { .. }
+        ));
+        let retained = supervisor
+            .take_stage()
+            .expect("completed lifecycle returns the stage");
+        retained.discard().expect("stage discards");
+        assert!(!root.exists());
     }
 
     #[test]

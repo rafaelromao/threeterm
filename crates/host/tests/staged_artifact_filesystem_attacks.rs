@@ -108,6 +108,8 @@ fn base_request(snapshot_revision: String, staging_name: &str) -> Layer1Artifact
     Layer1ArtifactRequest {
         request_id: format!("req-{}", staging_name),
         source_revision_id: snapshot_revision,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: staging_name.to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -538,6 +540,8 @@ fn oversized_temporary_and_final_output_rejected_without_authoritative_promotion
     let req = Layer1ArtifactRequest {
         request_id: "req-big".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "big.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -546,6 +550,8 @@ fn oversized_temporary_and_final_output_rejected_without_authoritative_promotion
     let header = threeterm_protocol::artifact::ArtifactHeader {
         request_id: req.request_id.clone(),
         source_revision_id: req.source_revision_id.clone(),
+        operation: req.operation.clone(),
+        feature_id: req.feature_id.clone(),
         cache_key: threeterm_protocol::artifact::Layer1CacheKey::issue(&req, &fp),
         worker_fingerprint: fp.clone(),
         artifact_kind: req.artifact_kind.clone(),
@@ -575,6 +581,8 @@ fn oversized_temporary_and_final_output_rejected_without_authoritative_promotion
     let req3 = Layer1ArtifactRequest {
         request_id: "req-huge".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "huge.brep".to_string(),
         semantic_input_sha256: "aa".repeat(32),
@@ -589,6 +597,8 @@ fn oversized_temporary_and_final_output_rejected_without_authoritative_promotion
     let header3 = threeterm_protocol::artifact::ArtifactHeader {
         request_id: req3.request_id.clone(),
         source_revision_id: req3.source_revision_id.clone(),
+        operation: req3.operation.clone(),
+        feature_id: req3.feature_id.clone(),
         cache_key: threeterm_protocol::artifact::Layer1CacheKey::issue(&req3, &fp3),
         worker_fingerprint: fp3.clone(),
         artifact_kind: req3.artifact_kind.clone(),
@@ -672,6 +682,8 @@ fn success_failure_cancellation_deadline_remove_request_artifacts() {
     let req_fail = Layer1ArtifactRequest {
         request_id: "req-fail".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "fail.brep".to_string(),
         semantic_input_sha256: "33".repeat(32),
@@ -795,6 +807,8 @@ fn success_failure_cancellation_deadline_remove_request_artifacts() {
     let req_new = Layer1ArtifactRequest {
         request_id: "req-new".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "orphan.brep".to_string(),
         semantic_input_sha256: "99".repeat(32),
@@ -843,6 +857,8 @@ fn retry_after_hostile_failure_succeeds_and_removes_stale_output() {
     let req_fail = Layer1ArtifactRequest {
         request_id: "req-retry-fail".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "retry.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -913,6 +929,8 @@ fn same_feature_retries_and_concurrent_namespaces_do_not_collide_or_reuse_stale(
     let req_first = Layer1ArtifactRequest {
         request_id: "req-first".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "first.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -969,6 +987,8 @@ fn same_feature_retries_and_concurrent_namespaces_do_not_collide_or_reuse_stale(
     let req_a = Layer1ArtifactRequest {
         request_id: "req-a".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "shared.brep".to_string(),
         semantic_input_sha256: "33".repeat(32),
@@ -1019,6 +1039,8 @@ fn same_feature_retries_and_concurrent_namespaces_do_not_collide_or_reuse_stale(
     let req_c = Layer1ArtifactRequest {
         request_id: "req-c".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "shared.brep".to_string(),
         semantic_input_sha256: "77".repeat(32),
@@ -1067,6 +1089,8 @@ fn filesystem_attack_tests_verify_prior_canonical_remains_reloadable() {
         let req = Layer1ArtifactRequest {
             request_id: format!("req-attack-{idx}"),
             source_revision_id: snapshot.revision_hash.clone(),
+            operation: "extrude".to_string(),
+            feature_id: "box-1".to_string(),
             artifact_kind: "brep".to_string(),
             staging_name: format!("attack-{idx}.brep"),
             semantic_input_sha256: format!("{:02x}", idx).repeat(32),
@@ -1109,6 +1133,8 @@ fn filesystem_attack_tests_verify_prior_canonical_remains_reloadable() {
     let req_valid = Layer1ArtifactRequest {
         request_id: "req-valid".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "valid.brep".to_string(),
         semantic_input_sha256: "aa".repeat(32),

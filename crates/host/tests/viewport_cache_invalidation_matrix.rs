@@ -45,6 +45,8 @@ fn trigger_matrix_end_to_end_on_production_path() {
     let req = Layer1ArtifactRequest {
         request_id: "req-1".to_string(),
         source_revision_id: snap1.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "l-bracket".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: staged.staging_name.clone(),
         semantic_input_sha256: "aa".repeat(32),

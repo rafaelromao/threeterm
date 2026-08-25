@@ -101,6 +101,8 @@ fn layer1_excluded_artifact_kinds_never_persist_in_host_cache() {
     let base_request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -247,6 +249,8 @@ fn layer1_excluded_via_staging_name_or_semantic_fingerprint() {
     let base = Layer1ArtifactRequest {
         request_id: "req-1".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -303,6 +307,8 @@ fn layer2_exclusions_never_persist_across_host_and_viewport_layers() {
     let req = Layer1ArtifactRequest {
         request_id: "req-valid".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "l-bracket".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "brep-l-bracket.brep".to_string(),
         semantic_input_sha256: "aa".repeat(32),
@@ -315,6 +321,8 @@ fn layer2_exclusions_never_persist_across_host_and_viewport_layers() {
     let header = threeterm_protocol::artifact::ArtifactHeader {
         request_id: req.request_id.clone(),
         source_revision_id: req.source_revision_id.clone(),
+        operation: req.operation.clone(),
+        feature_id: req.feature_id.clone(),
         cache_key: threeterm_protocol::artifact::Layer1CacheKey::issue(&req, &fp),
         worker_fingerprint: fp.clone(),
         artifact_kind: req.artifact_kind.clone(),

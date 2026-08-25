@@ -1,3 +1,4 @@
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,6 +7,7 @@ use threeterm_host::Host;
 use threeterm_occt_worker::{
     ExtrudeRequest, ExtrudeResult, OcctWorker, Operation, SCHEMA_VERSION, worker_fingerprint,
 };
+use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::{
     ArtifactHeader, Layer1ArtifactRequest, Layer1CacheKey, Stage, sha256_hex,
 };
@@ -211,6 +213,13 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
     stage
         .stage_bytes(&request.staging_name, &bytes)
         .expect("artifact stages");
+    assert!(
+        stage
+            .root()
+            .join(format!("{}.partial", request.staging_name))
+            .is_file(),
+        "staged artifact exists before acceptance"
+    );
     let result = typed_result(&stage.root().join("extrude-1.brep.partial"), &bytes);
     let outcome = completed(&request, &result, &bytes);
 
@@ -240,6 +249,136 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
 
     let _ = std::fs::remove_dir_all(project_root);
     let _ = std::fs::remove_dir_all(stage_root);
+}
+
+#[test]
+fn host_promotes_one_validated_extrude_into_the_next_openable_generation() {
+    let project_root = temp_root("promote-project");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "seed", "box")
+        .expect("canonical snapshot saves");
+    let stage_parent = project_root.join(".derived");
+    let stage = Stage::create_fresh(&stage_parent, "extrude").expect("stage creates");
+    let request = binding(&snapshot);
+    let bytes = b"promoted extrude result";
+    stage
+        .stage_bytes(&request.staging_name, bytes)
+        .expect("artifact stages");
+    let result = typed_result(
+        &stage
+            .root()
+            .join(format!("{}.partial", request.staging_name)),
+        bytes,
+    );
+    let outcome = completed(&request, &result, bytes);
+    let artifact = host
+        .accept_staged_extrude(stage, &request, &result, outcome)
+        .expect("derived result accepts");
+    let request_stage = artifact
+        .path
+        .parent()
+        .expect("request stage exists")
+        .to_path_buf();
+    let derived = threeterm_host::ExtrudeDerivedResult {
+        source_snapshot: snapshot.clone(),
+        result,
+        artifact,
+    };
+
+    let committed = host
+        .promote_extrude_derived(&project_root, derived)
+        .expect("validated result promotes");
+
+    assert_eq!(
+        committed.result.brep_path,
+        project_root.join("brep/extrude-1.brep")
+    );
+    assert_eq!(
+        fs::read(&committed.result.brep_path).expect("canonical BREP reads"),
+        bytes
+    );
+    assert_ne!(committed.snapshot.revision_hash, snapshot.revision_hash);
+    assert_eq!(
+        Bundle::at(&project_root)
+            .open()
+            .expect("generation opens")
+            .revision_hash_hex(),
+        committed.snapshot.revision_hash
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("transactions.log"))
+            .expect("transaction log reads")
+            .matches("brep:extrude-1")
+            .count(),
+        1
+    );
+    assert!(
+        !request_stage.exists(),
+        "request stage is removed after promotion"
+    );
+
+    let _ = fs::remove_dir_all(project_root);
+}
+
+#[test]
+fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
+    let project_root = temp_root("stale-promotion-project");
+    let host = Host::new();
+    let snapshot = host
+        .save(&project_root, "seed", "box")
+        .expect("canonical snapshot saves");
+    let stage =
+        Stage::create_fresh(project_root.join(".derived"), "extrude").expect("stage creates");
+    let request = binding(&snapshot);
+    let bytes = b"stale extrude result";
+    stage
+        .stage_bytes(&request.staging_name, bytes)
+        .expect("artifact stages");
+    let result = typed_result(
+        &stage
+            .root()
+            .join(format!("{}.partial", request.staging_name)),
+        bytes,
+    );
+    let artifact = host
+        .accept_staged_extrude(
+            stage,
+            &request,
+            &result,
+            completed(&request, &result, bytes),
+        )
+        .expect("derived result accepts");
+    let derived = threeterm_host::ExtrudeDerivedResult {
+        source_snapshot: snapshot,
+        result,
+        artifact,
+    };
+    let newer = host
+        .save(&project_root, "newer", "marker")
+        .expect("newer generation saves");
+    let manifest = fs::read(project_root.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(project_root.join("transactions.log")).expect("log reads");
+
+    let error = host
+        .promote_extrude_derived(&project_root, derived)
+        .expect_err("stale result rejects");
+    assert!(matches!(
+        error,
+        threeterm_host::HostError::DerivedResult { .. }
+    ));
+    assert_eq!(
+        fs::read(project_root.join("manifest.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project_root.join("transactions.log")).unwrap(),
+        log
+    );
+    assert_eq!(host.current(), Some(newer));
+    assert!(!project_root.join(".derived").exists());
+
+    let _ = fs::remove_dir_all(project_root);
 }
 
 #[test]

@@ -394,8 +394,10 @@ pub struct ExtrudeDerivedResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtrudeCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: ExtrudeResult,
+    pub worker_fingerprint: WorkerFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2662,6 +2664,131 @@ impl Host {
         })
     }
 
+    /// Promote one Host-validated extrude result into the next canonical
+    /// Project Generation. The request stage is consumed before persistence
+    /// copies the bundle, so transient worker artifacts cannot become part of
+    /// the new generation.
+    pub fn promote_extrude_derived(
+        &self,
+        root: impl AsRef<Path>,
+        derived: ExtrudeDerivedResult,
+    ) -> Result<ExtrudeCommitView, HostError> {
+        let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
+        let derived_root = root.join(".derived");
+        let stage_root = derived
+            .artifact
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(
+                    "derived_artifact_stage_missing",
+                ),
+            })?;
+        if !stage_root.starts_with(&derived_root) {
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(
+                    "derived_artifact_stage_not_owned",
+                ),
+            });
+        }
+        let stage =
+            Stage::open_existing(&stage_root).map_err(|error| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
+            })?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let worker_fingerprint = derived.artifact.worker_fingerprint.clone();
+        let feature_id = derived.artifact.feature_id.clone();
+        let final_name = derived
+            .artifact
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure("derived_artifact_name_missing"),
+            })?
+            .to_string();
+        if stage_root.join(&final_name) != derived.artifact.path {
+            let _ = stage.discard();
+            let _ = fs::remove_dir(&derived_root);
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(
+                    "derived_artifact_path_mismatch",
+                ),
+            });
+        }
+
+        let current = match Bundle::at(&root).open() {
+            Ok(current) => current,
+            Err(error) => {
+                let _ = stage.discard();
+                let _ = fs::remove_dir(&derived_root);
+                return Err(error.into());
+            }
+        };
+        if source_snapshot.revision_hash != current.manifest.revision_hash
+            || derived.artifact.source_revision_id != current.manifest.revision_hash
+        {
+            let _ = stage.discard();
+            let _ = fs::remove_dir(&derived_root);
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_revision_mismatch(
+                    "derived_artifact_source_revision_mismatch",
+                ),
+            });
+        }
+
+        let bytes = match stage.read_published(
+            &final_name,
+            derived.artifact.byte_count,
+            &derived.artifact.sha256,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = stage.discard();
+                let _ = fs::remove_dir(&derived_root);
+                return Err(HostError::DerivedResult {
+                    diagnostic: artifact_error_diagnostic(&error),
+                });
+            }
+        };
+        if let Err(error) = stage.discard() {
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
+            });
+        }
+        let _ = fs::remove_dir(&derived_root);
+
+        let bundle = Bundle::at(&root);
+        let kind = format!("brep:{feature_id}");
+        let updated = match bundle.append_feature_with_brep_if_revision(
+            &feature_id,
+            &kind,
+            &current.manifest.revision_hash,
+            &bytes,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                if let Ok(reconciled) = bundle.open() {
+                    self.current.replace(Some(reconciled));
+                }
+                return Err(error.into());
+            }
+        };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        let mut result = derived.result;
+        result.brep_path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+        result.brep_bytes = bytes.len();
+        result.brep_sha256 = sha256_hex(&bytes);
+        Ok(ExtrudeCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            worker_fingerprint,
+        })
+    }
+
     /// Independently validate a completed staged extrude before the generic
     /// non-authoritative cache link. This seam accepts completed facts and a
     /// typed result separately so neither worker-side validation path can
@@ -3290,8 +3417,12 @@ impl Host {
                 return Err(error);
             }
         };
-        let _ = prior_view;
-        Ok(ExtrudeCommitView { snapshot, result })
+        Ok(ExtrudeCommitView {
+            source_snapshot: prior_view,
+            snapshot,
+            result,
+            worker_fingerprint: expected_occt_worker_fingerprint(),
+        })
     }
 
     /// Extrude `request` with a cooperative cancellation token. Mirrors
@@ -3344,8 +3475,12 @@ impl Host {
                 return Err(error);
             }
         };
-        let _ = prior_view;
-        Ok(ExtrudeCommitView { snapshot, result })
+        Ok(ExtrudeCommitView {
+            source_snapshot: prior_view,
+            snapshot,
+            result,
+            worker_fingerprint: expected_occt_worker_fingerprint(),
+        })
     }
 
     /// Boolean-fuse `request` against the disposable OCCT worker and,

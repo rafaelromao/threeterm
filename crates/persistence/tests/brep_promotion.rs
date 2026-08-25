@@ -1,7 +1,9 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use threeterm_persistence::{Bundle, BundleError};
+use threeterm_persistence::{
+    Bundle, BundleError, PublicationFailurePoint, fail_next_publication_at,
+};
 
 fn temp_root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -115,4 +117,71 @@ fn parameterized_idempotency_retries_only_the_same_payload() {
         b"new-brep"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn brep_target_failures_leave_the_prior_generation_byte_identical_and_retryable() {
+    for (label, point) in [
+        ("copy", PublicationFailurePoint::BrepCopy),
+        ("write", PublicationFailurePoint::BrepWrite),
+        ("sync", PublicationFailurePoint::BrepSync),
+        ("rename", PublicationFailurePoint::BrepRename),
+        ("directory-sync", PublicationFailurePoint::BrepDirectorySync),
+        ("manifest", PublicationFailurePoint::ManifestSync),
+    ] {
+        let root = temp_root(label);
+        let bundle = Bundle::create(&root).expect("bundle creates");
+        let empty_revision = bundle
+            .open()
+            .expect("bundle opens")
+            .revision_hash_hex()
+            .to_string();
+        bundle
+            .append_feature_with_brep_if_revision("seed", "box", &empty_revision, b"prior-brep")
+            .expect("initial geometry publishes");
+        let source_revision = bundle
+            .open()
+            .expect("bundle opens")
+            .revision_hash_hex()
+            .to_string();
+        let prior_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+        let prior_log = fs::read(root.join("transactions.log")).expect("log reads");
+
+        fail_next_publication_at(point);
+        assert!(
+            bundle
+                .append_feature_with_brep_if_revision(
+                    "extrude-1",
+                    "brep:extrude-1",
+                    &source_revision,
+                    b"new-brep",
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(root.join("manifest.json")).unwrap(),
+            prior_manifest
+        );
+        assert_eq!(fs::read(root.join("transactions.log")).unwrap(), prior_log);
+        assert!(!root.join("brep/extrude-1.brep").exists());
+        assert_eq!(
+            fs::read(root.join("brep/seed.brep")).unwrap(),
+            b"prior-brep"
+        );
+        assert!(!root.join("brep/.extrude-1.brep.tmp").exists());
+
+        bundle
+            .append_feature_with_brep_if_revision(
+                "extrude-1",
+                "brep:extrude-1",
+                &source_revision,
+                b"new-brep",
+            )
+            .expect("retry succeeds after target failure");
+        assert_eq!(
+            fs::read(root.join("brep/extrude-1.brep")).unwrap(),
+            b"new-brep"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

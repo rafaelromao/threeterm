@@ -1014,6 +1014,22 @@ impl Supervisor {
     ) -> Option<SupervisorOutcome> {
         let deadline = Instant::now() + TERMINAL_DRAIN_WAIT;
         loop {
+            if let Some(stream) = self.host.stream_overflowed() {
+                let context = TerminationContext {
+                    last_progress: last_progress.clone(),
+                    last_artifact_error: self.last_artifact_error.take(),
+                    failed: None,
+                };
+                return Some(SupervisorOutcome::ForceTerminated {
+                    record: self.termination_record(
+                        request_id.to_string(),
+                        format!("{stage_prefix}:stream_overflow:{stream}"),
+                        started,
+                        context,
+                        ExitKind::ForceAfterGrace,
+                    ),
+                });
+            }
             match self.host.recv(deadline) {
                 Ok(envelope) => {
                     let context = TerminationContext {

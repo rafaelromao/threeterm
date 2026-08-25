@@ -20,15 +20,18 @@ pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_RESPONSE_SCHEMA_VERSION,
     CHAMFER_RESPONSE_SCHEMA_VERSION, CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
     DRAFT_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
-    HOLE_RESPONSE_SCHEMA_VERSION, LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
-    REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
+    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
+    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
+    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
+    REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
-    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
-    find_by_name, iter,
+    BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
@@ -80,6 +83,28 @@ enum DispatchPlan {
     Component {
         command: CommandId,
         request: Value,
+    },
+    HistoricalEdit {
+        bundle: String,
+        feature_id: String,
+        parameter: String,
+        value: f64,
+    },
+    CreateRevision {
+        bundle: String,
+        name: String,
+    },
+    RestoreRevision {
+        bundle: String,
+        feature_id: String,
+        name: String,
+    },
+    Timeline {
+        bundle: String,
+        feature_id: String,
+    },
+    ReplayVerify {
+        bundle: String,
     },
     Extrude {
         bundle: String,
@@ -425,6 +450,12 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
             parse_component(EDIT_COMPONENT_PARAMETER_COMMAND_ID, &args[2..])
         }
         "component-state" => parse_component(COMPONENT_STATE_COMMAND_ID, &args[2..]),
+        "capture-component" => parse_component(CAPTURE_COMPONENT_COMMAND_ID, &args[2..]),
+        "historical-edit" => parse_historical_edit(&args[2..]),
+        "create-revision" => parse_named_revision(&args[2..], true),
+        "restore-revision" => parse_named_revision(&args[2..], false),
+        "timeline" => parse_timeline(&args[2..]),
+        "replay-verify" => parse_replay_verify(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
@@ -519,7 +550,12 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::Load { .. }
         | DispatchPlan::BooleanFuse { .. }
         | DispatchPlan::Component { .. }
+        | DispatchPlan::CreateRevision { .. }
+        | DispatchPlan::RestoreRevision { .. }
+        | DispatchPlan::Timeline { .. }
+        | DispatchPlan::ReplayVerify { .. }
         | DispatchPlan::Unknown { .. } => true,
+        DispatchPlan::HistoricalEdit { value, .. } => value.is_finite(),
     };
     if finite {
         plan
@@ -552,6 +588,16 @@ fn parse_component(command: CommandId, args: &[OsString]) -> DispatchPlan {
             };
         };
         let key = name.replace('-', "_");
+        if command == CAPTURE_COMPONENT_COMMAND_ID && key == "feature_id" {
+            request
+                .entry("selected_feature_ids".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("capture feature IDs are stored as an array")
+                .push(Value::String(value.to_string()));
+            index += 2;
+            continue;
+        }
         let value = if key == "transform" {
             match parse_vec3(value, "--transform") {
                 Ok(transform) => json!(transform),
@@ -642,6 +688,160 @@ fn parse_load(args: &[OsString]) -> DispatchPlan {
         },
         [] => DispatchPlan::Unknown {
             arg: "load".to_string(),
+        },
+    }
+}
+
+fn parse_historical_edit(args: &[OsString]) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: "historical-edit".to_string(),
+        };
+    };
+    let mut feature_id = None;
+    let mut parameter = None;
+    let mut value = None;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        let Some(argument) = args.get(index + 1) else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        match flag.as_ref() {
+            "--feature-id" => feature_id = argument.to_str().map(str::to_string),
+            "--parameter" => parameter = argument.to_str().map(str::to_string),
+            "--value" => match argument.to_string_lossy().parse::<f64>() {
+                Ok(parsed) => value = Some(parsed),
+                Err(_) => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: flag.into_owned(),
+                };
+            }
+        }
+        index += 2;
+    }
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(parameter) = parameter else {
+        return DispatchPlan::Unknown {
+            arg: "--parameter".to_string(),
+        };
+    };
+    let Some(value) = value else {
+        return DispatchPlan::Unknown {
+            arg: "--value".to_string(),
+        };
+    };
+    DispatchPlan::HistoricalEdit {
+        bundle: bundle.to_string(),
+        feature_id,
+        parameter,
+        value,
+    }
+}
+
+fn parse_named_revision(args: &[OsString], create: bool) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: if create {
+                "create-revision"
+            } else {
+                "restore-revision"
+            }
+            .to_string(),
+        };
+    };
+    if create && (args.len() != 3 || args[1] != "--name") {
+        return DispatchPlan::Unknown {
+            arg: args.get(1).map_or_else(
+                || "--name".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    if !create && (args.len() != 5 || args[1] != "--feature-id" || args[3] != "--name") {
+        return DispatchPlan::Unknown {
+            arg: args.get(1).map_or_else(
+                || "--feature-id".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    let (feature_id, name_index) = if create {
+        (None, 2)
+    } else {
+        let Some(feature_id) = args[2].to_str() else {
+            return DispatchPlan::Unknown {
+                arg: "--feature-id".to_string(),
+            };
+        };
+        (Some(feature_id.to_string()), 4)
+    };
+    let Some(name) = args[name_index].to_str() else {
+        return DispatchPlan::Unknown {
+            arg: "--name".to_string(),
+        };
+    };
+    if create {
+        DispatchPlan::CreateRevision {
+            bundle: bundle.to_string(),
+            name: name.to_string(),
+        }
+    } else {
+        DispatchPlan::RestoreRevision {
+            bundle: bundle.to_string(),
+            feature_id: feature_id.expect("restore feature id"),
+            name: name.to_string(),
+        }
+    }
+}
+
+fn parse_timeline(args: &[OsString]) -> DispatchPlan {
+    let Some(bundle) = args.first().and_then(|value| value.to_str()) else {
+        return DispatchPlan::Unknown {
+            arg: "timeline".to_string(),
+        };
+    };
+    if args.len() != 3 || args[1] != "--feature-id" {
+        return DispatchPlan::Unknown {
+            arg: args.get(1).map_or_else(
+                || "--feature-id".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    let Some(feature_id) = args[2].to_str() else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    DispatchPlan::Timeline {
+        bundle: bundle.to_string(),
+        feature_id: feature_id.to_string(),
+    }
+}
+
+fn parse_replay_verify(args: &[OsString]) -> DispatchPlan {
+    match args {
+        [bundle] if bundle.to_str().is_some() => DispatchPlan::ReplayVerify {
+            bundle: bundle.to_string_lossy().into_owned(),
+        },
+        [argument, ..] => DispatchPlan::Unknown {
+            arg: argument.to_string_lossy().into_owned(),
+        },
+        [] => DispatchPlan::Unknown {
+            arg: "replay-verify".to_string(),
         },
     }
 }
@@ -2151,6 +2351,25 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
+        DispatchPlan::HistoricalEdit { .. }
+        | DispatchPlan::CreateRevision { .. }
+        | DispatchPlan::RestoreRevision { .. }
+        | DispatchPlan::Timeline { .. }
+        | DispatchPlan::ReplayVerify { .. } => {
+            let command = match &plan {
+                DispatchPlan::HistoricalEdit { .. } => HISTORICAL_EDIT_COMMAND_ID,
+                DispatchPlan::CreateRevision { .. } => CREATE_REVISION_COMMAND_ID,
+                DispatchPlan::RestoreRevision { .. } => RESTORE_REVISION_COMMAND_ID,
+                DispatchPlan::Timeline { .. } => TIMELINE_COMMAND_ID,
+                DispatchPlan::ReplayVerify { .. } => REPLAY_VERIFY_COMMAND_ID,
+                _ => unreachable!(),
+            };
+            let host = Host::new();
+            match dispatch_registered_command(&host, command, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -2471,6 +2690,80 @@ pub fn dispatch_registered_command(
                 json!({"definitions": graph.definitions, "instances": graph.instances, "schema_version": schema.response_schema_version}),
             );
         }
+        if command == CAPTURE_COMPONENT_COMMAND_ID {
+            let selected_feature_ids = request
+                .get("selected_feature_ids")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    DispatchError::Validation("missing selected_feature_ids".to_string())
+                })?
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        DispatchError::Validation(
+                            "selected_feature_ids must contain strings".to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let view = host.capture_component(
+                string_field("bundle_path")?,
+                string_field("definition_id")?,
+                &selected_feature_ids,
+            )?;
+            return Ok(json!({
+                "feature_graph_hash": view.feature_graph_hash,
+                "revision_hash": view.revision_hash,
+                "schema_version": schema.response_schema_version,
+            }));
+        }
+        if command == HISTORICAL_EDIT_COMMAND_ID {
+            let view = host.historical_edit(
+                string_field("bundle_path")?,
+                string_field("feature_id")?,
+                string_field("parameter")?,
+                number_field("value")?,
+            )?;
+            return Ok(history_commit_response(
+                "historical-edit",
+                schema.response_schema_version,
+                &view,
+            ));
+        }
+        if command == CREATE_REVISION_COMMAND_ID {
+            let view =
+                host.create_named_revision(string_field("bundle_path")?, string_field("name")?)?;
+            return Ok(history_commit_response(
+                "create-revision",
+                schema.response_schema_version,
+                &view,
+            ));
+        }
+        if command == RESTORE_REVISION_COMMAND_ID {
+            let view = host.restore_named_revision(
+                string_field("bundle_path")?,
+                string_field("feature_id")?,
+                string_field("name")?,
+            )?;
+            return Ok(history_commit_response(
+                "restore-revision",
+                schema.response_schema_version,
+                &view,
+            ));
+        }
+        if command == TIMELINE_COMMAND_ID {
+            let view = host.timeline(string_field("bundle_path")?, string_field("feature_id")?)?;
+            return Ok(timeline_response(schema.response_schema_version, &view));
+        }
+        if command == REPLAY_VERIFY_COMMAND_ID {
+            let verification = host.verify_history_replay(string_field("bundle_path")?)?;
+            return Ok(json!({
+                "deterministic": verification.deterministic,
+                "fingerprint": verification.fingerprint,
+                "mismatch": verification.mismatch.unwrap_or_default(),
+                "schema_version": schema.response_schema_version,
+            }));
+        }
         let view = if command == BRACKET_COMMAND_ID {
             dispatch_bracket_with_host(
                 host,
@@ -2505,6 +2798,7 @@ pub fn dispatch_registered_command(
                 DEFINE_COMPONENT_COMMAND_ID => ComponentCommand::Define {
                     definition: ComponentDefinition {
                         id: string_field("definition_id")?.to_string(),
+                        selected_feature_ids: Vec::new(),
                         descriptor: LBracketDescriptor {
                             feature_id: string_field("feature_id")?.to_string(),
                             length: number_field("length")?,
@@ -2574,6 +2868,131 @@ fn dispatch_bracket_with_host(
 ) -> Result<SnapshotView, DispatchError> {
     host.save_bracket(bundle, bracket_id, length, width, height, thickness)
         .map_err(DispatchError::from)
+}
+
+fn history_commit_response(
+    operation: &str,
+    schema_version: &'static str,
+    view: &threeterm_host::HistoryCommitView,
+) -> Value {
+    let active = view.history.active_snapshot();
+    let diagnostics: Vec<_> = active
+        .features
+        .values()
+        .filter_map(|feature| feature.diagnostic.clone())
+        .collect();
+    let named_revisions: Vec<_> = view
+        .history
+        .named_revisions()
+        .values()
+        .map(|revision| {
+            json!({
+                "name": revision.name,
+                "revision_id": revision.snapshot.revision_id,
+                "provenance": revision.provenance,
+            })
+        })
+        .collect();
+    let features: Vec<_> = active
+        .features
+        .values()
+        .map(|feature| {
+            let mut value = json!({
+                "id": feature.id,
+                "status": history_status_name(feature.status),
+                "geometry_fingerprint": feature.geometry_fingerprint.clone().unwrap_or_default(),
+                "last_valid_geometry_fingerprint": feature
+                    .last_valid_geometry_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
+            });
+            if let Some(diagnostic) = &feature.diagnostic {
+                value["diagnostic"] = json!(diagnostic);
+            }
+            value
+        })
+        .collect();
+    let (dirty_features, evaluated_features, blocked_features) =
+        view.evaluation.as_ref().map_or_else(
+            || (Vec::new(), Vec::new(), Vec::new()),
+            |evaluation| {
+                (
+                    evaluation.dirty_features.clone(),
+                    evaluation.evaluated_features.clone(),
+                    evaluation.blocked_features.clone(),
+                )
+            },
+        );
+    let degraded = active.features.values().any(|feature| {
+        matches!(
+            feature.status,
+            threeterm_domain::history::HistoryStatus::Broken
+                | threeterm_domain::history::HistoryStatus::BlockedByFailure
+        )
+    });
+    json!({
+        "status": if degraded { "degraded" } else { "ok" },
+        "operation": operation,
+        "active_revision": active.revision_id,
+        "dirty_features": dirty_features,
+        "evaluated_features": evaluated_features,
+        "blocked_features": blocked_features,
+        "diagnostics": diagnostics,
+        "named_revisions": named_revisions,
+        "features": features,
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "schema_version": schema_version,
+    })
+}
+
+fn history_status_name(status: threeterm_domain::history::HistoryStatus) -> &'static str {
+    match status {
+        threeterm_domain::history::HistoryStatus::CurrentValid => "current-valid",
+        threeterm_domain::history::HistoryStatus::Broken => "broken",
+        threeterm_domain::history::HistoryStatus::BlockedByFailure => "blocked-by-failure",
+        threeterm_domain::history::HistoryStatus::Suppressed => "suppressed",
+    }
+}
+
+fn timeline_response(
+    schema_version: &'static str,
+    view: &threeterm_host::HistoryTimelineView,
+) -> Value {
+    let timeline = &view.timeline;
+    let revisions = timeline
+        .revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "ordinal": revision.ordinal,
+                "revision_id": revision.revision_id,
+                "operation": revision.operation,
+                "status": serde_json::to_value(&revision.status).expect("timeline status serializes"),
+                "named_revision_names": revision.named_revision_names,
+            })
+        })
+        .collect::<Vec<_>>();
+    let named_revisions = timeline
+        .named_revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "name": revision.name,
+                "revision_id": revision.revision_id,
+                "provenance": revision.provenance,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "feature_id": timeline.feature_id,
+        "active_revision": timeline.active_revision,
+        "revisions": revisions,
+        "named_revisions": named_revisions,
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "schema_version": schema_version,
+    })
 }
 
 /// Structured failure modes emitted by the shared CLI/MCP dispatcher. The
@@ -2731,6 +3150,33 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             "thickness": thickness,
         }),
         DispatchPlan::Component { request, .. } => request.clone(),
+        DispatchPlan::HistoricalEdit {
+            bundle,
+            feature_id,
+            parameter,
+            value,
+        } => json!({
+            "bundle_path": bundle,
+            "feature_id": feature_id,
+            "parameter": parameter,
+            "value": value,
+        }),
+        DispatchPlan::CreateRevision { bundle, name } => {
+            json!({ "bundle_path": bundle, "name": name })
+        }
+        DispatchPlan::RestoreRevision {
+            bundle,
+            feature_id,
+            name,
+        } => json!({
+            "bundle_path": bundle,
+            "feature_id": feature_id,
+            "name": name,
+        }),
+        DispatchPlan::Timeline { bundle, feature_id } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id })
+        }
+        DispatchPlan::ReplayVerify { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -4098,7 +4544,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 24);
+        assert_eq!(commands.len(), 30);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use threeterm_domain::{ComponentCommand, ComponentGraph, FeatureGraph};
+use threeterm_domain::{
+    ComponentCommand, ComponentGraph, FeatureGraph,
+    history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
+};
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BracketRequest, BracketResult, ChamferRequest,
     ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest, DraftResult,
@@ -217,6 +220,26 @@ pub struct BracketPreviewView {
 pub struct BracketCommitView {
     pub snapshot: SnapshotView,
     pub input_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryCommitView {
+    pub snapshot: SnapshotView,
+    pub history: HistoryState,
+    pub evaluation: Option<HistoryEvaluation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTimelineView {
+    pub snapshot: SnapshotView,
+    pub timeline: HistoryTimeline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayVerification {
+    pub deterministic: bool,
+    pub fingerprint: String,
+    pub mismatch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -600,13 +623,23 @@ impl Host {
 
         let root = root.as_ref();
         let bundle = self.bundle_for_save(root)?;
+        let prior_history = if bundle.canonical_root().exists() {
+            bundle.open()?.history
+        } else {
+            HistoryState::default()
+        };
+        let history_event = prior_history
+            .initialize_l_bracket(bracket_id, length, width, height, thickness)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
         let vertical_id = format!("{bracket_id}-plate-vertical");
         let horizontal_id = format!("{bracket_id}-plate-horizontal");
         let entries = [
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let loaded = match bundle.append_features(&entries) {
+        let loaded = match bundle.append_features_with_history(&entries, &history_event) {
             Ok(loaded) => loaded,
             Err(error) => {
                 // Publication can promote before its final parent sync
@@ -621,6 +654,127 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    pub fn history(&self, root: impl AsRef<Path>) -> Result<HistoryState, HostError> {
+        Ok(Bundle::at(root.as_ref()).open()?.history)
+    }
+
+    pub fn historical_edit(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        parameter: &str,
+        value: f64,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let (event, evaluation) = loaded
+            .history
+            .historical_edit(feature_id, parameter, value)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: Some(evaluation),
+        })
+    }
+
+    pub fn timeline(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<HistoryTimelineView, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let loaded = bundle.open()?;
+        let timeline =
+            loaded
+                .feature_timeline(feature_id)
+                .map_err(|error| HostError::Validation {
+                    detail: error.to_string(),
+                })?;
+        Ok(HistoryTimelineView {
+            snapshot: SnapshotView::from(&loaded),
+            timeline,
+        })
+    }
+
+    pub fn create_named_revision(
+        &self,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .create_named_revision(name)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
+        })
+    }
+
+    pub fn restore_named_revision(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        name: &str,
+    ) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .restore_named_revision_for_feature(feature_id, name)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
+        })
+    }
+
+    pub fn verify_history_replay(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<ReplayVerification, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let loaded = bundle.open()?;
+        let (first, second) = bundle.replay_history_states()?;
+        let first_fingerprint = first.fingerprint();
+        let mismatch = if first == second && first == loaded.history {
+            None
+        } else {
+            Some("history replay fingerprints differ from canonical state".to_string())
+        };
+        Ok(ReplayVerification {
+            deterministic: mismatch.is_none(),
+            fingerprint: first_fingerprint,
+            mismatch,
+        })
     }
 
     pub fn load(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
@@ -717,6 +871,67 @@ impl Host {
     /// canonical command transactions, never a separately persisted snapshot.
     pub fn component_graph(&self, root: impl AsRef<Path>) -> Result<ComponentGraph, HostError> {
         Ok(Bundle::at(root.as_ref()).open()?.components)
+    }
+
+    /// Capture one dependency-closed L-bracket feature subset as an immutable
+    /// component definition. The selected history snapshot is checked again
+    /// by persistence under its write lock before publication.
+    pub fn capture_component(
+        &self,
+        root: impl AsRef<Path>,
+        definition_id: &str,
+        selected_feature_ids: &[String],
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let selected = canonical_selected_feature_ids(selected_feature_ids)?;
+        let snapshot = loaded.history.active_snapshot();
+        for feature_id in &selected {
+            let feature =
+                snapshot
+                    .features
+                    .get(feature_id)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!("selected feature reference is lost: {feature_id}"),
+                    })?;
+            if feature.status != HistoryStatus::CurrentValid {
+                return Err(HostError::Validation {
+                    detail: format!("selected feature is not current-valid: {feature_id}"),
+                });
+            }
+            if feature
+                .dependencies
+                .iter()
+                .any(|dependency| !selected.contains(dependency))
+            {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "selected feature subset is not dependency-closed: {feature_id}"
+                    ),
+                });
+            }
+        }
+        let descriptor = descriptor_for_selected_l_bracket(definition_id, &selected, snapshot)?;
+        let command = ComponentCommand::Capture {
+            definition_id: definition_id.to_string(),
+            selected_feature_ids: selected,
+            descriptor,
+        };
+        let expected_revision = loaded.revision_hash_hex().to_string();
+        let updated =
+            match bundle.append_component_command_if_revision(&command, &expected_revision) {
+                Ok(updated) => updated,
+                Err(error) => {
+                    if let Ok(current) = bundle.open() {
+                        self.current.replace(Some(current));
+                    }
+                    return Err(error.into());
+                }
+            };
+        let view = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(view)
     }
 
     /// Validate and atomically append one component command. Validation occurs
@@ -2725,6 +2940,90 @@ impl Drop for Host {
     }
 }
 
+fn canonical_selected_feature_ids(feature_ids: &[String]) -> Result<Vec<String>, HostError> {
+    let mut selected = BTreeSet::new();
+    for feature_id in feature_ids {
+        if feature_id.is_empty() || !selected.insert(feature_id.clone()) {
+            return Err(HostError::Validation {
+                detail: "selected feature IDs must be non-empty and unique".to_string(),
+            });
+        }
+    }
+    if selected.is_empty() {
+        return Err(HostError::Validation {
+            detail: "selected feature IDs must not be empty".to_string(),
+        });
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn descriptor_for_selected_l_bracket(
+    definition_id: &str,
+    selected: &[String],
+    snapshot: &threeterm_domain::history::HistorySnapshot,
+) -> Result<threeterm_domain::LBracketDescriptor, HostError> {
+    let mut family: Option<&str> = None;
+    let mut values = [None; 4];
+    for feature_id in selected {
+        let Some((candidate_family, role)) = l_bracket_feature_role(feature_id) else {
+            return Err(HostError::Validation {
+                detail: format!("selected feature is not an L-bracket feature: {feature_id}"),
+            });
+        };
+        if family.is_some_and(|existing| existing != candidate_family) {
+            return Err(HostError::Validation {
+                detail: "selected feature subset mixes L-bracket families".to_string(),
+            });
+        }
+        family = Some(candidate_family);
+        let value = snapshot
+            .features
+            .get(feature_id)
+            .map(|feature| feature.input_value)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("selected feature reference is lost: {feature_id}"),
+            })?;
+        match role {
+            "base" => values[0] = Some(value),
+            "bend" => values[1] = Some(value),
+            "finish" => values[2] = Some(value),
+            "independent-base" => values[3] = Some(value),
+            "independent-finish" => {}
+            _ => unreachable!(),
+        }
+    }
+    let [Some(length), Some(width), Some(height), Some(thickness)] = values else {
+        return Err(HostError::Validation {
+            detail: "selected feature subset does not contain all L-bracket parameters".to_string(),
+        });
+    };
+    Ok(threeterm_domain::LBracketDescriptor {
+        feature_id: format!("{definition_id}-feature"),
+        length,
+        width,
+        height,
+        thickness,
+    })
+}
+
+fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
+    for (suffix, role) in [
+        ("-independent-base", "independent-base"),
+        ("-independent-finish", "independent-finish"),
+        ("-base", "base"),
+        ("-bend", "bend"),
+        ("-finish", "finish"),
+    ] {
+        if let Some(family) = feature_id
+            .strip_suffix(suffix)
+            .filter(|family| !family.is_empty())
+        {
+            return Some((family, role));
+        }
+    }
+    None
+}
+
 fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
     match error {
         ArtifactError::HashMismatch { expected, actual } => {
@@ -3286,8 +3585,8 @@ mod tests {
             serde_json::from_slice(&manifest_bytes).expect("manifest parses");
         assert!(manifest.is_object());
         assert_eq!(
-            manifest["transaction_count"], 2,
-            "save_bracket must record exactly two transactions"
+            manifest["transaction_count"], 3,
+            "save_bracket must record two features and one history transaction"
         );
         let transactions =
             std::fs::read_to_string(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME))

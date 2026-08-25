@@ -329,9 +329,9 @@ pub fn is_layer1_excluded(request: &Layer1ArtifactRequest) -> bool {
     ];
     for (index, field) in fields.into_iter().enumerate() {
         let lower = field.to_ascii_lowercase();
-        let canonical_draft_staging_name =
-            request.operation == "draft" && index == 1 && lower.starts_with("draft-");
-        if (lower.contains("draft") && !canonical_draft_staging_name)
+        let canonical_staging_name = index == 1
+            && lower.starts_with(&format!("{}-", request.operation.to_ascii_lowercase()));
+        if (lower.contains("draft") && !canonical_staging_name)
             || lower.contains("hover")
             || lower.contains("candidate")
             || lower.contains("pointer")

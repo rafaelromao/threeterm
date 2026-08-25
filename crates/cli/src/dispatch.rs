@@ -190,6 +190,14 @@ enum DispatchPlan {
         is_solid: bool,
         ruled: bool,
     },
+    Export {
+        bundle: String,
+        feature_id: String,
+        formats: Vec<String>,
+        output_dir: String,
+        tessellation_deflection: f64,
+        override_warnings: bool,
+    },
     Unknown {
         arg: String,
     },
@@ -468,6 +476,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "shell" => parse_shell(&args[2..]),
         "draft" => parse_draft(&args[2..]),
         "loft" => parse_loft(&args[2..]),
+        "export" => parse_export(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -534,6 +543,10 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
                 && angle_step.is_finite()
         }
         DispatchPlan::Loft { .. } => true,
+        DispatchPlan::Export {
+            tessellation_deflection,
+            ..
+        } => tessellation_deflection.is_finite(),
         DispatchPlan::Bracket {
             length,
             width,
@@ -563,6 +576,70 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         DispatchPlan::Unknown {
             arg: "non-finite numeric value".to_string(),
         }
+    }
+}
+
+fn parse_export(args: &[OsString]) -> DispatchPlan {
+    let mut bundle = None;
+    let mut feature_id = None;
+    let mut formats = None;
+    let mut output_dir = None;
+    let mut deflection = 0.5;
+    let mut override_warnings = false;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if flag == "--override-warnings" {
+            override_warnings = true;
+            index += 1;
+            continue;
+        }
+        let Some(value) = args.get(index + 1) else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        match flag.as_ref() {
+            "--bundle" => bundle = Some(value.to_string_lossy().into_owned()),
+            "--feature-id" => feature_id = Some(value.to_string_lossy().into_owned()),
+            "--formats" => {
+                formats = Some(
+                    value
+                        .to_string_lossy()
+                        .split(',')
+                        .map(str::to_string)
+                        .collect(),
+                )
+            }
+            "--output-dir" => output_dir = Some(value.to_string_lossy().into_owned()),
+            "--tessellation-deflection" => match value.to_string_lossy().parse() {
+                Ok(value) => deflection = value,
+                Err(_) => {
+                    return DispatchPlan::Unknown {
+                        arg: flag.into_owned(),
+                    };
+                }
+            },
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: flag.into_owned(),
+                };
+            }
+        };
+        index += 2;
+    }
+    match (bundle, feature_id, formats, output_dir) {
+        (Some(bundle), Some(feature_id), Some(formats), Some(output_dir)) => DispatchPlan::Export {
+            bundle,
+            feature_id,
+            formats,
+            output_dir,
+            tessellation_deflection: deflection,
+            override_warnings,
+        },
+        _ => DispatchPlan::Unknown {
+            arg: "export".to_string(),
+        },
     }
 }
 
@@ -2550,6 +2627,23 @@ fn execute_handler(
             stdout,
             stderr,
         ),
+        DispatchPlan::Export {
+            bundle,
+            feature_id,
+            formats,
+            output_dir,
+            tessellation_deflection,
+            override_warnings,
+        } => emit_export(
+            &bundle,
+            &feature_id,
+            &formats,
+            &output_dir,
+            tessellation_deflection,
+            override_warnings,
+            stdout,
+            stderr,
+        ),
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
 }
@@ -3289,11 +3383,60 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
                 .collect();
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled })
         }
+        DispatchPlan::Export {
+            bundle,
+            feature_id,
+            formats,
+            output_dir,
+            tessellation_deflection,
+            override_warnings,
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings })
+        }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
         }
     };
     Ok(request)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_export(
+    bundle: &str,
+    feature_id: &str,
+    formats: &[String],
+    output_dir: &str,
+    deflection: f64,
+    override_warnings: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match Host::new().export(
+        bundle,
+        feature_id,
+        formats,
+        Path::new(output_dir),
+        deflection,
+        override_warnings,
+    ) {
+        Ok(artifacts) => write_success(
+            stdout,
+            &json!({ "status": "ok", "feature_id": feature_id, "artifacts": artifacts, "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION }),
+            stderr,
+        ),
+        Err(HostError::Validation { detail }) if detail.starts_with('{') => {
+            let _ = writeln!(stderr, "{detail}");
+            EXIT_BREP_INVALID
+        }
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                json!({ "severity": "fatal", "code": "export_failed", "affected_feature_id": feature_id, "recovery": "fix the selected feature or output directory and retry", "override_eligible": false, "detail": error.to_string(), "schema_version": threeterm_protocol::schema_version() })
+            );
+            EXIT_BREP_INVALID
+        }
+    }
 }
 
 fn profile_json(profile_file: &str) -> Result<Value, String> {
@@ -4488,7 +4631,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 29);
+        assert_eq!(commands.len(), 30);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

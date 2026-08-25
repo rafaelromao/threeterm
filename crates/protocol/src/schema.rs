@@ -780,6 +780,28 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "formats", "output_dir", "tessellation_deflection", "override_warnings"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "formats": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["stl", "3mf", "step"] } },
+            "output_dir": { "type": "string", "minLength": 1 },
+            "tessellation_deflection": { "type": "number", "exclusiveMinimum": 0 },
+            "override_warnings": { "type": "boolean" }
+        }, "additionalProperties": false
+    })
+});
+pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object", "required": ["status", "feature_id", "artifacts", "schema_version"],
+        "properties": { "status": { "type": "string" }, "feature_id": { "type": "string" }, "artifacts": { "type": "array" }, "schema_version": { "type": "string" } },
+        "additionalProperties": false
+    })
+});
+
 pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
             "type": "object",
@@ -1410,6 +1432,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: LOFT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        EXPORT_COMMAND_ID,
+        CommandSchema {
+            id: EXPORT_COMMAND_ID,
+            name: "export",
+            schema_version: "threeterm.command.export/1",
+            request_schema_version: "threeterm.command.export.request/1",
+            request_schema: EXPORT_REQUEST_SCHEMA.clone(),
+            response_schema_version: EXPORT_RESPONSE_SCHEMA_VERSION,
+            response_schema: EXPORT_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -1444,6 +1478,7 @@ pub const CIRCULAR_PATTERN_COMMAND_ID: CommandId = CommandId("circular-pattern")
 pub const SHELL_COMMAND_ID: CommandId = CommandId("shell");
 pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
 pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
+pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
@@ -1461,6 +1496,7 @@ pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
 pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.response/1";
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
+pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/1";
 pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/1";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.replay-verify.response/1";

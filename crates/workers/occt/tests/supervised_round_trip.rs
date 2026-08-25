@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! End-to-end tests driving the production typed `OcctWorker` API
 //! against fixture worker processes that speak the versioned envelope
 //! protocol.

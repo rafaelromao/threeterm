@@ -51,6 +51,7 @@ pub enum Operation {
     Draft,
     Loft,
     BooleanPattern,
+    Export,
 }
 
 impl Operation {
@@ -69,7 +70,81 @@ impl Operation {
             Self::Draft => "draft",
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
+            Self::Export => "export",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+    pub tessellation_deflection: f64,
+}
+impl ExportRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        deflection: f64,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Export,
+            base_path: base_path.into(),
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+            tessellation_deflection: deflection,
+        }
+    }
+    pub fn with_output_path(mut self, dir: impl Into<PathBuf>, name: impl Into<String>) -> Self {
+        self.output_dir = dir.into();
+        self.output_filename = name.into();
+        self
+    }
+    pub fn with_feature_id(mut self, id: impl Into<String>) -> Self {
+        self.feature_id = id.into();
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version)
+            || !is_request_id(&self.request_id)
+            || !is_feature_id(&self.feature_id)
+            || self.operation != Operation::Export
+            || self.base_path.as_os_str().is_empty()
+            || self.output_filename.is_empty()
+            || self.output_filename.contains('/')
+            || !self.tessellation_deflection.is_finite()
+            || self.tessellation_deflection <= 0.0
+        {
+            return Err("invalid export request".to_string());
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub step_path: PathBuf,
+    pub feature_id: String,
+}
+impl ExportResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
     }
 }
 

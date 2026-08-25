@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! Worker termination lifecycle containment and diagnostic tests.
 //!
 //! Exercises the complete disposable-worker lifecycle from a production

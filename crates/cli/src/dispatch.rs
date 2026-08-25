@@ -195,6 +195,7 @@ enum DispatchPlan {
     Export {
         bundle: String,
         feature_id: String,
+        body_ids: Vec<String>,
         formats: Vec<String>,
         output_dir: String,
         tessellation_deflection: f64,
@@ -585,6 +586,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
 fn parse_export(args: &[OsString]) -> DispatchPlan {
     let mut bundle = None;
     let mut feature_id = None;
+    let mut body_ids = Vec::new();
     let mut formats = None;
     let mut output_dir = None;
     let mut deflection = 0.5;
@@ -611,6 +613,13 @@ fn parse_export(args: &[OsString]) -> DispatchPlan {
         match flag.as_ref() {
             "--bundle" => bundle = Some(value.to_string_lossy().into_owned()),
             "--feature-id" => feature_id = Some(value.to_string_lossy().into_owned()),
+            "--body-ids" => {
+                body_ids = value
+                    .to_string_lossy()
+                    .split(',')
+                    .map(str::to_string)
+                    .collect()
+            }
             "--formats" => {
                 formats = Some(
                     value
@@ -641,6 +650,7 @@ fn parse_export(args: &[OsString]) -> DispatchPlan {
         (Some(bundle), Some(feature_id), Some(formats), Some(output_dir)) => DispatchPlan::Export {
             bundle,
             feature_id,
+            body_ids,
             formats,
             output_dir,
             tessellation_deflection: deflection,
@@ -2640,6 +2650,7 @@ fn execute_handler(
         DispatchPlan::Export {
             bundle,
             feature_id,
+            body_ids,
             formats,
             output_dir,
             tessellation_deflection,
@@ -2648,6 +2659,7 @@ fn execute_handler(
         } => emit_export(
             &bundle,
             &feature_id,
+            &body_ids,
             &formats,
             &output_dir,
             tessellation_deflection,
@@ -3552,13 +3564,14 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         DispatchPlan::Export {
             bundle,
             feature_id,
+            body_ids,
             formats,
             output_dir,
             tessellation_deflection,
             override_warnings,
             accept_stale_geometry,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings, "accept_stale_geometry": accept_stale_geometry })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "body_ids": body_ids, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings, "accept_stale_geometry": accept_stale_geometry })
         }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
@@ -3571,6 +3584,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
 fn emit_export(
     bundle: &str,
     feature_id: &str,
+    body_ids: &[String],
     formats: &[String],
     output_dir: &str,
     deflection: f64,
@@ -3587,6 +3601,7 @@ fn emit_export(
         deflection,
         override_warnings,
         accept_stale_geometry,
+        body_ids,
     ) {
         Ok(view) => write_success(
             stdout,

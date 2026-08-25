@@ -13,12 +13,12 @@ use threeterm_domain::{
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
 };
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanFuseResult, BracketRequest, BracketResult, ChamferRequest,
-    ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest, DraftResult,
-    ExportRequest, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
-    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
-    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, ShellRequest,
-    ShellResult, WorkerError,
+    BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
+    BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
+    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
+    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
+    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
+    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -29,51 +29,99 @@ use threeterm_protocol::supervisor::SupervisorOutcome;
 
 pub const BREP_SUBDIR: &str = "brep";
 
-fn write_3mf(stl: &Path, destination: &Path) -> Result<(), HostError> {
-    let source = fs::read_to_string(stl).map_err(|error| HostError::BrepIo {
-        detail: error.to_string(),
-    })?;
-    let vertices: Vec<[f64; 3]> = source
-        .lines()
-        .filter_map(|line| {
-            let values: Vec<_> = line.split_whitespace().collect();
-            (values.first() == Some(&"vertex") && values.len() == 4)
-                .then(|| {
-                    Some([
-                        values[1].parse().ok()?,
-                        values[2].parse().ok()?,
-                        values[3].parse().ok()?,
-                    ])
-                })
-                .flatten()
-        })
-        .collect();
-    if vertices.len() < 3 || !vertices.len().is_multiple_of(3) {
+struct ThreeMfBody {
+    label: String,
+    stl: PathBuf,
+}
+
+fn write_3mf(
+    bodies: &[ThreeMfBody],
+    generation_id: &str,
+    revision_id: &str,
+    feature_ids: &[String],
+    feature_graph_hash: &str,
+    revision_hash: &str,
+    destination: &Path,
+) -> Result<(), HostError> {
+    let mut objects = String::new();
+    let mut build = String::new();
+    for (index, body) in bodies.iter().enumerate() {
+        let source = fs::read_to_string(&body.stl).map_err(|error| HostError::BrepIo {
+            detail: format!("3MF body {} could not be read: {error}", body.label),
+        })?;
+        let vertices: Vec<[f64; 3]> = source
+            .lines()
+            .filter_map(|line| {
+                let values: Vec<_> = line.split_whitespace().collect();
+                (values.first() == Some(&"vertex") && values.len() == 4)
+                    .then(|| {
+                        Some([
+                            values[1].parse().ok()?,
+                            values[2].parse().ok()?,
+                            values[3].parse().ok()?,
+                        ])
+                    })
+                    .flatten()
+            })
+            .collect();
+        if vertices.len() < 3 || !vertices.len().is_multiple_of(3) {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("export-{}", body.label)),
+                detail: format!(
+                    "3MF body {} has empty or malformed tessellation",
+                    body.label
+                ),
+            });
+        }
+        let object_id = index + 1;
+        objects.push_str(&format!(
+            "<object id=\"{object_id}\" type=\"model\" name=\"{}\"><mesh><vertices>",
+            xml_escape(&body.label)
+        ));
+        for vertex in &vertices {
+            objects.push_str(&format!(
+                "<vertex x=\"{}\" y=\"{}\" z=\"{}\"/>",
+                vertex[0], vertex[1], vertex[2]
+            ));
+        }
+        objects.push_str("</vertices><triangles>");
+        for triangle in (0..vertices.len()).step_by(3) {
+            objects.push_str(&format!(
+                "<triangle v1=\"{triangle}\" v2=\"{}\" v3=\"{}\"/>",
+                triangle + 1,
+                triangle + 2
+            ));
+        }
+        objects.push_str("</triangles></mesh></object>");
+        build.push_str(&format!("<item objectid=\"{object_id}\"/>",));
+    }
+    let metadata = [
+        ("generation_id", generation_id.to_string()),
+        ("revision_id", revision_id.to_string()),
+        (
+            "feature_ids",
+            serde_json::to_string(feature_ids).expect("feature IDs serialize"),
+        ),
+        ("feature_graph_hash", feature_graph_hash.to_string()),
+        ("revision_hash", revision_hash.to_string()),
+    ]
+    .into_iter()
+    .map(|(name, value)| {
+        format!(
+            "<metadata name=\"threeterm.{name}\">{}</metadata>",
+            xml_escape(&value)
+        )
+    })
+    .collect::<String>();
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" xmlns:threeterm=\"https://threeterm.dev/3mf/2026\">{metadata}<resources>{objects}</resources><build>{build}</build></model>"
+    );
+    if xml.is_empty() {
         return Err(HostError::BrepInvalid {
             request_id: Some("export".to_string()),
-            detail: "OCCT STL tessellation is empty or malformed".to_string(),
+            detail: "3MF model is empty".to_string(),
         });
     }
-    let mut xml = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources><object id=\"1\" type=\"model\"><mesh><vertices>",
-    );
-    for vertex in &vertices {
-        xml.push_str(&format!(
-            "<vertex x=\"{}\" y=\"{}\" z=\"{}\"/>",
-            vertex[0], vertex[1], vertex[2]
-        ));
-    }
-    xml.push_str("</vertices><triangles>");
-    for index in (0..vertices.len()).step_by(3) {
-        xml.push_str(&format!(
-            "<triangle v1=\"{index}\" v2=\"{}\" v3=\"{}\"/>",
-            index + 1,
-            index + 2
-        ));
-    }
-    xml.push_str(
-        "</triangles></mesh></object></resources><build><item objectid=\"1\"/></build></model>",
-    );
     let content_types = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/></Types>";
     let relationships = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/></Relationships>";
     let zip = zip_stored(&[
@@ -84,6 +132,116 @@ fn write_3mf(stl: &Path, destination: &Path) -> Result<(), HostError> {
     fs::write(destination, zip).map_err(|error| HostError::BrepIo {
         detail: error.to_string(),
     })
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn publish_export_artifacts(staged: &[(PathBuf, PathBuf)]) -> Result<Vec<PathBuf>, HostError> {
+    let mut previous = Vec::with_capacity(staged.len());
+    for (_, destination) in staged {
+        let saved = if destination.is_file() {
+            Some(fs::read(destination).map_err(|error| HostError::BrepIo {
+                detail: error.to_string(),
+            })?)
+        } else {
+            None
+        };
+        previous.push((destination.clone(), saved));
+    }
+    let mut published = Vec::with_capacity(staged.len());
+    for (source, destination) in staged {
+        if let Some(parent) = destination.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            rollback_export_artifacts(&published, &previous);
+            return Err(HostError::BrepIo {
+                detail: error.to_string(),
+            });
+        }
+        if let Err(error) = fs::rename(source, destination) {
+            rollback_export_artifacts(&published, &previous);
+            return Err(HostError::BrepIo {
+                detail: error.to_string(),
+            });
+        }
+        published.push(destination.clone());
+    }
+    Ok(published)
+}
+
+fn rollback_export_artifacts(published: &[PathBuf], previous: &[(PathBuf, Option<Vec<u8>>)]) {
+    for path in published {
+        if let Some((_, Some(bytes))) = previous
+            .iter()
+            .find(|(previous_path, _)| previous_path == path)
+        {
+            let _ = fs::write(path, bytes);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn prepare_3mf_bodies(
+    root: &Path,
+    prior: &LoadedBundle,
+    body_ids: &[String],
+    stage: &Path,
+    deflection: f64,
+    accept_stale_geometry: bool,
+    worker: &OcctWorker,
+) -> Result<Vec<ThreeMfBody>, HostError> {
+    let mut bodies = Vec::with_capacity(body_ids.len());
+    for body_id in body_ids {
+        let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
+        if !accept_stale_geometry && !stale_body_features.is_empty() {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: body_id.clone(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features: stale_body_features,
+            });
+        }
+        if !prior
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == body_id)
+        {
+            return Err(HostError::Validation {
+                detail: format!("3MF body is not a canonical feature: {body_id}"),
+            });
+        }
+        let body_brep = bundle_root(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{body_id}.brep"));
+        if !body_brep.is_file() {
+            return Err(HostError::BrepFileMissing { path: body_brep });
+        }
+        let body_request = ExportRequest::new(format!("export-{body_id}"), body_brep, deflection)
+            .with_output_path(stage.join("bodies"), format!("{body_id}.stl"))
+            .with_feature_id(body_id);
+        let body_result = worker
+            .clone()
+            .export(&body_request)
+            .map_err(HostError::from)?;
+        if !body_result.is_success() || !body_result.brep_path.is_file() {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("export-{body_id}")),
+                detail: format!("3MF body export did not produce a mesh: {body_id}"),
+            });
+        }
+        bodies.push(ThreeMfBody {
+            label: body_id.clone(),
+            stl: body_result.brep_path,
+        });
+    }
+    Ok(bodies)
 }
 
 fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
@@ -277,6 +435,12 @@ pub struct LinearPatternCommitView {
 pub struct CircularPatternCommitView {
     pub snapshot: SnapshotView,
     pub result: CircularPatternResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BooleanPatternCommitView {
+    pub snapshot: SnapshotView,
+    pub result: BooleanPatternResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -664,6 +828,7 @@ impl From<WorkerError> for HostError {
             } => Self::WorkerFailure { request_id, detail },
             WorkerError::Cancelled {
                 request_id,
+                reason,
                 last_progress,
                 elapsed,
                 stderr_tail,
@@ -673,6 +838,7 @@ impl From<WorkerError> for HostError {
                 record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
                     request_id: request_id.clone(),
                     stage: "cancelled".to_string(),
+                    cancel_reason: Some(reason),
                     elapsed,
                     last_progress,
                     last_artifact_error: None,
@@ -716,6 +882,7 @@ impl Host {
         deflection: f64,
         override_warnings: bool,
         accept_stale_geometry: bool,
+        body_ids: &[String],
     ) -> Result<ExportCommitView, HostError> {
         if deflection > 0.5 && !override_warnings {
             return Err(HostError::Validation {
@@ -754,6 +921,17 @@ impl Host {
                 detail: "unsupported export format".to_string(),
             });
         }
+        let body_ids = if body_ids.is_empty() {
+            vec![feature_id.to_string()]
+        } else {
+            body_ids.to_vec()
+        };
+        let unique_bodies = body_ids.iter().collect::<BTreeSet<_>>();
+        if unique_bodies.len() != body_ids.len() || body_ids.iter().any(String::is_empty) {
+            return Err(HostError::Validation {
+                detail: "duplicate or empty 3MF body ID".to_string(),
+            });
+        }
         let stage = output_dir.join(format!(".threeterm-export-{}", std::process::id()));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: error.to_string(),
@@ -761,11 +939,16 @@ impl Host {
         let request = ExportRequest::new("export", brep, deflection)
             .with_output_path(&stage, format!("{feature_id}.stl"))
             .with_feature_id(feature_id);
-        let result = OcctWorker::locate()
-            .map_err(HostError::from)?
-            .with_revision_id(prior.revision_hash_hex())
-            .export(&request)
-            .map_err(HostError::from)?;
+        let worker = OcctWorker::locate()
+            .map_err(|error| {
+                let _ = fs::remove_dir_all(&stage);
+                HostError::from(error)
+            })?
+            .with_revision_id(prior.revision_hash_hex());
+        let result = worker.export(&request).map_err(|error| {
+            let _ = fs::remove_dir_all(&stage);
+            HostError::from(error)
+        })?;
         if !result.is_success() || !result.step_path.is_file() {
             let _ = fs::remove_dir_all(&stage);
             return Err(HostError::BrepInvalid {
@@ -773,26 +956,67 @@ impl Host {
                 detail: "export worker did not produce validated artifacts".to_string(),
             });
         }
-        let mut artifacts = Vec::new();
+        let bodies = if formats.iter().any(|format| format == "3mf") {
+            prepare_3mf_bodies(
+                root,
+                &prior,
+                &body_ids,
+                &stage,
+                deflection,
+                accept_stale_geometry,
+                &worker,
+            )
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&stage);
+            })?
+        } else {
+            Vec::new()
+        };
         if formats.iter().any(|format| format == "3mf") {
-            write_3mf(&result.brep_path, &stage.join(format!("{feature_id}.3mf")))?;
-        }
-        for format in formats {
-            let source = match format.as_str() {
-                "stl" => result.brep_path.clone(),
-                "step" => result.step_path.clone(),
-                "3mf" => stage.join(format!("{feature_id}.3mf")),
-                _ => unreachable!(),
-            };
-            let final_path = output_dir.join(format!("{feature_id}.{format}"));
-            fs::create_dir_all(output_dir).map_err(|error| HostError::BrepIo {
-                detail: error.to_string(),
+            let feature_ids = prior
+                .generation
+                .revisions
+                .last()
+                .map(|revision| {
+                    revision
+                        .features
+                        .iter()
+                        .map(|feature_id| feature_id.as_str().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            write_3mf(
+                &bodies,
+                &prior.generation.id,
+                &prior
+                    .generation
+                    .revisions
+                    .last()
+                    .map_or_else(|| "revision-0".to_string(), |revision| revision.id.clone()),
+                &feature_ids,
+                prior.feature_graph_hash_hex(),
+                prior.revision_hash_hex(),
+                &stage.join(format!("{feature_id}.3mf")),
+            )
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&stage);
             })?;
-            fs::rename(&source, &final_path).map_err(|error| HostError::BrepIo {
-                detail: error.to_string(),
-            })?;
-            artifacts.push(final_path);
         }
+        let staged_artifacts = formats
+            .iter()
+            .map(|format| {
+                let source = match format.as_str() {
+                    "stl" => result.brep_path.clone(),
+                    "step" => result.step_path.clone(),
+                    "3mf" => stage.join(format!("{feature_id}.3mf")),
+                    _ => unreachable!(),
+                };
+                (source, output_dir.join(format!("{feature_id}.{format}")))
+            })
+            .collect::<Vec<_>>();
+        let artifacts = publish_export_artifacts(&staged_artifacts).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&stage);
+        })?;
         let _ = fs::remove_dir_all(stage);
         Ok(ExportCommitView {
             artifacts,
@@ -3148,6 +3372,71 @@ impl Host {
         Ok(CircularPatternCommitView { snapshot, result })
     }
 
+    /// Run the real sequential Boolean-cut pattern with cooperative
+    /// cancellation. A successful result is the only path that can advance
+    /// the canonical Revision Snapshot.
+    pub fn boolean_pattern_with_cancel(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanPatternRequest,
+        worker: &OcctWorker,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<BooleanPatternCommitView, HostError> {
+        let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        self.boolean_pattern_with_cancel_and_progress(
+            root,
+            request,
+            worker,
+            cancel,
+            &mut ignore_progress,
+        )
+    }
+
+    pub fn boolean_pattern_with_cancel_and_progress(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanPatternRequest,
+        worker: &OcctWorker,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    ) -> Result<BooleanPatternCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .boolean_pattern_with_cancel_and_progress(&request, cancel, on_progress)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
+                detail: format!(
+                    "boolean_pattern returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = self.commit_brep_feature_verified_at_revision(
+            root,
+            &feature_id,
+            &result.brep_path,
+            &prior_view.revision_hash,
+            result.brep_bytes,
+            &result.brep_sha256,
+        )?;
+        Ok(BooleanPatternCommitView { snapshot, result })
+    }
+
     /// Shell `request` against the disposable OCCT worker and, on
     /// success, commit the shelled BREP into a new revision.
     pub fn shell(
@@ -4098,6 +4387,7 @@ mod tests {
                 0.5,
                 false,
                 false,
+                &[],
             )
             .expect_err("stale family must require explicit acceptance");
         match error {
@@ -4209,6 +4499,50 @@ mod tests {
         let reloaded = host.load(&root).expect("reloads");
         assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn three_mf_writer_emits_named_objects_and_recoverable_generation_metadata() {
+        let root = temp_root("3mf-writer");
+        std::fs::create_dir_all(&root).expect("writer root creates");
+        let stl = root.join("body.stl");
+        std::fs::write(
+            &stl,
+            "solid body\n facet normal 0 0 1\n  outer loop\n   vertex 0 0 0\n   vertex 1 0 0\n   vertex 0 1 0\n  endloop\n endfacet\nendsolid body\n",
+        )
+        .expect("fixture STL writes");
+        let destination = root.join("body.3mf");
+        write_3mf(
+            &[
+                ThreeMfBody {
+                    label: "first<&".to_string(),
+                    stl: stl.clone(),
+                },
+                ThreeMfBody {
+                    label: "second".to_string(),
+                    stl,
+                },
+            ],
+            "generation-1",
+            "revision-2",
+            &["first".to_string(), "second".to_string()],
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &destination,
+        )
+        .expect("3MF writes");
+        let bytes = std::fs::read(&destination).expect("3MF reads");
+        let archive = String::from_utf8_lossy(&bytes);
+        assert_eq!(archive.matches("<object ").count(), 2);
+        assert_eq!(archive.matches("<item ").count(), 2);
+        assert!(archive.contains("name=\"first&lt;&amp;\""));
+        assert!(archive.contains("threeterm.generation_id"));
+        assert!(archive.contains("generation-1"));
+        assert!(archive.contains("revision-2"));
+        assert!(archive.contains("threeterm.feature_ids\">[&quot;first&quot;,&quot;second&quot;]"));
+        assert!(archive.contains(&"a".repeat(64)));
+        assert!(archive.contains(&"b".repeat(64)));
         let _ = std::fs::remove_dir_all(root);
     }
 }

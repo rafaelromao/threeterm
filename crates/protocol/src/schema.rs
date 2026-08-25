@@ -787,6 +787,7 @@ pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "body_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
             "formats": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["stl", "3mf", "step"] } },
             "output_dir": { "type": "string", "minLength": 1 },
             "tessellation_deflection": { "type": "number", "exclusiveMinimum": 0 },

@@ -2140,15 +2140,14 @@ pub fn stale_last_valid_geometry_for_export(
 ) -> Vec<StaleLastValidGeometryEntry> {
     let snapshot = history.active_snapshot();
     let mut candidates = BTreeSet::new();
-    if snapshot.features.contains_key(export_feature_id) {
-        candidates.insert(export_feature_id.to_string());
-    } else {
-        for suffix in ["-base", "-bend", "-finish"] {
-            let candidate = format!("{export_feature_id}{suffix}");
-            if snapshot.features.contains_key(&candidate) {
-                candidates.insert(candidate);
-            }
+    for suffix in ["-base", "-bend", "-finish"] {
+        let candidate = format!("{export_feature_id}{suffix}");
+        if snapshot.features.contains_key(&candidate) {
+            candidates.insert(candidate);
         }
+    }
+    if candidates.is_empty() && snapshot.features.contains_key(export_feature_id) {
+        candidates.insert(export_feature_id.to_string());
     }
     candidates
         .into_iter()

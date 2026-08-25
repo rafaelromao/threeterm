@@ -933,6 +933,7 @@ impl TuiSession {
             can_undo: true,
             can_redo: false,
         }))?;
+        self.refresh_stale_last_valid_geometry(&view.history, &feature_id);
         Ok(view)
     }
 
@@ -1890,9 +1891,7 @@ impl TuiSession {
             .frame
             .render_overlay_with_theme(&self.theme)
             .map_err(|error| self.theme_diagnostic(error))?;
-        let overlay = self
-            .stale_last_valid_geometry_overlay()
-            .map_or(overlay.clone(), |stale| format!("{overlay}\n{stale}"));
+        let overlay = self.append_stale_last_valid_geometry_overlay(overlay);
         Ok(RenderedInput {
             frame: outcome.frame,
             overlay,
@@ -1953,12 +1952,18 @@ impl TuiSession {
             &self.theme,
         )
         .map_err(|error| self.theme_diagnostic(error))?;
+        let overlay = self.append_stale_last_valid_geometry_overlay(overlay);
         Ok(StateTransition {
             state: self.state(),
             acknowledgement,
             overlay,
             diagnostic,
         })
+    }
+
+    fn append_stale_last_valid_geometry_overlay(&self, overlay: String) -> String {
+        self.stale_last_valid_geometry_overlay()
+            .map_or(overlay.clone(), |stale| format!("{overlay}\n{stale}"))
     }
 
     fn operation_diagnostic(
@@ -2510,6 +2515,14 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn state(&self) -> TuiState {
         self.tui.state()
+    }
+
+    pub fn open_feature_timeline(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+    ) -> Result<(), TuiDiagnostic> {
+        self.tui.open_feature_timeline(host, root)
     }
 
     pub fn refresh_stale_last_valid_geometry(

@@ -664,7 +664,7 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     if let Some(current_revision) = current_revision {
         diagnostic["current_revision"] = Value::String(current_revision.to_string());
     }
-    if phase == "open" && diagnostic["kind"] == "bracket_edit_rejected" {
+    if phase == "open" {
         let current_revision = arguments
             .get("bundle_path")
             .and_then(Value::as_str)

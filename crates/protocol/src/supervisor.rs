@@ -1074,10 +1074,15 @@ impl Supervisor {
                         last_artifact_error: self.last_artifact_error.take(),
                         failed: None,
                     };
+                    let stage = self
+                        .host
+                        .stream_overflowed()
+                        .map(|stream| format!("{stage_prefix}:stream_overflow:{stream}"))
+                        .unwrap_or_else(|| format!("{stage_prefix}:trailing_drain_failed:{error}"));
                     return Some(SupervisorOutcome::ForceTerminated {
                         record: self.termination_record(
                             request_id.to_string(),
-                            format!("{stage_prefix}:trailing_drain_failed:{error}"),
+                            stage,
                             started,
                             context,
                             ExitKind::ForceAfterGrace,

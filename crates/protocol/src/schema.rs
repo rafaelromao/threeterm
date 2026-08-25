@@ -943,6 +943,7 @@ pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status": { "type": "string" },
             "feature_id": { "type": "string" },
             "artifacts": { "type": "array" },
+            "source_revision_id": { "type": "string", "minLength": 1 },
             "derived_artifacts": {
                 "type": "array",
                 "items": {

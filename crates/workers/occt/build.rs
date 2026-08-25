@@ -196,11 +196,8 @@ fn check_occt(root: &Path) -> Result<OcctInstall, String> {
         "TKFillet".to_string(),
         "TKShHealing".to_string(),
         "TKMesh".to_string(),
-        "TKSTL".to_string(),
-        "TKSTEP".to_string(),
-        "TKSTEPAttr".to_string(),
-        "TKSTEP209".to_string(),
-        "TKSTEPBase".to_string(),
+        "TKDESTL".to_string(),
+        "TKDESTEP".to_string(),
         "TKXSBase".to_string(),
         "TKOffset".to_string(),
     ];

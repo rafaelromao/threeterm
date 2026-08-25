@@ -5365,7 +5365,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 33);
+        assert_eq!(commands.len(), 34);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

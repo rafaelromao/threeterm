@@ -384,7 +384,15 @@ fn schema_and_capability_adversarial_cases_preserve_state_and_publish_evidence()
             .as_bool()
             .unwrap()
     );
-    verify_adversarial_evidence(&output_dir).expect("incremental adversarial evidence verifies");
+    let error = verify_adversarial_evidence(&output_dir)
+        .expect_err("incomplete adversarial evidence must be rejected");
+    assert_eq!(error.stage, "evidence_verification");
+    assert!(
+        error.detail["message"]
+            .as_str()
+            .unwrap()
+            .contains("all required cases")
+    );
     let _ = fs::remove_dir_all(output_dir);
 }
 

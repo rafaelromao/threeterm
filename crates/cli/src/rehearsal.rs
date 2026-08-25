@@ -1068,6 +1068,42 @@ pub fn verify_adversarial_evidence(root: impl AsRef<Path>) -> Result<(), Rehears
             root,
         ));
     }
+    let required_cases = AdversarialCase::ALL
+        .iter()
+        .map(|case| case.as_str())
+        .collect::<Vec<_>>();
+    if manifest["cases"] != json!(required_cases) {
+        return Err(RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "adversarial manifest must contain all required cases", "expected": required_cases, "actual": manifest["cases"]}),
+            root,
+        ));
+    }
+    for case in AdversarialCase::ALL {
+        let case_root = root.join(case.as_str());
+        let report_path = case_root.join("report.json");
+        let report: Value = serde_json::from_slice(&fs::read(&report_path).map_err(|error| {
+            RehearsalError::new(
+                "evidence_verification",
+                json!({"message": error.to_string(), "case": case.as_str()}),
+                root,
+            )
+        })?)
+        .map_err(|error| {
+            RehearsalError::new(
+                "evidence_verification",
+                json!({"message": error.to_string(), "case": case.as_str()}),
+                root,
+            )
+        })?;
+        if report["schema_version"] != ADVERSARIAL_SCHEMA || report["case"] != case.as_str() {
+            return Err(RehearsalError::new(
+                "evidence_verification",
+                json!({"message": "adversarial case report does not match its required case", "case": case.as_str()}),
+                root,
+            ));
+        }
+    }
     let expected = manifest["artifacts"].as_array().ok_or_else(|| {
         RehearsalError::new(
             "evidence_verification",

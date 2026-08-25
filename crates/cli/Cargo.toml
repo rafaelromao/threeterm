@@ -8,7 +8,9 @@ publish.workspace = true
 description = "Headless Automation CLI adapter for the ThreeTerm domain command API."
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 threeterm-domain = { path = "../domain" }
 threeterm-host = { path = "../host" }
 threeterm-lua-bridge = { path = "../lua-bridge" }

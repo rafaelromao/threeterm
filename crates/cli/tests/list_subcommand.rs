@@ -36,7 +36,7 @@ fn threeterm_machine_list_prints_top_level_json_array_to_stdout() {
     let commands = parsed
         .as_array()
         .expect("dispatch output is a top-level JSON array");
-    assert_eq!(commands.len(), 30, "thirty registered commands");
+    assert_eq!(commands.len(), 31, "thirty-one registered commands");
     let list = commands
         .iter()
         .find(|command| command["id"] == "list")

@@ -36,9 +36,14 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <StlAPI_Writer.hxx>
+#include <STEPControl_Writer.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Message_ProgressRange.hxx>
+#include <Message.hxx>
+#include <Message_PrinterOStream.hxx>
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1124,6 +1129,30 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         << "}";
     g_result_json = out.str();
     return status == "ok";
+}
+
+bool handle_export(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    double deflection = get_number(request, "tessellation_deflection");
+    if (request_id.empty() || feature_id.empty() || base_path.empty() || output_dir.empty() || output_filename.empty() || !(deflection > 0.0) || !std::isfinite(deflection)) { error = "export request is missing required fields"; return false; }
+    TopoDS_Shape shape; BRep_Builder builder;
+    if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) { error = "could not read export BREP"; return false; }
+    if (!analyze_brep(shape)) { error = "brep_invalid: BRepCheck_Analyzer failed"; return false; }
+    std::filesystem::path stl_path = std::filesystem::path(output_dir) / output_filename;
+    std::filesystem::path step_path = stl_path; step_path.replace_extension("step");
+    std::error_code ec; std::filesystem::create_directories(stl_path.parent_path(), ec);
+    try {
+        BRepMesh_IncrementalMesh mesh(shape, deflection);
+        StlAPI_Writer stl; stl.ASCIIMode() = Standard_True; stl.Write(shape, stl_path.string().c_str());
+        STEPControl_Writer step; if (step.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone || step.Write(step_path.string().c_str()) != IFSelect_RetDone) { error = "STEP writer failed"; return false; }
+    } catch (const Standard_Failure& exception) { error = std::string("OCCT export failed: ") + exception.GetMessageString(); return false; }
+    std::ifstream stream(stl_path, std::ios::binary); std::ostringstream bytes; bytes << stream.rdbuf();
+    if (bytes.str().empty() || !std::filesystem::is_regular_file(step_path)) { error = "export writer produced no artifact"; return false; }
+    std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
@@ -2518,6 +2547,10 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
 }  // namespace
 
 int main() {
+    // Keep OCCT diagnostics off stdout, which is reserved for protocol frames.
+    Message::DefaultMessenger()->ChangePrinters().Clear();
+    Message::DefaultMessenger()->AddPrinter(new Message_PrinterOStream("cerr", Standard_False));
+
     // The cancellation probe uses poll(2) after reading the request. Keep
     // stdio from hiding a queued Cancel line in its user-space buffer.
     std::setvbuf(stdin, nullptr, _IONBF, 0);
@@ -2656,6 +2689,8 @@ int main() {
         success = handle_draft(*args, error);
     } else if (command_id == "loft") {
         success = handle_loft(*args, error);
+    } else if (command_id == "export") {
+        success = handle_export(*args, error);
     } else {
         write_failed(request_id, "request_malformed", "unknown command_id " + command_id);
         return 2;

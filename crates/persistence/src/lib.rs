@@ -1059,6 +1059,7 @@ impl Bundle {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_features_locked(
         &self,
         entries: &[(&str, &str)],

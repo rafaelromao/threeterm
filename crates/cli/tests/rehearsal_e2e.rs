@@ -55,7 +55,7 @@ fn hash(root: &Path, relative: &str) -> (u64, String) {
 }
 
 #[test]
-fn rehearsal_runs_the_production_l_bracket_pipeline_and_catalogs_every_artifact() {
+fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
     if OcctWorker::locate().is_err() {
         eprintln!("rehearsal_e2e: no OCCT worker binary found; CI runs this production path");
         return;
@@ -81,42 +81,51 @@ fn rehearsal_runs_the_production_l_bracket_pipeline_and_catalogs_every_artifact(
     .expect("request validates");
     assert_eq!(
         entry.response_schema_version,
-        "threeterm.command.rehearse.response/1"
+        "threeterm.command.rehearse.response/2"
     );
-    assert_eq!(report["run_count"], 1);
+    assert_eq!(report["run_count"], 2);
     assert_eq!(report["promoted"], false);
     assert_eq!(report["fixture"], "l-bracket");
     assert_eq!(
-        report["timings"].as_array().unwrap().len(),
-        9,
-        "one band per production rehearsal stage"
+        report["release_candidates"],
+        serde_json::json!(["rc-1", "rc-2"])
     );
-    for timing in report["timings"].as_array().unwrap() {
-        assert_eq!(timing["sample_count"], 1);
-        assert_eq!(timing["unit"], "ms");
-        assert_eq!(timing["samples_ms"].as_array().unwrap().len(), 1);
-        assert_eq!(timing["p50_ms"], timing["p95_ms"]);
-        assert_eq!(timing["p95_ms"], timing["p99_ms"]);
+    assert_eq!(report["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(report["comparisons"].as_array().unwrap().len(), 9);
+    for run in report["runs"].as_array().unwrap() {
+        assert_eq!(run["timings"].as_array().unwrap().len(), 9);
+        for timing in run["timings"].as_array().unwrap() {
+            assert_eq!(timing["sample_count"], 1);
+            assert_eq!(timing["unit"], "ms");
+            assert_eq!(timing["samples_ms"].as_array().unwrap().len(), 1);
+            assert_eq!(timing["p50_ms"], timing["p95_ms"]);
+            assert_eq!(timing["p95_ms"], timing["p99_ms"]);
+        }
+    }
+    for comparison in report["comparisons"].as_array().unwrap() {
+        assert_eq!(comparison["same_order_of_magnitude"], true);
     }
 
-    let project = output_dir.join("project");
-    let export = output_dir.join("export");
-    let loaded = Bundle::at(&project)
-        .open()
-        .expect("rehearsal project reloads");
-    assert!(project.join("manifest.json").is_file());
-    assert!(project.join("transactions.log").is_file());
-    assert!(project.join("brep/l-bracket.brep").is_file());
-    assert!(export.join("l-bracket.stl").is_file());
-    assert!(export.join("l-bracket.3mf").is_file());
-    assert!(export.join("l-bracket.step").is_file());
-    assert!(
-        fs::read_to_string(project.join("transactions.log"))
-            .unwrap()
-            .contains("65.00000000000000000"),
-        "the edit dimensions are canonical"
-    );
-    assert_eq!(loaded.revision_hash_hex().len(), 64);
+    for run_number in [1, 2] {
+        let project = output_dir.join(format!("run-{run_number}/project"));
+        let export = output_dir.join(format!("run-{run_number}/export"));
+        let loaded = Bundle::at(&project)
+            .open()
+            .expect("rehearsal project reloads");
+        assert!(project.join("manifest.json").is_file());
+        assert!(project.join("transactions.log").is_file());
+        assert!(project.join("brep/l-bracket.brep").is_file());
+        assert!(export.join("l-bracket.stl").is_file());
+        assert!(export.join("l-bracket.3mf").is_file());
+        assert!(export.join("l-bracket.step").is_file());
+        assert!(
+            fs::read_to_string(project.join("transactions.log"))
+                .unwrap()
+                .contains("65.00000000000000000"),
+            "the edit dimensions are canonical"
+        );
+        assert_eq!(loaded.revision_hash_hex().len(), 64);
+    }
 
     let catalog_path = output_dir.join("sha256-manifest.json");
     assert!(catalog_path.is_file());
@@ -125,40 +134,55 @@ fn rehearsal_runs_the_production_l_bracket_pipeline_and_catalogs_every_artifact(
         report
     );
     let mut actual = Vec::new();
-    files(&project, "project", &mut actual);
-    if output_dir.join("project.previous-generation").is_dir() {
+    for run_number in [1, 2] {
+        let run = output_dir.join(format!("run-{run_number}"));
         files(
-            &output_dir.join("project.previous-generation"),
-            "project.previous-generation",
+            &run.join("project"),
+            &format!("run-{run_number}/project"),
+            &mut actual,
+        );
+        if run.join("project.previous-generation").is_dir() {
+            files(
+                &run.join("project.previous-generation"),
+                &format!("run-{run_number}/project.previous-generation"),
+                &mut actual,
+            );
+        }
+        files(
+            &run.join("export"),
+            &format!("run-{run_number}/export"),
             &mut actual,
         );
     }
-    files(&export, "export", &mut actual);
     actual.sort();
-    let cataloged = report["artifacts"]
+    let cataloged = report["runs"]
         .as_array()
         .unwrap()
         .iter()
+        .flat_map(|run| run["artifacts"].as_array().unwrap())
         .map(|artifact| artifact["relative_path"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     assert_eq!(cataloged, actual);
-    for artifact in report["artifacts"].as_array().unwrap() {
-        let relative = artifact["relative_path"].as_str().unwrap();
-        let (bytes, sha256) = hash(&output_dir, relative);
-        assert_eq!(artifact["bytes"].as_u64(), Some(bytes));
-        assert_eq!(artifact["sha256"].as_str(), Some(sha256.as_str()));
+    for run in report["runs"].as_array().unwrap() {
+        for artifact in run["artifacts"].as_array().unwrap() {
+            let relative = artifact["relative_path"].as_str().unwrap();
+            let (bytes, sha256) = hash(&output_dir, relative);
+            assert_eq!(artifact["bytes"].as_u64(), Some(bytes));
+            assert_eq!(artifact["sha256"].as_str(), Some(sha256.as_str()));
+        }
     }
     let top_level = fs::read_dir(&output_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(top_level.contains("project"));
-    assert!(top_level.contains("export"));
+    assert!(top_level.contains("run-1"));
+    assert!(top_level.contains("run-2"));
     assert!(top_level.contains("sha256-manifest.json"));
-    assert!(top_level.iter().all(|name| matches!(
-        name.as_str(),
-        "project" | "project.previous-generation" | "export" | "sha256-manifest.json"
-    )));
+    assert!(
+        top_level
+            .iter()
+            .all(|name| matches!(name.as_str(), "run-1" | "run-2" | "sha256-manifest.json"))
+    );
     assert!(
         !actual
             .iter()
@@ -174,18 +198,21 @@ fn failed_export_reports_a_structured_diagnostic_and_keeps_the_project_reloadabl
         return;
     }
     let output_dir = temp_root("export-failure");
-    fs::create_dir_all(&output_dir).expect("output root creates");
-    fs::write(output_dir.join("export"), b"not-a-directory").expect("export sentinel writes");
+    fs::create_dir_all(output_dir.join("run-2")).expect("output root creates");
+    fs::write(output_dir.join("run-2/export"), b"not-a-directory").expect("export sentinel writes");
     let output = run_rehearsal(&output_dir);
     assert_eq!(output.status.code(), Some(7));
     assert!(output.stdout.is_empty());
     let diagnostic: Value = serde_json::from_slice(&output.stderr).expect("diagnostic is JSON");
     assert_eq!(diagnostic["code"], "rehearsal_failure");
-    assert_eq!(diagnostic["stage"], "export");
+    assert_eq!(diagnostic["stage"], "run-2:export");
     assert!(diagnostic["current_revision"].as_str().unwrap().len() == 64);
     assert!(diagnostic["detail"].is_object());
     assert!(!output_dir.join("sha256-manifest.json").exists());
-    let project = output_dir.join("project");
+    Bundle::at(output_dir.join("run-1/project"))
+        .open()
+        .expect("first completed run remains reloadable");
+    let project = output_dir.join("run-2/project");
     let before_manifest = fs::read(project.join("manifest.json")).expect("manifest remains");
     let before_log = fs::read(project.join("transactions.log")).expect("log remains");
     let before_brep = fs::read(project.join("brep/l-bracket.brep")).expect("brep remains");

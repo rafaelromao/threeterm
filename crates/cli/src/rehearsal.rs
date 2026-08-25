@@ -11,7 +11,8 @@ use threeterm_host::Host;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, BRACKET_EDIT_RESPONSE_SCHEMA,
     BRACKET_RESPONSE_SCHEMA, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
-    NEW_PROJECT_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION, find,
+    NEW_PROJECT_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
+    REHEARSE_RUN_RESPONSE_SCHEMA, find,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -97,12 +98,58 @@ fn elapsed_band(class: &str, started: Instant) -> TimingBand {
     }
 }
 
-/// Run the canonical L-bracket rehearsal once and write its artifact catalog.
+/// Run the canonical L-bracket rehearsal twice and write the comparison catalog.
 pub fn run_l_bracket_rehearsal(
     output_dir: impl AsRef<Path>,
     release_candidate: &str,
 ) -> Result<Value, RehearsalError> {
     let output_dir = output_dir.as_ref();
+    let project = output_dir.join("run-1").join(PROJECT_DIR);
+    preflight_aggregate(output_dir, &project)?;
+    let release_candidates = release_candidates(release_candidate);
+    let mut runs = Vec::with_capacity(release_candidates.len());
+    for (index, candidate) in release_candidates.iter().enumerate() {
+        let run_root = output_dir.join(format!("run-{}", index + 1));
+        let report =
+            run_single_l_bracket_rehearsal(&run_root, candidate).map_err(|mut error| {
+                error.stage = format!("run-{}:{}", index + 1, error.stage);
+                error
+            })?;
+        runs.push(prefix_run_report(report, &format!("run-{}", index + 1)));
+    }
+
+    let comparisons = compare_runs(&runs, &output_dir.join("run-2").join(PROJECT_DIR))?;
+    let report = json!({
+        "schema_version": REHEARSE_RESPONSE_SCHEMA_VERSION,
+        "release_candidates": release_candidates,
+        "fixture": FIXTURE,
+        "run_count": 2,
+        "sample_policy": "nearest-rank",
+        "promoted": false,
+        "runs": runs,
+        "comparisons": comparisons,
+    });
+    validate(&REHEARSE_RESPONSE_SCHEMA, &report).map_err(|error| {
+        RehearsalError::new(
+            "comparison",
+            json!({"message": format!("comparison response failed schema validation: {error}")}),
+            &output_dir.join("run-2").join(PROJECT_DIR),
+        )
+    })?;
+    write_catalog(output_dir, &report).map_err(|error| {
+        RehearsalError::new(
+            "comparison",
+            json!({"message": error.to_string()}),
+            &project,
+        )
+    })?;
+    Ok(report)
+}
+
+fn run_single_l_bracket_rehearsal(
+    output_dir: &Path,
+    release_candidate: &str,
+) -> Result<Value, RehearsalError> {
     let project = output_dir.join(PROJECT_DIR);
     preflight(output_dir, &project, release_candidate)?;
     let mut timings = Vec::with_capacity(TIMING_CLASSES.len());
@@ -284,25 +331,14 @@ pub fn run_l_bracket_rehearsal(
             .unwrap_or(usize::MAX)
     });
     let report = json!({
-        "schema_version": REHEARSE_RESPONSE_SCHEMA_VERSION,
         "release_candidate": release_candidate,
-        "fixture": FIXTURE,
-        "run_count": 1,
-        "sample_policy": "nearest-rank",
-        "promoted": false,
         "project_path": PROJECT_DIR,
         "export_path": EXPORT_DIR,
         "catalog_path": CATALOG_FILE,
         "timings": timings,
         "artifacts": artifacts,
     });
-    validate(
-        &find(threeterm_protocol::schema::REHEARSE_COMMAND_ID)
-            .expect("rehearse schema is registered")
-            .response_schema,
-        &report,
-    )
-    .map_err(|error| {
+    validate(&REHEARSE_RUN_RESPONSE_SCHEMA, &report).map_err(|error| {
         RehearsalError::new(
             "catalog",
             json!({"message": format!("catalog response failed schema validation: {error}")}),
@@ -313,6 +349,148 @@ pub fn run_l_bracket_rehearsal(
         RehearsalError::new("catalog", json!({"message": error.to_string()}), &project)
     })?;
     Ok(report)
+}
+
+fn release_candidates(release_candidate: &str) -> [String; 2] {
+    let second = release_candidate.strip_suffix('1').map_or_else(
+        || format!("{release_candidate}-2"),
+        |prefix| format!("{prefix}2"),
+    );
+    [release_candidate.to_string(), second]
+}
+
+fn prefix_run_report(mut report: Value, prefix: &str) -> Value {
+    for field in ["project_path", "export_path", "catalog_path"] {
+        let path = report[field]
+            .as_str()
+            .expect("per-run report path is a string")
+            .to_string();
+        report[field] = json!(format!("{prefix}/{path}"));
+    }
+    if let Some(artifacts) = report["artifacts"].as_array_mut() {
+        for artifact in artifacts {
+            let path = artifact["relative_path"]
+                .as_str()
+                .expect("artifact path is a string")
+                .to_string();
+            artifact["relative_path"] = json!(format!("{prefix}/{path}"));
+        }
+    }
+    report
+}
+
+fn compare_runs(runs: &[Value], project: &Path) -> Result<Vec<Value>, RehearsalError> {
+    let first = runs
+        .first()
+        .and_then(|run| run["timings"].as_array())
+        .expect("first run timings are an array");
+    let second = runs
+        .get(1)
+        .and_then(|run| run["timings"].as_array())
+        .expect("second run timings are an array");
+    let mut comparisons = Vec::with_capacity(first.len());
+    for timing in first {
+        let class = timing["class"].as_str().expect("timing class is a string");
+        let other = second
+            .iter()
+            .find(|candidate| candidate["class"] == class)
+            .ok_or_else(|| {
+                RehearsalError::new(
+                    "comparison",
+                    json!({"message": "timing class is missing from the second run", "class": class}),
+                    project,
+                )
+            })?;
+        let run_1 = timing_band_values(timing);
+        let run_2 = timing_band_values(other);
+        let same = ["p50_ms", "p95_ms", "p99_ms"]
+            .iter()
+            .all(|field| same_order_of_magnitude(&run_1[field], &run_2[field]));
+        if !same {
+            return Err(RehearsalError::new(
+                "comparison",
+                json!({
+                    "message": "release candidates differ in timing order of magnitude",
+                    "class": class,
+                    "run_1": run_1,
+                    "run_2": run_2,
+                }),
+                project,
+            ));
+        }
+        comparisons.push(json!({
+            "class": class,
+            "run_1": run_1,
+            "run_2": run_2,
+            "same_order_of_magnitude": true,
+        }));
+    }
+    Ok(comparisons)
+}
+
+fn timing_band_values(timing: &Value) -> Value {
+    json!({
+        "p50_ms": timing["p50_ms"],
+        "p95_ms": timing["p95_ms"],
+        "p99_ms": timing["p99_ms"],
+    })
+}
+
+fn same_order_of_magnitude(left: &Value, right: &Value) -> bool {
+    let (Some(left), Some(right)) = (left.as_f64(), right.as_f64()) else {
+        return false;
+    };
+    if !left.is_finite() || !right.is_finite() || left < 0.0 || right < 0.0 {
+        return false;
+    }
+    if left == 0.0 || right == 0.0 {
+        return left == right;
+    }
+    left.log10().floor() == right.log10().floor()
+}
+
+fn preflight_aggregate(output_dir: &Path, project: &Path) -> Result<(), RehearsalError> {
+    if output_dir.exists() {
+        let metadata = fs::symlink_metadata(output_dir).map_err(|error| {
+            RehearsalError::new("preflight", json!({"message": error.to_string()}), project)
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(RehearsalError::new(
+                "preflight",
+                json!({"message": "output_dir must be a real directory"}),
+                project,
+            ));
+        }
+        let entries = fs::read_dir(output_dir)
+            .map_err(|error| {
+                RehearsalError::new("preflight", json!({"message": error.to_string()}), project)
+            })?
+            .collect::<Result<Vec<_>, io::Error>>()
+            .map_err(|error| {
+                RehearsalError::new("preflight", json!({"message": error.to_string()}), project)
+            })?;
+        if entries.len() > 1
+            || entries
+                .first()
+                .is_some_and(|entry| entry.file_name() != "run-2")
+            || entries.first().is_some_and(|entry| {
+                let metadata = fs::symlink_metadata(entry.path()).ok();
+                metadata
+                    .is_none_or(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+            })
+        {
+            return Err(RehearsalError::new(
+                "preflight",
+                json!({"message": "output_dir must be empty for a two-run rehearsal"}),
+                project,
+            ));
+        }
+    } else {
+        fs::create_dir_all(output_dir).map_err(|error| {
+            RehearsalError::new("preflight", json!({"message": error.to_string()}), project)
+        })?;
+    }
+    Ok(())
 }
 
 fn preflight(
@@ -560,4 +738,24 @@ fn write_catalog(output_dir: &Path, report: &Value) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_order_of_magnitude;
+    use serde_json::json;
+
+    #[test]
+    fn equal_zero_bands_match_but_zero_and_positive_do_not() {
+        assert!(same_order_of_magnitude(&json!(0.0), &json!(0.0)));
+        assert!(!same_order_of_magnitude(&json!(0.0), &json!(0.1)));
+    }
+
+    #[test]
+    fn positive_bands_match_within_an_exponent_and_fail_at_a_boundary() {
+        assert!(same_order_of_magnitude(&json!(0.1), &json!(0.99)));
+        assert!(same_order_of_magnitude(&json!(1.0), &json!(9.99)));
+        assert!(!same_order_of_magnitude(&json!(9.99), &json!(10.0)));
+        assert!(!same_order_of_magnitude(&json!(1.0), &json!(100.0)));
+    }
 }

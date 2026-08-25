@@ -115,14 +115,29 @@ pub static REHEARSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+fn rehearsal_timing_classes() -> Value {
+    json!([
+        "project_create",
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog"
+    ])
+}
+
 pub static REHEARSE_RUN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": [
-            "release_candidate", "project_path", "export_path",
+            "schema_version", "release_candidate", "project_path", "export_path",
             "catalog_path", "timings", "artifacts"
         ],
         "properties": {
+            "schema_version": { "const": "threeterm.command.rehearse.run.response/1" },
             "release_candidate": { "type": "string", "minLength": 1 },
             "project_path": { "type": "string", "minLength": 1 },
             "export_path": { "type": "string", "minLength": 1 },
@@ -137,7 +152,7 @@ pub static REHEARSE_RUN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "p50_ms", "p95_ms", "p99_ms"
                     ],
                     "properties": {
-                        "class": { "type": "string", "minLength": 1 },
+                                    "class": { "enum": rehearsal_timing_classes() },
                         "unit": { "const": "ms" },
                         "sample_count": { "const": 1 },
                         "samples_ms": {
@@ -214,7 +229,7 @@ pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                     "type": "object",
                     "required": ["class", "run_1", "run_2", "same_order_of_magnitude"],
                     "properties": {
-                        "class": { "type": "string", "minLength": 1 },
+                        "class": { "enum": rehearsal_timing_classes() },
                         "run_1": {
                             "type": "object",
                             "required": ["p50_ms", "p95_ms", "p99_ms"],
@@ -1934,6 +1949,7 @@ pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
 pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const REHEARSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.response/2";
+pub const REHEARSE_RUN_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.run.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";

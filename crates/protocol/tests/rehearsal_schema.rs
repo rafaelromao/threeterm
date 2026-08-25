@@ -43,6 +43,7 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
         "sample_policy": "nearest-rank",
         "promoted": false,
         "runs": [{
+            "schema_version": "threeterm.command.rehearse.run.response/1",
             "release_candidate": "rc-1",
             "project_path": "run-1/project",
             "export_path": "run-1/export",
@@ -62,6 +63,7 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         }, {
+            "schema_version": "threeterm.command.rehearse.run.response/1",
             "release_candidate": "rc-2",
             "project_path": "run-2/project",
             "export_path": "run-2/export",
@@ -88,12 +90,21 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
             "same_order_of_magnitude": true
         }]
     });
-    for index in 1..9 {
+    for class in [
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog",
+    ] {
         response["comparisons"]
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({
-                "class": format!("class-{index}"),
+                "class": class,
                 "run_1": {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0},
                 "run_2": {"p50_ms": 2.0, "p95_ms": 2.0, "p99_ms": 2.0},
                 "same_order_of_magnitude": true

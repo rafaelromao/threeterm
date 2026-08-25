@@ -129,8 +129,41 @@ fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
     );
     assert_eq!(report["runs"].as_array().unwrap().len(), 2);
     assert_eq!(report["comparisons"].as_array().unwrap().len(), 9);
-    for run in report["runs"].as_array().unwrap() {
+    let expected_classes = [
+        "project_create",
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog",
+    ]
+    .into_iter()
+    .map(Value::from)
+    .collect::<Vec<_>>();
+    for (index, run) in report["runs"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(
+            run["schema_version"],
+            "threeterm.command.rehearse.run.response/1"
+        );
+        assert_eq!(run["project_path"], format!("run-{}/project", index + 1));
+        assert_eq!(run["export_path"], format!("run-{}/export", index + 1));
+        assert_eq!(
+            run["catalog_path"],
+            format!("run-{}/sha256-manifest.json", index + 1)
+        );
         assert_eq!(run["timings"].as_array().unwrap().len(), 9);
+        assert_eq!(
+            run["timings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|timing| timing["class"].clone())
+                .collect::<Vec<_>>(),
+            expected_classes
+        );
         for timing in run["timings"].as_array().unwrap() {
             assert_eq!(timing["sample_count"], 1);
             assert_eq!(timing["unit"], "ms");
@@ -139,6 +172,15 @@ fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
             assert_eq!(timing["p95_ms"], timing["p99_ms"]);
         }
     }
+    assert_eq!(
+        report["comparisons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|comparison| comparison["class"].clone())
+            .collect::<Vec<_>>(),
+        expected_classes
+    );
     for comparison in report["comparisons"].as_array().unwrap() {
         assert_eq!(comparison["same_order_of_magnitude"], true);
     }

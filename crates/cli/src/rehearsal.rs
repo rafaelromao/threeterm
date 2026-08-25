@@ -12,7 +12,7 @@ use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, BRACKET_EDIT_RESPONSE_SCHEMA,
     BRACKET_RESPONSE_SCHEMA, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
     NEW_PROJECT_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
-    REHEARSE_RUN_RESPONSE_SCHEMA, find,
+    REHEARSE_RUN_RESPONSE_SCHEMA, REHEARSE_RUN_RESPONSE_SCHEMA_VERSION, find,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -332,6 +332,7 @@ fn run_single_l_bracket_rehearsal(
             .unwrap_or(usize::MAX)
     });
     let report = json!({
+        "schema_version": REHEARSE_RUN_RESPONSE_SCHEMA_VERSION,
         "release_candidate": release_candidate,
         "project_path": PROJECT_DIR,
         "export_path": EXPORT_DIR,

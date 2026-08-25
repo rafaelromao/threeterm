@@ -1051,9 +1051,17 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
     }
 
     std::ostringstream out;
+    const auto* artifact_binding = find_field(request, "artifact_request");
+    const std::string source_revision_id =
+        artifact_binding != nullptr && artifact_binding->kind == JsonParser::ValueKind::Object
+            ? get_string(*artifact_binding, "source_revision_id")
+            : std::string{};
     out << "{"
         << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
         << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << (source_revision_id.empty()
+                ? std::string{}
+                : "\"source_revision_id\":\"" + json_escape(source_revision_id) + "\",")
         << "\"operation\":\"extrude\","
         << "\"status\":\"" << json_escape(status) << "\","
         << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","

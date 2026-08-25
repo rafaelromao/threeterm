@@ -320,7 +320,9 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
     assert_eq!(structured(&discarded, 2)["status"], "rejected");
     assert_eq!(
         structured(&discarded, 2)["diagnostic"]["kind"],
-        "draft_input_conflict"
+        "draft_input_conflict",
+        "duplicate open must expose a structured conflict: {}",
+        structured(&discarded, 2)
     );
     assert!(structured(&discarded, 2)["diagnostic"]["source_revision"].is_string());
     assert!(structured(&discarded, 2)["diagnostic"]["current_revision"].is_string());

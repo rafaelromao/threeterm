@@ -694,6 +694,163 @@ fn collect_artifacts(project: &Path, export: &Path) -> Result<Vec<Artifact>, Reh
     Ok(artifacts)
 }
 
+/// Verify a checked-in rehearsal output without rerunning native workers.
+pub fn verify_rehearsal_evidence(root: impl AsRef<Path>) -> Result<(), RehearsalError> {
+    let root = root.as_ref();
+    let diagnostic_root = root.join("run-2").join(PROJECT_DIR);
+    verify_directory_entries(root, &["run-1", "run-2", CATALOG_FILE], &diagnostic_root)?;
+
+    let aggregate = read_report(
+        &root.join(CATALOG_FILE),
+        &REHEARSE_RESPONSE_SCHEMA,
+        &diagnostic_root,
+    )?;
+    let runs = aggregate["runs"].as_array().ok_or_else(|| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "aggregate report omitted runs"}),
+            &diagnostic_root,
+        )
+    })?;
+
+    for (index, aggregate_run) in runs.iter().enumerate() {
+        let run_root = root.join(format!("run-{}", index + 1));
+        let run_project = run_root.join(PROJECT_DIR);
+        let mut allowed = vec![PROJECT_DIR, EXPORT_DIR, CATALOG_FILE];
+        if run_root.join(PREVIOUS_PROJECT_DIR).exists() {
+            allowed.push(PREVIOUS_PROJECT_DIR);
+        }
+        verify_directory_entries(&run_root, &allowed, &run_project)?;
+        let run_report = read_report(
+            &run_root.join(CATALOG_FILE),
+            &REHEARSE_RUN_RESPONSE_SCHEMA,
+            &run_project,
+        )?;
+        if prefix_run_report(run_report.clone(), &format!("run-{}", index + 1)) != *aggregate_run {
+            return Err(RehearsalError::new(
+                "evidence_verification",
+                json!({"message": "aggregate run does not match its per-run report", "run": index + 1}),
+                &run_project,
+            ));
+        }
+
+        let artifacts = collect_artifacts(&run_project, &run_root.join(EXPORT_DIR))?;
+        let actual = serde_json::to_value(artifacts).expect("artifact catalog serializes");
+        if actual != run_report["artifacts"] {
+            return Err(RehearsalError::new(
+                "evidence_verification",
+                json!({"message": "artifact catalog does not match the committed files", "run": index + 1}),
+                &run_project,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_report(
+    path: &Path,
+    schema: &Value,
+    diagnostic_root: &Path,
+) -> Result<Value, RehearsalError> {
+    let bytes = fs::read(path).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string(), "path": path}),
+            diagnostic_root,
+        )
+    })?;
+    let report: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string(), "path": path}),
+            diagnostic_root,
+        )
+    })?;
+    validate(schema, &report).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": format!("catalog report failed schema validation: {error}"), "path": path}),
+            diagnostic_root,
+        )
+    })?;
+    Ok(report)
+}
+
+fn verify_directory_entries(
+    root: &Path,
+    allowed: &[&str],
+    diagnostic_root: &Path,
+) -> Result<(), RehearsalError> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string(), "path": root}),
+            diagnostic_root,
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "evidence root is not a real directory", "path": root}),
+            diagnostic_root,
+        ));
+    }
+    let mut names = fs::read_dir(root)
+        .map_err(|error| {
+            RehearsalError::new(
+                "evidence_verification",
+                json!({"message": error.to_string(), "path": root}),
+                diagnostic_root,
+            )
+        })?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| {
+                    RehearsalError::new(
+                        "evidence_verification",
+                        json!({"message": error.to_string(), "path": root}),
+                        diagnostic_root,
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    let mut expected = allowed
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    if names != expected {
+        return Err(RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "evidence directory has unexpected entries", "path": root, "actual": names, "expected": expected}),
+            diagnostic_root,
+        ));
+    }
+    for name in names {
+        let path = root.join(name);
+        if fs::symlink_metadata(&path)
+            .map_err(|error| {
+                RehearsalError::new(
+                    "evidence_verification",
+                    json!({"message": error.to_string(), "path": path}),
+                    diagnostic_root,
+                )
+            })?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(RehearsalError::new(
+                "evidence_verification",
+                json!({"message": "evidence contains a symlink", "path": path}),
+                diagnostic_root,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn collect_tree(
     root: &Path,
     root_name: &str,

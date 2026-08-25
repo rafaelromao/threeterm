@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use threeterm_cli::rehearsal::verify_rehearsal_evidence;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{REHEARSE_REQUEST_SCHEMA, REHEARSE_RESPONSE_SCHEMA, find};
@@ -315,4 +316,12 @@ fn failed_export_reports_a_structured_diagnostic_and_keeps_the_project_reloadabl
         before_brep
     );
     let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn committed_rehearsal_evidence_has_a_reproducible_sha256_catalog() {
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/research/rehearsal-evidence/l-bracket");
+
+    verify_rehearsal_evidence(&evidence).expect("committed evidence catalog verifies");
 }

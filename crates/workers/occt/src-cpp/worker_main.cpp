@@ -72,6 +72,7 @@
 #include <TopoDS_Face.hxx>
 
 #include <cmath>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cerrno>
@@ -84,6 +85,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <optional>
 #include <poll.h>
 #include <sstream>
@@ -113,19 +115,36 @@ struct InputLine {
     bool terminated;
 };
 
+std::string g_stdin_buffer;
+std::optional<std::string> g_cancel_reason;
+bool g_cancel_protocol_error = false;
+
 InputLine read_stdin_line() {
-    std::string out;
-    out.reserve(256);
-    while (out.size() < kMaxEnvelopeBytes) {
-        int c = std::fgetc(stdin);
-        if (c == EOF) return {std::move(out), false};
-        if (c == '\n') return {std::move(out), true};
-        out.push_back(static_cast<char>(c));
+    while (true) {
+        const std::size_t newline = g_stdin_buffer.find('\n');
+        if (newline != std::string::npos) {
+            std::string line = g_stdin_buffer.substr(0, newline);
+            g_stdin_buffer.erase(0, newline + 1);
+            return {std::move(line), true};
+        }
+        if (g_stdin_buffer.size() >= kMaxEnvelopeBytes) {
+            return {g_stdin_buffer.substr(0, kMaxEnvelopeBytes), false};
+        }
+
+        struct pollfd descriptor;
+        descriptor.fd = STDIN_FILENO;
+        descriptor.events = POLLIN;
+        descriptor.revents = 0;
+        if (poll(&descriptor, 1, -1) <= 0) continue;
+        char buffer[4096];
+        const ssize_t read_count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (read_count == 0) return {std::move(g_stdin_buffer), false};
+        if (read_count < 0) {
+            if (errno == EINTR) continue;
+            return {std::move(g_stdin_buffer), false};
+        }
+        g_stdin_buffer.append(buffer, static_cast<std::size_t>(read_count));
     }
-    // Preserve the bounded prefix so request_id_hint can still bind a
-    // malformed oversized frame. Do not consume the unbounded remainder.
-    int next = std::fgetc(stdin);
-    return {std::move(out), next == '\n'};
 }
 
 bool read_json_string(const std::string& raw, std::size_t& cursor, std::string& value) {
@@ -197,12 +216,41 @@ std::string request_id_hint(const std::string& raw) {
 /// without blocking. Used to observe a cooperative Cancel before the
 /// monolithic operation starts.
 bool stdin_has_pending_line() {
+    if (g_stdin_buffer.find('\n') != std::string::npos) return true;
     struct pollfd descriptor;
     descriptor.fd = STDIN_FILENO;
     descriptor.events = POLLIN;
     descriptor.revents = 0;
     int ready = poll(&descriptor, 1, 0);
     return ready > 0 && (descriptor.revents & POLLIN) != 0;
+}
+
+/// Pull one complete line without blocking. A partial frame remains buffered
+/// and is retried later, so cancellation probing cannot block an OCCT loop.
+bool try_read_stdin_line(InputLine& output) {
+    const std::size_t newline = g_stdin_buffer.find('\n');
+    if (newline != std::string::npos) {
+        output.value = g_stdin_buffer.substr(0, newline);
+        g_stdin_buffer.erase(0, newline + 1);
+        output.terminated = true;
+        return true;
+    }
+
+    struct pollfd descriptor;
+    descriptor.fd = STDIN_FILENO;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    if (poll(&descriptor, 1, 0) <= 0) return false;
+    char buffer[4096];
+    const ssize_t read_count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (read_count <= 0) return false;
+    g_stdin_buffer.append(buffer, static_cast<std::size_t>(read_count));
+    const std::size_t completed = g_stdin_buffer.find('\n');
+    if (completed == std::string::npos) return false;
+    output.value = g_stdin_buffer.substr(0, completed);
+    g_stdin_buffer.erase(0, completed + 1);
+    output.terminated = true;
+    return true;
 }
 
 void write_stdout_line(const std::string& line) {
@@ -513,13 +561,14 @@ void write_worker_ready() {
     write_stdout_line(out.str());
 }
 
-void write_progress(const std::string& request_id, const std::string& stage) {
+void write_progress(const std::string& request_id, const std::string& stage,
+                    unsigned percent = 0) {
     std::ostringstream out;
     out << "{\"kind\":\"progress\","
         << "\"schema_version\":\"" << json_escape(kProtocolSchemaVersion) << "\","
         << "\"request_id\":\"" << json_escape(request_id) << "\","
         << "\"stage\":\"" << json_escape(stage) << "\","
-        << "\"percent\":0}";
+        << "\"percent\":" << percent << "}";
     write_stdout_line(out.str());
 }
 
@@ -569,6 +618,27 @@ std::string get_string(const JsonParser::Value& object, const std::string& key) 
     return value->string_value;
 }
 
+bool poll_for_cancel(const std::string& request_id, std::string& error) {
+    InputLine line;
+    if (!try_read_stdin_line(line)) return false;
+    JsonParser parser(line.value);
+    JsonParser::Value envelope;
+    const JsonParser::Value* reason = nullptr;
+    if (line.terminated && parser.parse_document(&envelope, error) &&
+        envelope.kind == JsonParser::ValueKind::Object &&
+        get_string(envelope, "kind") == "cancel" &&
+        get_string(envelope, "schema_version") == kProtocolSchemaVersion &&
+        get_string(envelope, "request_id") == request_id &&
+        (reason = find_field(envelope, "reason")) != nullptr &&
+        reason->kind == JsonParser::ValueKind::String) {
+        g_cancel_reason = get_string(envelope, "reason");
+        return true;
+    }
+    error = "pending line during boolean_pattern is not a valid cancel envelope";
+    g_cancel_protocol_error = true;
+    return false;
+}
+
 double get_number(const JsonParser::Value& object, const std::string& key) {
     const auto* value = find_field(object, key);
     if (value == nullptr || value->kind != JsonParser::ValueKind::Number) return 0.0;
@@ -612,6 +682,18 @@ std::array<double, 3> get_vec3(const JsonParser::Value& object, const std::strin
     if (value == nullptr || value->kind != JsonParser::ValueKind::Array) return result;
     if (value->array_value.size() != 3) return result;
     for (std::size_t index = 0; index < 3; ++index) {
+        if (value->array_value[index].kind != JsonParser::ValueKind::Number) return result;
+        result[index] = value->array_value[index].number_value;
+    }
+    return result;
+}
+
+std::array<double, 2> get_vec2(const JsonParser::Value& object, const std::string& key) {
+    std::array<double, 2> result{0.0, 0.0};
+    const auto* value = find_field(object, key);
+    if (value == nullptr || value->kind != JsonParser::ValueKind::Array ||
+        value->array_value.size() != 2) return result;
+    for (std::size_t index = 0; index < 2; ++index) {
         if (value->array_value[index].kind != JsonParser::ValueKind::Number) return result;
         result[index] = value->array_value[index].number_value;
     }
@@ -1950,6 +2032,150 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
     }
 }
 
+bool handle_boolean_pattern(const JsonParser::Value& request, std::string& error) {
+    const std::string request_id = get_string(request, "request_id");
+    const std::string feature_id = get_string(request, "feature_id");
+    const std::string base_path_str = get_string(request, "base_path");
+    const std::string output_dir = get_string(request, "output_dir");
+    const std::string output_filename = get_string(request, "output_filename");
+    const auto origin = get_vec3(request, "origin");
+    const auto spacing = get_vec2(request, "spacing");
+    const double columns_value = get_number(request, "columns");
+    const double rows_value = get_number(request, "rows");
+    const double diameter = get_number(request, "diameter");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "boolean_pattern request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!std::isfinite(columns_value) || !std::isfinite(rows_value) ||
+        columns_value < 1.0 || rows_value < 1.0 ||
+        columns_value != std::floor(columns_value) || rows_value != std::floor(rows_value)) {
+        error = "boolean_pattern rows and columns must be positive integers";
+        return false;
+    }
+    const std::uint32_t columns = static_cast<std::uint32_t>(columns_value);
+    const std::uint32_t rows = static_cast<std::uint32_t>(rows_value);
+    if (static_cast<double>(columns) != columns_value || static_cast<double>(rows) != rows_value ||
+        columns > 1000 || rows > 1000) {
+        error = "boolean_pattern rows and columns exceed the supported bound";
+        return false;
+    }
+    if (!std::isfinite(origin[0]) || !std::isfinite(origin[1]) || !std::isfinite(origin[2]) ||
+        !std::isfinite(spacing[0]) || !std::isfinite(spacing[1]) ||
+        spacing[0] <= 0.0 || spacing[1] <= 0.0) {
+        error = "boolean_pattern origin and spacing must be finite with positive spacing";
+        return false;
+    }
+    if (!(diameter > 0.0) || !std::isfinite(diameter)) {
+        error = "boolean_pattern diameter must be a positive finite number";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape result;
+        BRep_Builder builder;
+        if (!BRepTools::Read(result, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (result.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        Bnd_Box bounds;
+        BRepBndLib::Add(result, bounds);
+        Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+        bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        const double hole_start = origin[2];
+        const double hole_height = std::max(1.0, static_cast<double>(zmax) - hole_start + 2.0);
+        const double radius = diameter * 0.5;
+        const std::uint32_t total = columns * rows;
+        std::uint32_t completed = 0;
+
+        for (std::uint32_t row = 0; row < rows; ++row) {
+            for (std::uint32_t column = 0; column < columns; ++column) {
+                if (poll_for_cancel(request_id, error) || g_cancel_protocol_error) return false;
+
+                const double x = origin[0] + spacing[0] * static_cast<double>(column);
+                const double y = origin[1] + spacing[1] * static_cast<double>(row);
+                gp_Ax2 axis(gp_Pnt(x, y, hole_start), gp_Dir(0.0, 0.0, 1.0));
+                BRepPrimAPI_MakeCylinder cylinder(axis, radius, hole_height);
+                cylinder.Build();
+                if (!cylinder.IsDone()) {
+                    error = "could not build boolean_pattern hole cylinder";
+                    return false;
+                }
+
+                BRepAlgoAPI_Cut cut(result, cylinder.Shape());
+                cut.SetFuzzyValue(1.0e-6);
+                cut.Build();
+                if (!cut.IsDone() || cut.Shape().IsNull()) {
+                    error = "BRepAlgoAPI_Cut did not complete during boolean_pattern";
+                    return false;
+                }
+                result = cut.Shape();
+                ++completed;
+                const unsigned percent = static_cast<unsigned>(
+                    (static_cast<std::uint64_t>(completed) * 100U) / total);
+                write_progress(request_id,
+                               "boolean_pattern:" + std::to_string(completed) + "/" +
+                                   std::to_string(total),
+                               percent);
+                if (poll_for_cancel(request_id, error) || g_cancel_protocol_error) return false;
+            }
+        }
+
+        // Cancellation linearizes before any staged artifact is created.
+        if (poll_for_cancel(request_id, error) || g_cancel_protocol_error) return false;
+        const std::filesystem::path output_path =
+            std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) return false;
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        const std::string sha = sha256_hex(bytes.str());
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"boolean_pattern\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\","
+            << "\"cut_count\":" << completed
+            << "}";
+        g_result_json = out.str();
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during boolean_pattern: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during boolean_pattern: ";
+        error += e.what();
+        return false;
+    }
+}
+
 bool handle_shell(const JsonParser::Value& request, std::string& error) {
     std::string request_id = get_string(request, "request_id");
     std::string feature_id = get_string(request, "feature_id");
@@ -2609,6 +2835,8 @@ int main() {
         success = handle_linear_pattern(*args, error);
     } else if (command_id == "circular_pattern") {
         success = handle_circular_pattern(*args, error);
+    } else if (command_id == "boolean_pattern") {
+        success = handle_boolean_pattern(*args, error);
     } else if (command_id == "shell") {
         success = handle_shell(*args, error);
     } else if (command_id == "draft") {
@@ -2623,6 +2851,10 @@ int main() {
     }
 
     if (!success) {
+        if (g_cancel_reason.has_value()) {
+            write_cancelled(request_id, *g_cancel_reason);
+            return 0;
+        }
         if (error.empty()) {
             error = "operation returned a non-ok status";
         }

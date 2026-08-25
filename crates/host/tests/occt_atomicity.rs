@@ -20,9 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    ShellRequest,
+    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
+    DraftRequest, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest,
+    MirrorRequest, Operation, ShellRequest,
 };
 use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
 
@@ -47,6 +47,17 @@ fn unique_request_id(label: &str) -> String {
 
 fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
+}
+
+fn required_fixture_worker(test_name: &str) -> Option<threeterm_occt_worker::OcctWorker> {
+    let worker = locate_worker();
+    if worker.is_none()
+        && (std::env::var_os("CI").is_some()
+            || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some())
+    {
+        panic!("{test_name}: OCCT worker is required in this environment");
+    }
+    worker
 }
 
 fn is_brep_invalid<T>(result: &Result<T, HostError>) -> bool {
@@ -116,6 +127,24 @@ fn snapshot_files(root: &Path) -> (Vec<u8>, Vec<u8>) {
     (manifest, log)
 }
 
+fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut entries = fs::read_dir(root.join("brep"))
+        .expect("brep directory reads")
+        .map(|entry| {
+            let path = entry.expect("brep entry reads").path();
+            (
+                path.file_name()
+                    .expect("brep entry has a name")
+                    .to_string_lossy()
+                    .into_owned(),
+                fs::read(path).expect("brep bytes read"),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
 #[test]
 fn extrude_commits_brep_into_a_new_revision() {
     let Some(worker) = locate_worker() else {
@@ -138,6 +167,79 @@ fn extrude_commits_brep_into_a_new_revision() {
     assert!(brep_path.is_file(), "BREP is on disk at {brep_path:?}");
     let reloaded = Host::new().load(&root).expect("reloads after commit");
     assert_eq!(view.snapshot, reloaded);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot() {
+    let Some(worker) = required_fixture_worker(
+        "cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot",
+    ) else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("boolean-pattern-cancel", "box-seed", "box");
+    let host = Host::new();
+    let base_request = ExtrudeRequest::new(
+        unique_request_id("boolean-pattern-base"),
+        vec![(0.0, 0.0), (120.0, 0.0), (120.0, 120.0), (0.0, 120.0)],
+        20.0,
+    )
+    .with_output_path(root.join("stage"), "boolean-pattern-base.brep")
+    .with_feature_id("boolean-pattern-base-1");
+    host.extrude(&root, base_request, &worker)
+        .expect("real OCCT base extrude");
+    let before = host.load(&root).expect("load canonical snapshot");
+    let before_files = snapshot_files(&root);
+    let before_breps = brep_inventory(&root);
+    let base_path = committed_brep_path(&root, "boolean-pattern-base-1");
+    let request = BooleanPatternRequest::new(
+        unique_request_id("boolean-pattern-cancel"),
+        &base_path,
+        [6.0, 6.0, -1.0],
+        [6.0, 6.0],
+        18,
+        18,
+        2.0,
+    )
+    .with_output_path(root.join("stage"), "boolean-pattern-cancelled.brep")
+    .with_feature_id("boolean-pattern-cancelled-1");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut observed = false;
+    let mut on_progress = |progress: &threeterm_protocol::supervisor::Progress| {
+        if progress.stage.starts_with("boolean_pattern:") {
+            observed = true;
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+
+    let result = host.boolean_pattern_with_cancel_and_progress(
+        &root,
+        request.clone(),
+        &worker,
+        &cancel,
+        &mut on_progress,
+    );
+    let Err(HostError::WorkerTerminated { record }) = result else {
+        panic!("expected structured cooperative cancellation, got {result:?}");
+    };
+    assert!(observed, "cancellation must follow real worker progress");
+    assert_eq!(record.request_id, request.request_id);
+    assert_eq!(record.cancel_reason.as_deref(), Some("cancelled by host"));
+    assert_eq!(
+        record.exit_kind,
+        threeterm_protocol::supervisor::ExitKind::Cooperative
+    );
+    assert!(record.exit_signal.is_none());
+    assert!(record.exit_code.is_none() || record.exit_code == Some(0));
+    assert_eq!(snapshot_files(&root), before_files);
+    assert_eq!(brep_inventory(&root), before_breps);
+    assert_eq!(host.current(), Some(before.clone()));
+    assert_eq!(
+        Host::new().load(&root).expect("reload unchanged snapshot"),
+        before
+    );
+    assert!(!root.join("stage/boolean-pattern-cancelled.brep").exists());
 
     let _ = fs::remove_dir_all(root);
 }

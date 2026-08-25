@@ -20,7 +20,7 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::frame::FrameParser;
 use threeterm_protocol::schema_version;
 use threeterm_protocol::supervisor::{
-    ExitKind, Request, Supervisor, SupervisorOutcome, TerminationRecord,
+    ExitKind, Progress, Request, Supervisor, SupervisorOutcome, TerminationRecord,
 };
 use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
 
@@ -483,6 +483,7 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
     let TerminationRecord {
         request_id,
         stage,
+        cancel_reason,
         elapsed,
         last_progress,
         last_artifact_error,
@@ -503,6 +504,7 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
     assert_eq!(stderr_tail, "");
     assert_eq!(failed_code, None);
     assert_eq!(failed_detail, None);
+    assert_eq!(cancel_reason, None);
     assert_eq!(exit_kind, ExitKind::ForceAfterGrace);
     assert!(last_progress.is_none());
     assert!(last_artifact_error.is_none());
@@ -1015,6 +1017,40 @@ fn request_with_cancel_acknowledges_a_cooperative_worker() {
 }
 
 #[test]
+fn progress_observer_can_trigger_cancellation_at_a_kernel_boundary() {
+    let worker = PipeHost::new(vec![
+        ready_envelope(),
+        Envelope::Progress {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            stage: "boolean_pattern:1/324".to_string(),
+            percent: 1,
+        },
+        Envelope::Cancelled {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            reason: "cancelled after observed progress".to_string(),
+        },
+    ]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut observed = Vec::new();
+    let mut on_progress = |progress: &Progress| {
+        observed.push(progress.clone());
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    };
+
+    let outcome =
+        supervisor.request_with_cancel_and_progress(sample_request(), &cancel, &mut on_progress);
+    assert_eq!(observed[0].stage, "boolean_pattern:1/324");
+    assert!(matches!(
+        outcome,
+        SupervisorOutcome::Acknowledged { reason, .. }
+            if reason == "cancelled after observed progress"
+    ));
+}
+
+#[test]
 fn request_with_cancel_force_terminates_a_worker_that_never_acks() {
     // The worker never acks the cooperative Cancel; the cancellation
     // lifecycle force-terminates after the grace period.
@@ -1054,6 +1090,21 @@ fn cancel_fails_closed_on_a_foreign_acknowledgement() {
         record.stage
     );
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+}
+
+#[test]
+fn cancel_fails_closed_on_an_empty_acknowledgement_reason() {
+    let worker = PipeHost::new(vec![Envelope::Cancelled {
+        schema_version: schema_version().to_string(),
+        request_id: "req-1".to_string(),
+        reason: String::new(),
+    }]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.stage, "protocol_violation:empty_cancel_reason");
 }
 
 #[test]

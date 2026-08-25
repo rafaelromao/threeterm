@@ -10,11 +10,12 @@ use threeterm_domain::{
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
 };
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
-    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
+    ChamferRequest, ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest,
+    DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult,
+    HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult,
+    MirrorRequest, MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult,
+    ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
 use threeterm_protocol::artifact::{
@@ -276,6 +277,12 @@ pub struct CircularPatternCommitView {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct BooleanPatternCommitView {
+    pub snapshot: SnapshotView,
+    pub result: BooleanPatternResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShellCommitView {
     pub snapshot: SnapshotView,
     pub result: ShellResult,
@@ -497,6 +504,7 @@ impl From<WorkerError> for HostError {
             } => Self::WorkerFailure { request_id, detail },
             WorkerError::Cancelled {
                 request_id,
+                reason,
                 last_progress,
                 elapsed,
                 stderr_tail,
@@ -506,6 +514,7 @@ impl From<WorkerError> for HostError {
                 record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
                     request_id: request_id.clone(),
                     stage: "cancelled".to_string(),
+                    cancel_reason: Some(reason),
                     elapsed,
                     last_progress,
                     last_artifact_error: None,
@@ -1912,6 +1921,71 @@ impl Host {
         };
         let _ = prior_view;
         Ok(CircularPatternCommitView { snapshot, result })
+    }
+
+    /// Run the real sequential Boolean-cut pattern with cooperative
+    /// cancellation. A successful result is the only path that can advance
+    /// the canonical Revision Snapshot.
+    pub fn boolean_pattern_with_cancel(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanPatternRequest,
+        worker: &OcctWorker,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<BooleanPatternCommitView, HostError> {
+        let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        self.boolean_pattern_with_cancel_and_progress(
+            root,
+            request,
+            worker,
+            cancel,
+            &mut ignore_progress,
+        )
+    }
+
+    pub fn boolean_pattern_with_cancel_and_progress(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanPatternRequest,
+        worker: &OcctWorker,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    ) -> Result<BooleanPatternCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let prior_view = SnapshotView::from(&loaded);
+        let result = match worker
+            .clone()
+            .with_revision_id(prior_view.revision_hash.clone())
+            .boolean_pattern_with_cancel_and_progress(&request, cancel, on_progress)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::from(error));
+            }
+        };
+        if !result.is_success() {
+            self.current.replace(Some(loaded));
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
+                detail: format!(
+                    "boolean_pattern returned non-ok status: status={} feature_id={}",
+                    result.status, result.feature_id
+                ),
+            });
+        }
+        let feature_id = request.feature_id.clone();
+        let snapshot = self.commit_brep_feature_verified_at_revision(
+            root,
+            &feature_id,
+            &result.brep_path,
+            &prior_view.revision_hash,
+            result.brep_bytes,
+            &result.brep_sha256,
+        )?;
+        Ok(BooleanPatternCommitView { snapshot, result })
     }
 
     /// Shell `request` against the disposable OCCT worker and, on

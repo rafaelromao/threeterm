@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 //! OCCT geometry worker boundary.
 //!
 //! The C++ worker binary is built by `build.rs` against the system OCCT
@@ -31,7 +33,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use threeterm_protocol::supervisor::{
-    Request as SupervisorRequest, Supervisor, SupervisorOutcome, TerminationRecord,
+    CancellationGracePolicy, Progress, Request as SupervisorRequest, Supervisor, SupervisorOutcome,
+    TerminationRecord,
 };
 use threeterm_protocol::worker::{
     SubprocessWorkerHost, WorkerConfig, WorkerError as ProtocolWorkerError, WorkerHost,
@@ -40,11 +43,12 @@ use threeterm_protocol::worker::{
 
 pub mod envelope;
 pub use envelope::{
-    BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExportResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, Operation,
-    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
+    BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
+    ChamferRequest, ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest,
+    DraftResult, ExportRequest, ExportResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
+    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
+    LoftResult, MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult,
+    SCHEMA_VERSION, ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -120,6 +124,7 @@ pub enum WorkerError {
     /// retained so the diagnostic surface keeps cancellation context.
     Cancelled {
         request_id: String,
+        reason: String,
         last_progress: Option<threeterm_protocol::supervisor::Progress>,
         elapsed: std::time::Duration,
         stderr_tail: String,
@@ -187,13 +192,14 @@ impl std::fmt::Display for WorkerError {
             ),
             Self::Cancelled {
                 request_id,
+                reason,
                 last_progress,
                 elapsed,
                 ..
             } => {
                 write!(
                     formatter,
-                    "worker request {request_id} cancelled after {elapsed:?} last_progress={last_progress:?}"
+                    "worker request {request_id} cancelled after {elapsed:?} reason={reason:?} last_progress={last_progress:?}"
                 )
             }
             Self::Supervised { record } => {
@@ -225,6 +231,7 @@ pub struct OcctWorker {
     /// Supervisor grace period: the worker must complete the handshake
     /// and the request inside this deadline or it is force-terminated.
     grace: Duration,
+    cancellation_grace: CancellationGracePolicy,
     /// Revision Snapshot the host authorized for the request. The worker
     /// protocol carries this outer identity even though the typed OCCT
     /// arguments remain operation-specific.
@@ -237,6 +244,8 @@ pub struct OcctWorker {
 /// well under a second; this bound catches hangs without harming
 /// legitimate geometry work.
 pub const DEFAULT_SUPERVISOR_GRACE: Duration = Duration::from_secs(30);
+pub const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
+pub const BOOLEAN_PATTERN_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 
 impl OcctWorker {
     /// Locate the worker binary. Prefers the path embedded at build
@@ -279,6 +288,8 @@ impl OcctWorker {
         Self {
             binary_path,
             grace: DEFAULT_SUPERVISOR_GRACE,
+            cancellation_grace: CancellationGracePolicy::new(DEFAULT_CANCELLATION_GRACE)
+                .with_operation("boolean_pattern", BOOLEAN_PATTERN_CANCELLATION_GRACE),
             revision_id: None,
             expected_worker_id: None,
         }
@@ -288,6 +299,15 @@ impl OcctWorker {
     /// operation this worker executes.
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    /// Override the cooperative cancellation grace for one OCCT operation.
+    pub fn with_operation_grace(mut self, operation: Operation, grace: Duration) -> Self {
+        self.cancellation_grace = self
+            .cancellation_grace
+            .clone()
+            .with_operation(operation.as_str(), grace);
         self
     }
 
@@ -354,6 +374,43 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_boolean_fuse()
+    }
+
+    pub fn boolean_pattern(
+        &self,
+        request: &BooleanPatternRequest,
+    ) -> Result<BooleanPatternResult, WorkerError> {
+        let bytes = bounded_serialize(request, "boolean_pattern", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_boolean_pattern()
+    }
+
+    pub fn boolean_pattern_with_cancel(
+        &self,
+        request: &BooleanPatternRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<BooleanPatternResult, WorkerError> {
+        let mut ignore_progress = |_progress: &Progress| {};
+        self.boolean_pattern_with_cancel_and_progress(request, cancel, &mut ignore_progress)
+    }
+
+    pub fn boolean_pattern_with_cancel_and_progress(
+        &self,
+        request: &BooleanPatternRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> Result<BooleanPatternResult, WorkerError> {
+        let bytes = bounded_serialize(request, "boolean_pattern", &request.request_id)?;
+        let value = self.run_with_cancel_and_progress(&bytes, cancel, on_progress)?;
+        RawResult {
+            value,
+            request_id: request.request_id.clone(),
+            expected_output: expected_output_path(&request.output_dir, &request.output_filename),
+        }
+        .into_boolean_pattern()
     }
 
     /// Fillet `request` by spawning the worker process. See module
@@ -511,6 +568,16 @@ impl OcctWorker {
         envelope: &[u8],
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<serde_json::Value, WorkerError> {
+        let mut ignore_progress = |_progress: &Progress| {};
+        self.run_with_cancel_and_progress(envelope, cancel, &mut ignore_progress)
+    }
+
+    pub fn run_with_cancel_and_progress(
+        &self,
+        envelope: &[u8],
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> Result<serde_json::Value, WorkerError> {
         // Reject the raw input length before any JSON materialization: an
         // oversized request must never be parsed into a `serde_json::Value`
         // past the protocol's input bound.
@@ -583,11 +650,12 @@ impl OcctWorker {
             detail: error.to_string(),
             request_id: Some(request_id.clone()),
         })?;
-        let mut supervisor = Supervisor::new(self.grace, host, None);
+        let mut supervisor = Supervisor::new(self.grace, host, None)
+            .with_cancellation_grace_policy(self.cancellation_grace.clone());
         if let Some(worker_id) = &self.expected_worker_id {
             supervisor = supervisor.with_expected_worker_id(worker_id.clone());
         }
-        let outcome = supervisor.request_with_cancel(
+        let outcome = supervisor.request_with_cancel_and_progress(
             SupervisorRequest {
                 request_id: request_id.clone(),
                 command_id: command_id.clone(),
@@ -595,6 +663,7 @@ impl OcctWorker {
                 revision_id: self.revision_id.clone().unwrap_or_default(),
             },
             cancel,
+            on_progress,
         );
         let cleanup_path = expected_output.clone();
         let mapped = map_outcome(
@@ -698,11 +767,8 @@ fn map_outcome(
             exit_signal,
             exit_code,
         } => Err(WorkerError::Cancelled {
-            request_id: if request_id.is_empty() {
-                reason
-            } else {
-                request_id
-            },
+            request_id,
+            reason,
             last_progress,
             elapsed,
             stderr_tail,
@@ -1065,6 +1131,10 @@ impl RawResult {
     }
 
     fn into_boolean_fuse(self) -> Result<BooleanFuseResult, WorkerError> {
+        self.bounded()
+    }
+
+    fn into_boolean_pattern(self) -> Result<BooleanPatternResult, WorkerError> {
         self.bounded()
     }
 
@@ -1691,6 +1761,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1725,6 +1796,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "failed:brep_invalid:BRepCheck_Analyzer failed".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1757,6 +1829,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "grace_exceeded".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1786,6 +1859,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "worker_closed".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1820,6 +1894,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "worker_closed".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1855,6 +1930,7 @@ mod tests {
                 request_id: "<handshake>".to_string(),
                 stage: "handshake_schema_mismatch:received=threeterm.protocol/0 expected=threeterm.protocol/1"
                     .to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,
@@ -1881,6 +1957,7 @@ mod tests {
             record: TerminationRecord {
                 request_id: "req-1".to_string(),
                 stage: "worker_closed".to_string(),
+                cancel_reason: None,
                 elapsed: Duration::from_millis(1),
                 last_progress: None,
                 last_artifact_error: None,

@@ -48,6 +48,7 @@ pub const EXIT_PERSISTENCE_FAILURE: i32 = 3;
 pub const EXIT_WORKER_FAILURE: i32 = 4;
 pub const EXIT_BREP_INVALID: i32 = 5;
 pub const EXIT_THEME_PALETTE_FAILURE: i32 = 6;
+pub const EXIT_REHEARSAL_FAILURE: i32 = 7;
 
 const PALETTE_RECOVERY: &str = "use --palette or THREETERM_PALETTE with one of: catppuccin, tokyo-night, evergreen, gruvbox, sandman-light";
 
@@ -67,6 +68,11 @@ enum DispatchPlan {
     List,
     NewProject {
         path: String,
+    },
+    Rehearse {
+        output_dir: Option<String>,
+        release_candidate: Option<String>,
+        argument_error: Option<String>,
     },
     Save {
         bundle: String,
@@ -451,6 +457,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "new-project" if args.len() == 3 => DispatchPlan::NewProject {
             path: args[2].to_string_lossy().into_owned(),
         },
+        "rehearse" => parse_rehearse(&args[2..]),
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
         "bracket" => parse_bracket(&args[2..]),
@@ -493,6 +500,35 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         },
     };
     reject_non_finite(parsed)
+}
+
+fn parse_rehearse(args: &[OsString]) -> DispatchPlan {
+    let mut output_dir = None;
+    let mut release_candidate = None;
+    let mut argument_error = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy().into_owned();
+        let Some(value) = args.get(index + 1) else {
+            argument_error = Some(flag);
+            break;
+        };
+        let value = value.to_string_lossy().into_owned();
+        match flag.as_str() {
+            "--output-dir" => output_dir = Some(value),
+            "--release-candidate" => release_candidate = Some(value),
+            _ => {
+                argument_error = Some(flag);
+                break;
+            }
+        }
+        index += 2;
+    }
+    DispatchPlan::Rehearse {
+        output_dir,
+        release_candidate,
+        argument_error,
+    }
 }
 
 fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
@@ -571,6 +607,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
+        | DispatchPlan::Rehearse { .. }
         | DispatchPlan::Save { .. }
         | DispatchPlan::Load { .. }
         | DispatchPlan::BooleanFuse { .. }
@@ -2465,6 +2502,17 @@ fn execute_handler(
         }
         DispatchPlan::List => emit_listing(stdout, stderr),
         DispatchPlan::NewProject { path } => emit_new_project(&path, stdout, stderr),
+        DispatchPlan::Rehearse {
+            output_dir,
+            release_candidate,
+            argument_error,
+        } => emit_rehearsal(
+            output_dir.as_deref(),
+            release_candidate.as_deref(),
+            argument_error.as_deref(),
+            stdout,
+            stderr,
+        ),
         DispatchPlan::Save {
             bundle,
             feature_id,
@@ -3478,6 +3526,9 @@ fn execute_registered_with_observer(
         Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
+    if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID {
+        return execute_handler(*plan, &request, theme, stdout, stderr);
+    }
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
@@ -3518,6 +3569,14 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
     let request = match plan {
         DispatchPlan::List => json!({}),
         DispatchPlan::NewProject { path } => json!({ "destination": path }),
+        DispatchPlan::Rehearse {
+            output_dir,
+            release_candidate,
+            ..
+        } => json!({
+            "output_dir": output_dir.as_deref().unwrap_or_default(),
+            "release_candidate": release_candidate.as_deref().unwrap_or_default()
+        }),
         DispatchPlan::Save {
             bundle,
             feature_id,
@@ -3829,6 +3888,77 @@ fn emit_new_project(path: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) 
         }
         Err(error) => emit_persistence_error(&error.to_string(), stderr),
     }
+}
+
+fn emit_rehearsal(
+    output_dir: Option<&str>,
+    release_candidate: Option<&str>,
+    argument_error: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let Some(output_dir) = output_dir else {
+        return write_rehearsal_failure(
+            &threeterm_cli_rehearsal_error(
+                "argument_parse",
+                json!({"message": "missing --output-dir"}),
+                None,
+            ),
+            stderr,
+        );
+    };
+    let Some(release_candidate) = release_candidate else {
+        return write_rehearsal_failure(
+            &threeterm_cli_rehearsal_error(
+                "argument_parse",
+                json!({"message": "missing --release-candidate"}),
+                None,
+            ),
+            stderr,
+        );
+    };
+    if let Some(argument_error) = argument_error {
+        return write_rehearsal_failure(
+            &threeterm_cli_rehearsal_error(
+                "argument_parse",
+                json!({"message": format!("unknown or incomplete argument {argument_error:?}")}),
+                None,
+            ),
+            stderr,
+        );
+    }
+    match crate::rehearsal::run_l_bracket_rehearsal(output_dir, release_candidate) {
+        Ok(report) => write_success(stdout, &report, stderr),
+        Err(error) => write_rehearsal_failure(&error, stderr),
+    }
+}
+
+fn threeterm_cli_rehearsal_error(
+    stage: &str,
+    detail: Value,
+    current_revision: Option<String>,
+) -> crate::rehearsal::RehearsalError {
+    crate::rehearsal::RehearsalError {
+        stage: stage.to_string(),
+        detail,
+        current_revision,
+    }
+}
+
+fn write_rehearsal_failure(
+    error: &crate::rehearsal::RehearsalError,
+    stderr: &mut dyn Write,
+) -> i32 {
+    debug_assert!(
+        threeterm_protocol::schema_validator::validate(
+            &threeterm_protocol::schema::REHEARSE_FAILURE_DIAGNOSTIC_SCHEMA,
+            &error.diagnostic(),
+        )
+        .is_ok()
+    );
+    let _ = serde_json::to_writer_pretty(&mut *stderr, &error.diagnostic());
+    let _ = writeln!(stderr);
+    EXIT_REHEARSAL_FAILURE
 }
 
 fn emit_save(
@@ -5070,7 +5200,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 32);
+        assert_eq!(commands.len(), 33);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

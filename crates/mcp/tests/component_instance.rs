@@ -320,3 +320,181 @@ fn invalid_capture_preserves_the_canonical_bundle() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn cross_document_component_references_are_rejected_atomically() {
+    let source = bundle();
+    let target = bundle();
+
+    cli_command(
+        "bracket",
+        &source,
+        &[
+            "--bracket-id",
+            "source-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    cli_command(
+        "define-component",
+        &source,
+        &[
+            "--definition-id",
+            "source-definition",
+            "--feature-id",
+            "source-feature",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    let source_state_before = cli_command("component-state", &source, &[]);
+    let source_manifest_before =
+        std::fs::read(source.join("manifest.json")).expect("manifest reads");
+    let source_log_before = std::fs::read(source.join("transactions.log")).expect("log reads");
+
+    cli_command(
+        "bracket",
+        &target,
+        &[
+            "--bracket-id",
+            "target-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    let target_state_before_capture = cli_command("component-state", &target, &[]);
+    let target_manifest_before_capture =
+        std::fs::read(target.join("manifest.json")).expect("manifest reads");
+    let target_log_before_capture =
+        std::fs::read(target.join("transactions.log")).expect("log reads");
+
+    let foreign_capture = cli_failure(
+        "capture-component",
+        &target,
+        &[
+            "--definition-id",
+            "foreign-capture",
+            "--feature-id",
+            "source-bracket-base",
+        ],
+    );
+    assert_eq!(foreign_capture["code"], json!("reference_lost"));
+    assert_eq!(
+        cli_command("component-state", &target, &[]),
+        target_state_before_capture
+    );
+    assert_eq!(
+        std::fs::read(target.join("manifest.json")).expect("manifest reads"),
+        target_manifest_before_capture
+    );
+    assert_eq!(
+        std::fs::read(target.join("transactions.log")).expect("log reads"),
+        target_log_before_capture
+    );
+
+    cli_command(
+        "define-component",
+        &target,
+        &[
+            "--definition-id",
+            "target-definition",
+            "--feature-id",
+            "target-feature",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    let target_state_before_instance = cli_command("component-state", &target, &[]);
+    let target_manifest_before_instance =
+        std::fs::read(target.join("manifest.json")).expect("manifest reads");
+    let target_log_before_instance =
+        std::fs::read(target.join("transactions.log")).expect("log reads");
+
+    let foreign_instance = cli_failure(
+        "create-component-instance",
+        &target,
+        &[
+            "--instance-id",
+            "foreign-instance",
+            "--definition-id",
+            "source-definition",
+            "--transform",
+            "0,0,0",
+        ],
+    );
+    assert_eq!(foreign_instance["code"], json!("reference_lost"));
+    assert_eq!(
+        cli_command("component-state", &target, &[]),
+        target_state_before_instance
+    );
+    assert_eq!(
+        std::fs::read(target.join("manifest.json")).expect("manifest reads"),
+        target_manifest_before_instance
+    );
+    assert_eq!(
+        std::fs::read(target.join("transactions.log")).expect("log reads"),
+        target_log_before_instance
+    );
+
+    cli_command(
+        "create-component-instance",
+        &target,
+        &[
+            "--instance-id",
+            "target-instance",
+            "--definition-id",
+            "target-definition",
+            "--transform",
+            "0,0,0",
+        ],
+    );
+    let target_state_after_instance = cli_command("component-state", &target, &[]);
+    assert_eq!(
+        target_state_after_instance["instances"]["target-instance"]["definition_id"],
+        json!("target-definition")
+    );
+    assert_eq!(
+        cli_command("component-state", &target, &[]),
+        target_state_after_instance
+    );
+    assert_eq!(
+        cli_command("component-state", &source, &[]),
+        source_state_before
+    );
+    assert_eq!(
+        std::fs::read(source.join("manifest.json")).expect("manifest reads"),
+        source_manifest_before
+    );
+    assert_eq!(
+        std::fs::read(source.join("transactions.log")).expect("log reads"),
+        source_log_before
+    );
+
+    let _ = std::fs::remove_dir_all(source);
+    let _ = std::fs::remove_dir_all(target);
+}

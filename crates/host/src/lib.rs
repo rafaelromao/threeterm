@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, FeatureGraph,
@@ -364,6 +365,26 @@ pub struct ReplayVerification {
     pub mismatch: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StaleLastValidGeometryEntry {
+    pub feature_id: String,
+    pub status: String,
+    pub last_valid_geometry_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StaleLastValidGeometryAcceptance {
+    pub feature_id: String,
+    pub active_revision: String,
+    pub stale_features: Vec<StaleLastValidGeometryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportCommitView {
+    pub artifacts: Vec<PathBuf>,
+    pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoftCommitView {
     pub snapshot: SnapshotView,
@@ -380,6 +401,11 @@ pub enum HostError {
     },
     Validation {
         detail: String,
+    },
+    StaleLastValidGeometry {
+        feature_id: String,
+        active_revision: String,
+        stale_features: Vec<StaleLastValidGeometryEntry>,
     },
     Persistence(BundleError),
     WorkerFailure {
@@ -472,6 +498,15 @@ impl std::fmt::Display for HostError {
                 )
             }
             Self::Validation { detail } => write!(formatter, "host.validation: {detail}"),
+            Self::StaleLastValidGeometry {
+                feature_id,
+                active_revision,
+                stale_features,
+            } => write!(
+                formatter,
+                "stale last-valid geometry requires explicit acceptance for {feature_id} at {active_revision}: {} stale features",
+                stale_features.len()
+            ),
             Self::Persistence(error) => error.fmt(formatter),
             Self::WorkerFailure { detail, .. } => {
                 write!(formatter, "occt worker failure: {detail}")
@@ -671,6 +706,7 @@ fn draft_map_key(root: &Path, draft_id: &str) -> (PathBuf, String) {
 }
 
 impl Host {
+    #[allow(clippy::too_many_arguments)]
     pub fn export(
         &self,
         root: impl AsRef<Path>,
@@ -679,7 +715,8 @@ impl Host {
         output_dir: &Path,
         deflection: f64,
         override_warnings: bool,
-    ) -> Result<Vec<PathBuf>, HostError> {
+        accept_stale_geometry: bool,
+    ) -> Result<ExportCommitView, HostError> {
         if deflection > 0.5 && !override_warnings {
             return Err(HostError::Validation {
                 detail: format!(
@@ -692,6 +729,15 @@ impl Host {
         if unique_formats.len() != formats.len() {
             return Err(HostError::Validation {
                 detail: "duplicate export format".to_string(),
+            });
+        }
+        let prior = Bundle::at(root).open()?;
+        let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
+        if !stale_features.is_empty() && !accept_stale_geometry {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: feature_id.to_string(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features,
             });
         }
         let brep = bundle_root(root)
@@ -708,7 +754,6 @@ impl Host {
                 detail: "unsupported export format".to_string(),
             });
         }
-        let prior = Bundle::at(root).open()?;
         let stage = output_dir.join(format!(".threeterm-export-{}", std::process::id()));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: error.to_string(),
@@ -749,7 +794,14 @@ impl Host {
             artifacts.push(final_path);
         }
         let _ = fs::remove_dir_all(stage);
-        Ok(artifacts)
+        Ok(ExportCommitView {
+            artifacts,
+            stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance {
+                feature_id: feature_id.to_string(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features,
+            },
+        })
     }
     pub fn new() -> Self {
         Self::default()
@@ -3280,6 +3332,42 @@ fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
     None
 }
 
+pub fn stale_last_valid_geometry_for_export(
+    history: &HistoryState,
+    export_feature_id: &str,
+) -> Vec<StaleLastValidGeometryEntry> {
+    let snapshot = history.active_snapshot();
+    let mut candidates = BTreeSet::new();
+    for suffix in ["-base", "-bend", "-finish"] {
+        let candidate = format!("{export_feature_id}{suffix}");
+        if snapshot.features.contains_key(&candidate) {
+            candidates.insert(candidate);
+        }
+    }
+    if candidates.is_empty() && snapshot.features.contains_key(export_feature_id) {
+        candidates.insert(export_feature_id.to_string());
+    }
+    candidates
+        .into_iter()
+        .filter_map(|feature_id| {
+            let feature = snapshot.features.get(&feature_id)?;
+            let status = match feature.status {
+                HistoryStatus::Broken => "broken",
+                HistoryStatus::BlockedByFailure => "blocked-by-failure",
+                _ => return None,
+            };
+            Some(StaleLastValidGeometryEntry {
+                feature_id,
+                status: status.to_string(),
+                last_valid_geometry_fingerprint: feature
+                    .last_valid_geometry_fingerprint
+                    .clone()
+                    .filter(|fingerprint| !fingerprint.is_empty())?,
+            })
+        })
+        .collect()
+}
+
 fn artifact_error_diagnostic(error: &ArtifactError) -> Diagnostic {
     match error {
         ArtifactError::HashMismatch { expected, actual } => {
@@ -3884,6 +3972,74 @@ mod tests {
         assert!(host.current().is_none());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_rejects_stale_history_before_brep_or_staging_side_effects() {
+        let root = temp_root("stale-export-gate");
+        let output = temp_root("stale-export-output");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+            .expect("failing historical edit is committed");
+        let manifest = std::fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+        let log = std::fs::read(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME))
+            .expect("log reads");
+
+        let error = host
+            .export(
+                &root,
+                "l-bracket",
+                &["stl".to_string()],
+                &output,
+                0.5,
+                false,
+                false,
+            )
+            .expect_err("stale family must require explicit acceptance");
+        match error {
+            HostError::StaleLastValidGeometry {
+                feature_id,
+                active_revision,
+                stale_features,
+            } => {
+                assert_eq!(feature_id, "l-bracket");
+                assert!(active_revision.starts_with("history-revision-"));
+                assert_eq!(
+                    stale_features
+                        .iter()
+                        .map(|feature| feature.feature_id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["l-bracket-base", "l-bracket-bend", "l-bracket-finish"]
+                );
+                assert!(
+                    stale_features
+                        .iter()
+                        .all(|feature| !feature.last_valid_geometry_fingerprint.is_empty())
+                );
+            }
+            other => panic!("unexpected export error: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read(root.join(threeterm_persistence::TRANSACTIONS_LOG_FILENAME)).unwrap(),
+            log
+        );
+        assert!(!output.exists());
+        assert_eq!(
+            host.history(&root)
+                .expect("history reloads")
+                .active_snapshot()
+                .revision_id,
+            "history-revision-2"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(output);
     }
 
     #[test]

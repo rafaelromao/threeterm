@@ -478,6 +478,7 @@ dependencies = [
  "threeterm-persistence",
  "threeterm-protocol",
  "threeterm-theme",
+ "threeterm-tui",
 ]
 
 [[package]]
@@ -493,6 +494,7 @@ dependencies = [
 name = "threeterm-host"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "sha2",
  "threeterm-domain",

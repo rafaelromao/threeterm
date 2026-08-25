@@ -77,6 +77,79 @@ fn state_transition_uses_the_host_projection_without_mutating_canonical_state() 
 }
 
 #[test]
+fn reloaded_history_renders_stale_last_valid_geometry_without_mutating_host() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("history initializes");
+    host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+        .expect("failed edit commits its stale marker");
+    let history = host.history(&root).expect("history reloads");
+    let before = host.current().expect("canonical snapshot exists");
+
+    let mut session = TuiSession::new([], "before-reload");
+    session.refresh_stale_last_valid_geometry(&history, "l-bracket");
+    let state = session.state();
+    assert_eq!(state.canonical_revision, "before-reload");
+    assert_eq!(state.stale_last_valid_geometry.len(), 3);
+    assert_eq!(
+        state.stale_last_valid_geometry[0].active_revision,
+        "history-revision-2"
+    );
+    let overlay = session
+        .stale_last_valid_geometry_overlay()
+        .expect("stale marker is observable");
+    assert!(overlay.contains("[warning-glyph]"));
+    assert!(overlay.contains("stale-last-valid-geometry"));
+    assert!(overlay.contains("l-bracket-base"));
+    assert!(overlay.contains(&state.stale_last_valid_geometry[0].last_valid_geometry_fingerprint));
+
+    let valid_history = threeterm_domain::history::HistoryState::default();
+    session.refresh_stale_last_valid_geometry(&valid_history, "l-bracket");
+    assert!(session.state().stale_last_valid_geometry.is_empty());
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn feature_timeline_reload_renders_the_stale_marker_on_live_input() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("history initializes");
+    host.save(&root, "l-bracket-base", "history-feature")
+        .expect("timeline target is in the canonical graph");
+    host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+        .expect("failed edit commits its stale marker");
+    let before = host.current().expect("canonical snapshot exists");
+    let graph = host.current_graph().expect("canonical graph exists");
+    let mut session = TuiSession::from_feature_graph(&graph, &before.revision_hash);
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["l-bracket-base".to_string()],
+        })
+        .expect("feature is nominated");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["l-bracket-base".to_string()],
+        }))
+        .expect("feature selection is verified");
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("timeline reload refreshes stale projection");
+
+    let rendered = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("live input renders");
+    assert!(rendered.overlay.contains("stale-last-valid-geometry"));
+    assert!(rendered.overlay.contains("l-bracket-base"));
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
     let mut session = TuiSession::new_probing([], "revision-lifecycle");
     assert_eq!(session.state().lifecycle, LifecycleState::Probing);

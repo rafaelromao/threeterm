@@ -19,6 +19,7 @@ threeterm-theme = { path = "../theme" }
 
 [dev-dependencies]
 threeterm-persistence = { path = "../persistence", features = ["publication-kill-points"] }
+threeterm-tui = { path = "../tui" }
 
 [[bin]]
 name = "threeterm"

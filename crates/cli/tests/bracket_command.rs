@@ -12,6 +12,11 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_persistence::Bundle;
+use threeterm_protocol::schema::{
+    BRACKET_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, find,
+};
+use threeterm_protocol::schema_validator::validate;
 
 fn fresh_bundle(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -35,10 +40,35 @@ fn parse_success_or_skip_occt(output: Output) -> Option<Value> {
 }
 
 #[test]
-fn machine_bracket_generates_brep_and_load_returns_identical_hashes() {
+fn machine_new_project_then_bracket_commits_a_reloadable_l_bracket() {
     let root = fresh_bundle("happy");
+    let bin = env!("CARGO_BIN_EXE_threeterm");
 
-    let saved = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+    let created = Command::new(bin)
+        .args(["--machine", "new-project"])
+        .arg(&root)
+        .output()
+        .expect("new-project process runs");
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(created.stderr.is_empty(), "stderr must be empty on success");
+    let created: Value =
+        serde_json::from_slice(&created.stdout).expect("response is one JSON document");
+    validate(
+        &find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .response_schema,
+        &created,
+    )
+    .expect("new-project response validates against its registered schema");
+    let created_bundle = Bundle::at(&root).open().expect("created bundle reloads");
+    assert_eq!(created_bundle.manifest.revision_count, 1);
+    assert!(created_bundle.transactions.is_empty());
+
+    let saved = Command::new(bin)
         .args(["--machine", "bracket"])
         .arg(&root)
         .args([
@@ -58,6 +88,13 @@ fn machine_bracket_generates_brep_and_load_returns_identical_hashes() {
     let Some(saved) = parse_success_or_skip_occt(saved) else {
         return;
     };
+    validate(
+        &find(BRACKET_COMMAND_ID)
+            .expect("bracket is registered")
+            .response_schema,
+        &saved,
+    )
+    .expect("bracket response validates against its registered schema");
 
     for key in ["feature_graph_hash", "revision_hash", "schema_version"] {
         assert!(
@@ -86,7 +123,7 @@ fn machine_bracket_generates_brep_and_load_returns_identical_hashes() {
     ));
     assert!(root.join("brep/l-1.brep").is_file());
 
-    let loaded = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+    let loaded = Command::new(bin)
         .args(["--machine", "load"])
         .arg(&root)
         .output()
@@ -96,7 +133,15 @@ fn machine_bracket_generates_brep_and_load_returns_identical_hashes() {
         "stderr: {}",
         String::from_utf8_lossy(&loaded.stderr)
     );
-    let loaded: Value = serde_json::from_slice(&loaded.stdout).expect("load response is JSON");
+    let loaded: Value =
+        serde_json::from_slice(&loaded.stdout).expect("response is one JSON document");
+    validate(
+        &find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .response_schema,
+        &loaded,
+    )
+    .expect("load response validates against its registered schema");
 
     assert_eq!(
         saved["feature_graph_hash"], loaded["feature_graph_hash"],

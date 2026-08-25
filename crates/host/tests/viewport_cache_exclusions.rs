@@ -509,6 +509,7 @@ fn exclusions_covered_for_all_five_categories_in_both_layers() {
         }],
         selected_id: None,
         layer1_references: vec!["derived-abc".to_string()],
+        fit_relationships: vec![],
     };
     let mut cache = ViewportDisplayCache::new();
     // Verify each category is recognized as excluded

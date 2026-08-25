@@ -446,6 +446,10 @@ impl BooleanFuseRequest {
 pub struct ExtrudeResult {
     pub schema_version: String,
     pub request_id: String,
+    /// The immutable Revision Snapshot used for this staged result. Legacy
+    /// non-staged responses may omit it; Host-owned staging requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_id: Option<String>,
     pub operation: Operation,
     pub status: String,
     pub brep_path: PathBuf,
@@ -2044,6 +2048,7 @@ mod tests {
         let mut result = ExtrudeResult {
             schema_version: SCHEMA_VERSION.to_string(),
             request_id: "req-1".to_string(),
+            source_revision_id: None,
             operation: Operation::Extrude,
             status: "ok".to_string(),
             brep_path: PathBuf::from("/tmp/out.brep"),

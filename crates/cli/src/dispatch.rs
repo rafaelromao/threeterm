@@ -21,9 +21,9 @@ pub use threeterm_protocol::schema::{
     BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
     EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
-    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
-    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
-    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
+    FIT_DIMENSION_RESPONSE_SCHEMA_VERSION, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+    HOLE_RESPONSE_SCHEMA_VERSION, LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+    LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
@@ -32,9 +32,9 @@ use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
     COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    HISTORICAL_EDIT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
-    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
+    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
 use threeterm_theme::{
@@ -121,6 +121,16 @@ enum DispatchPlan {
         feature_id: String,
         profile_file: String,
         height: f64,
+    },
+    FitDimension {
+        bundle: String,
+        expected_revision: String,
+        source_feature_id: String,
+        target_feature_id: String,
+        source_dimension_id: String,
+        target_dimension_id: String,
+        dimension: String,
+        clearance: f64,
     },
     BooleanFuse {
         bundle: String,
@@ -482,6 +492,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "timeline" => parse_timeline(&args[2..]),
         "replay-verify" => parse_replay_verify(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
+        "fit-dimension" => parse_fit_dimension(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
         "chamfer" => parse_chamfer(&args[2..]),
@@ -604,6 +615,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         } => [length, width, height, thickness]
             .iter()
             .all(|value| value.is_finite()),
+        DispatchPlan::FitDimension { clearance, .. } => clearance.is_finite(),
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
@@ -625,6 +637,96 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         DispatchPlan::Unknown {
             arg: "non-finite numeric value".to_string(),
         }
+    }
+}
+
+fn parse_fit_dimension(args: &[OsString]) -> DispatchPlan {
+    let mut values = std::collections::HashMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        let Some(value) = args.get(index + 1) else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        let Some(name) = flag.strip_prefix("--") else {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        };
+        if !matches!(
+            name,
+            "bundle"
+                | "expected-revision"
+                | "source-feature-id"
+                | "target-feature-id"
+                | "source-dimension-id"
+                | "target-dimension-id"
+                | "dimension"
+                | "clearance"
+        ) || values.contains_key(name)
+        {
+            return DispatchPlan::Unknown {
+                arg: flag.into_owned(),
+            };
+        }
+        values.insert(name.to_string(), value.to_string_lossy().into_owned());
+        index += 2;
+    }
+    let required = |name: &str| values.get(name).cloned().filter(|value| !value.is_empty());
+    let Some(bundle) = required("bundle") else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(expected_revision) = required("expected-revision") else {
+        return DispatchPlan::Unknown {
+            arg: "--expected-revision".to_string(),
+        };
+    };
+    let Some(source_feature_id) = required("source-feature-id") else {
+        return DispatchPlan::Unknown {
+            arg: "--source-feature-id".to_string(),
+        };
+    };
+    let Some(target_feature_id) = required("target-feature-id") else {
+        return DispatchPlan::Unknown {
+            arg: "--target-feature-id".to_string(),
+        };
+    };
+    let Some(source_dimension_id) = required("source-dimension-id") else {
+        return DispatchPlan::Unknown {
+            arg: "--source-dimension-id".to_string(),
+        };
+    };
+    let Some(target_dimension_id) = required("target-dimension-id") else {
+        return DispatchPlan::Unknown {
+            arg: "--target-dimension-id".to_string(),
+        };
+    };
+    let Some(dimension) = required("dimension") else {
+        return DispatchPlan::Unknown {
+            arg: "--dimension".to_string(),
+        };
+    };
+    let Some(clearance) = values
+        .get("clearance")
+        .and_then(|value| value.parse::<f64>().ok())
+    else {
+        return DispatchPlan::Unknown {
+            arg: "--clearance".to_string(),
+        };
+    };
+    DispatchPlan::FitDimension {
+        bundle,
+        expected_revision,
+        source_feature_id,
+        target_feature_id,
+        source_dimension_id,
+        target_dimension_id,
+        dimension,
+        clearance,
     }
 }
 
@@ -2582,6 +2684,32 @@ fn execute_handler(
             stdout,
             stderr,
         ),
+        DispatchPlan::FitDimension {
+            bundle,
+            expected_revision,
+            source_feature_id,
+            target_feature_id,
+            source_dimension_id,
+            target_dimension_id,
+            dimension,
+            clearance,
+        } => {
+            let host = Host::new();
+            let request = json!({
+                "bundle_path": bundle,
+                "expected_revision": expected_revision,
+                "source_feature_id": source_feature_id,
+                "target_feature_id": target_feature_id,
+                "source_dimension_id": source_dimension_id,
+                "target_dimension_id": target_dimension_id,
+                "dimension": dimension,
+                "clearance": clearance,
+            });
+            match dispatch_registered_command(&host, FIT_DIMENSION_COMMAND_ID, request) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::BooleanFuse {
             bundle,
             feature_id,
@@ -2976,6 +3104,24 @@ pub fn dispatch_registered_command(
             .map_err(|error| DispatchError::Validation(error.to_string()))?;
             response["schema_version"] = Value::String(schema.response_schema_version.to_string());
             return Ok(response);
+        }
+        if command == FIT_DIMENSION_COMMAND_ID {
+            let fit = host.fit_dimension(
+                string_field("bundle_path")?,
+                string_field("expected_revision")?,
+                string_field("source_feature_id")?,
+                string_field("target_feature_id")?,
+                string_field("source_dimension_id")?,
+                string_field("target_dimension_id")?,
+                string_field("dimension")?,
+                number_field("clearance")?,
+            )?;
+            return Ok(json!({
+                "fit": fit.fit,
+                "feature_graph_hash": fit.snapshot.feature_graph_hash,
+                "revision_hash": fit.snapshot.revision_hash,
+                "schema_version": schema.response_schema_version,
+            }));
         }
         if command == CAPTURE_COMPONENT_COMMAND_ID {
             let selected_feature_ids = request
@@ -3634,6 +3780,25 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height })
         }
+        DispatchPlan::FitDimension {
+            bundle,
+            expected_revision,
+            source_feature_id,
+            target_feature_id,
+            source_dimension_id,
+            target_dimension_id,
+            dimension,
+            clearance,
+        } => json!({
+            "bundle_path": bundle,
+            "expected_revision": expected_revision,
+            "source_feature_id": source_feature_id,
+            "target_feature_id": target_feature_id,
+            "source_dimension_id": source_dimension_id,
+            "target_dimension_id": target_dimension_id,
+            "dimension": dimension,
+            "clearance": clearance,
+        }),
         DispatchPlan::BooleanFuse {
             bundle,
             feature_id,

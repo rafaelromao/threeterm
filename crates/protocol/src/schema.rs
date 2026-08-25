@@ -242,6 +242,66 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static FIT_DIMENSION_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "bundle_path",
+            "expected_revision",
+            "source_feature_id",
+            "target_feature_id",
+            "source_dimension_id",
+            "target_dimension_id",
+            "dimension",
+            "clearance"
+        ],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "minLength": 1 },
+            "source_feature_id": { "type": "string", "minLength": 1 },
+            "target_feature_id": { "type": "string", "minLength": 1 },
+            "source_dimension_id": { "type": "string", "minLength": 1 },
+            "target_dimension_id": { "type": "string", "minLength": 1 },
+            "dimension": { "type": "string", "minLength": 1 },
+            "clearance": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static FIT_DIMENSION_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["fit", "feature_graph_hash", "revision_hash", "schema_version"],
+        "properties": {
+            "fit": {
+                "type": "object",
+                "required": [
+                    "id", "source_feature_id", "target_feature_id",
+                    "source_dimension_id", "target_dimension_id", "dimension",
+                    "source_value", "target_value", "clearance"
+                ],
+                "properties": {
+                    "id": { "type": "string" },
+                    "source_feature_id": { "type": "string" },
+                    "target_feature_id": { "type": "string" },
+                    "source_dimension_id": { "type": "string" },
+                    "target_dimension_id": { "type": "string" },
+                    "dimension": { "type": "string" },
+                    "source_value": { "type": "number" },
+                    "target_value": { "type": "number" },
+                    "clearance": { "type": "number" }
+                },
+                "additionalProperties": false
+            },
+            "feature_graph_hash": { "type": "string", "minLength": 64 },
+            "revision_hash": { "type": "string", "minLength": 64 },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static BOOLEAN_FUSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1610,6 +1670,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        FIT_DIMENSION_COMMAND_ID,
+        CommandSchema {
+            id: FIT_DIMENSION_COMMAND_ID,
+            name: "fit-dimension",
+            schema_version: "threeterm.command.fit-dimension/1",
+            request_schema_version: "threeterm.command.fit-dimension.request/1",
+            request_schema: FIT_DIMENSION_REQUEST_SCHEMA.clone(),
+            response_schema_version: FIT_DIMENSION_RESPONSE_SCHEMA_VERSION,
+            response_schema: FIT_DIMENSION_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         BOOLEAN_FUSE_COMMAND_ID,
         CommandSchema {
             id: BOOLEAN_FUSE_COMMAND_ID,
@@ -1778,6 +1850,7 @@ pub const RESTORE_REVISION_COMMAND_ID: CommandId = CommandId("restore-revision")
 pub const REPLAY_VERIFY_COMMAND_ID: CommandId = CommandId("replay-verify");
 pub const TIMELINE_COMMAND_ID: CommandId = CommandId("timeline");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
+pub const FIT_DIMENSION_COMMAND_ID: CommandId = CommandId("fit-dimension");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
 pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
@@ -1797,6 +1870,8 @@ pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";
 pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/3";
+pub const FIT_DIMENSION_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.fit-dimension.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
 pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";

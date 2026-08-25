@@ -23,6 +23,7 @@ fn scene(revision: &str) -> ViewportScene {
         }],
         selected_id: None,
         layer1_references: vec!["derived-abc".to_string()],
+        fit_relationships: vec![],
     }
 }
 

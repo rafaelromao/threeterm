@@ -28,6 +28,7 @@ fn scene_with(revision: &str, selected: Option<&str>) -> ViewportScene {
         ],
         selected_id: selected.map(|s| s.to_string()),
         layer1_references: vec!["derived-abc".to_string()],
+        fit_relationships: vec![],
     }
 }
 

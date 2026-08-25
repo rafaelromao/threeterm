@@ -8,9 +8,9 @@
 
 use threeterm_protocol::schema::{
     BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
-    LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
-    SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, registry_hash,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HOLE_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID,
+    MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -33,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "9b86702f03f62e36184fc76fb41ba254cbf98a725db20995d1eca0a0a59e33ad",
+        "9679cf3f68991de7f3ed999498aa4c54a359291efe3cb8d857796cd2bd055921",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -102,6 +102,30 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
         ])
     );
     assert_eq!(fuse.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_the_revision_bound_fit_dimension_contract() {
+    let fit = find(FIT_DIMENSION_COMMAND_ID).expect("fit-dimension is registered");
+    assert_eq!(fit.name, "fit-dimension");
+    assert_eq!(
+        fit.response_schema_version,
+        "threeterm.command.fit-dimension.response/1"
+    );
+    assert_eq!(
+        fit.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "expected_revision",
+            "source_feature_id",
+            "target_feature_id",
+            "source_dimension_id",
+            "target_dimension_id",
+            "dimension",
+            "clearance"
+        ])
+    );
+    assert_eq!(fit.request_schema["additionalProperties"], false);
 }
 
 #[test]

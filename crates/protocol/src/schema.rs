@@ -115,24 +115,33 @@ pub static REHEARSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
-pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+fn rehearsal_timing_classes() -> Value {
+    json!([
+        "project_create",
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog"
+    ])
+}
+
+pub static REHEARSE_RUN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": [
-            "schema_version", "release_candidate", "fixture", "run_count",
-            "sample_policy", "promoted", "project_path", "export_path",
+            "schema_version", "release_candidate", "project_path", "export_path",
             "catalog_path", "timings", "artifacts"
         ],
         "properties": {
-            "schema_version": { "const": "threeterm.command.rehearse.response/1" },
+            "schema_version": { "const": "threeterm.command.rehearse.run.response/1" },
             "release_candidate": { "type": "string", "minLength": 1 },
-            "fixture": { "const": "l-bracket" },
-            "run_count": { "const": 1 },
-            "sample_policy": { "const": "nearest-rank" },
-            "promoted": { "const": false },
-            "project_path": { "const": "project" },
-            "export_path": { "const": "export" },
-            "catalog_path": { "const": "sha256-manifest.json" },
+            "project_path": { "type": "string", "minLength": 1 },
+            "export_path": { "type": "string", "minLength": 1 },
+            "catalog_path": { "type": "string", "minLength": 1 },
             "timings": {
                 "type": "array",
                 "minItems": 1,
@@ -143,7 +152,7 @@ pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "p50_ms", "p95_ms", "p99_ms"
                     ],
                     "properties": {
-                        "class": { "type": "string", "minLength": 1 },
+                                    "class": { "enum": rehearsal_timing_classes() },
                         "unit": { "const": "ms" },
                         "sample_count": { "const": 1 },
                         "samples_ms": {
@@ -168,6 +177,80 @@ pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "relative_path": { "type": "string", "minLength": 1 },
                         "bytes": { "type": "integer", "minimum": 0 },
                         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    let mut aggregate_run_schema = (*REHEARSE_RUN_RESPONSE_SCHEMA).clone();
+    aggregate_run_schema["properties"]["project_path"]["pattern"] = json!("^run-[12]/project$");
+    aggregate_run_schema["properties"]["export_path"]["pattern"] = json!("^run-[12]/export$");
+    aggregate_run_schema["properties"]["catalog_path"]["pattern"] =
+        json!("^run-[12]/sha256-manifest\\.json$");
+    aggregate_run_schema["properties"]["artifacts"]["items"]["properties"]["relative_path"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^run-[12]/(project|project\\.previous-generation|export)/.+$"
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "schema_version", "release_candidates", "fixture", "run_count",
+            "sample_policy", "promoted", "runs", "comparisons"
+        ],
+        "properties": {
+            "schema_version": { "const": "threeterm.command.rehearse.response/2" },
+            "release_candidates": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": { "type": "string", "minLength": 1 }
+            },
+            "fixture": { "const": "l-bracket" },
+            "run_count": { "const": 2 },
+            "sample_policy": { "const": "nearest-rank" },
+            "promoted": { "const": false },
+            "runs": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": aggregate_run_schema
+            },
+            "comparisons": {
+                "type": "array",
+                "minItems": 9,
+                "maxItems": 9,
+                "items": {
+                    "type": "object",
+                    "required": ["class", "run_1", "run_2", "same_order_of_magnitude"],
+                    "properties": {
+                        "class": { "enum": rehearsal_timing_classes() },
+                        "run_1": {
+                            "type": "object",
+                            "required": ["p50_ms", "p95_ms", "p99_ms"],
+                            "properties": {
+                                "p50_ms": { "type": "number", "minimum": 0 },
+                                "p95_ms": { "type": "number", "minimum": 0 },
+                                "p99_ms": { "type": "number", "minimum": 0 }
+                            },
+                            "additionalProperties": false
+                        },
+                        "run_2": {
+                            "type": "object",
+                            "required": ["p50_ms", "p95_ms", "p99_ms"],
+                            "properties": {
+                                "p50_ms": { "type": "number", "minimum": 0 },
+                                "p95_ms": { "type": "number", "minimum": 0 },
+                                "p99_ms": { "type": "number", "minimum": 0 }
+                            },
+                            "additionalProperties": false
+                        },
+                        "same_order_of_magnitude": { "const": true }
                     },
                     "additionalProperties": false
                 }
@@ -1865,7 +1948,8 @@ pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
 pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
-pub const REHEARSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.response/1";
+pub const REHEARSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.response/2";
+pub const REHEARSE_RUN_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.run.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";

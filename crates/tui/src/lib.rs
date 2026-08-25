@@ -1,7 +1,9 @@
 #![allow(clippy::result_large_err)]
 
-use threeterm_domain::FeatureGraph;
-use threeterm_host::Host;
+use std::path::Path;
+
+use threeterm_domain::{FeatureGraph, history::HistoryTimelineStatus};
+use threeterm_host::{HistoryCommitView, Host};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -443,6 +445,17 @@ impl InteractionEvent {
     }
 }
 
+fn history_timeline_status_name(status: &HistoryTimelineStatus) -> String {
+    match status {
+        HistoryTimelineStatus::CurrentValid => "current-valid",
+        HistoryTimelineStatus::Broken => "broken",
+        HistoryTimelineStatus::BlockedByFailure => "blocked-by-failure",
+        HistoryTimelineStatus::Suppressed => "suppressed",
+        HistoryTimelineStatus::Absent => "absent",
+    }
+    .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateAcknowledgement {
     pub sequence: u64,
@@ -457,6 +470,21 @@ pub struct StateAcknowledgement {
 pub struct FeatureTarget {
     pub id: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureTimelineView {
+    pub feature_id: String,
+    pub revisions: Vec<FeatureTimelineRevision>,
+    pub named_revisions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureTimelineRevision {
+    pub revision_id: String,
+    pub operation: String,
+    pub status: String,
+    pub named_revision_names: Vec<String>,
 }
 
 impl FeatureTarget {
@@ -512,6 +540,7 @@ pub struct TuiState {
     pub command_source_revision: Option<String>,
     pub history: HistoryState,
     pub recoverable_revisions: Vec<String>,
+    pub feature_timeline: Option<FeatureTimelineView>,
     pub presentation_generation: u64,
     pub canonical_revision: String,
     pub last_acknowledgement: Option<GestureAcknowledgement>,
@@ -616,6 +645,7 @@ pub struct TuiSession {
     command_source_revision: Option<String>,
     history: HistoryState,
     recoverable_revisions: Vec<String>,
+    feature_timeline: Option<FeatureTimelineView>,
     presentation_generation: u64,
     canonical_revision: String,
     acknowledgement_sequence: u64,
@@ -646,6 +676,7 @@ impl TuiSession {
                 can_redo: false,
             },
             recoverable_revisions: Vec::new(),
+            feature_timeline: None,
             presentation_generation: 0,
             canonical_revision: canonical_revision.as_ref().to_string(),
             acknowledgement_sequence: 0,
@@ -718,11 +749,135 @@ impl TuiSession {
             command_source_revision: self.command_source_revision.clone(),
             history: self.history.clone(),
             recoverable_revisions: self.recoverable_revisions.clone(),
+            feature_timeline: self.feature_timeline.clone(),
             presentation_generation: self.presentation_generation,
             canonical_revision: self.canonical_revision.clone(),
             last_acknowledgement: self.last_acknowledgement.clone(),
             last_transition_acknowledgement: self.last_transition_acknowledgement.clone(),
         }
+    }
+
+    pub fn show_feature_timeline(
+        &mut self,
+        feature_id: &str,
+        revisions: Vec<FeatureTimelineRevision>,
+        named_revisions: Vec<String>,
+    ) -> Result<(), TuiDiagnostic> {
+        let kind = StateEventKind::History(HistoryEventKind::RestoreNamedRevision);
+        if self.selected_target() != Some(feature_id) {
+            return Err(self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                kind,
+                "timeline feature must be the selected target".to_string(),
+                "timeline",
+            ));
+        }
+        self.feature_timeline = Some(FeatureTimelineView {
+            feature_id: feature_id.to_string(),
+            revisions,
+            named_revisions,
+        });
+        Ok(())
+    }
+
+    pub fn open_feature_timeline(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+    ) -> Result<(), TuiDiagnostic> {
+        let feature_id = self.selected_target().ok_or_else(|| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::NoFeatureTarget,
+                StateAxis::Selection,
+                StateEventKind::Selection(SelectionEventKind::Clear),
+                "timeline requires a selected feature".to_string(),
+                "timeline",
+            )
+        })?;
+        let timeline = host.timeline(root, feature_id).map_err(|error| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                error.to_string(),
+                "timeline",
+            )
+        })?;
+        self.show_feature_timeline(
+            &timeline.timeline.feature_id,
+            timeline
+                .timeline
+                .revisions
+                .iter()
+                .map(|revision| FeatureTimelineRevision {
+                    revision_id: revision.revision_id.clone(),
+                    operation: revision.operation.clone(),
+                    status: history_timeline_status_name(&revision.status),
+                    named_revision_names: revision.named_revision_names.clone(),
+                })
+                .collect(),
+            timeline
+                .timeline
+                .named_revisions
+                .iter()
+                .map(|revision| revision.name.clone())
+                .collect(),
+        )
+    }
+
+    pub fn clear_feature_timeline(&mut self) {
+        self.feature_timeline = None;
+    }
+
+    pub fn restore_feature_timeline(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, TuiDiagnostic> {
+        let feature_id = self
+            .feature_timeline
+            .as_ref()
+            .map(|timeline| timeline.feature_id.clone())
+            .ok_or_else(|| {
+                self.operation_diagnostic(
+                    TuiDiagnosticCode::HistoryRejected,
+                    StateAxis::History,
+                    StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                    "no feature timeline is open".to_string(),
+                    "timeline",
+                )
+            })?;
+        let started = self.transition_history(HistoryEvent::RestoreNamedRevision {
+            name: name.to_string(),
+        })?;
+        if let Some(diagnostic) = started.diagnostic {
+            return Err(diagnostic);
+        }
+
+        let view = match host.restore_named_revision(root, &feature_id, name) {
+            Ok(view) => view,
+            Err(error) => {
+                let rejected = self
+                    .transition_history(HistoryEvent::ApplyCompleted(
+                        HistoryApplyResult::Rejected {
+                            detail: error.to_string(),
+                        },
+                    ))
+                    .expect("history rejection returns to the linear state");
+                return Err(rejected
+                    .diagnostic
+                    .expect("history rejection carries a diagnostic"));
+            }
+        };
+        let revision = view.history.active_snapshot().revision_id.clone();
+        self.transition_history(HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
+            revision,
+            can_undo: true,
+            can_redo: false,
+        }))?;
+        Ok(view)
     }
 
     pub fn transition_lifecycle(
@@ -1058,12 +1213,16 @@ impl TuiSession {
                         "Candidate",
                     ))
                 } else {
+                    let previous_target = self.selected_target().map(str::to_string);
                     self.selected_index = stable_ids.first().and_then(|stable_id| {
                         self.targets
                             .iter()
                             .position(|target| target.id == *stable_id)
                     });
                     self.selection = SelectionState::Selected { stable_ids };
+                    if previous_target.as_deref() != self.selected_target() {
+                        self.feature_timeline = None;
+                    }
                     self.finish_transition(kind, "selection verified", TransientState::Selected)
                 }
             }
@@ -1109,6 +1268,7 @@ impl TuiSession {
             {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
+                self.feature_timeline = None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionLost,
                     StateAxis::Selection,
@@ -1128,6 +1288,7 @@ impl TuiSession {
             {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
+                self.feature_timeline = None;
                 let diagnostic = self.operation_diagnostic(
                     TuiDiagnosticCode::SelectionIncompatible,
                     StateAxis::Selection,
@@ -1145,6 +1306,7 @@ impl TuiSession {
             SelectionEvent::Clear if !matches!(self.selection, SelectionState::None) => {
                 self.selected_index = None;
                 self.selection = SelectionState::None;
+                self.feature_timeline = None;
                 self.finish_transition(kind, "selection cleared", TransientState::Ready)
             }
             _ => self.invalid_transition(StateAxis::Selection, kind),
@@ -1448,8 +1610,10 @@ impl TuiSession {
                 self.finish_transition(kind, "history redo applying", TransientState::Ready)
             }
             HistoryEvent::RestoreNamedRevision { name }
-                if self.recoverable_revisions.contains(&name)
-                    && matches!(self.history, HistoryState::Linear { .. })
+                if self.feature_timeline.as_ref().map_or_else(
+                    || self.recoverable_revisions.contains(&name),
+                    |timeline| timeline.named_revisions.contains(&name),
+                ) && matches!(self.history, HistoryState::Linear { .. })
                     && self.interaction_mode == InteractionMode::ModelessReady
                     && self.command_phase == CommandPhase::Idle =>
             {
@@ -1462,6 +1626,21 @@ impl TuiSession {
                 self.interaction_mode = InteractionMode::HistoryApplying;
                 self.finish_transition(kind, "named revision applying", TransientState::Ready)
             }
+            HistoryEvent::RestoreNamedRevision { name } if self.feature_timeline.is_some() => {
+                let diagnostic = self.operation_diagnostic(
+                    TuiDiagnosticCode::HistoryRejected,
+                    StateAxis::History,
+                    kind,
+                    format!("named revision is outside the selected feature timeline: {name}"),
+                    "Linear",
+                );
+                self.finish_transition_with_diagnostic(
+                    kind,
+                    "named revision rejected by feature timeline",
+                    TransientState::Error,
+                    Some(diagnostic),
+                )
+            }
             HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
                 revision,
                 can_undo,
@@ -1470,6 +1649,7 @@ impl TuiSession {
                 self.canonical_revision = revision;
                 self.history = HistoryState::Linear { can_undo, can_redo };
                 self.interaction_mode = InteractionMode::ModelessReady;
+                self.feature_timeline = None;
                 self.finish_transition(kind, "history application complete", TransientState::Ready)
             }
             HistoryEvent::ApplyCompleted(HistoryApplyResult::Rejected { detail })

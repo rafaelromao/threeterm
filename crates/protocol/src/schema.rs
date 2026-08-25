@@ -815,6 +815,190 @@ pub static SNAPSHOT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static HISTORICAL_EDIT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "parameter", "value"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "parameter": { "type": "string", "minLength": 1 },
+            "value": { "type": "number" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status", "operation", "active_revision", "dirty_features",
+            "evaluated_features", "blocked_features", "diagnostics",
+            "named_revisions", "features", "feature_graph_hash", "revision_hash", "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string" },
+            "operation": { "type": "string" },
+            "active_revision": { "type": "string", "minLength": 1 },
+            "dirty_features": { "type": "array", "items": { "type": "string" } },
+            "evaluated_features": { "type": "array", "items": { "type": "string" } },
+            "blocked_features": { "type": "array", "items": { "type": "string" } },
+            "diagnostics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["code", "feature_id", "detail"],
+                    "properties": {
+                        "code": { "type": "string", "minLength": 1 },
+                        "feature_id": { "type": "string", "minLength": 1 },
+                        "detail": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "named_revisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "revision_id", "provenance"],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                        "revision_id": { "type": "string", "minLength": 1 },
+                        "provenance": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "features": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "status", "geometry_fingerprint", "last_valid_geometry_fingerprint"],
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1 },
+                        "status": { "type": "string", "minLength": 1 },
+                        "geometry_fingerprint": { "type": "string" },
+                        "last_valid_geometry_fingerprint": { "type": "string" },
+                        "diagnostic": { "type": "object" }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static NAMED_REVISION_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "name"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static RESTORE_REVISION_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "name"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static TIMELINE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static TIMELINE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "feature_id", "active_revision", "revisions", "named_revisions",
+            "feature_graph_hash", "revision_hash", "schema_version"
+        ],
+        "properties": {
+            "feature_id": { "type": "string", "minLength": 1 },
+            "active_revision": { "type": "string", "minLength": 1 },
+            "revisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["ordinal", "revision_id", "operation", "status", "named_revision_names"],
+                    "properties": {
+                        "ordinal": { "type": "integer", "minimum": 1 },
+                        "revision_id": { "type": "string", "minLength": 1 },
+                        "operation": { "type": "string", "minLength": 1 },
+                        "status": { "type": "string", "minLength": 1 },
+                        "named_revision_names": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "named_revisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "revision_id", "provenance"],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                        "revision_id": { "type": "string", "minLength": 1 },
+                        "provenance": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REPLAY_VERIFY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path"],
+        "properties": { "bundle_path": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+pub static REPLAY_VERIFY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["deterministic", "fingerprint", "mismatch", "schema_version"],
+        "properties": {
+            "deterministic": { "type": "boolean" },
+            "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "mismatch": { "type": "string" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 /// Canonical request schema document for the `bracket` command. The numeric
 /// dimensions are stored in the canonical transaction log but no OCCT
 /// geometry is computed in this slice — that is the responsibility of a
@@ -866,6 +1050,34 @@ pub static LOAD_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
+    })
+});
+
+fn component_request_schema(fields: &[&str]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        let schema = match *field {
+            "transform" => {
+                json!({"type":"array", "minItems":3, "maxItems":3, "items":{"type":"number"}})
+            }
+            "selected_feature_ids" => {
+                json!({"type":"array", "minItems":1, "uniqueItems":true, "items":{"type":"string", "minLength":1}})
+            }
+            "length" | "width" | "height" | "thickness" | "value" => {
+                json!({"type":"number", "exclusiveMinimum":0})
+            }
+            _ => json!({"type":"string", "minLength":1}),
+        };
+        properties.insert((*field).to_string(), schema);
+    }
+    json!({"type":"object", "required":fields, "properties":properties, "additionalProperties":false})
+}
+
+pub static COMPONENT_STATE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type":"object", "required":["definitions","instances","schema_version"],
+        "properties":{"definitions":{"type":"object"},"instances":{"type":"object"},"schema_version":{"type":"string"}},
+        "additionalProperties":false
     })
 });
 /// The static command registry, keyed by `CommandId`.
@@ -929,6 +1141,151 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: BRACKET_REQUEST_SCHEMA.clone(),
             response_schema_version: BRACKET_RESPONSE_SCHEMA_VERSION,
             response_schema: BRACKET_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    for (id, name, fields) in [
+        (
+            DEFINE_COMPONENT_COMMAND_ID,
+            "define-component",
+            &[
+                "bundle_path",
+                "definition_id",
+                "feature_id",
+                "length",
+                "width",
+                "height",
+                "thickness",
+            ][..],
+        ),
+        (
+            CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+            "create-component-instance",
+            &["bundle_path", "instance_id", "definition_id", "transform"][..],
+        ),
+        (
+            TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+            "transform-component-instance",
+            &["bundle_path", "instance_id", "transform"][..],
+        ),
+        (
+            MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+            "make-component-independent",
+            &[
+                "bundle_path",
+                "source_instance_id",
+                "definition_id",
+                "instance_id",
+                "feature_id",
+            ][..],
+        ),
+        (
+            EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+            "edit-component-parameter",
+            &["bundle_path", "definition_id", "parameter", "value"][..],
+        ),
+    ] {
+        let command = format!("threeterm.command.{name}/1");
+        let request = format!("threeterm.command.{name}.request/1");
+        let response = format!("threeterm.command.{name}.response/1");
+        map.insert(
+            id,
+            CommandSchema {
+                id,
+                name,
+                schema_version: Box::leak(command.into_boxed_str()),
+                request_schema_version: Box::leak(request.into_boxed_str()),
+                request_schema: component_request_schema(fields),
+                response_schema_version: Box::leak(response.into_boxed_str()),
+                response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+            },
+        );
+    }
+    map.insert(
+        COMPONENT_STATE_COMMAND_ID,
+        CommandSchema {
+            id: COMPONENT_STATE_COMMAND_ID,
+            name: "component-state",
+            schema_version: "threeterm.command.component-state/1",
+            request_schema_version: "threeterm.command.component-state.request/1",
+            request_schema: component_request_schema(&["bundle_path"]),
+            response_schema_version: "threeterm.command.component-state.response/1",
+            response_schema: COMPONENT_STATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        CAPTURE_COMPONENT_COMMAND_ID,
+        CommandSchema {
+            id: CAPTURE_COMPONENT_COMMAND_ID,
+            name: "capture-component",
+            schema_version: "threeterm.command.capture-component/1",
+            request_schema_version: "threeterm.command.capture-component.request/1",
+            request_schema: component_request_schema(&[
+                "bundle_path",
+                "definition_id",
+                "selected_feature_ids",
+            ]),
+            response_schema_version: "threeterm.command.capture-component.response/1",
+            response_schema: SNAPSHOT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        HISTORICAL_EDIT_COMMAND_ID,
+        CommandSchema {
+            id: HISTORICAL_EDIT_COMMAND_ID,
+            name: "historical-edit",
+            schema_version: "threeterm.command.historical-edit/1",
+            request_schema_version: "threeterm.command.historical-edit.request/1",
+            request_schema: HISTORICAL_EDIT_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        CREATE_REVISION_COMMAND_ID,
+        CommandSchema {
+            id: CREATE_REVISION_COMMAND_ID,
+            name: "create-revision",
+            schema_version: "threeterm.command.create-revision/1",
+            request_schema_version: "threeterm.command.create-revision.request/1",
+            request_schema: NAMED_REVISION_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        RESTORE_REVISION_COMMAND_ID,
+        CommandSchema {
+            id: RESTORE_REVISION_COMMAND_ID,
+            name: "restore-revision",
+            schema_version: "threeterm.command.restore-revision/1",
+            request_schema_version: RESTORE_REVISION_REQUEST_SCHEMA_VERSION,
+            request_schema: RESTORE_REVISION_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        TIMELINE_COMMAND_ID,
+        CommandSchema {
+            id: TIMELINE_COMMAND_ID,
+            name: "timeline",
+            schema_version: "threeterm.command.timeline/1",
+            request_schema_version: TIMELINE_REQUEST_SCHEMA_VERSION,
+            request_schema: TIMELINE_REQUEST_SCHEMA.clone(),
+            response_schema_version: TIMELINE_RESPONSE_SCHEMA_VERSION,
+            response_schema: TIMELINE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        REPLAY_VERIFY_COMMAND_ID,
+        CommandSchema {
+            id: REPLAY_VERIFY_COMMAND_ID,
+            name: "replay-verify",
+            schema_version: "threeterm.command.replay-verify/1",
+            request_schema_version: "threeterm.command.replay-verify.request/1",
+            request_schema: REPLAY_VERIFY_REQUEST_SCHEMA.clone(),
+            response_schema_version: REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION,
+            response_schema: REPLAY_VERIFY_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1095,6 +1452,20 @@ pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
+pub const DEFINE_COMPONENT_COMMAND_ID: CommandId = CommandId("define-component");
+pub const CREATE_COMPONENT_INSTANCE_COMMAND_ID: CommandId = CommandId("create-component-instance");
+pub const TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID: CommandId =
+    CommandId("transform-component-instance");
+pub const MAKE_COMPONENT_INDEPENDENT_COMMAND_ID: CommandId =
+    CommandId("make-component-independent");
+pub const EDIT_COMPONENT_PARAMETER_COMMAND_ID: CommandId = CommandId("edit-component-parameter");
+pub const COMPONENT_STATE_COMMAND_ID: CommandId = CommandId("component-state");
+pub const CAPTURE_COMPONENT_COMMAND_ID: CommandId = CommandId("capture-component");
+pub const HISTORICAL_EDIT_COMMAND_ID: CommandId = CommandId("historical-edit");
+pub const CREATE_REVISION_COMMAND_ID: CommandId = CommandId("create-revision");
+pub const RESTORE_REVISION_COMMAND_ID: CommandId = CommandId("restore-revision");
+pub const REPLAY_VERIFY_COMMAND_ID: CommandId = CommandId("replay-verify");
+pub const TIMELINE_COMMAND_ID: CommandId = CommandId("timeline");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
@@ -1126,6 +1497,13 @@ pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.respons
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
 pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/1";
+pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/1";
+pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.replay-verify.response/1";
+pub const TIMELINE_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.timeline.request/1";
+pub const TIMELINE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.timeline.response/1";
+pub const RESTORE_REVISION_REQUEST_SCHEMA_VERSION: &str =
+    "threeterm.command.restore-revision.request/2";
 
 /// registered, `None` otherwise. Adapters use this to resolve a parsed
 /// command id into the canonical schema row.

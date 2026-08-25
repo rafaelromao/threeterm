@@ -9,6 +9,15 @@ pub mod graph {
     pub use super::{Feature, FeatureGraph, FeatureId, ProjectGeneration, Revision};
 }
 
+pub mod component {
+    pub use super::{
+        ComponentCommand, ComponentDefinition, ComponentGraph, ComponentInstance,
+        LBracketDescriptor, ReferenceOutcome, SemanticReference, resolve_semantic_reference,
+    };
+}
+
+pub mod history;
+
 pub fn schema_version() -> &'static str {
     "threeterm.domain/1"
 }
@@ -53,6 +62,287 @@ impl Feature {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureGraph {
     features: BTreeMap<FeatureId, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LBracketDescriptor {
+    pub feature_id: String,
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+    pub thickness: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentDefinition {
+    pub id: String,
+    #[serde(default)]
+    pub selected_feature_ids: Vec<String>,
+    pub descriptor: LBracketDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentInstance {
+    pub id: String,
+    pub definition_id: String,
+    pub transform: [f64; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "kebab-case")]
+pub enum ComponentCommand {
+    Define {
+        definition: ComponentDefinition,
+    },
+    Capture {
+        definition_id: String,
+        selected_feature_ids: Vec<String>,
+        descriptor: LBracketDescriptor,
+    },
+    CreateInstance {
+        instance: ComponentInstance,
+    },
+    TransformInstance {
+        instance_id: String,
+        transform: [f64; 3],
+    },
+    MakeIndependent {
+        source_instance_id: String,
+        definition_id: String,
+        instance_id: String,
+        feature_id: String,
+    },
+    EditParameter {
+        definition_id: String,
+        parameter: String,
+        value: f64,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ComponentGraph {
+    pub definitions: BTreeMap<String, ComponentDefinition>,
+    pub instances: BTreeMap<String, ComponentInstance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticReference {
+    pub id: String,
+    pub expected_kind: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceOutcome {
+    Resolved(String),
+    Ambiguous,
+    Lost,
+    Incompatible,
+}
+
+/// Resolve only stable semantic identities. The caller supplies semantic
+/// candidates; topology positions or indexes are never considered.
+pub fn resolve_semantic_reference(
+    reference: &SemanticReference,
+    candidates: impl IntoIterator<Item = (String, &'static str)>,
+) -> ReferenceOutcome {
+    let matches: Vec<_> = candidates
+        .into_iter()
+        .filter(|(id, _)| id == &reference.id)
+        .collect();
+    match matches.as_slice() {
+        [] => ReferenceOutcome::Lost,
+        [(_, kind)] if *kind == reference.expected_kind => {
+            ReferenceOutcome::Resolved(reference.id.clone())
+        }
+        [..] if matches.len() == 1 => ReferenceOutcome::Incompatible,
+        _ => ReferenceOutcome::Ambiguous,
+    }
+}
+
+impl ComponentGraph {
+    pub fn apply(&mut self, command: &ComponentCommand) -> Result<(), String> {
+        match command {
+            ComponentCommand::Define { definition } => {
+                if definition.id.is_empty() || definition.descriptor.feature_id.is_empty() {
+                    return Err("component IDs must not be empty".to_string());
+                }
+                validate_selected_feature_ids(&definition.selected_feature_ids)?;
+                if ![
+                    definition.descriptor.length,
+                    definition.descriptor.width,
+                    definition.descriptor.height,
+                    definition.descriptor.thickness,
+                ]
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+                {
+                    return Err(
+                        "component dimensions must be strictly positive finite numbers".to_string(),
+                    );
+                }
+                if self.id_is_in_use(&definition.id) {
+                    return Err("component ID already exists".to_string());
+                }
+                if self.feature_id_is_in_use(&definition.descriptor.feature_id) {
+                    return Err("component feature ID already exists".to_string());
+                }
+                self.definitions
+                    .insert(definition.id.clone(), definition.clone());
+            }
+            ComponentCommand::Capture {
+                definition_id,
+                selected_feature_ids,
+                descriptor,
+            } => {
+                self.apply(&ComponentCommand::Define {
+                    definition: ComponentDefinition {
+                        id: definition_id.clone(),
+                        selected_feature_ids: selected_feature_ids.clone(),
+                        descriptor: descriptor.clone(),
+                    },
+                })?;
+            }
+            ComponentCommand::CreateInstance { instance } => {
+                self.require_definition(&instance.definition_id)?;
+                if self.id_is_in_use(&instance.id) {
+                    return Err("component ID already exists".to_string());
+                }
+                self.instances.insert(instance.id.clone(), instance.clone());
+            }
+            ComponentCommand::TransformInstance {
+                instance_id,
+                transform,
+            } => {
+                if !transform.iter().all(|value| value.is_finite()) {
+                    return Err("component transform must contain finite numbers".to_string());
+                }
+                self.require_instance(instance_id)?.transform = *transform;
+            }
+            ComponentCommand::MakeIndependent {
+                source_instance_id,
+                definition_id,
+                instance_id,
+                feature_id,
+            } => {
+                let source = self.require_instance(source_instance_id)?.clone();
+                let mut definition = self.require_definition(&source.definition_id)?.clone();
+                if definition_id == instance_id
+                    || self.id_is_in_use(definition_id)
+                    || self.id_is_in_use(instance_id)
+                    || self.feature_id_is_in_use(feature_id)
+                {
+                    return Err("independent component IDs already exist".to_string());
+                }
+                definition.id = definition_id.clone();
+                definition.descriptor.feature_id = feature_id.clone();
+                self.definitions.insert(definition_id.clone(), definition);
+                self.instances.insert(
+                    instance_id.clone(),
+                    ComponentInstance {
+                        id: instance_id.clone(),
+                        definition_id: definition_id.clone(),
+                        transform: source.transform,
+                    },
+                );
+            }
+            ComponentCommand::EditParameter {
+                definition_id,
+                parameter,
+                value,
+            } => {
+                if !value.is_finite() || *value <= 0.0 {
+                    return Err(
+                        "component parameter value must be a strictly positive finite number"
+                            .to_string(),
+                    );
+                }
+                let descriptor = &mut self.require_definition(definition_id)?.descriptor;
+                match parameter.as_str() {
+                    "length" => descriptor.length = *value,
+                    "width" => descriptor.width = *value,
+                    "height" => descriptor.height = *value,
+                    "thickness" => descriptor.thickness = *value,
+                    _ => return Err("unknown component parameter".to_string()),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn require_definition(&mut self, id: &str) -> Result<&mut ComponentDefinition, String> {
+        let outcome = resolve_semantic_reference(
+            &SemanticReference {
+                id: id.to_string(),
+                expected_kind: "definition",
+            },
+            self.definitions
+                .keys()
+                .cloned()
+                .map(|id| (id, "definition"))
+                .chain(self.instances.keys().cloned().map(|id| (id, "instance"))),
+        );
+        match outcome {
+            ReferenceOutcome::Resolved(_) => self
+                .definitions
+                .get_mut(id)
+                .ok_or_else(|| "component definition reference is lost".to_string()),
+            ReferenceOutcome::Ambiguous => {
+                Err("component definition reference is ambiguous".to_string())
+            }
+            ReferenceOutcome::Lost => Err("component definition reference is lost".to_string()),
+            ReferenceOutcome::Incompatible => {
+                Err("component definition reference is incompatible".to_string())
+            }
+        }
+    }
+
+    fn require_instance(&mut self, id: &str) -> Result<&mut ComponentInstance, String> {
+        let outcome = resolve_semantic_reference(
+            &SemanticReference {
+                id: id.to_string(),
+                expected_kind: "instance",
+            },
+            self.definitions
+                .keys()
+                .cloned()
+                .map(|id| (id, "definition"))
+                .chain(self.instances.keys().cloned().map(|id| (id, "instance"))),
+        );
+        match outcome {
+            ReferenceOutcome::Resolved(_) => self
+                .instances
+                .get_mut(id)
+                .ok_or_else(|| "component instance reference is lost".to_string()),
+            ReferenceOutcome::Ambiguous => {
+                Err("component instance reference is ambiguous".to_string())
+            }
+            ReferenceOutcome::Lost => Err("component instance reference is lost".to_string()),
+            ReferenceOutcome::Incompatible => {
+                Err("component instance reference is incompatible".to_string())
+            }
+        }
+    }
+
+    fn id_is_in_use(&self, id: &str) -> bool {
+        self.definitions.contains_key(id) || self.instances.contains_key(id)
+    }
+
+    fn feature_id_is_in_use(&self, feature_id: &str) -> bool {
+        self.definitions
+            .values()
+            .any(|definition| definition.descriptor.feature_id == feature_id)
+    }
+}
+
+fn validate_selected_feature_ids(feature_ids: &[String]) -> Result<(), String> {
+    if feature_ids.iter().any(|feature_id| feature_id.is_empty())
+        || feature_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(
+            "selected component feature IDs must be non-empty, unique, and sorted".to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl FeatureGraph {
@@ -210,5 +500,65 @@ mod tests {
     #[test]
     fn feature_id_rejects_empty_values() {
         assert_eq!(FeatureId::new(""), Err(DomainError::EmptyId));
+    }
+
+    #[test]
+    fn semantic_reference_resolution_never_uses_topology_indexes() {
+        let reference = SemanticReference {
+            id: "stable-id".to_string(),
+            expected_kind: "definition",
+        };
+        assert_eq!(
+            resolve_semantic_reference(&reference, [("stable-id".to_string(), "definition")]),
+            ReferenceOutcome::Resolved("stable-id".to_string())
+        );
+        assert_eq!(
+            resolve_semantic_reference(&reference, [("stable-id".to_string(), "instance")]),
+            ReferenceOutcome::Incompatible
+        );
+        assert_eq!(
+            resolve_semantic_reference(
+                &reference,
+                [
+                    ("stable-id".to_string(), "definition"),
+                    ("stable-id".to_string(), "definition")
+                ]
+            ),
+            ReferenceOutcome::Ambiguous
+        );
+        assert_eq!(
+            resolve_semantic_reference(&reference, [("different".to_string(), "definition")]),
+            ReferenceOutcome::Lost
+        );
+    }
+
+    #[test]
+    fn component_ids_are_unique_across_definitions_and_instances() {
+        let mut graph = ComponentGraph::default();
+        graph
+            .apply(&ComponentCommand::Define {
+                definition: ComponentDefinition {
+                    id: "bracket".to_string(),
+                    selected_feature_ids: Vec::new(),
+                    descriptor: LBracketDescriptor {
+                        feature_id: "bracket-feature".to_string(),
+                        length: 60.0,
+                        width: 30.0,
+                        height: 40.0,
+                        thickness: 3.0,
+                    },
+                },
+            })
+            .expect("definition is valid");
+        assert_eq!(
+            graph.apply(&ComponentCommand::CreateInstance {
+                instance: ComponentInstance {
+                    id: "bracket".to_string(),
+                    definition_id: "bracket".to_string(),
+                    transform: [0.0, 0.0, 0.0],
+                },
+            }),
+            Err("component ID already exists".to_string())
+        );
     }
 }

@@ -32,6 +32,10 @@ pub enum DiagnosticCode {
     ArtifactRevisionMismatch,
     ArtifactRequestMismatch,
     ArtifactCacheKeyMismatch,
+    InvalidRequest,
+    ReferenceAmbiguous,
+    ReferenceLost,
+    ReferenceIncompatible,
 }
 
 /// One structured diagnostic entry. The base JSON shape is fixed:
@@ -116,5 +120,21 @@ impl Diagnostic {
 
     pub fn artifact_cache_key_mismatch(detail: &str) -> Self {
         Self::base(DiagnosticCode::ArtifactCacheKeyMismatch, detail)
+    }
+
+    pub fn invalid_request(detail: &str) -> Self {
+        Self::base(DiagnosticCode::InvalidRequest, detail)
+    }
+
+    pub fn reference_ambiguous(detail: &str) -> Self {
+        Self::base(DiagnosticCode::ReferenceAmbiguous, detail)
+    }
+
+    pub fn reference_lost(detail: &str) -> Self {
+        Self::base(DiagnosticCode::ReferenceLost, detail)
+    }
+
+    pub fn reference_incompatible(detail: &str) -> Self {
+        Self::base(DiagnosticCode::ReferenceIncompatible, detail)
     }
 }

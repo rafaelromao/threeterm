@@ -3673,9 +3673,6 @@ fn execute_registered_with_observer(
         Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
-    if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID {
-        return execute_handler(*plan, &request, theme, stdout, stderr);
-    }
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();
@@ -3702,6 +3699,14 @@ fn execute_registered_with_observer(
         Err(ExecutionError::Handler((exit, diagnostic))) => {
             let _ = stderr.write_all(&diagnostic);
             exit
+        }
+        Err(ExecutionError::InvalidRequest(error))
+            if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID =>
+        {
+            write_rehearsal_failure(
+                &threeterm_cli_rehearsal_error("argument_parse", json!({"message": error}), None),
+                stderr,
+            )
         }
         Err(ExecutionError::InvalidRequest(error)) => emit_internal_error(&error, stderr),
         Err(ExecutionError::InvalidResponse(error)) => emit_internal_error(

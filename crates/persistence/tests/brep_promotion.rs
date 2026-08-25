@@ -185,3 +185,52 @@ fn brep_target_failures_leave_the_prior_generation_byte_identical_and_retryable(
         let _ = fs::remove_dir_all(root);
     }
 }
+
+#[test]
+fn brep_parent_sync_failure_reconciles_to_the_selected_generation() {
+    let root = temp_root("parent-sync");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let prior = bundle
+        .append_feature_with_brep_if_revision("seed", "box", &source_revision, b"prior-brep")
+        .expect("prior geometry publishes");
+    let prior_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let prior_log = fs::read(root.join("transactions.log")).expect("log reads");
+
+    fail_next_publication_at(PublicationFailurePoint::ParentSync);
+    assert!(
+        bundle
+            .append_feature_with_brep_if_revision(
+                "extrude-1",
+                "brep:extrude-1",
+                prior.revision_hash_hex(),
+                b"new-brep",
+            )
+            .is_err()
+    );
+
+    let selected = bundle.open().expect("selected generation opens");
+    assert_eq!(
+        fs::read(root.join("brep/extrude-1.brep")).unwrap(),
+        b"new-brep"
+    );
+    assert_ne!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        prior_manifest
+    );
+    assert_ne!(fs::read(root.join("transactions.log")).unwrap(), prior_log);
+    let previous = threeterm_persistence::previous_generation_path(&root);
+    assert_eq!(
+        fs::read(previous.join("brep/seed.brep")).unwrap(),
+        b"prior-brep"
+    );
+    assert_eq!(
+        selected.revision_hash_hex(),
+        Bundle::at(&root).open().unwrap().revision_hash_hex()
+    );
+    let _ = fs::remove_dir_all(root);
+}

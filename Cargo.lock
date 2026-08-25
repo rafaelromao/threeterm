@@ -522,6 +522,7 @@ dependencies = [
  "serde_json",
  "threeterm-cli",
  "threeterm-host",
+ "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
 ]

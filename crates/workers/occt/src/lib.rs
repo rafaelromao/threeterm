@@ -44,11 +44,11 @@ use threeterm_protocol::worker::{
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
-    ChamferRequest, ChamferResult, CircularPatternRequest, CircularPatternResult, DraftRequest,
-    DraftResult, ExportRequest, ExportResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult,
-    SCHEMA_VERSION, ShellRequest, ShellResult,
+    BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
+    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExportResult, ExtrudeRequest,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
+    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, Operation,
+    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -336,6 +336,32 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_extrude()
+    }
+
+    pub fn bracket(&self, request: &BracketRequest) -> Result<BracketResult, WorkerError> {
+        let bytes = bounded_serialize(request, "bracket", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_bracket()
+    }
+
+    /// Bracket `request` with a cooperative cancellation token. This uses the
+    /// same supervised worker and artifact validation path as `bracket`.
+    pub fn bracket_with_cancel(
+        &self,
+        request: &BracketRequest,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<BracketResult, WorkerError> {
+        let bytes = bounded_serialize(request, "bracket", &request.request_id)?;
+        let value = self.run_with_cancel(&bytes, cancel)?;
+        RawResult {
+            value,
+            request_id: request.request_id.clone(),
+            expected_output: expected_output_path(&request.output_dir, &request.output_filename),
+        }
+        .into_bracket()
     }
 
     /// Extrude `request` with a cooperative cancellation token. The
@@ -1130,6 +1156,10 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_bracket(self) -> Result<BracketResult, WorkerError> {
+        self.bounded()
+    }
+
     fn into_boolean_fuse(self) -> Result<BooleanFuseResult, WorkerError> {
         self.bounded()
     }
@@ -1195,6 +1225,10 @@ pub fn new_request_id() -> String {
 /// Parse a request from raw JSON. Used by tests that do not want the
 /// typed builder.
 pub fn parse_extrude_request(raw: &str) -> Result<ExtrudeRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_bracket_request(raw: &str) -> Result<BracketRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -1569,6 +1603,28 @@ mod tests {
         assert_eq!(value["angle"], std::f64::consts::FRAC_PI_2 / 6.0);
         assert_eq!(value["pull_direction"], serde_json::json!([0.0, 0.0, 1.0]));
         assert_eq!(value["feature_id"], "draft-1");
+    }
+
+    #[test]
+    fn bracket_envelope_validates_and_round_trips_semantic_dimensions() {
+        let request = BracketRequest::new("req-1", 100.0, 60.0, 40.0, 5.0)
+            .with_output_path("/tmp", "bracket.brep")
+            .with_feature_id("l-bracket");
+        request.validate().expect("bracket request is valid");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["operation"], "bracket");
+        assert_eq!(value["length"], 100.0);
+        assert_eq!(value["thickness"], 5.0);
+        let decoded: BracketRequest = serde_json::from_value(value).expect("deserializes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn bracket_envelope_rejects_a_degenerate_wall() {
+        let request = BracketRequest::new("req-1", 5.0, 10.0, 40.0, 5.0)
+            .with_output_path("/tmp", "bracket.brep")
+            .with_feature_id("l-bracket");
+        assert!(request.validate().is_err());
     }
 
     #[test]

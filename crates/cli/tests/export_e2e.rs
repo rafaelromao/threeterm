@@ -426,15 +426,14 @@ fn export_artifacts_have_required_3mf_structure_and_preserve_generations() {
 
 #[test]
 fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("export_e2e: no OCCT worker binary found; CI runs this production path");
+        return;
+    }
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let bundle = temp_root("stale-history");
     let output = temp_root("stale-history-output");
-    let worker_available = OcctWorker::locate().is_ok();
-    if worker_available {
-        l_bracket(bin, &bundle);
-    } else {
-        run(bin, &["new-project", bundle.to_str().unwrap()]);
-    }
+    l_bracket(bin, &bundle);
     run_value(
         bin,
         &[
@@ -500,8 +499,7 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
 
     let manifest = fs::read(bundle.join("manifest.json")).expect("manifest reads");
     let log = fs::read(bundle.join("transactions.log")).expect("log reads");
-    let brep =
-        worker_available.then(|| fs::read(bundle.join("brep/l-bracket.brep")).expect("BREP reads"));
+    let brep = Some(fs::read(bundle.join("brep/l-bracket.brep")).expect("BREP reads"));
     let refused = run_failed_value(
         bin,
         &[
@@ -537,33 +535,31 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
     }
     assert_eq!(host.current(), Some(before.clone()));
 
-    if worker_available {
-        let accepted = run_value(
-            bin,
-            &[
-                "--machine",
-                "export",
-                "--bundle",
-                bundle.to_str().unwrap(),
-                "--feature-id",
-                "l-bracket",
-                "--formats",
-                "stl",
-                "--output-dir",
-                output.to_str().unwrap(),
-                "--accept-stale-geometry",
-            ],
-        );
-        assert_eq!(accepted["accepted_stale_last_valid_geometry"], true);
-        assert_eq!(
-            accepted["stale_last_valid_geometry"]["feature_id"],
-            "l-bracket"
-        );
-        assert!(output.join("l-bracket.stl").is_file());
-        assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
-        assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
-        assert_eq!(host.current(), Some(before));
-    }
+    let accepted = run_value(
+        bin,
+        &[
+            "--machine",
+            "export",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--feature-id",
+            "l-bracket",
+            "--formats",
+            "stl",
+            "--output-dir",
+            output.to_str().unwrap(),
+            "--accept-stale-geometry",
+        ],
+    );
+    assert_eq!(accepted["accepted_stale_last_valid_geometry"], true);
+    assert_eq!(
+        accepted["stale_last_valid_geometry"]["feature_id"],
+        "l-bracket"
+    );
+    assert!(output.join("l-bracket.stl").is_file());
+    assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
+    assert_eq!(host.current(), Some(before));
 
     let _ = fs::remove_dir_all(bundle);
     let _ = fs::remove_dir_all(output);

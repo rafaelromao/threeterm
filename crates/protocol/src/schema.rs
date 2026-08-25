@@ -1071,6 +1071,53 @@ pub static BRACKET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+/// Versioned semantic lifecycle contract for editing an L-bracket parameter.
+/// The phase is explicit so session adapters cannot confuse a transient
+/// preview with a canonical commit.
+pub static BRACKET_EDIT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "phase", "bundle_path", "draft_id", "bracket_id",
+            "length", "width", "height", "thickness"
+        ],
+        "properties": {
+            "phase": { "type": "string", "enum": ["open", "update", "preview", "commit", "discard"] },
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "draft_id": { "type": "string", "minLength": 1 },
+            "bracket_id": { "type": "string", "minLength": 1 },
+            "length": { "type": "number", "exclusiveMinimum": 0 },
+            "width": { "type": "number", "exclusiveMinimum": 0 },
+            "height": { "type": "number", "exclusiveMinimum": 0 },
+            "thickness": { "type": "number", "exclusiveMinimum": 0 },
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "draft_sequence": { "type": "integer", "minimum": 0 },
+            "input_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BRACKET_EDIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["status", "phase", "draft_id", "source_revision", "schema_version"],
+        "properties": {
+            "status": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
+            "phase": { "type": "string", "minLength": 1 },
+            "draft_id": { "type": "string", "minLength": 1 },
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "current_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "preview_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "input_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "draft_sequence": { "type": "integer", "minimum": 0 },
+            "diagnostic": { "type": "object" },
+            "schema_version": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static LOAD_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1242,6 +1289,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: component_request_schema(&["bundle_path"]),
             response_schema_version: "threeterm.command.component-state.response/1",
             response_schema: COMPONENT_STATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        BRACKET_EDIT_COMMAND_ID,
+        CommandSchema {
+            id: BRACKET_EDIT_COMMAND_ID,
+            name: "bracket-edit",
+            schema_version: "threeterm.command.bracket-edit/1",
+            request_schema_version: "threeterm.command.bracket-edit.request/1",
+            request_schema: BRACKET_EDIT_REQUEST_SCHEMA.clone(),
+            response_schema_version: BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: BRACKET_EDIT_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -1484,6 +1543,7 @@ pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
 pub const BRACKET_COMMAND_ID: CommandId = CommandId("bracket");
+pub const BRACKET_EDIT_COMMAND_ID: CommandId = CommandId("bracket-edit");
 pub const DEFINE_COMPONENT_COMMAND_ID: CommandId = CommandId("define-component");
 pub const CREATE_COMPONENT_INSTANCE_COMMAND_ID: CommandId = CommandId("create-component-instance");
 pub const TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID: CommandId =
@@ -1514,6 +1574,7 @@ pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
+pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";
 pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";

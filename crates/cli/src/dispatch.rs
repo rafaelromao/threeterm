@@ -10,16 +10,17 @@ use threeterm_domain::{
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    RevolveRequest, ShellRequest,
+    BooleanFuseRequest, BracketRequest, ChamferRequest, CircularPatternRequest, DraftRequest,
+    ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
+    OcctWorker, Operation, RevolveRequest, ShellRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 pub use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_RESPONSE_SCHEMA_VERSION,
-    CHAMFER_RESPONSE_SCHEMA_VERSION, CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
-    DRAFT_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
+    BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+    BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
+    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
+    EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
     HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
     LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
     LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
@@ -27,11 +28,12 @@ pub use threeterm_protocol::schema::{
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
-    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
-    DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
+    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+    find, find_by_name, iter,
 };
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
@@ -2800,6 +2802,9 @@ pub fn dispatch_registered_command(
                 .and_then(Value::as_f64)
                 .ok_or_else(|| DispatchError::Validation(format!("missing number field {name:?}")))
         };
+        if command == BRACKET_EDIT_COMMAND_ID {
+            return dispatch_bracket_edit_command(host, &request);
+        }
         if command == COMPONENT_STATE_COMMAND_ID {
             let graph = host.component_graph(string_field("bundle_path")?)?;
             return Ok(
@@ -2982,8 +2987,154 @@ fn dispatch_bracket_with_host(
     height: f64,
     thickness: f64,
 ) -> Result<SnapshotView, DispatchError> {
-    host.save_bracket(bundle, bracket_id, length, width, height, thickness)
+    let worker = OcctWorker::locate().map_err(|error| {
+        DispatchError::Host(HostError::WorkerUnavailable {
+            detail: error.to_string(),
+        })
+    })?;
+    let request = BracketRequest::new(new_request_id(), length, width, height, thickness)
+        .with_feature_id(bracket_id);
+    host.create_bracket(bundle, request, &worker)
         .map_err(DispatchError::from)
+}
+
+fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, DispatchError> {
+    let string_field = |name: &str| {
+        request
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| DispatchError::Validation(format!("missing string field {name:?}")))
+    };
+    let number_field = |name: &str| {
+        request
+            .get(name)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| DispatchError::Validation(format!("missing number field {name:?}")))
+    };
+    let phase = string_field("phase")?;
+    let bundle = string_field("bundle_path")?;
+    let draft_id = string_field("draft_id")?;
+    let bracket_id = string_field("bracket_id")?;
+    let dimensions = || -> Result<BracketRequest, DispatchError> {
+        Ok(BracketRequest::new(
+            new_request_id(),
+            number_field("length")?,
+            number_field("width")?,
+            number_field("height")?,
+            number_field("thickness")?,
+        )
+        .with_feature_id(bracket_id))
+    };
+
+    match phase {
+        "open" => {
+            let draft =
+                host.open_bracket_parameter_draft(bundle, draft_id, bracket_id, dimensions()?)?;
+            Ok(json!({
+                "status": "ok",
+                "phase": "open",
+                "draft_id": draft.draft_id,
+                "source_revision": draft.source_revision,
+                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
+                "draft_sequence": draft.sequence,
+                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            }))
+        }
+        "update" => {
+            let sequence = request
+                .get("draft_sequence")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    DispatchError::Validation(
+                        "missing integer field \"draft_sequence\"".to_string(),
+                    )
+                })?;
+            let input_fingerprint = request
+                .get("input_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    DispatchError::Validation(
+                        "missing string field \"input_fingerprint\"".to_string(),
+                    )
+                })?;
+            let draft = host.update_bracket_parameter_draft(
+                bundle,
+                draft_id,
+                sequence,
+                input_fingerprint,
+                dimensions()?,
+            )?;
+            Ok(json!({
+                "status": "ok",
+                "phase": "update",
+                "draft_id": draft.draft_id,
+                "source_revision": draft.source_revision,
+                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
+                "draft_sequence": draft.sequence,
+                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            }))
+        }
+        "preview" => {
+            host.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
+            let worker = OcctWorker::locate().map_err(|error| {
+                DispatchError::Host(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            let preview = host.preview_bracket_parameter_draft(bundle, draft_id, &worker)?;
+            Ok(json!({
+                "status": "ok",
+                "phase": "preview",
+                "draft_id": preview.draft_id,
+                "source_revision": preview.source_revision,
+                "current_revision": preview.source_revision,
+                "preview_revision": preview.preview_revision,
+                "input_fingerprint": preview.input_fingerprint,
+                "draft_sequence": host
+                    .bracket_draft_sequence(bundle, draft_id)
+                    .expect("preview keeps draft"),
+                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            }))
+        }
+        "commit" => {
+            host.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
+            let source_revision = host
+                .bracket_draft_source_revision(bundle, draft_id)
+                .ok_or_else(|| {
+                    DispatchError::Host(HostError::DraftNotFound {
+                        draft_id: draft_id.to_string(),
+                    })
+                })?;
+            let worker = OcctWorker::locate().map_err(|error| {
+                DispatchError::Host(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            let committed = host.commit_bracket_parameter_draft(bundle, draft_id, &worker)?;
+            Ok(json!({
+                "status": "ok",
+                "phase": "commit",
+                "draft_id": draft_id,
+                "source_revision": source_revision,
+                "current_revision": committed.snapshot.revision_hash,
+                "input_fingerprint": committed.input_fingerprint,
+                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            }))
+        }
+        "discard" => {
+            let source_revision = host.discard_bracket_parameter_draft(bundle, draft_id)?;
+            Ok(json!({
+                "status": "ok",
+                "phase": "discard",
+                "draft_id": draft_id,
+                "source_revision": source_revision,
+                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
+            }))
+        }
+        _ => Err(DispatchError::Validation(
+            "bracket-edit phase is invalid".to_string(),
+        )),
+    }
 }
 
 fn history_commit_response(
@@ -4593,6 +4744,67 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
+        HostError::DraftAlreadyExists { draft_id } => {
+            format!(
+                "{{\"kind\":\"draft_already_exists\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?}}}"
+            )
+        }
+        HostError::DraftNotFound { draft_id } => {
+            format!(
+                "{{\"kind\":\"draft_not_found\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?}}}"
+            )
+        }
+        HostError::DraftStale {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_stale\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftSourceChanged {
+            draft_id,
+            source_feature_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_source_changed\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_feature_id\":{source_feature_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftInvalid { draft_id, detail } => format!(
+            "{{\"kind\":\"draft_invalid\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"detail\":{detail:?}}}"
+        ),
+        HostError::DraftInputConflict {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_input_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftSequenceConflict {
+            draft_id,
+            expected,
+            current,
+        } => format!(
+            "{{\"kind\":\"draft_sequence_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"expected_sequence\":{expected},\"current_sequence\":{current},\"recovery\":\"refresh_draft_and_retry\"}}"
+        ),
+        HostError::DraftIdempotencyConflict {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_idempotency_conflict\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
+        HostError::DraftUnknownOutcome {
+            draft_id,
+            source_revision,
+            current_revision,
+            recovery,
+        } => format!(
+            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
+        ),
         HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
             "kind": "worker_terminated",
             "request_id": record.request_id,
@@ -4709,7 +4921,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 30);
+        assert_eq!(commands.len(), 31);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

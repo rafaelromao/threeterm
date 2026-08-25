@@ -266,6 +266,10 @@ pub struct LogEntry {
     pub previous_digest: String,
     pub feature_id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_payload: Option<String>,
     pub terminal_digest: String,
 }
 
@@ -276,10 +280,19 @@ impl LogEntry {
             previous_digest: previous_digest.to_string(),
             feature_id: feature_id.to_string(),
             kind: kind.to_string(),
+            idempotency_key: None,
+            idempotency_payload: None,
             terminal_digest: String::new(),
         };
         entry.terminal_digest = entry.recomputed_digest();
         entry
+    }
+
+    fn with_idempotency_key(mut self, key: &str, payload: Option<&str>) -> Self {
+        self.idempotency_key = Some(key.to_string());
+        self.idempotency_payload = payload.map(str::to_string);
+        self.terminal_digest = self.recomputed_digest();
+        self
     }
 
     fn recomputed_digest(&self) -> String {
@@ -319,6 +332,20 @@ impl TransactionLog {
             feature_id,
             kind,
         ));
+    }
+
+    fn append_feature_with_idempotency(
+        &mut self,
+        feature_id: &str,
+        kind: &str,
+        idempotency_key: &str,
+        idempotency_payload: Option<&str>,
+    ) {
+        let previous = self.terminal_digest_hex().to_string();
+        self.entries.push(
+            LogEntry::new(self.entries.len(), &previous, feature_id, kind)
+                .with_idempotency_key(idempotency_key, idempotency_payload),
+        );
     }
 
     pub fn terminal_digest_hex(&self) -> &str {
@@ -435,6 +462,7 @@ pub enum BundleError {
         path: PathBuf,
         source: std::io::Error,
     },
+    PublicationUnknown(String),
     SourceUnreadable {
         path: PathBuf,
         source: std::io::Error,
@@ -460,6 +488,7 @@ impl BundleError {
             Self::SchemaTooNew { .. } => "schema_too_new",
             Self::ManifestFieldUnknown { .. } => "manifest_field_unknown",
             Self::Backup { .. } => "backup_failed",
+            Self::PublicationUnknown(_) => "publication_unknown",
             Self::SourceUnreadable { .. } => "source_unreadable",
             Self::Migration { .. } => "migration_failed",
         }
@@ -507,6 +536,7 @@ impl fmt::Display for BundleError {
                 "persistence.backup-failed: path={} source={source}",
                 path.display()
             ),
+            Self::PublicationUnknown(detail) => formatter.write_str(detail),
             Self::SourceUnreadable { path, source } => write!(
                 formatter,
                 "persistence.source-unreadable: path={} source={source}",
@@ -654,7 +684,10 @@ impl Bundle {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
-        publish_staged(&staging, &bundle.root)?;
+        publish_staged(&staging, &bundle.root).map_err(|error| match error {
+            PublicationError::Io(error) => BundleError::Io(error.to_string()),
+            PublicationError::Unknown(error) => BundleError::PublicationUnknown(error.to_string()),
+        })?;
         Ok(bundle)
     }
 
@@ -830,7 +863,15 @@ impl Bundle {
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             let feature_id = format!("component-transaction-{}", loaded.log.len());
             let kind = format!("{COMPONENT_COMMAND_KIND_PREFIX}{payload}");
-            self.append_features_locked(&[(&feature_id, &kind)], expected_revision, None)
+            self.append_features_locked(
+                &[(&feature_id, &kind)],
+                expected_revision,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         })
     }
 
@@ -843,7 +884,7 @@ impl Bundle {
         event: &HistoryEvent,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, Some(event))
+            self.append_features_locked(entries, None, None, None, None, None, Some(event))
         })
     }
 
@@ -872,7 +913,169 @@ impl Bundle {
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(&[(feature_id, kind)], Some(expected_revision), None)
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+    }
+
+    /// Publish one verified BREP together with its revision-guarded log entry
+    /// in the same sealed generation. The source comparison, BREP staging, log
+    /// rewrite, and generation rotation all occur under the bundle lock, so a
+    /// stale worker can never overwrite a newer writer's canonical artifact.
+    pub fn append_feature_with_brep_if_revision(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+    }
+
+    /// Publish a verified BREP and its initial history event in one sealed
+    /// generation.
+    pub fn append_feature_with_brep_if_revision_and_history(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        self.append_features_with_brep_if_revision_and_history(
+            &[(feature_id, kind)],
+            feature_id,
+            expected_revision,
+            brep_bytes,
+            history_event,
+        )
+    }
+
+    /// Publish several feature entries, one verified BREP, and its initial
+    /// history event in one sealed generation.
+    pub fn append_features_with_brep_if_revision_and_history(
+        &self,
+        entries: &[(&str, &str)],
+        brep_feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                entries,
+                Some(expected_revision),
+                Some((brep_feature_id, brep_bytes)),
+                None,
+                None,
+                None,
+                Some(history_event),
+            )
+        })
+    }
+
+    /// Variant of BREP promotion that also authenticates the source BREP while
+    /// holding the bundle write lock, immediately before staging the new
+    /// generation.
+    pub fn append_feature_with_brep_if_revision_and_source(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        self.append_feature_with_brep_if_revision_and_source_and_idempotency(
+            feature_id,
+            kind,
+            expected_revision,
+            expected_source_sha256,
+            None,
+            brep_bytes,
+        )
+    }
+
+    pub fn append_feature_with_brep_if_revision_and_source_and_idempotency(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        self.append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+            feature_id,
+            kind,
+            expected_revision,
+            expected_source_sha256,
+            idempotency_key,
+            None,
+            brep_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                Some((feature_id, expected_source_sha256)),
+                idempotency_key,
+                idempotency_payload,
+                None,
+            )
+        })
+    }
+
+    /// Look up a previously published transaction by its durable idempotency
+    /// key while holding the same bundle lock used by promotion.
+    pub fn find_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<LoadedBundle>, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            Ok(
+                if loaded
+                    .log
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
+                {
+                    Some(loaded)
+                } else {
+                    None
+                },
+            )
         })
     }
 
@@ -900,14 +1103,19 @@ impl Bundle {
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, None)
+            self.append_features_locked(entries, None, None, None, None, None, None)
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_features_locked(
         &self,
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
+        brep: Option<(&str, &[u8])>,
+        source_brep: Option<(&str, &str)>,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
@@ -920,6 +1128,24 @@ impl Bundle {
         } else {
             Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
+        if let Some(idempotency_key) = idempotency_key
+            && let Some(existing) = loaded
+                .log
+                .entries()
+                .iter()
+                .find(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
+        {
+            let same_transaction = entries.len() == 1
+                && existing.feature_id == entries[0].0
+                && existing.kind == entries[0].1
+                && existing.idempotency_payload.as_deref() == idempotency_payload;
+            if same_transaction {
+                return Ok(loaded);
+            }
+            return Err(BundleError::Invalid(format!(
+                "idempotency key {idempotency_key:?} is already bound to another transaction"
+            )));
+        }
         if let Some(expected_revision) = expected_revision
             && loaded.revision_hash_hex() != expected_revision
         {
@@ -928,11 +1154,33 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
+        if let Some((feature_id, expected_sha256)) = source_brep {
+            let source = self.root.join("brep").join(format!("{feature_id}.brep"));
+            let actual = fs::read(&source)
+                .map(|bytes| hash(&bytes))
+                .map_err(|error| {
+                    BundleError::Invalid(format!("source BREP could not be read: {error}"))
+                })?;
+            if actual != expected_sha256 {
+                return Err(BundleError::Invalid(format!(
+                    "source BREP digest mismatch for {feature_id}: expected {expected_sha256}, actual {actual}"
+                )));
+            }
+        }
         for (feature_id, kind) in entries {
             let feature = Feature::new(*feature_id, *kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             if loaded.graph.add_feature(feature) {
-                loaded.log.append_feature(feature_id, kind);
+                if let Some(idempotency_key) = idempotency_key {
+                    loaded.log.append_feature_with_idempotency(
+                        feature_id,
+                        kind,
+                        idempotency_key,
+                        idempotency_payload,
+                    );
+                } else {
+                    loaded.log.append_feature(feature_id, kind);
+                }
             }
         }
 
@@ -1007,6 +1255,15 @@ impl Bundle {
                     .map_err(|error| BundleError::Invalid(error.to_string()))?,
                 Some(PublicationFailurePoint::ManifestSync),
             )?;
+            if let Some((feature_id, brep_bytes)) = brep {
+                let brep_dir = staging.join("brep");
+                fs::create_dir_all(&brep_dir)?;
+                atomic_write(
+                    &brep_dir.join(format!("{feature_id}.brep")),
+                    brep_bytes,
+                    None,
+                )?;
+            }
             terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
             sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
             Bundle::at(&staging).open_sealed(false)?;
@@ -1017,8 +1274,12 @@ impl Bundle {
             return Err(error);
         }
         terminate_at_requested_publication_point(PublicationKillPoint::StagingValidation);
-        publish_staged(&staging, &self.root)?;
+        publish_staged(&staging, &self.root).map_err(|error| match error {
+            PublicationError::Io(error) => BundleError::Io(error.to_string()),
+            PublicationError::Unknown(error) => BundleError::PublicationUnknown(error.to_string()),
+        })?;
         self.open_locked()
+            .map_err(|error| BundleError::PublicationUnknown(error.to_string()))
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -1160,7 +1421,9 @@ fn load_v0_with_migration(
     if let Err(error) = publish_staged(&staging, path) {
         // A validated staging directory is a sealed recovery candidate. Keep
         // it for diagnostics and a later retry rather than discarding data.
-        return Err(BundleError::Io(error.to_string()));
+        return Err(BundleError::Io(match error {
+            PublicationError::Io(error) | PublicationError::Unknown(error) => error.to_string(),
+        }));
     }
 
     Ok(loaded_with(
@@ -1213,7 +1476,18 @@ fn replay_history_events(log: &TransactionLog) -> Result<HistoryState, BundleErr
     Ok(state)
 }
 
-fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
+enum PublicationError {
+    Io(std::io::Error),
+    Unknown(std::io::Error),
+}
+
+impl From<std::io::Error> for PublicationError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn publish_staged(staging: &Path, destination: &Path) -> Result<(), PublicationError> {
     let previous = previous_generation_path(destination);
     if !destination.exists() {
         rename_generation(
@@ -1221,7 +1495,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
             destination,
             PublicationFailurePoint::PromoteStaging,
         )?;
-        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
+        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)
+            .map_err(PublicationError::Unknown)?;
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
@@ -1240,7 +1515,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         if retired.exists() {
             let _ = rename_generation(&retired, &previous, PublicationFailurePoint::ReplaceCurrent);
         }
-        return Err(error);
+        return Err(PublicationError::Io(error));
     }
     // The previous generation is deliberately left in place. `Bundle::open`
     // recognizes an interrupted replacement and opens it explicitly.
@@ -1257,7 +1532,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         if retired.exists() {
             let _ = rename_generation(&retired, &previous, PublicationFailurePoint::RetirePrevious);
         }
-        return Err(error);
+        return Err(PublicationError::Io(error));
     }
     // This is the generation older than the retained predecessor. It is no
     // longer part of recovery, so its cleanup must not block a later publish
@@ -1265,7 +1540,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // Cleanup is outside the two-generation publication boundary. A failed
     // cleanup is retained for the next publication to reconcile.
     let _ = remove_retired_generation(&retired);
-    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
+    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)
+        .map_err(PublicationError::Unknown)?;
     Ok(())
 }
 

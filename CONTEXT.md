@@ -84,4 +84,4 @@ normalizes status, degrees of freedom, entity IDs, related constraints, diagnost
 and successful solved coordinates.
 
 **Fit Dimension**:
-A revision-bound relationship between stable sketch dimension constraints for a source solid and a target solid. The host derives both values from canonical sketches and validates the target against the source clearance before persisting the relationship.
+A revision-bound relationship between stable sketch dimension constraints associated with a source solid and a target solid. The host derives both values from canonical sketches and validates the target against the source clearance before persisting the relationship.

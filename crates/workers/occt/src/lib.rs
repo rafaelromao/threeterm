@@ -485,10 +485,28 @@ impl OcctWorker {
     /// operations such as Boolean Pattern.
     pub fn invoke_staged_with_cancel(
         &self,
+        request: serde_json::Value,
+        operation: Operation,
+        stage: Stage,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<StagedCompletion, WorkerError> {
+        let mut ignore_progress = |_progress: &Progress| {};
+        self.invoke_staged_with_cancel_and_progress(
+            request,
+            operation,
+            stage,
+            cancel,
+            &mut ignore_progress,
+        )
+    }
+
+    pub fn invoke_staged_with_cancel_and_progress(
+        &self,
         mut request: serde_json::Value,
         operation: Operation,
         stage: Stage,
         cancel: &std::sync::atomic::AtomicBool,
+        on_progress: &mut dyn FnMut(&Progress),
     ) -> Result<StagedCompletion, WorkerError> {
         let request_id = request["request_id"]
             .as_str()
@@ -515,7 +533,8 @@ impl OcctWorker {
         let bytes = bounded_serialize(&request, operation.as_str(), &request_id)?;
         let expected_output = expected_output_path(stage.root(), &output_filename);
         let context = RequestContext::from_envelope(&bytes, operation.as_str())?;
-        let (outcome, owned_stage) = self.supervise(&context, Some(cancel), Some(stage))?;
+        let (outcome, owned_stage) =
+            self.supervise_with_progress(&context, Some(cancel), Some(stage), on_progress)?;
         let SupervisorOutcome::Completed { result, .. } = &outcome else {
             return Err(map_outcome(
                 outcome,
@@ -945,6 +964,17 @@ impl OcctWorker {
         cancel: Option<&std::sync::atomic::AtomicBool>,
         stage: Option<Stage>,
     ) -> Result<(SupervisorOutcome, Option<Stage>), WorkerError> {
+        let mut ignore_progress = |_progress: &Progress| {};
+        self.supervise_with_progress(context, cancel, stage, &mut ignore_progress)
+    }
+
+    fn supervise_with_progress(
+        &self,
+        context: &RequestContext,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        stage: Option<Stage>,
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> Result<(SupervisorOutcome, Option<Stage>), WorkerError> {
         let host = match <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
             schema_version: threeterm_protocol::schema_version(),
@@ -965,7 +995,7 @@ impl OcctWorker {
         let mut supervisor = Supervisor::new(self.grace, host, stage);
         let local_cancel = std::sync::atomic::AtomicBool::new(false);
         let cancel = cancel.unwrap_or(&local_cancel);
-        let outcome = supervisor.request_with_cancel(
+        let outcome = supervisor.request_with_cancel_and_progress(
             SupervisorRequest {
                 request_id: context.request_id.clone(),
                 command_id: context.command_id.clone(),
@@ -973,6 +1003,7 @@ impl OcctWorker {
                 revision_id: self.revision_id.clone().unwrap_or_default(),
             },
             cancel,
+            on_progress,
         );
         let owned_stage = if matches!(outcome, SupervisorOutcome::Completed { .. }) {
             supervisor.take_stage()

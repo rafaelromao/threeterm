@@ -603,8 +603,22 @@ pub struct RetainedStaleLastValidGeometry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCommitView {
+    pub source_snapshot: SnapshotView,
     pub artifacts: Vec<PathBuf>,
+    pub derived_artifacts: Vec<ExportDerivedArtifact>,
     pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportDerivedArtifact {
+    pub request_id: String,
+    pub source_revision_id: String,
+    pub operation: String,
+    pub feature_id: String,
+    pub artifact_kind: String,
+    pub artifact_name: String,
+    pub byte_count: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1056,6 +1070,9 @@ impl Host {
         accept_stale_geometry: bool,
         body_ids: &[String],
     ) -> Result<ExportCommitView, HostError> {
+        // Export outputs are disposable Derived Results, not canonical BREP
+        // mutations. They use the same host-owned private staging and atomic
+        // publication discipline, but remain outside the transaction log.
         if deflection > 0.5 && !override_warnings {
             return Err(HostError::Validation {
                 detail: format!(
@@ -1186,12 +1203,42 @@ impl Host {
                 (source, output_dir.join(format!("{feature_id}.{format}")))
             })
             .collect::<Vec<_>>();
+        let derived_artifacts = staged_artifacts
+            .iter()
+            .zip(formats)
+            .map(|((source, destination), format)| {
+                let byte_count = fs::metadata(source)
+                    .map_err(|error| HostError::BrepIo {
+                        detail: format!("read staged export metadata failed: {error}"),
+                    })?
+                    .len();
+                let sha256 = sha256_path(source).map_err(|error| HostError::BrepIo {
+                    detail: format!("hash staged export failed: {error}"),
+                })?;
+                Ok(ExportDerivedArtifact {
+                    request_id: "export".to_string(),
+                    source_revision_id: prior.revision_hash_hex().to_string(),
+                    operation: "export".to_string(),
+                    feature_id: feature_id.to_string(),
+                    artifact_kind: format.to_string(),
+                    artifact_name: destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    byte_count,
+                    sha256,
+                })
+            })
+            .collect::<Result<Vec<_>, HostError>>()?;
         let artifacts = publish_export_artifacts(&staged_artifacts).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
         })?;
         let _ = fs::remove_dir_all(stage);
         Ok(ExportCommitView {
+            source_snapshot: SnapshotView::from(&prior),
             artifacts,
+            derived_artifacts,
             stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance {
                 feature_id: feature_id.to_string(),
                 active_revision: prior.history.active_snapshot().revision_id.clone(),
@@ -2051,6 +2098,43 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
+        self.stage_occt_result_inner(root, request, operation, worker, None, None)
+    }
+
+    fn stage_occt_result_with_cancel_and_progress<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        cancel: &AtomicBool,
+        on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.stage_occt_result_inner(
+            root,
+            request,
+            operation,
+            worker,
+            Some(cancel),
+            Some(on_progress),
+        )
+    }
+
+    fn stage_occt_result_inner<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        cancel: Option<&AtomicBool>,
+        on_progress: Option<&mut dyn FnMut(&threeterm_protocol::supervisor::Progress)>,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
         let source_snapshot = self.load(root)?;
         let mut request_value =
             serde_json::to_value(request).map_err(|error| HostError::Validation {
@@ -2098,11 +2182,29 @@ impl Host {
                 });
             }
         };
-        let completion = match worker
-            .clone()
-            .with_revision_id(source_snapshot.revision_hash.clone())
-            .invoke_staged(request_value, operation, stage)
-        {
+        let completion_result = match cancel {
+            Some(cancel) => match on_progress {
+                Some(on_progress) => worker
+                    .clone()
+                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .invoke_staged_with_cancel_and_progress(
+                        request_value,
+                        operation,
+                        stage,
+                        cancel,
+                        on_progress,
+                    ),
+                None => worker
+                    .clone()
+                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .invoke_staged_with_cancel(request_value, operation, stage, cancel),
+            },
+            None => worker
+                .clone()
+                .with_revision_id(source_snapshot.revision_hash.clone())
+                .invoke_staged(request_value, operation, stage),
+        };
+        let completion = match completion_result {
             Ok(completion) => completion,
             Err(error) => {
                 if let Some(path) = &original_output {
@@ -4367,51 +4469,20 @@ impl Host {
         on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
     ) -> Result<BooleanPatternCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .boolean_pattern_with_cancel_and_progress(&request, cancel, on_progress)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "boolean_pattern returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result_with_cancel_and_progress::<BooleanPatternResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
+            &request,
+            threeterm_occt_worker::Operation::BooleanPattern,
+            worker,
+            cancel,
+            on_progress,
         )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(BooleanPatternCommitView {
-            source_snapshot: prior_view.clone(),
+            source_snapshot,
             snapshot,
-            artifact: artifact_from_result_fields(
-                &prior_view,
-                &result.request_id,
-                result.operation,
-                &result.feature_id,
-                &result.brep_path,
-                result.brep_bytes,
-                &result.brep_sha256,
-            ),
+            artifact,
             result,
         })
     }

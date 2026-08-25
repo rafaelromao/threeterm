@@ -3741,6 +3741,8 @@ fn emit_export(
                 "status": "ok",
                 "feature_id": feature_id,
                 "artifacts": view.artifacts,
+                "source_revision_id": view.source_snapshot.revision_hash,
+                "derived_artifacts": view.derived_artifacts,
                 "accepted_stale_last_valid_geometry": !view
                     .stale_last_valid_geometry_acceptance
                     .stale_features

@@ -155,6 +155,54 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
 }
 
 #[test]
+fn production_viewport_history_selection_renders_stale_geometry_marker() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("history initializes");
+    host.save(&root, "l-bracket-base", "history-feature")
+        .expect("history feature is available to selection");
+    host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+        .expect("failed edit commits its stale marker");
+    let before = host.current().expect("canonical state exists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host projection creates a viewport session");
+
+    for _ in 0..10 {
+        session
+            .process_terminal_input(b"\x1b[B")
+            .expect("selection enters the production viewport path");
+        if session.state().selected_target.as_deref() == Some("l-bracket-base") {
+            break;
+        }
+    }
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("l-bracket-base")
+    );
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("history selection reloads stale geometry");
+    let rendered = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("history marker is rendered on live input");
+
+    assert!(rendered.rendered.overlay.contains("[warning-glyph]"));
+    assert!(
+        rendered
+            .rendered
+            .overlay
+            .contains("stale-last-valid-geometry")
+    );
+    assert!(rendered.rendered.overlay.contains("l-bracket-base"));
+    assert_eq!(session.state().stale_last_valid_geometry.len(), 1);
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn session_rejects_an_unadmitted_ghostty_renderer() {
     let root = temporary_bundle_root();
     let host = Host::new();

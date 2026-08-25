@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
+use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
+use threeterm_tui::TuiSession;
 
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -28,6 +31,30 @@ fn run(bin: &str, args: &[&str]) {
         "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn run_value(bin: &str, args: &[&str]) -> Value {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .expect("threeterm runs");
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    serde_json::from_slice(&output.stdout).expect("response is JSON")
+}
+
+fn run_failed_value(bin: &str, args: &[&str]) -> Value {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .expect("threeterm runs");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    serde_json::from_slice(&output.stderr).expect("diagnostic is JSON")
 }
 
 fn extrude(bin: &str, bundle: &Path, id: &str, profile: &str) {
@@ -271,6 +298,151 @@ fn export_artifacts_have_required_3mf_structure_and_preserve_generations() {
     ] {
         assert!(archive.windows(path.len()).any(|window| window == path));
     }
+    let _ = fs::remove_dir_all(bundle);
+    let _ = fs::remove_dir_all(output);
+}
+
+#[test]
+fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let bundle = temp_root("stale-history");
+    let output = temp_root("stale-history-output");
+    let worker_available = OcctWorker::locate().is_ok();
+    if worker_available {
+        l_bracket(bin, &bundle);
+    } else {
+        run(bin, &["new-project", bundle.to_str().unwrap()]);
+    }
+    run_value(
+        bin,
+        &[
+            "--machine",
+            "bracket",
+            bundle.to_str().unwrap(),
+            "--bracket-id",
+            "l-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    let edited = run_value(
+        bin,
+        &[
+            "--machine",
+            "historical-edit",
+            bundle.to_str().unwrap(),
+            "--feature-id",
+            "l-bracket-base",
+            "--parameter",
+            "length",
+            "--value",
+            "0",
+        ],
+    );
+    assert_eq!(edited["status"], "degraded");
+    assert!(
+        edited["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature["last_valid_geometry_fingerprint"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()))
+    );
+    assert_eq!(
+        edited["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|feature| feature["id"] == "l-bracket-base")
+            .unwrap()["stale_last_valid_geometry"],
+        true
+    );
+
+    let host = Host::new();
+    let before = host.load(&bundle).expect("canonical state reloads");
+    let history = host.history(&bundle).expect("history reloads");
+    let mut tui = TuiSession::new([], "before-refresh");
+    tui.refresh_stale_last_valid_geometry(&history, "l-bracket");
+    let stale_overlay = tui
+        .stale_last_valid_geometry_overlay()
+        .expect("TUI exposes stale marker");
+    assert!(stale_overlay.contains("stale-last-valid-geometry"));
+    assert!(stale_overlay.contains("l-bracket-base"));
+
+    let manifest = fs::read(bundle.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(bundle.join("transactions.log")).expect("log reads");
+    let brep =
+        worker_available.then(|| fs::read(bundle.join("brep/l-bracket.brep")).expect("BREP reads"));
+    let refused = run_failed_value(
+        bin,
+        &[
+            "--machine",
+            "export",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--feature-id",
+            "l-bracket",
+            "--formats",
+            "stl",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(refused["code"], "stale_last_valid_geometry");
+    assert_eq!(refused["feature_id"], "l-bracket");
+    assert_eq!(refused["stale_features"].as_array().unwrap().len(), 3);
+    assert!(
+        refused["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("accept-stale-geometry")
+    );
+    assert!(!output.exists());
+    assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
+    if let Some(brep) = &brep {
+        assert_eq!(
+            fs::read(bundle.join("brep/l-bracket.brep")).unwrap(),
+            brep.as_slice()
+        );
+    }
+    assert_eq!(host.current(), Some(before.clone()));
+
+    if worker_available {
+        let accepted = run_value(
+            bin,
+            &[
+                "--machine",
+                "export",
+                "--bundle",
+                bundle.to_str().unwrap(),
+                "--feature-id",
+                "l-bracket",
+                "--formats",
+                "stl",
+                "--output-dir",
+                output.to_str().unwrap(),
+                "--accept-stale-geometry",
+            ],
+        );
+        assert_eq!(accepted["accepted_stale_last_valid_geometry"], true);
+        assert_eq!(
+            accepted["stale_last_valid_geometry"]["feature_id"],
+            "l-bracket"
+        );
+        assert!(output.join("l-bracket.stl").is_file());
+        assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
+        assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
+        assert_eq!(host.current(), Some(before));
+    }
+
     let _ = fs::remove_dir_all(bundle);
     let _ = fs::remove_dir_all(output);
 }

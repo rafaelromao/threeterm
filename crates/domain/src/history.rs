@@ -465,6 +465,7 @@ pub struct HistoryTimelineEntry {
     pub revision_id: String,
     pub operation: String,
     pub status: HistoryTimelineStatus,
+    pub stale_last_valid_geometry_fingerprint: Option<String>,
     pub named_revision_names: Vec<String>,
 }
 
@@ -546,6 +547,8 @@ pub fn project_feature_timeline(
                 status: after_feature
                     .map(|feature| history_timeline_status(feature.status))
                     .unwrap_or(HistoryTimelineStatus::Absent),
+                stale_last_valid_geometry_fingerprint: after_feature
+                    .and_then(|feature| feature.last_valid_geometry_fingerprint.clone()),
                 named_revision_names,
             });
         }

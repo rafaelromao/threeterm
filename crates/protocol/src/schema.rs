@@ -783,21 +783,50 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "formats", "output_dir", "tessellation_deflection", "override_warnings"],
+        "required": ["bundle_path", "feature_id", "formats", "output_dir", "tessellation_deflection", "override_warnings", "accept_stale_geometry"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "formats": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["stl", "3mf", "step"] } },
             "output_dir": { "type": "string", "minLength": 1 },
             "tessellation_deflection": { "type": "number", "exclusiveMinimum": 0 },
-            "override_warnings": { "type": "boolean" }
+            "override_warnings": { "type": "boolean" },
+            "accept_stale_geometry": { "type": "boolean" }
         }, "additionalProperties": false
     })
 });
 pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
-        "type": "object", "required": ["status", "feature_id", "artifacts", "schema_version"],
-        "properties": { "status": { "type": "string" }, "feature_id": { "type": "string" }, "artifacts": { "type": "array" }, "schema_version": { "type": "string" } },
+        "type": "object", "required": ["status", "feature_id", "artifacts", "accepted_stale_last_valid_geometry", "stale_last_valid_geometry", "schema_version"],
+        "properties": {
+            "status": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "artifacts": { "type": "array" },
+            "accepted_stale_last_valid_geometry": { "type": "boolean" },
+            "stale_last_valid_geometry": {
+                "type": "object",
+                "required": ["feature_id", "active_revision", "stale_features"],
+                "properties": {
+                    "feature_id": { "type": "string", "minLength": 1 },
+                    "active_revision": { "type": "string", "minLength": 1 },
+                    "stale_features": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["feature_id", "status", "last_valid_geometry_fingerprint"],
+                            "properties": {
+                                "feature_id": { "type": "string", "minLength": 1 },
+                                "status": { "type": "string", "enum": ["broken", "blocked-by-failure"] },
+                                "last_valid_geometry_fingerprint": { "type": "string", "minLength": 1 }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "schema_version": { "type": "string" }
+        },
         "additionalProperties": false
     })
 });
@@ -874,12 +903,13 @@ pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["id", "status", "geometry_fingerprint", "last_valid_geometry_fingerprint"],
+                    "required": ["id", "status", "geometry_fingerprint", "last_valid_geometry_fingerprint", "stale_last_valid_geometry"],
                     "properties": {
                         "id": { "type": "string", "minLength": 1 },
                         "status": { "type": "string", "minLength": 1 },
                         "geometry_fingerprint": { "type": "string" },
                         "last_valid_geometry_fingerprint": { "type": "string" },
+                        "stale_last_valid_geometry": { "type": "boolean" },
                         "diagnostic": { "type": "object" }
                     },
                     "additionalProperties": false
@@ -944,12 +974,13 @@ pub static TIMELINE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["ordinal", "revision_id", "operation", "status", "named_revision_names"],
+                    "required": ["ordinal", "revision_id", "operation", "status", "stale_last_valid_geometry_fingerprint", "named_revision_names"],
                     "properties": {
                         "ordinal": { "type": "integer", "minimum": 1 },
                         "revision_id": { "type": "string", "minLength": 1 },
                         "operation": { "type": "string", "minLength": 1 },
                         "status": { "type": "string", "minLength": 1 },
+                        "stale_last_valid_geometry_fingerprint": { "type": "string" },
                         "named_revision_names": { "type": "array", "items": { "type": "string", "minLength": 1 } }
                     },
                     "additionalProperties": false
@@ -1438,7 +1469,7 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             id: EXPORT_COMMAND_ID,
             name: "export",
             schema_version: "threeterm.command.export/1",
-            request_schema_version: "threeterm.command.export.request/1",
+            request_schema_version: "threeterm.command.export.request/2",
             request_schema: EXPORT_REQUEST_SCHEMA.clone(),
             response_schema_version: EXPORT_RESPONSE_SCHEMA_VERSION,
             response_schema: EXPORT_RESPONSE_SCHEMA.clone(),
@@ -1496,12 +1527,12 @@ pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
 pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.response/1";
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
-pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/1";
-pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/1";
+pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/2";
+pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/2";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.replay-verify.response/1";
 pub const TIMELINE_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.timeline.request/1";
-pub const TIMELINE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.timeline.response/1";
+pub const TIMELINE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.timeline.response/2";
 pub const RESTORE_REVISION_REQUEST_SCHEMA_VERSION: &str =
     "threeterm.command.restore-revision.request/2";
 

@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, Feature, FeatureGraph, ProjectGeneration, Revision,
+    ComponentCommand, ComponentGraph, Feature, FeatureGraph, FitDimension, ProjectGeneration,
+    Revision,
     history::{
         HistoryEvent, HistoryOperation, HistoryState, HistoryTimeline, project_feature_timeline,
     },
@@ -16,6 +17,7 @@ use threeterm_domain::{
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
 const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
+const FIT_DIMENSION_KIND_PREFIX: &str = "fit-dimension:";
 pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
@@ -773,6 +775,20 @@ impl Bundle {
                 history_events.push(event);
                 continue;
             }
+            if let Some(payload) = entry.kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
+                let fit: FitDimension =
+                    serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: format!("invalid fit dimension: {error}"),
+                    })?;
+                graph
+                    .add_fit_dimension(fit)
+                    .map_err(|detail| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail,
+                    })?;
+                continue;
+            }
             let sketch_payload = entry
                 .kind
                 .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
@@ -897,6 +913,29 @@ impl Bundle {
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
         self.append_component_command_with_revision(command, Some(expected_revision))
+    }
+
+    /// Append one relation-only fit transaction if the bundle still has the
+    /// revision that supplied its sketch dimensions. Fit relations are
+    /// canonical graph metadata, not synthetic geometry features.
+    pub fn append_fit_dimension_if_revision(
+        &self,
+        fit: &FitDimension,
+        expected_revision: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        fit.validate().map_err(BundleError::Invalid)?;
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[],
+                Some(expected_revision),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(fit),
+            )
+        })
     }
 
     fn append_component_command_with_revision(
@@ -1172,6 +1211,30 @@ impl Bundle {
         idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_features_locked_with_fit(
+            entries,
+            expected_revision,
+            brep,
+            source_brep,
+            idempotency_key,
+            idempotency_payload,
+            history_event,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_features_locked_with_fit(
+        &self,
+        entries: &[(&str, &str)],
+        expected_revision: Option<&str>,
+        brep: Option<(&str, &[u8])>,
+        source_brep: Option<(&str, &str)>,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        history_event: Option<&HistoryEvent>,
+        fit_dimension: Option<&FitDimension>,
+    ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
         // bundle instead of racing a create against an append. The baseline
@@ -1257,6 +1320,20 @@ impl Bundle {
                     loaded.log.append_feature(feature_id, kind);
                 }
             }
+        }
+
+        if let Some(fit) = fit_dimension
+            && loaded
+                .graph
+                .add_fit_dimension(fit.clone())
+                .map_err(BundleError::Invalid)?
+        {
+            let payload = serde_json::to_string(fit)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            loaded.log.append_feature(
+                &format!("fit-dimension-{}", loaded.log.len()),
+                &format!("{FIT_DIMENSION_KIND_PREFIX}{payload}"),
+            );
         }
 
         if let Some(event) = history_event {

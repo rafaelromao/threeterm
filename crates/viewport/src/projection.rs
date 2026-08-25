@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use threeterm_domain::{FeatureGraph, SketchEntity};
+use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity};
 
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 
@@ -56,6 +56,7 @@ pub struct ViewportScene {
     pub features: Vec<SceneFeature>,
     pub selected_id: Option<String>,
     pub layer1_references: Vec<String>,
+    pub fit_relationships: Vec<FitDimension>,
 }
 
 impl ViewportScene {
@@ -103,6 +104,7 @@ impl ViewportScene {
             features,
             selected_id,
             layer1_references: Vec::new(),
+            fit_relationships: graph.fit_dimensions().cloned().collect(),
         }
     }
 

@@ -3335,7 +3335,8 @@ fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, 
             number_field("height")?,
             number_field("thickness")?,
         )
-        .with_feature_id(bracket_id))
+        .with_feature_id(bracket_id)
+        .with_output_path(bundle, "unused.brep"))
     };
 
     match phase {

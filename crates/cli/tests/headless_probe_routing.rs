@@ -47,7 +47,7 @@ fn cli_bracket_headless_succeeds_even_when_interactive_probe_would_fail() {
         OsString::from("--height"),
         OsString::from("40"),
         OsString::from("--thickness"),
-        OsString::from("5"),
+        OsString::from("3"),
     ];
     let (code, stdout, stderr) = dispatch(args);
     assert_eq!(

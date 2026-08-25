@@ -1577,7 +1577,24 @@ impl Host {
         }
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let draft_key = draft_map_key(&root, &draft_id);
-        if self.bracket_drafts.borrow().contains_key(&draft_key) {
+        if let Some(existing) = self.bracket_drafts.borrow().get(&draft_key).cloned() {
+            let request = request.with_feature_id(&bracket_id);
+            if request.length != existing.request.length
+                || request.width != existing.request.width
+                || request.height != existing.request.height
+                || request.thickness != existing.request.thickness
+            {
+                let current_revision = Bundle::at(&root)
+                    .open()
+                    .map(|bundle| bundle.revision_hash_hex().to_string())
+                    .unwrap_or_else(|_| existing.source_revision.clone());
+                return Err(HostError::DraftInputConflict {
+                    draft_id,
+                    source_revision: existing.source_revision,
+                    current_revision,
+                    recovery: "use_update_or_refresh_draft",
+                });
+            }
             return Err(HostError::DraftAlreadyExists { draft_id });
         }
         let loaded = Bundle::at(&root).open()?;

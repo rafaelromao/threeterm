@@ -43,7 +43,7 @@ fn write_3mf(stl: &Path, destination: &Path) -> Result<(), HostError> {
                 .flatten()
         })
         .collect();
-    if vertices.len() < 3 || vertices.len() % 3 != 0 {
+    if vertices.len() < 3 || !vertices.len().is_multiple_of(3) {
         return Err(HostError::BrepInvalid {
             request_id: Some("export".to_string()),
             detail: "OCCT STL tessellation is empty or malformed".to_string(),

@@ -3400,6 +3400,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
     Ok(request)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_export(
     bundle: &str,
     feature_id: &str,

@@ -1,6 +1,9 @@
 name: rehearsal-evidence
 
 on:
+  push:
+    branches:
+      - 281-f4-40v3-rehearsal-evidence-artifact-with-sha256-catalog
   workflow_dispatch:
 
 permissions:

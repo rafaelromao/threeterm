@@ -327,6 +327,44 @@ pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+fn derived_result_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "request_id",
+            "operation",
+            "feature_id",
+            "source_revision_id",
+            "worker_fingerprint",
+            "artifact_kind",
+            "artifact_name",
+            "byte_count",
+            "sha256"
+        ],
+        "properties": {
+            "request_id": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "source_revision_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "worker_fingerprint": {
+                "type": "object",
+                "required": ["worker_kind", "worker_schema_version", "protocol_schema_version"],
+                "properties": {
+                    "worker_kind": { "const": "occt" },
+                    "worker_schema_version": { "const": "threeterm.workers.occt/1" },
+                    "protocol_schema_version": { "const": "threeterm.protocol/1" }
+                },
+                "additionalProperties": false
+            },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
+            "byte_count": { "type": "integer", "minimum": 0 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+    })
+}
+
 pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -379,6 +417,7 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 },
                 "additionalProperties": false
             },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -407,6 +446,7 @@ pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -435,6 +475,7 @@ pub static FILLET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -463,6 +504,7 @@ pub static CHAMFER_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -491,6 +533,7 @@ pub static HOLE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -519,6 +562,7 @@ pub static REVOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -647,6 +691,7 @@ pub static MIRROR_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -675,6 +720,7 @@ pub static LINEAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -703,6 +749,7 @@ pub static CIRCULAR_PATTERN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| 
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -750,6 +797,7 @@ pub static SHELL_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -804,6 +852,7 @@ pub static DRAFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -864,6 +913,7 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false

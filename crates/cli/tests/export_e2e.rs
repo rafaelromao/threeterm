@@ -98,6 +98,12 @@ fn l_bracket(bin: &str, bundle: &Path) {
     );
 }
 
+fn multi_body_l_bracket(bin: &str, bundle: &Path) {
+    run(bin, &["new-project", bundle.to_str().unwrap()]);
+    extrude(bin, bundle, "vertical", "[[0,0],[4,0],[4,24],[0,24]]");
+    extrude(bin, bundle, "horizontal", "[[0,0],[28,0],[28,4],[0,4]]");
+}
+
 #[test]
 fn export_cli_writes_stl_3mf_and_step_for_a_fused_l_bracket() {
     if OcctWorker::locate().is_err() {
@@ -130,6 +136,71 @@ fn export_cli_writes_stl_3mf_and_step_for_a_fused_l_bracket() {
     assert!(stl.starts_with(b"solid"));
     assert!(three_mf.starts_with(b"PK\x03\x04"));
     assert!(step.starts_with(b"ISO-10303-21"));
+    let _ = fs::remove_dir_all(bundle);
+    let _ = fs::remove_dir_all(output);
+}
+
+#[test]
+fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("export_e2e: no OCCT worker binary found; CI runs this production path");
+        return;
+    }
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let bundle = temp_root("multi-body");
+    let output = temp_root("multi-body-output");
+    multi_body_l_bracket(bin, &bundle);
+    let manifest = fs::read_to_string(bundle.join("manifest.json")).unwrap();
+    let parsed_manifest: Value = serde_json::from_str(&manifest).unwrap();
+    run(
+        bin,
+        &[
+            "--machine",
+            "export",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--feature-id",
+            "vertical",
+            "--body-ids",
+            "vertical,horizontal",
+            "--formats",
+            "3mf",
+            "--output-dir",
+            output.to_str().unwrap(),
+        ],
+    );
+
+    let archive =
+        String::from_utf8_lossy(&fs::read(output.join("vertical.3mf")).unwrap()).into_owned();
+    assert_eq!(archive.matches("<object ").count(), 2);
+    assert_eq!(archive.matches("<item ").count(), 2);
+    assert!(archive.contains("name=\"vertical\""));
+    assert!(archive.contains("name=\"horizontal\""));
+    for field in [
+        "generation_id",
+        "revision_id",
+        "feature_ids",
+        "feature_graph_hash",
+        "revision_hash",
+    ] {
+        assert!(archive.contains(&format!("name=\"threeterm.{field}\"")));
+    }
+    for field in [
+        "generation_id",
+        "revision_id",
+        "feature_graph_hash",
+        "revision_hash",
+    ] {
+        let value = parsed_manifest[field].as_str().unwrap();
+        assert!(
+            archive.contains(value),
+            "metadata field {field} is recoverable"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(bundle.join("manifest.json")).unwrap(),
+        manifest
+    );
     let _ = fs::remove_dir_all(bundle);
     let _ = fs::remove_dir_all(output);
 }

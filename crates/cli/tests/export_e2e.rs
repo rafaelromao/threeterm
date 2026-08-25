@@ -136,6 +136,35 @@ fn export_warning_requires_an_explicit_override() {
 }
 
 #[test]
+fn export_rejects_duplicate_formats_before_staging() {
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let bundle = temp_root("duplicate-format");
+    run(bin, &["new-project", bundle.to_str().unwrap()]);
+    let output = Command::new(bin)
+        .args([
+            "--machine",
+            "export",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--feature-id",
+            "missing",
+            "--formats",
+            "stl,stl",
+            "--output-dir",
+            bundle.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate export format"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(bundle);
+}
+
+#[test]
 fn export_warning_override_allows_the_request_to_continue() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let bundle = temp_root("override");

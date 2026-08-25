@@ -515,6 +515,12 @@ impl Host {
             });
         }
         let root = root.as_ref();
+        let unique_formats = formats.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        if unique_formats.len() != formats.len() {
+            return Err(HostError::Validation {
+                detail: "duplicate export format".to_string(),
+            });
+        }
         let brep = bundle_root(root)
             .join(BREP_SUBDIR)
             .join(format!("{feature_id}.brep"));

@@ -197,6 +197,7 @@ enum DispatchPlan {
         output_dir: String,
         tessellation_deflection: f64,
         override_warnings: bool,
+        accept_stale_geometry: bool,
     },
     Unknown {
         arg: String,
@@ -586,11 +587,17 @@ fn parse_export(args: &[OsString]) -> DispatchPlan {
     let mut output_dir = None;
     let mut deflection = 0.5;
     let mut override_warnings = false;
+    let mut accept_stale_geometry = false;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
         if flag == "--override-warnings" {
             override_warnings = true;
+            index += 1;
+            continue;
+        }
+        if flag == "--accept-stale-geometry" {
+            accept_stale_geometry = true;
             index += 1;
             continue;
         }
@@ -636,6 +643,7 @@ fn parse_export(args: &[OsString]) -> DispatchPlan {
             output_dir,
             tessellation_deflection: deflection,
             override_warnings,
+            accept_stale_geometry,
         },
         _ => DispatchPlan::Unknown {
             arg: "export".to_string(),
@@ -2634,6 +2642,7 @@ fn execute_handler(
             output_dir,
             tessellation_deflection,
             override_warnings,
+            accept_stale_geometry,
         } => emit_export(
             &bundle,
             &feature_id,
@@ -2641,6 +2650,7 @@ fn execute_handler(
             &output_dir,
             tessellation_deflection,
             override_warnings,
+            accept_stale_geometry,
             stdout,
             stderr,
         ),
@@ -2999,6 +3009,7 @@ fn history_commit_response(
                     .last_valid_geometry_fingerprint
                     .clone()
                     .unwrap_or_default(),
+                "stale_last_valid_geometry": feature.last_valid_geometry_fingerprint.is_some(),
             });
             if let Some(diagnostic) = &feature.diagnostic {
                 value["diagnostic"] = json!(diagnostic);
@@ -3063,6 +3074,10 @@ fn timeline_response(
                 "revision_id": revision.revision_id,
                 "operation": revision.operation,
                 "status": serde_json::to_value(&revision.status).expect("timeline status serializes"),
+                "stale_last_valid_geometry_fingerprint": revision
+                    .stale_last_valid_geometry_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
                 "named_revision_names": revision.named_revision_names,
             })
         })
@@ -3390,8 +3405,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             output_dir,
             tessellation_deflection,
             override_warnings,
+            accept_stale_geometry,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings, "accept_stale_geometry": accept_stale_geometry })
         }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
@@ -3408,6 +3424,7 @@ fn emit_export(
     output_dir: &str,
     deflection: f64,
     override_warnings: bool,
+    accept_stale_geometry: bool,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -3418,12 +3435,40 @@ fn emit_export(
         Path::new(output_dir),
         deflection,
         override_warnings,
+        accept_stale_geometry,
     ) {
-        Ok(artifacts) => write_success(
+        Ok(view) => write_success(
             stdout,
-            &json!({ "status": "ok", "feature_id": feature_id, "artifacts": artifacts, "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION }),
+            &json!({
+                "status": "ok",
+                "feature_id": feature_id,
+                "artifacts": view.artifacts,
+                "accepted_stale_geometry": !view.stale_acceptance.stale_features.is_empty(),
+                "stale_geometry": view.stale_acceptance,
+                "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
+            }),
             stderr,
         ),
+        Err(HostError::StaleLastValidGeometry {
+            feature_id,
+            active_revision,
+            stale_features,
+        }) => {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                json!({
+                    "severity": "error",
+                    "code": "stale_last_valid_geometry",
+                    "feature_id": feature_id,
+                    "active_revision": active_revision,
+                    "stale_features": stale_features,
+                    "recovery": "correct or restore the feature, or retry with --accept-stale-geometry",
+                    "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
+                })
+            );
+            EXIT_BREP_INVALID
+        }
         Err(HostError::Validation { detail }) if detail.starts_with('{') => {
             let _ = writeln!(stderr, "{detail}");
             EXIT_BREP_INVALID
@@ -4501,6 +4546,18 @@ fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) 
 fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
     let detail = match error {
         HostError::Validation { detail } => detail.clone(),
+        HostError::StaleLastValidGeometry {
+            feature_id,
+            active_revision,
+            stale_features,
+        } => serde_json::to_string(&json!({
+            "code": "stale_last_valid_geometry",
+            "feature_id": feature_id,
+            "active_revision": active_revision,
+            "stale_features": stale_features,
+            "recovery": "correct or restore the feature, or retry with --accept-stale-geometry"
+        }))
+        .expect("stale geometry diagnostic serializes"),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
         HostError::Persistence(error) => error.diagnostic_detail().to_string(),
@@ -4550,6 +4607,9 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             Diagnostic::unsupported_geometry(&detail),
             EXIT_WORKER_FAILURE,
         ),
+        HostError::StaleLastValidGeometry { .. } => {
+            (Diagnostic::invalid_request(&detail), EXIT_BREP_INVALID)
+        }
         _ => (
             Diagnostic::integrity_failure(&detail),
             EXIT_INTEGRITY_FAILURE,

@@ -2,8 +2,11 @@
 
 use std::path::Path;
 
-use threeterm_domain::{FeatureGraph, history::HistoryTimelineStatus};
-use threeterm_host::{HistoryCommitView, Host};
+use threeterm_domain::{
+    FeatureGraph,
+    history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
+};
+use threeterm_host::{HistoryCommitView, Host, stale_geometry_for_export};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -487,6 +490,14 @@ pub struct FeatureTimelineRevision {
     pub named_revision_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleGeometryView {
+    pub feature_id: String,
+    pub status: String,
+    pub active_revision: String,
+    pub last_valid_geometry_fingerprint: String,
+}
+
 impl FeatureTarget {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
@@ -541,6 +552,7 @@ pub struct TuiState {
     pub history: HistoryState,
     pub recoverable_revisions: Vec<String>,
     pub feature_timeline: Option<FeatureTimelineView>,
+    pub stale_geometry: Vec<StaleGeometryView>,
     pub presentation_generation: u64,
     pub canonical_revision: String,
     pub last_acknowledgement: Option<GestureAcknowledgement>,
@@ -646,6 +658,7 @@ pub struct TuiSession {
     history: HistoryState,
     recoverable_revisions: Vec<String>,
     feature_timeline: Option<FeatureTimelineView>,
+    stale_geometry: Vec<StaleGeometryView>,
     presentation_generation: u64,
     canonical_revision: String,
     acknowledgement_sequence: u64,
@@ -677,6 +690,7 @@ impl TuiSession {
             },
             recoverable_revisions: Vec::new(),
             feature_timeline: None,
+            stale_geometry: Vec::new(),
             presentation_generation: 0,
             canonical_revision: canonical_revision.as_ref().to_string(),
             acknowledgement_sequence: 0,
@@ -750,6 +764,7 @@ impl TuiSession {
             history: self.history.clone(),
             recoverable_revisions: self.recoverable_revisions.clone(),
             feature_timeline: self.feature_timeline.clone(),
+            stale_geometry: self.stale_geometry.clone(),
             presentation_generation: self.presentation_generation,
             canonical_revision: self.canonical_revision.clone(),
             last_acknowledgement: self.last_acknowledgement.clone(),
@@ -828,6 +843,34 @@ impl TuiSession {
 
     pub fn clear_feature_timeline(&mut self) {
         self.feature_timeline = None;
+    }
+
+    pub fn refresh_stale_geometry(
+        &mut self,
+        history: &CanonicalHistoryState,
+        export_feature_id: &str,
+    ) {
+        let active_revision = history.active_snapshot().revision_id.clone();
+        self.stale_geometry = stale_geometry_for_export(history, export_feature_id)
+            .into_iter()
+            .map(|feature| StaleGeometryView {
+                feature_id: feature.feature_id,
+                status: feature.status,
+                active_revision: active_revision.clone(),
+                last_valid_geometry_fingerprint: feature.last_valid_geometry_fingerprint,
+            })
+            .collect();
+    }
+
+    pub fn stale_geometry_overlay(&self) -> Option<String> {
+        let first = self.stale_geometry.first()?;
+        Some(format!(
+            "[warning-glyph] stale-last-valid-geometry feature={} status={} revision={} last_valid={}",
+            first.feature_id,
+            first.status,
+            first.active_revision,
+            first.last_valid_geometry_fingerprint
+        ))
     }
 
     pub fn restore_feature_timeline(
@@ -2451,6 +2494,26 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn state(&self) -> TuiState {
         self.tui.state()
+    }
+
+    pub fn refresh_stale_geometry(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+        export_feature_id: &str,
+    ) -> Result<(), TuiDiagnostic> {
+        let history = host.history(root).map_err(|error| TuiDiagnostic {
+            code: TuiDiagnosticCode::HistoryRejected,
+            detail: error.to_string(),
+            canonical_revision: self.tui.state().canonical_revision,
+            axis: Some(StateAxis::History),
+            event: Some(StateEventKind::History(
+                HistoryEventKind::RestoreNamedRevision,
+            )),
+            from: Some("stale-geometry-refresh".to_string()),
+        })?;
+        self.tui.refresh_stale_geometry(&history, export_feature_id);
+        Ok(())
     }
 
     pub fn camera(&self) -> CameraState {

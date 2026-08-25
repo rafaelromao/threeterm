@@ -316,9 +316,20 @@ impl McpServer {
         let key = (canonical_bundle, draft_id.clone());
         match phase {
             "open" => {
-                if self.bracket_edits.borrow().contains_key(&key) {
-                    return Err(DispatchError::Host(HostError::DraftAlreadyExists {
+                if let Some(session) = self.bracket_edits.borrow().get(&key) {
+                    let source_revision = session
+                        .host
+                        .bracket_draft_source_revision(&bundle, &draft_id)
+                        .unwrap_or_default();
+                    let current_revision = Bundle::at(&bundle)
+                        .open()
+                        .map(|loaded| loaded.revision_hash_hex().to_string())
+                        .unwrap_or_else(|_| source_revision.clone());
+                    return Err(DispatchError::Host(HostError::DraftInputConflict {
                         draft_id,
+                        source_revision,
+                        current_revision,
+                        recovery: "use_update_or_refresh_draft",
                     }));
                 }
                 let worker = OcctWorker::locate().map_err(|error| {

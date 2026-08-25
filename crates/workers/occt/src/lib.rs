@@ -251,6 +251,15 @@ pub struct StagedExtrudeCompletion {
     pub stage: Stage,
 }
 
+/// A completed typed OCCT request whose artifact remains in a Host-owned
+/// stage until the Host validates and promotes it.
+#[derive(Debug)]
+pub struct StagedCompletion {
+    pub result: serde_json::Value,
+    pub outcome: SupervisorOutcome,
+    pub stage: Stage,
+}
+
 /// Default supervisor grace for OCCT operations. Operations complete in
 /// well under a second; this bound catches hangs without harming
 /// legitimate geometry work.
@@ -453,6 +462,77 @@ impl OcctWorker {
         };
         Ok(StagedExtrudeCompletion {
             result: parsed,
+            outcome,
+            stage,
+        })
+    }
+
+    /// Run any OCCT operation through the Host-owned artifact boundary.
+    /// Request-specific Rust envelopes remain typed at their public APIs; the
+    /// binding is added only to the wire value so every operation shares the
+    /// same staged lifecycle without duplicating envelope fields.
+    pub fn invoke_staged(
+        &self,
+        request: serde_json::Value,
+        operation: Operation,
+        stage: Stage,
+    ) -> Result<StagedCompletion, WorkerError> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        self.invoke_staged_with_cancel(request, operation, stage, &cancel)
+    }
+
+    /// Cancellable form of [`Self::invoke_staged`] used by long-running
+    /// operations such as Boolean Pattern.
+    pub fn invoke_staged_with_cancel(
+        &self,
+        mut request: serde_json::Value,
+        operation: Operation,
+        stage: Stage,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<StagedCompletion, WorkerError> {
+        let request_id = request["request_id"]
+            .as_str()
+            .ok_or_else(|| WorkerError::Malformed {
+                detail: "staged OCCT request is missing request_id".to_string(),
+            })?
+            .to_string();
+        let feature_id = request["feature_id"]
+            .as_str()
+            .ok_or_else(|| WorkerError::Malformed {
+                detail: "staged OCCT request is missing feature_id".to_string(),
+            })?
+            .to_string();
+        let staging_name = request["artifact_request"]["staging_name"]
+            .as_str()
+            .ok_or_else(|| WorkerError::Malformed {
+                detail: "staged OCCT artifact binding is missing staging_name".to_string(),
+            })?
+            .to_string();
+        let output_filename = format!("{staging_name}.partial");
+        request["output_dir"] =
+            serde_json::Value::String(stage.root().to_path_buf().display().to_string());
+        request["output_filename"] = serde_json::Value::String(output_filename.clone());
+        let bytes = bounded_serialize(&request, operation.as_str(), &request_id)?;
+        let expected_output = expected_output_path(stage.root(), &output_filename);
+        let context = RequestContext::from_envelope(&bytes, operation.as_str())?;
+        let (outcome, owned_stage) = self.supervise(&context, Some(cancel), Some(stage))?;
+        let SupervisorOutcome::Completed { result, .. } = &outcome else {
+            return Err(map_outcome(
+                outcome,
+                &context.request_id,
+                &context.command_id,
+                &feature_id,
+                expected_output,
+            )
+            .expect_err("non-completed staged outcome must map to a worker error"));
+        };
+        let Some(stage) = owned_stage else {
+            return Err(WorkerError::Malformed {
+                detail: "completed staged OCCT request lost its request stage".to_string(),
+            });
+        };
+        Ok(StagedCompletion {
+            result: result.clone(),
             outcome,
             stage,
         })

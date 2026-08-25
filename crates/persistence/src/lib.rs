@@ -1003,6 +1003,31 @@ impl Bundle {
         })
     }
 
+    /// Publish one verified BREP and its command provenance as one canonical
+    /// transaction. The provenance is metadata only: worker paths and raw
+    /// artifact bytes remain outside the Canonical Transaction Log.
+    pub fn append_feature_with_brep_if_revision_and_provenance(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+            )
+        })
+    }
+
     /// Publish a verified BREP and its initial history event in one sealed
     /// generation.
     pub fn append_feature_with_brep_if_revision_and_history(
@@ -1040,6 +1065,29 @@ impl Bundle {
                 None,
                 None,
                 None,
+                Some(history_event),
+            )
+        })
+    }
+
+    pub fn append_features_with_brep_if_revision_and_history_and_provenance(
+        &self,
+        entries: &[(&str, &str)],
+        brep_feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+        request_id: &str,
+        provenance: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                entries,
+                Some(expected_revision),
+                Some((brep_feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
                 Some(history_event),
             )
         })

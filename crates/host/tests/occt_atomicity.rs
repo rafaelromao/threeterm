@@ -587,12 +587,26 @@ fn boolean_fuse_of_two_extrudes_commits_a_fused_brep() {
     )
     .with_output_path(root.join("stage"), "fused.brep")
     .with_feature_id("fused-1");
+    let fuse_request_id = fuse_request.request_id.clone();
     let fuse_view = host
         .boolean_fuse(&root, fuse_request, &worker)
         .expect("boolean fuse commits");
 
     assert_eq!(fuse_view.result.status, "ok");
     assert_eq!(fuse_view.result.operation, Operation::BooleanFuse);
+    assert_eq!(
+        fuse_view.source_snapshot.revision_hash,
+        tool_view.snapshot.revision_hash
+    );
+    assert_eq!(fuse_view.artifact.request_id, fuse_request_id);
+    assert_eq!(fuse_view.artifact.operation, "boolean_fuse");
+    assert_eq!(fuse_view.artifact.feature_id, "fused-1");
+    assert_eq!(fuse_view.artifact.path, root.join("brep/fused-1.brep"));
+    assert_eq!(
+        fuse_view.artifact.byte_count,
+        fuse_view.result.brep_bytes as u64
+    );
+    assert_eq!(fuse_view.artifact.sha256, fuse_view.result.brep_sha256);
     assert!(fuse_view.snapshot.revision_hash != base_view.snapshot.revision_hash);
     let fused_brep = root.join("brep/fused-1.brep");
     assert!(
@@ -600,6 +614,14 @@ fn boolean_fuse_of_two_extrudes_commits_a_fused_brep() {
         "fused BREP is on disk at {fused_brep:?}"
     );
     assert_ne!(fuse_view.snapshot.revision_hash, prior_view.revision_hash);
+    let transactions = fs::read_to_string(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    assert!(transactions.contains(&fuse_request_id));
+    assert!(transactions.contains("boolean_fuse"));
+    assert!(!transactions.contains("/stage/"));
+    assert_eq!(
+        Host::new().load(&root).expect("reloads"),
+        fuse_view.snapshot
+    );
 
     let _ = fs::remove_dir_all(root);
 }

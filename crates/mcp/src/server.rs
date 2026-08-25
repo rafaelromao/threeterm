@@ -664,6 +664,18 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     if let Some(current_revision) = current_revision {
         diagnostic["current_revision"] = Value::String(current_revision.to_string());
     }
+    if phase == "open" && diagnostic["kind"] == "bracket_edit_rejected" {
+        let current_revision = arguments
+            .get("bundle_path")
+            .and_then(Value::as_str)
+            .and_then(|bundle| Bundle::at(bundle).open().ok())
+            .map(|loaded| loaded.revision_hash_hex().to_string())
+            .unwrap_or_else(|| source_revision.clone());
+        diagnostic["kind"] = Value::String("draft_input_conflict".to_string());
+        diagnostic["source_revision"] = Value::String(source_revision.clone());
+        diagnostic["current_revision"] = Value::String(current_revision);
+        diagnostic["recovery"] = Value::String("use_update_or_refresh_draft".to_string());
+    }
     let mut response = bracket_edit_response(
         phase,
         draft_id,

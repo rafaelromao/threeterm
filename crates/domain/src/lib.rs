@@ -16,6 +16,8 @@ pub mod component {
     };
 }
 
+pub mod history;
+
 pub fn schema_version() -> &'static str {
     "threeterm.domain/1"
 }
@@ -74,6 +76,8 @@ pub struct LBracketDescriptor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComponentDefinition {
     pub id: String,
+    #[serde(default)]
+    pub selected_feature_ids: Vec<String>,
     pub descriptor: LBracketDescriptor,
 }
 
@@ -89,6 +93,11 @@ pub struct ComponentInstance {
 pub enum ComponentCommand {
     Define {
         definition: ComponentDefinition,
+    },
+    Capture {
+        definition_id: String,
+        selected_feature_ids: Vec<String>,
+        descriptor: LBracketDescriptor,
     },
     CreateInstance {
         instance: ComponentInstance,
@@ -157,6 +166,7 @@ impl ComponentGraph {
                 if definition.id.is_empty() || definition.descriptor.feature_id.is_empty() {
                     return Err("component IDs must not be empty".to_string());
                 }
+                validate_selected_feature_ids(&definition.selected_feature_ids)?;
                 if ![
                     definition.descriptor.length,
                     definition.descriptor.width,
@@ -178,6 +188,19 @@ impl ComponentGraph {
                 }
                 self.definitions
                     .insert(definition.id.clone(), definition.clone());
+            }
+            ComponentCommand::Capture {
+                definition_id,
+                selected_feature_ids,
+                descriptor,
+            } => {
+                self.apply(&ComponentCommand::Define {
+                    definition: ComponentDefinition {
+                        id: definition_id.clone(),
+                        selected_feature_ids: selected_feature_ids.clone(),
+                        descriptor: descriptor.clone(),
+                    },
+                })?;
             }
             ComponentCommand::CreateInstance { instance } => {
                 self.require_definition(&instance.definition_id)?;
@@ -309,6 +332,17 @@ impl ComponentGraph {
             .values()
             .any(|definition| definition.descriptor.feature_id == feature_id)
     }
+}
+
+fn validate_selected_feature_ids(feature_ids: &[String]) -> Result<(), String> {
+    if feature_ids.iter().any(|feature_id| feature_id.is_empty())
+        || feature_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(
+            "selected component feature IDs must be non-empty, unique, and sorted".to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl FeatureGraph {
@@ -505,6 +539,7 @@ mod tests {
             .apply(&ComponentCommand::Define {
                 definition: ComponentDefinition {
                     id: "bracket".to_string(),
+                    selected_feature_ids: Vec::new(),
                     descriptor: LBracketDescriptor {
                         feature_id: "bracket-feature".to_string(),
                         length: 60.0,

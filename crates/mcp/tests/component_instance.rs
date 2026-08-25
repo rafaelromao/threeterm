@@ -46,6 +46,18 @@ fn cli_command(command: &str, root: &PathBuf, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI returns JSON")
 }
 
+fn cli_failure(command: &str, root: &PathBuf, args: &[&str]) -> Value {
+    let output = Command::new(cli())
+        .args(["--machine", command])
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("CLI starts");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    serde_json::from_slice(&output.stderr).expect("CLI returns a diagnostic")
+}
+
 fn mcp_command(name: &str, arguments: Value) -> Value {
     let mut child = Command::new(mcp())
         .stdin(Stdio::piped())
@@ -166,5 +178,138 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
     );
     let reopened = cli_command("component-state", &root, &[]);
     assert_eq!(reopened, after);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn captured_definition_survives_recompute_and_is_reusable() {
+    let root = bundle();
+    let root_text = root.to_string_lossy().into_owned();
+    cli_command(
+        "bracket",
+        &root,
+        &[
+            "--bracket-id",
+            "l-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    cli_command(
+        "capture-component",
+        &root,
+        &[
+            "--definition-id",
+            "captured-bracket",
+            "--feature-id",
+            "l-bracket-base",
+            "--feature-id",
+            "l-bracket-bend",
+            "--feature-id",
+            "l-bracket-finish",
+            "--feature-id",
+            "l-bracket-independent-base",
+        ],
+    );
+    let captured = cli_command("component-state", &root, &[]);
+    assert_eq!(
+        captured["definitions"]["captured-bracket"]["selected_feature_ids"],
+        json!([
+            "l-bracket-base",
+            "l-bracket-bend",
+            "l-bracket-finish",
+            "l-bracket-independent-base"
+        ])
+    );
+    assert_eq!(
+        captured["definitions"]["captured-bracket"]["descriptor"]["length"],
+        json!(60.0)
+    );
+
+    cli_command(
+        "historical-edit",
+        &root,
+        &[
+            "--feature-id",
+            "l-bracket-base",
+            "--parameter",
+            "length",
+            "--value",
+            "75",
+        ],
+    );
+    mcp_command(
+        "threeterm.command.create-component-instance/1",
+        json!({
+            "bundle_path": root_text,
+            "instance_id": "captured-instance",
+            "definition_id": "captured-bracket",
+            "transform": [12.0, 0.0, 90.0]
+        }),
+    );
+
+    let after_recompute = cli_command("component-state", &root, &[]);
+    assert_eq!(
+        after_recompute["definitions"]["captured-bracket"],
+        captured["definitions"]["captured-bracket"]
+    );
+    assert_eq!(
+        after_recompute["instances"]["captured-instance"]["definition_id"],
+        json!("captured-bracket")
+    );
+    assert_eq!(
+        cli_command("component-state", &root, &[]),
+        after_recompute,
+        "reopening the canonical bundle preserves the captured definition"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_capture_preserves_the_canonical_bundle() {
+    let root = bundle();
+    cli_command(
+        "bracket",
+        &root,
+        &[
+            "--bracket-id",
+            "l-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+    let diagnostic = cli_failure(
+        "capture-component",
+        &root,
+        &[
+            "--definition-id",
+            "invalid-capture",
+            "--feature-id",
+            "l-bracket-finish",
+        ],
+    );
+    assert_eq!(diagnostic["code"], json!("invalid_request"));
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("log reads"),
+        log_before
+    );
     let _ = std::fs::remove_dir_all(root);
 }

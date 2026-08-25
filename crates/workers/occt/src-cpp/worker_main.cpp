@@ -1169,7 +1169,13 @@ bool write_staged_artifact(const JsonParser::Value& request,
     const std::string deterministic_settings_sha256 =
         get_string(*binding, "deterministic_settings_sha256");
 
-    if (request_id.empty() || operation != "extrude" || feature_id.empty() ||
+    const bool is_brep_operation = operation == "extrude" || operation == "bracket" ||
+        operation == "boolean_fuse" || operation == "fillet" || operation == "chamfer" ||
+        operation == "hole" || operation == "revolve" || operation == "mirror" ||
+        operation == "linear_pattern" || operation == "circular_pattern" ||
+        operation == "boolean_pattern" || operation == "shell" || operation == "draft" ||
+        operation == "loft";
+    if (request_id.empty() || !is_brep_operation || feature_id.empty() ||
         binding_request_id != request_id || binding_operation != operation ||
         binding_feature_id != feature_id || source_revision_id.empty() ||
         artifact_kind != "brep" || staging_name.empty() ||

@@ -327,9 +327,11 @@ pub fn is_layer1_excluded(request: &Layer1ArtifactRequest) -> bool {
         &request.semantic_input_sha256,
         &request.deterministic_settings_sha256,
     ];
-    for field in fields {
+    for (index, field) in fields.into_iter().enumerate() {
         let lower = field.to_ascii_lowercase();
-        if lower.contains("draft")
+        let canonical_draft_staging_name =
+            request.operation == "draft" && index == 1 && lower.starts_with("draft-");
+        if (lower.contains("draft") && !canonical_draft_staging_name)
             || lower.contains("hover")
             || lower.contains("candidate")
             || lower.contains("pointer")

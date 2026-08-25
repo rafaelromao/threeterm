@@ -54,6 +54,43 @@ fn hash(root: &Path, relative: &str) -> (u64, String) {
     (bytes.len() as u64, format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn synthetic_timing_run(multiplier: f64) -> Value {
+    let classes = [
+        "project_create",
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog",
+    ];
+    serde_json::json!({
+        "timings": classes.into_iter().map(|class| serde_json::json!({
+            "class": class,
+            "p50_ms": multiplier,
+            "p95_ms": multiplier,
+            "p99_ms": multiplier,
+        })).collect::<Vec<_>>()
+    })
+}
+
+#[test]
+fn timing_comparison_failure_is_structured_and_does_not_publish_a_catalog() {
+    let output_dir = temp_root("comparison-failure");
+    let error = threeterm_cli::rehearsal::compare_rehearsal_runs(
+        &[synthetic_timing_run(1.0), synthetic_timing_run(100.0)],
+        output_dir.join("run-2/project"),
+    )
+    .expect_err("different timing exponents must fail the comparison");
+
+    assert_eq!(error.stage, "comparison");
+    assert_eq!(error.diagnostic()["code"], "rehearsal_failure");
+    assert_eq!(error.diagnostic()["detail"]["class"], "project_create");
+    assert!(!output_dir.join("sha256-manifest.json").exists());
+}
+
 #[test]
 fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
     if OcctWorker::locate().is_err() {

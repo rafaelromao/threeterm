@@ -172,6 +172,16 @@ pub static REHEARSE_RUN_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    let mut aggregate_run_schema = (*REHEARSE_RUN_RESPONSE_SCHEMA).clone();
+    aggregate_run_schema["properties"]["project_path"]["pattern"] = json!("^run-[12]/project$");
+    aggregate_run_schema["properties"]["export_path"]["pattern"] = json!("^run-[12]/export$");
+    aggregate_run_schema["properties"]["catalog_path"]["pattern"] =
+        json!("^run-[12]/sha256-manifest\\.json$");
+    aggregate_run_schema["properties"]["artifacts"]["items"]["properties"]["relative_path"] = json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^run-[12]/(project|project\\.previous-generation|export)/.+$"
+    });
     json!({
         "type": "object",
         "required": [
@@ -194,11 +204,12 @@ pub static REHEARSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "type": "array",
                 "minItems": 2,
                 "maxItems": 2,
-                "items": (*REHEARSE_RUN_RESPONSE_SCHEMA).clone()
+                "items": aggregate_run_schema
             },
             "comparisons": {
                 "type": "array",
-                "minItems": 1,
+                "minItems": 9,
+                "maxItems": 9,
                 "items": {
                     "type": "object",
                     "required": ["class", "run_1", "run_2", "same_order_of_magnitude"],

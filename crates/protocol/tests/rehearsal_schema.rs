@@ -35,7 +35,7 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
     });
     validate(&REHEARSE_REQUEST_SCHEMA, &request).expect("request validates");
 
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "schema_version": "threeterm.command.rehearse.response/2",
         "release_candidates": ["rc-1", "rc-2"],
         "fixture": "l-bracket",
@@ -88,6 +88,17 @@ fn rehearsal_response_describes_two_release_candidates_and_artifact_hashes() {
             "same_order_of_magnitude": true
         }]
     });
+    for index in 1..9 {
+        response["comparisons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "class": format!("class-{index}"),
+                "run_1": {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0},
+                "run_2": {"p50_ms": 2.0, "p95_ms": 2.0, "p99_ms": 2.0},
+                "same_order_of_magnitude": true
+            }));
+    }
     validate(&REHEARSE_RESPONSE_SCHEMA, &response).expect("response validates");
     validate(&REHEARSE_RUN_RESPONSE_SCHEMA, &response["runs"][0])
         .expect("per-run response validates");

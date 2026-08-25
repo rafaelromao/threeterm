@@ -118,7 +118,8 @@ pub fn run_l_bracket_rehearsal(
         runs.push(prefix_run_report(report, &format!("run-{}", index + 1)));
     }
 
-    let comparisons = compare_runs(&runs, &output_dir.join("run-2").join(PROJECT_DIR))?;
+    let comparisons =
+        compare_rehearsal_runs(runs.as_slice(), output_dir.join("run-2").join(PROJECT_DIR))?;
     let report = json!({
         "schema_version": REHEARSE_RESPONSE_SCHEMA_VERSION,
         "release_candidates": release_candidates,
@@ -379,15 +380,53 @@ fn prefix_run_report(mut report: Value, prefix: &str) -> Value {
     report
 }
 
-fn compare_runs(runs: &[Value], project: &Path) -> Result<Vec<Value>, RehearsalError> {
-    let first = runs
-        .first()
-        .and_then(|run| run["timings"].as_array())
-        .expect("first run timings are an array");
-    let second = runs
-        .get(1)
-        .and_then(|run| run["timings"].as_array())
-        .expect("second run timings are an array");
+/// Compare the published timing bands from two completed rehearsal runs.
+pub fn compare_rehearsal_runs(
+    runs: &[Value],
+    project: impl AsRef<Path>,
+) -> Result<Vec<Value>, RehearsalError> {
+    let project = project.as_ref();
+    let Some(first) = runs.first().and_then(|run| run["timings"].as_array()) else {
+        return Err(RehearsalError::new(
+            "comparison",
+            json!({"message": "first run timings are missing"}),
+            project,
+        ));
+    };
+    let Some(second) = runs.get(1).and_then(|run| run["timings"].as_array()) else {
+        return Err(RehearsalError::new(
+            "comparison",
+            json!({"message": "second run timings are missing"}),
+            project,
+        ));
+    };
+    if runs.len() != 2
+        || first.len() != TIMING_CLASSES.len()
+        || second.len() != TIMING_CLASSES.len()
+    {
+        return Err(RehearsalError::new(
+            "comparison",
+            json!({"message": "comparison requires two complete timing runs"}),
+            project,
+        ));
+    }
+    for class in TIMING_CLASSES {
+        let first_count = first
+            .iter()
+            .filter(|timing| timing["class"] == class)
+            .count();
+        let second_count = second
+            .iter()
+            .filter(|timing| timing["class"] == class)
+            .count();
+        if first_count != 1 || second_count != 1 {
+            return Err(RehearsalError::new(
+                "comparison",
+                json!({"message": "timing classes must match exactly once per run", "class": class}),
+                project,
+            ));
+        }
+    }
     let mut comparisons = Vec::with_capacity(first.len());
     for timing in first {
         let class = timing["class"].as_str().expect("timing class is a string");

@@ -7,7 +7,7 @@ use threeterm_host::Host;
 use threeterm_occt_worker::{
     ExtrudeRequest, ExtrudeResult, OcctWorker, Operation, SCHEMA_VERSION, worker_fingerprint,
 };
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, PublicationFailurePoint, fail_next_publication_at};
 use threeterm_protocol::artifact::{
     ArtifactHeader, Layer1ArtifactRequest, Layer1CacheKey, Stage, sha256_hex,
 };
@@ -379,6 +379,95 @@ fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
     assert!(!project_root.join(".derived").exists());
 
     let _ = fs::remove_dir_all(project_root);
+}
+
+#[test]
+fn host_promotion_failure_matrix_preserves_the_generation_and_retries_cleanly() {
+    for (label, point) in [
+        ("copy", PublicationFailurePoint::BrepCopy),
+        ("write", PublicationFailurePoint::BrepWrite),
+        ("sync", PublicationFailurePoint::BrepSync),
+        ("rename", PublicationFailurePoint::BrepRename),
+        ("directory-sync", PublicationFailurePoint::BrepDirectorySync),
+        ("manifest", PublicationFailurePoint::ManifestSync),
+    ] {
+        let project_root = temp_root(&format!("host-failure-{label}"));
+        let host = Host::new();
+        let snapshot = host
+            .save(&project_root, "seed", "box")
+            .expect("canonical snapshot saves");
+        let prior_manifest = fs::read(project_root.join("manifest.json")).expect("manifest reads");
+        let prior_log = fs::read(project_root.join("transactions.log")).expect("log reads");
+        let stage =
+            Stage::create_fresh(project_root.join(".derived"), "extrude").expect("stage creates");
+        let request = binding(&snapshot);
+        let bytes = b"host failure matrix result";
+        stage
+            .stage_bytes(&request.staging_name, bytes)
+            .expect("artifact stages");
+        let result = typed_result(
+            &stage
+                .root()
+                .join(format!("{}.partial", request.staging_name)),
+            bytes,
+        );
+        let outcome = completed(&request, &result, bytes);
+        let artifact = host
+            .accept_staged_extrude(stage, &request, &result, outcome)
+            .expect("derived result accepts");
+        let derived = threeterm_host::ExtrudeDerivedResult {
+            source_snapshot: snapshot.clone(),
+            result,
+            artifact,
+        };
+
+        fail_next_publication_at(point);
+        assert!(
+            host.promote_extrude_derived(&project_root, derived)
+                .is_err(),
+            "injected {label} failure rejects promotion"
+        );
+        assert_eq!(
+            fs::read(project_root.join("manifest.json")).unwrap(),
+            prior_manifest
+        );
+        assert_eq!(
+            fs::read(project_root.join("transactions.log")).unwrap(),
+            prior_log
+        );
+        assert_eq!(host.current(), Some(snapshot.clone()));
+        assert!(!project_root.join(".derived").exists());
+
+        let retry_snapshot = host.load(&project_root).expect("prior generation reloads");
+        let retry_stage = Stage::create_fresh(project_root.join(".derived"), "extrude")
+            .expect("retry stage creates");
+        let retry_request = binding(&retry_snapshot);
+        retry_stage
+            .stage_bytes(&retry_request.staging_name, bytes)
+            .expect("retry artifact stages");
+        let retry_result = typed_result(
+            &retry_stage
+                .root()
+                .join(format!("{}.partial", retry_request.staging_name)),
+            bytes,
+        );
+        let retry_outcome = completed(&retry_request, &retry_result, bytes);
+        let retry_artifact = host
+            .accept_staged_extrude(retry_stage, &retry_request, &retry_result, retry_outcome)
+            .expect("retry derived result accepts");
+        host.promote_extrude_derived(
+            &project_root,
+            threeterm_host::ExtrudeDerivedResult {
+                source_snapshot: retry_snapshot,
+                result: retry_result,
+                artifact: retry_artifact,
+            },
+        )
+        .expect("retry promotion succeeds");
+        assert!(project_root.join("brep/extrude-1.brep").is_file());
+        assert!(!project_root.join(".derived").exists());
+        let _ = fs::remove_dir_all(project_root);
+    }
 }
 
 #[test]

@@ -2896,6 +2896,7 @@ impl Host {
         let source_snapshot = derived.source_snapshot.clone();
         let worker_fingerprint = derived.artifact.worker_fingerprint.clone();
         let feature_id = derived.artifact.feature_id.clone();
+        let cache_key = derived.artifact.cache_key.clone();
         let final_name = derived
             .artifact
             .path
@@ -2907,6 +2908,7 @@ impl Host {
             .to_string();
         if stage_root.join(&final_name) != derived.artifact.path {
             let _ = stage.discard();
+            self.layer1_results.borrow_mut().remove(&cache_key);
             let _ = fs::remove_dir(&derived_root);
             return Err(HostError::DerivedResult {
                 diagnostic: Diagnostic::artifact_promotion_failure(
@@ -2919,6 +2921,7 @@ impl Host {
             Ok(current) => current,
             Err(error) => {
                 let _ = stage.discard();
+                self.layer1_results.borrow_mut().remove(&cache_key);
                 let _ = fs::remove_dir(&derived_root);
                 return Err(error.into());
             }
@@ -2927,6 +2930,7 @@ impl Host {
             || derived.artifact.source_revision_id != current.manifest.revision_hash
         {
             let _ = stage.discard();
+            self.layer1_results.borrow_mut().remove(&cache_key);
             let _ = fs::remove_dir(&derived_root);
             return Err(HostError::DerivedResult {
                 diagnostic: Diagnostic::artifact_revision_mismatch(
@@ -2943,6 +2947,7 @@ impl Host {
             Ok(bytes) => bytes,
             Err(error) => {
                 let _ = stage.discard();
+                self.layer1_results.borrow_mut().remove(&cache_key);
                 let _ = fs::remove_dir(&derived_root);
                 return Err(HostError::DerivedResult {
                     diagnostic: artifact_error_diagnostic(&error),
@@ -2954,6 +2959,7 @@ impl Host {
                 diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
             });
         }
+        self.layer1_results.borrow_mut().remove(&cache_key);
         let _ = fs::remove_dir(&derived_root);
 
         let bundle = Bundle::at(&root);

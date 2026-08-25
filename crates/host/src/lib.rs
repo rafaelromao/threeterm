@@ -2912,9 +2912,15 @@ impl Host {
         // Exclusion policy: never cache Command Drafts, hover/pointer/candidate,
         // stale last-valid geometry, preview-only beyond session, worker internals.
         if is_layer1_excluded(request) {
-            return Err(reject(Diagnostic::artifact_promotion_failure(
-                "excluded_layer1_artifact: draft/hover/candidate/pointer/stale/preview-only/worker-internal/tmp/stderr",
-            )));
+            return Err(reject_staged_artifact(
+                stage,
+                &request.staging_name,
+                &header_staging_name,
+                Diagnostic::artifact_promotion_failure(
+                    "excluded_layer1_artifact: draft/hover/candidate/pointer/stale/preview-only/worker-internal/tmp/stderr",
+                ),
+                discard_stage_on_error,
+            ));
         }
         let expected_cache_key = Layer1CacheKey::issue(request, expected_worker);
         if request.source_revision_id != current.revision_hash

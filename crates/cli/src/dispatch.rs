@@ -4854,7 +4854,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::StaleLastValidGeometry { .. } => {
             (Diagnostic::invalid_request(&detail), EXIT_BREP_INVALID)
         }
-        HostError::DerivedResult { diagnostic } => (diagnostic, EXIT_BREP_INVALID),
+        HostError::DerivedResult { diagnostic } => (diagnostic.clone(), EXIT_BREP_INVALID),
         _ => (
             Diagnostic::integrity_failure(&detail),
             EXIT_INTEGRITY_FAILURE,

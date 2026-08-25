@@ -411,7 +411,7 @@ impl OcctWorker {
                     .to_string(),
             });
         }
-        let bytes = match bounded_serialize(request, "extrude") {
+        let bytes = match bounded_serialize(request, "extrude", &request.request_id) {
             Ok(bytes) => bytes,
             Err(error) => {
                 let _ = stage.discard();
@@ -456,7 +456,7 @@ impl OcctWorker {
             outcome,
             stage,
         })
-}
+    }
     /// Extrude `request` with a cooperative cancellation token. The
     /// caller sets the token to request cancellation; the supervisor
     /// sends `Cancel`, waits the grace period for the worker's
@@ -878,6 +878,7 @@ impl OcctWorker {
                 return Err(WorkerError::Spawn {
                     binary: self.binary_path.clone(),
                     detail: error.to_string(),
+                    request_id: Some(context.request_id.clone()),
                 });
             }
         };

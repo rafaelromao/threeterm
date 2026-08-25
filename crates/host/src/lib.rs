@@ -153,13 +153,13 @@ fn publish_export_artifacts(staged: &[(PathBuf, PathBuf)]) -> Result<Vec<PathBuf
     }
     let mut published = Vec::with_capacity(staged.len());
     for (source, destination) in staged {
-        if let Some(parent) = destination.parent() {
-            if let Err(error) = fs::create_dir_all(parent) {
-                rollback_export_artifacts(&published, &previous);
-                return Err(HostError::BrepIo {
-                    detail: error.to_string(),
-                });
-            }
+        if let Some(parent) = destination.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            rollback_export_artifacts(&published, &previous);
+            return Err(HostError::BrepIo {
+                detail: error.to_string(),
+            });
         }
         if let Err(error) = fs::rename(source, destination) {
             rollback_export_artifacts(&published, &previous);
@@ -799,9 +799,8 @@ impl Host {
                 prior.revision_hash_hex(),
                 &stage.join(format!("{feature_id}.3mf")),
             )
-            .map_err(|error| {
+            .inspect_err(|_| {
                 let _ = fs::remove_dir_all(&stage);
-                error
             })?;
         }
         let staged_artifacts = formats
@@ -816,9 +815,8 @@ impl Host {
                 (source, output_dir.join(format!("{feature_id}.{format}")))
             })
             .collect::<Vec<_>>();
-        let artifacts = publish_export_artifacts(&staged_artifacts).map_err(|error| {
+        let artifacts = publish_export_artifacts(&staged_artifacts).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
-            error
         })?;
         let _ = fs::remove_dir_all(stage);
         Ok(ExportCommitView {

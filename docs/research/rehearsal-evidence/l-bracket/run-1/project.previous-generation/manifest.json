@@ -1,0 +1,15 @@
+{
+  "schema_version": "threeterm.persistence/1",
+  "schema_generation": 1,
+  "generation_id": "23fb461c2bfed181d3d4b38a852a97148a5dcacdc33a05f6664eb5bdf6ac48da",
+  "revision_id": "revision-0",
+  "revision_count": 1,
+  "transaction_count": 4,
+  "transaction_bytes": 2870,
+  "transaction_sha256": "660333fafdb562a0948cc8cbe50598c96052a3da963e7cf32e487511a4cd7919",
+  "terminal_log_digest": "23fb461c2bfed181d3d4b38a852a97148a5dcacdc33a05f6664eb5bdf6ac48da",
+  "feature_graph_hash": "47abb91f6041d5b1b9f645b41d7d33e05d1730f2b35bf8be9f1fcec380ca8413",
+  "revision_hash": "24bd8c53948b3ed2ac7c96aada8105fdbf2439c51e074f41272eb904f2b0780f",
+  "canonical_root_sha256": "2e7b81fae00d00d4bd32fc3b023b92f2b0dabe5f43e045c2ef131f8cf395447f",
+  "seal_sha256": "e0758496d2ee10df54ef4f8f7c974088b3c23d1957fd88c2e28de54cfcef63f2"
+}

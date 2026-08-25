@@ -38,10 +38,11 @@ fn binding(snapshot: &threeterm_host::SnapshotView) -> Layer1ArtifactRequest {
     }
 }
 
-fn typed_result(path: &Path, bytes: &[u8]) -> ExtrudeResult {
+fn typed_result(path: &Path, bytes: &[u8], source_revision_id: &str) -> ExtrudeResult {
     ExtrudeResult {
         schema_version: SCHEMA_VERSION.to_string(),
         request_id: "request-1".to_string(),
+        source_revision_id: Some(source_revision_id.to_string()),
         operation: Operation::Extrude,
         status: "ok".to_string(),
         brep_path: path.to_path_buf(),
@@ -104,6 +105,7 @@ fn staged_fixture(
             .root()
             .join(format!("{}.partial", request.staging_name)),
         bytes,
+        &request.source_revision_id,
     );
     let outcome = completed(&request, &result, bytes);
     (stage, request, result, outcome)
@@ -149,7 +151,7 @@ deterministic_settings_sha256=$(printf '%s\n' "$request" | sed -n 's/.*"determin
 printf 'fake-brep' > "$output_dir/$output_filename"
 printf '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"%s","stage":"computed","percent":100}\n' "$request_id"
 printf '{"kind":"artifact","schema_version":"threeterm.protocol/1","header":{"request_id":"%s","source_revision_id":"%s","operation":"extrude","feature_id":"%s","cache_key":{"source_revision_id":"%s","worker_fingerprint":{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"},"operation":"extrude","feature_id":"%s","artifact_kind":"brep","semantic_input_sha256":"%s","deterministic_settings_sha256":"%s"},"worker_fingerprint":{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"},"artifact_kind":"brep","staging_name":"%s","byte_count":9,"sha256":"4eb93fc60c4cd82be45d7386c4ced9eda15ab698c19849a4860184e81c06702e"}}\n' "$request_id" "$source_revision_id" "$feature_id" "$source_revision_id" "$feature_id" "$semantic_input_sha256" "$deterministic_settings_sha256" "$staging_name"
-printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{"schema_version":"threeterm.workers.occt/1","request_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"4eb93fc60c4cd82be45d7386c4ced9eda15ab698c19849a4860184e81c06702e","brep_bytes":9,"feature_id":"%s"}}\n' "$request_id" "$request_id" "$output_dir" "$output_filename" "$feature_id"
+printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"4eb93fc60c4cd82be45d7386c4ced9eda15ab698c19849a4860184e81c06702e","brep_bytes":9,"feature_id":"%s"}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$output_filename" "$feature_id"
 "##,
     )
     .expect("worker script writes");
@@ -192,6 +194,35 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
         log_before
     );
 
+    assert_eq!(
+        result.result.source_revision_id.as_deref(),
+        Some(snapshot.revision_hash.as_str())
+    );
+    let newer = host
+        .save(&project_root, "unrelated", "marker")
+        .expect("unrelated revision saves");
+    let stale_error = host
+        .promote_extrude_derived(&project_root, result)
+        .expect_err("late production result is stale");
+    let diagnostic = match stale_error {
+        threeterm_host::HostError::DerivedResult { diagnostic } => diagnostic,
+        other => panic!("expected stale diagnostic, got {other:?}"),
+    };
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactRevisionMismatch);
+    let retained = host
+        .retained_stale_last_valid_geometry("feature-stage-host")
+        .expect("late production result is retained");
+    assert_eq!(retained.bytes, b"fake-brep");
+    assert!(!retained.authoritative);
+    assert_eq!(host.current(), Some(newer.clone()));
+    assert_eq!(
+        Host::new()
+            .load(&project_root)
+            .expect("newer revision reloads"),
+        newer
+    );
+    assert!(!project_root.join("brep/feature-stage-host.brep").exists());
+
     let _ = std::fs::remove_dir_all(project_root);
     let _ = std::fs::remove_dir_all(worker_root);
 }
@@ -220,7 +251,11 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
             .is_file(),
         "staged artifact exists before acceptance"
     );
-    let result = typed_result(&stage.root().join("extrude-1.brep.partial"), &bytes);
+    let result = typed_result(
+        &stage.root().join("extrude-1.brep.partial"),
+        &bytes,
+        &request.source_revision_id,
+    );
     let outcome = completed(&request, &result, &bytes);
 
     let artifact = host
@@ -252,6 +287,29 @@ fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state(
 }
 
 #[test]
+fn staged_extrude_requires_result_source_revision_identity() {
+    let project_root = temp_root("missing-result-revision-project");
+    let host = Host::new();
+    let (stage, request, mut result, mut outcome) =
+        staged_fixture(&host, &project_root, "missing-result-revision-stage");
+
+    result.source_revision_id = None;
+    replace_completion_result(&mut outcome, &result);
+    let diagnostic = host
+        .accept_staged_extrude(stage, &request, &result, outcome)
+        .expect_err("staged result without source revision is rejected");
+
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactRevisionMismatch);
+    assert_eq!(diagnostic.arg, "typed_result_source_revision_mismatch");
+    assert_eq!(
+        diagnostic.schema_version,
+        threeterm_protocol::schema_version()
+    );
+
+    let _ = fs::remove_dir_all(project_root);
+}
+
+#[test]
 fn host_promotes_one_validated_extrude_into_the_next_openable_generation() {
     let project_root = temp_root("promote-project");
     let host = Host::new();
@@ -270,6 +328,7 @@ fn host_promotes_one_validated_extrude_into_the_next_openable_generation() {
             .root()
             .join(format!("{}.partial", request.staging_name)),
         bytes,
+        &request.source_revision_id,
     );
     let outcome = completed(&request, &result, bytes);
     let artifact = host
@@ -340,6 +399,7 @@ fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
             .root()
             .join(format!("{}.partial", request.staging_name)),
         bytes,
+        &request.source_revision_id,
     );
     let artifact = host
         .accept_staged_extrude(
@@ -350,7 +410,7 @@ fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
         )
         .expect("derived result accepts");
     let derived = threeterm_host::ExtrudeDerivedResult {
-        source_snapshot: snapshot,
+        source_snapshot: snapshot.clone(),
         result,
         artifact,
     };
@@ -363,10 +423,16 @@ fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
     let error = host
         .promote_extrude_derived(&project_root, derived)
         .expect_err("stale result rejects");
-    assert!(matches!(
-        error,
-        threeterm_host::HostError::DerivedResult { .. }
-    ));
+    let diagnostic = match error {
+        threeterm_host::HostError::DerivedResult { diagnostic } => diagnostic,
+        other => panic!("expected structured stale diagnostic, got {other:?}"),
+    };
+    assert_eq!(diagnostic.code, DiagnosticCode::ArtifactRevisionMismatch);
+    assert_eq!(diagnostic.arg, "derived_artifact_source_revision_mismatch");
+    assert_eq!(
+        diagnostic.schema_version,
+        threeterm_protocol::schema_version()
+    );
     assert_eq!(
         fs::read(project_root.join("manifest.json")).unwrap(),
         manifest
@@ -375,8 +441,36 @@ fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
         fs::read(project_root.join("transactions.log")).unwrap(),
         log
     );
-    assert_eq!(host.current(), Some(newer));
+    assert_eq!(host.current(), Some(newer.clone()));
     assert!(!project_root.join(".derived").exists());
+    let retained = host
+        .retained_stale_last_valid_geometry("extrude-1")
+        .expect("stale geometry is retained");
+    assert_eq!(retained.source_revision_id, snapshot.revision_hash);
+    assert_eq!(retained.current_revision_id, newer.revision_hash);
+    assert_eq!(retained.feature_id, "extrude-1");
+    assert_eq!(retained.bytes, bytes);
+    assert_eq!(retained.sha256, sha256_hex(bytes));
+    assert!(!retained.authoritative);
+    assert_eq!(
+        retained.diagnostic_code,
+        DiagnosticCode::ArtifactRevisionMismatch
+    );
+
+    let reloaded = Host::new();
+    assert_eq!(
+        reloaded
+            .load(&project_root)
+            .expect("newer generation reloads"),
+        newer
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("transactions.log"))
+            .unwrap()
+            .matches("brep:extrude-1")
+            .count(),
+        0
+    );
 
     let _ = fs::remove_dir_all(project_root);
 }
@@ -410,6 +504,7 @@ fn host_promotion_failure_matrix_preserves_the_generation_and_retries_cleanly() 
                 .root()
                 .join(format!("{}.partial", request.staging_name)),
             bytes,
+            &request.source_revision_id,
         );
         let outcome = completed(&request, &result, bytes);
         let artifact = host
@@ -450,6 +545,7 @@ fn host_promotion_failure_matrix_preserves_the_generation_and_retries_cleanly() 
                 .root()
                 .join(format!("{}.partial", retry_request.staging_name)),
             bytes,
+            &retry_request.source_revision_id,
         );
         let retry_outcome = completed(&retry_request, &retry_result, bytes);
         let retry_artifact = host
@@ -489,6 +585,7 @@ fn host_reuses_a_valid_cached_extrude_without_orphaning_the_first_stage() {
             .root()
             .join(format!("{}.partial", request.staging_name)),
         first_bytes,
+        &request.source_revision_id,
     );
     let first = host
         .accept_staged_extrude(
@@ -509,6 +606,7 @@ fn host_reuses_a_valid_cached_extrude_without_orphaning_the_first_stage() {
             .root()
             .join(format!("{}.partial", request.staging_name)),
         second_bytes,
+        &request.source_revision_id,
     );
     let repeated = host
         .accept_staged_extrude(
@@ -557,6 +655,7 @@ fn host_acceptance_keeps_using_the_owned_stage_after_an_ancestor_replacement() {
             .root()
             .join(format!("{}.partial", request.staging_name)),
         original_bytes,
+        &request.source_revision_id,
     );
     let mut outcome = completed(&request, &result, original_bytes);
     let stage_name = stage

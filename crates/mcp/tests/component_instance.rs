@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_occt_worker::OcctWorker;
 
 fn bundle() -> PathBuf {
     let nonce = SystemTime::now()
@@ -183,6 +184,9 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
 
 #[test]
 fn captured_definition_survives_recompute_and_is_reusable() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = bundle();
     let root_text = root.to_string_lossy().into_owned();
     cli_command(
@@ -273,6 +277,9 @@ fn captured_definition_survives_recompute_and_is_reusable() {
 
 #[test]
 fn invalid_capture_preserves_the_canonical_bundle() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = bundle();
     cli_command(
         "bracket",

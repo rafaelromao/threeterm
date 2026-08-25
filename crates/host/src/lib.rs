@@ -331,6 +331,7 @@ pub enum HostError {
     DraftUnknownOutcome {
         draft_id: String,
         source_revision: String,
+        current_revision: String,
         recovery: &'static str,
     },
 }
@@ -436,10 +437,11 @@ impl std::fmt::Display for HostError {
             Self::DraftUnknownOutcome {
                 draft_id,
                 source_revision,
+                current_revision,
                 recovery,
             } => write!(
                 formatter,
-                "command draft {draft_id} has unknown publication outcome: source_revision={source_revision} recovery={recovery}"
+                "command draft {draft_id} has unknown publication outcome: source_revision={source_revision} current_revision={current_revision} recovery={recovery}"
             ),
         }
     }
@@ -1626,6 +1628,26 @@ impl Host {
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                if let Ok(committed) = Bundle::at(&root).open()
+                    && committed.log.entries().iter().any(|entry| {
+                        entry.idempotency_key.as_deref() == Some(draft_id)
+                            && entry.feature_id == draft.bracket_id
+                            && entry.kind == kind
+                            && entry.idempotency_payload.as_deref()
+                                == Some(input_fingerprint.as_str())
+                    })
+                    && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
+                        == Some(result.brep_sha256.clone())
+                {
+                    let snapshot = SnapshotView::from(&committed);
+                    self.current.replace(Some(committed));
+                    self.bracket_drafts.borrow_mut().remove(&draft_key);
+                    remove_preview_stage(&stage);
+                    return Ok(BracketCommitView {
+                        snapshot,
+                        input_fingerprint,
+                    });
+                }
                 if matches!(&error, HostError::Persistence(BundleError::Invalid(_)))
                     && let Ok(current) = Bundle::at(&root).open()
                 {
@@ -1662,29 +1684,6 @@ impl Host {
                         });
                     }
                 }
-                // Parent-sync failures can report after publication. Resolve
-                // that durable outcome by looking up the same semantic key
-                // before retrying or surfacing a failure.
-                if let Ok(committed) = Bundle::at(&root).open()
-                    && committed.log.entries().iter().any(|entry| {
-                        entry.idempotency_key.as_deref() == Some(draft_id)
-                            && entry.feature_id == draft.bracket_id
-                            && entry.kind == kind
-                            && entry.idempotency_payload.as_deref()
-                                == Some(input_fingerprint.as_str())
-                    })
-                    && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
-                        == Some(result.brep_sha256.clone())
-                {
-                    let snapshot = SnapshotView::from(&committed);
-                    self.current.replace(Some(committed));
-                    self.bracket_drafts.borrow_mut().remove(&draft_key);
-                    remove_preview_stage(&stage);
-                    return Ok(BracketCommitView {
-                        snapshot,
-                        input_fingerprint,
-                    });
-                }
                 remove_preview_stage(&stage);
                 if matches!(
                     &error,
@@ -1694,6 +1693,10 @@ impl Host {
                     return Err(HostError::DraftUnknownOutcome {
                         draft_id: draft_id.to_string(),
                         source_revision: draft.source_revision.clone(),
+                        current_revision: Bundle::at(&root)
+                            .open()
+                            .map(|current| current.revision_hash_hex().to_string())
+                            .unwrap_or_else(|_| draft.source_revision.clone()),
                         recovery: "retry_same_idempotency_key",
                     });
                 }

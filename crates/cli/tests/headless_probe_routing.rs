@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use threeterm_occt_worker::OcctWorker;
+
 fn temporary_bundle_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -18,6 +20,10 @@ fn dispatch(args: Vec<OsString>) -> (i32, Vec<u8>, Vec<u8>) {
 
 #[test]
 fn cli_bracket_headless_succeeds_even_when_interactive_probe_would_fail() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("headless_probe_routing: OCCT worker unavailable");
+        return;
+    }
     // This test proves Headless Automation is unblocked even when the
     // unattached terminal capability probe would refuse Interactive Modeling.
     // The CLI does not require a Ghostty probe — it reuses the same Host

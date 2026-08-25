@@ -10,9 +10,9 @@ use threeterm_domain::{
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    RevolveRequest, ShellRequest,
+    BooleanFuseRequest, BracketRequest, ChamferRequest, CircularPatternRequest, DraftRequest,
+    ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
+    OcctWorker, Operation, RevolveRequest, ShellRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
@@ -2866,7 +2866,14 @@ fn dispatch_bracket_with_host(
     height: f64,
     thickness: f64,
 ) -> Result<SnapshotView, DispatchError> {
-    host.save_bracket(bundle, bracket_id, length, width, height, thickness)
+    let worker = OcctWorker::locate().map_err(|error| {
+        DispatchError::Host(HostError::WorkerUnavailable {
+            detail: error.to_string(),
+        })
+    })?;
+    let request = BracketRequest::new(new_request_id(), length, width, height, thickness)
+        .with_feature_id(bracket_id);
+    host.create_bracket(bundle, request, &worker)
         .map_err(DispatchError::from)
 }
 
@@ -4427,9 +4434,10 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DraftUnknownOutcome {
             draft_id,
             source_revision,
+            current_revision,
             recovery,
         } => format!(
-            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"recovery\":{recovery:?}}}"
+            "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
         HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
             "kind": "worker_terminated",

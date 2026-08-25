@@ -550,6 +550,7 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     });
     let status = if let HostError::DraftUnknownOutcome {
         source_revision: authoritative_source,
+        current_revision,
         recovery,
         ..
     } = error
@@ -557,6 +558,7 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         diagnostic["kind"] = Value::String("bracket_edit_unknown_outcome".to_string());
         diagnostic["recovery"] = Value::String((*recovery).to_string());
         diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+        diagnostic["current_revision"] = Value::String(current_revision.clone());
         source_revision = authoritative_source.clone();
         "unknown"
     } else {
@@ -613,6 +615,17 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
             ..
         }
         | HostError::DraftInputConflict {
+            source_revision: authoritative_source,
+            current_revision,
+            recovery,
+            ..
+        } => {
+            source_revision = authoritative_source.clone();
+            diagnostic["source_revision"] = Value::String(authoritative_source.clone());
+            diagnostic["recovery"] = Value::String((*recovery).to_string());
+            Some(current_revision.as_str())
+        }
+        HostError::DraftUnknownOutcome {
             source_revision: authoritative_source,
             current_revision,
             recovery,

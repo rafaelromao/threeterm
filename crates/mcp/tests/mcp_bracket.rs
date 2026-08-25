@@ -21,9 +21,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use threeterm_host::Host;
-use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
-use threeterm_persistence::Bundle;
+use threeterm_occt_worker::OcctWorker;
 
 fn fresh_bundle(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -260,14 +258,28 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
         return;
     }
     let root = fresh_bundle("bracket-edit-lifecycle");
-    Bundle::create(&root).expect("bundle creates");
-    Host::new()
-        .create_bracket(
-            &root,
-            BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("l-1"),
-            &OcctWorker::locate().expect("worker locates"),
-        )
-        .expect("initial bracket commits");
+    let seeded = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(&root)
+        .args([
+            "--bracket-id",
+            "l-1",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("seed bracket process runs");
+    assert!(
+        seeded.status.success(),
+        "seed bracket stderr: {}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
     let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
     let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
     let brep_before = std::fs::read(root.join("brep/l-1.brep")).expect("brep reads");
@@ -354,6 +366,9 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
 
 #[test]
 fn tools_call_rejects_invalid_arguments_with_invalid_params_code() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = fresh_bundle("invalid-args");
 
     let seeded = Command::new(threeterm_binary())
@@ -457,6 +472,9 @@ fn tools_call_rejects_unknown_tool_with_method_not_found_code() {
 
 #[test]
 fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = fresh_bundle("tampered");
 
     let seeded = Command::new(threeterm_binary())
@@ -533,6 +551,9 @@ fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
 
 #[test]
 fn tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = fresh_bundle("empty-bracket-id");
 
     let seeded = Command::new(threeterm_binary())
@@ -602,6 +623,9 @@ fn tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params(
 
 #[test]
 fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = fresh_bundle("non-positive-length");
 
     let seeded = Command::new(threeterm_binary())
@@ -671,6 +695,9 @@ fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params(
 
 #[test]
 fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = fresh_bundle("timeline");
     let seeded = Command::new(threeterm_binary())
         .args(["--machine", "bracket"])

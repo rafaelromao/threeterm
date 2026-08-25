@@ -9,6 +9,7 @@ use serde_json::Value;
 use threeterm_cli::dispatch::{dispatch, dispatch_lua_key};
 use threeterm_host::Host;
 use threeterm_lua_bridge::{LuaConfigWatcher, LuaReloadStatus};
+use threeterm_occt_worker::OcctWorker;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
@@ -50,6 +51,9 @@ fn run_lua_file(config: &Path) -> Output {
 
 #[test]
 fn lua_f2_produces_the_same_bracket_response_as_the_cli() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let cli_root = temp_path("cli");
     let lua_root = temp_path("lua");
     let cli_args = [
@@ -95,6 +99,9 @@ fn lua_f2_produces_the_same_bracket_response_as_the_cli() {
 
 #[test]
 fn lua_dispatch_failure_preserves_the_host_canonical_state() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let root = temp_path("state");
     let blocked = temp_path("blocked");
     fs::write(&blocked, b"not a bundle directory").expect("blocked path writes");
@@ -122,6 +129,9 @@ fn lua_dispatch_failure_preserves_the_host_canonical_state() {
 }
 #[test]
 fn saving_lua_config_reloads_the_binding_on_the_production_dispatch_path() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let config = temp_path("reload-config");
     let first_root = temp_path("reload-first");
     let second_root = temp_path("reload-second");
@@ -147,6 +157,9 @@ fn saving_lua_config_reloads_the_binding_on_the_production_dispatch_path() {
 
 #[test]
 fn failed_reload_reports_diagnostic_and_preserves_the_last_valid_host_state() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let config = temp_path("failed-reload-config");
     let root = temp_path("failed-reload-root");
     fs::write(&config, bracket_lua(&root)).expect("initial Lua config writes");
@@ -189,6 +202,9 @@ fn failed_reload_reports_diagnostic_and_preserves_the_last_valid_host_state() {
 
 #[test]
 fn atomic_config_replacement_is_detected_by_the_file_backed_watcher() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let config = temp_path("atomic-config");
     let replacement = temp_path("atomic-replacement");
     let first_root = temp_path("atomic-first");
@@ -247,6 +263,9 @@ fn restoring_the_active_config_clears_a_read_failure_diagnostic() {
 
 #[test]
 fn the_shipped_cli_dispatches_the_file_backed_lua_path() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let config = temp_path("binary-config");
     let first_root = temp_path("binary-first");
     let second_root = temp_path("binary-second");
@@ -279,6 +298,9 @@ fn the_shipped_cli_dispatches_the_file_backed_lua_path() {
 
 #[test]
 fn the_shipped_cli_keeps_one_lua_session_alive_across_reload_failures() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
     let config = temp_path("session-config");
     let first_root = temp_path("session-first");
     let second_root = temp_path("session-second");

@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 
 fn temp_root() -> PathBuf {
@@ -61,6 +62,10 @@ fn bracket(bin: &str, root: &Path) -> Value {
 
 #[test]
 fn historical_failure_and_named_restore_use_the_production_cli_path() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("historical_recovery_e2e: OCCT worker unavailable");
+        return;
+    }
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     let bracket_response = bracket(bin, &root);

@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{TIMELINE_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
@@ -81,6 +82,10 @@ fn timeline(bin: &str, root: &Path, feature_id: &str) -> Value {
 
 #[test]
 fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("object_specific_timeline_e2e: OCCT worker unavailable");
+        return;
+    }
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     bracket(bin, &root, "first");

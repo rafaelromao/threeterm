@@ -3618,7 +3618,7 @@ impl Host {
             }
         };
         self.layer1_results.borrow_mut().remove(&cache_key);
-        let _ = fs::remove_dir(&derived_root);
+        let _ = fs::remove_dir_all(&derived_root);
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         let mut result = derived.result;

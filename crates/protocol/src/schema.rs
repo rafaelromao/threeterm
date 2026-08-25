@@ -943,6 +943,33 @@ pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status": { "type": "string" },
             "feature_id": { "type": "string" },
             "artifacts": { "type": "array" },
+            "derived_artifacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "source_revision_id",
+                        "operation",
+                        "feature_id",
+                        "artifact_kind",
+                        "artifact_name",
+                        "byte_count",
+                        "sha256"
+                    ],
+                    "properties": {
+                        "request_id": { "type": "string", "minLength": 1 },
+                        "source_revision_id": { "type": "string", "minLength": 1 },
+                        "operation": { "type": "string", "minLength": 1 },
+                        "feature_id": { "type": "string", "minLength": 1 },
+                        "artifact_kind": { "type": "string", "minLength": 1 },
+                        "artifact_name": { "type": "string", "minLength": 1 },
+                        "byte_count": { "type": "integer", "minimum": 0 },
+                        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                    },
+                    "additionalProperties": false
+                }
+            },
             "accepted_stale_last_valid_geometry": { "type": "boolean" },
             "stale_last_valid_geometry": {
                 "type": "object",

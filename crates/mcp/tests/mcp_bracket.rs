@@ -15,9 +15,9 @@
 //!   schema with `code: -32602` and preserves canonical host state.
 //! - `tools/call` rejects unknown tool names with `code: -32601`.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -95,6 +95,63 @@ fn run_mcp(requests: &[Value]) -> Vec<Value> {
         responses.push(parsed);
     }
     responses
+}
+
+struct McpSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr: ChildStderr,
+}
+
+impl McpSession {
+    fn spawn() -> Self {
+        let mut child = Command::new(threeterm_mcp_binary())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("threeterm-mcp session runs");
+        Self {
+            stdin: child.stdin.take().expect("session stdin is captured"),
+            stdout: BufReader::new(child.stdout.take().expect("session stdout is captured")),
+            stderr: child.stderr.take().expect("session stderr is captured"),
+            child,
+        }
+    }
+
+    fn send(&mut self, request: &Value) -> Value {
+        let mut bytes = serde_json::to_vec(request).expect("request serializes");
+        bytes.push(b'\n');
+        self.stdin
+            .write_all(&bytes)
+            .expect("session request writes");
+        self.stdin.flush().expect("session request flushes");
+        let mut line = Vec::new();
+        self.stdout
+            .read_until(b'\n', &mut line)
+            .expect("session response reads");
+        serde_json::from_slice(&line).expect("session response is JSON")
+    }
+
+    fn finish(mut self) {
+        drop(self.stdin);
+        let status = self.child.wait().expect("mcp session completes");
+        let mut stderr = Vec::new();
+        self.stderr
+            .read_to_end(&mut stderr)
+            .expect("session stderr reads");
+        assert!(
+            status.success(),
+            "mcp session exited non-zero: stderr={}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            stderr.is_empty(),
+            "stderr must be empty on success: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
 }
 
 fn structured(responses: &[Value], index: usize) -> &Value {
@@ -344,20 +401,27 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
         std::fs::read(root.join("brep/l-1.brep")).unwrap(),
         brep_before
     );
-    let opened = run_mcp(&[call(4, "open", "edit-commit", 3.0, None)]);
-    let draft_fingerprint = structured(&opened, 0)["input_fingerprint"]
+    let mut session = McpSession::spawn();
+    let opened = session.send(&call(4, "open", "edit-commit", 3.0, None));
+    let draft_fingerprint = opened["result"]["structuredContent"]["input_fingerprint"]
         .as_str()
         .expect("open returns the draft fingerprint")
         .to_string();
     let mut update = call(5, "update", "edit-commit", 4.0, Some(0));
     update["params"]["arguments"]["input_fingerprint"] = draft_fingerprint.into();
-    let committed = run_mcp(&[
-        update,
-        call(6, "preview", "edit-commit", 4.0, None),
-        call(7, "commit", "edit-commit", 4.0, None),
-    ]);
+    let committed = vec![
+        session.send(&update),
+        session.send(&call(6, "preview", "edit-commit", 4.0, None)),
+        session.send(&call(7, "commit", "edit-commit", 4.0, None)),
+    ];
+    session.finish();
     assert_eq!(committed.len(), 3);
-    assert_eq!(structured(&committed, 0)["draft_sequence"], 1);
+    assert_eq!(
+        structured(&committed, 0)["draft_sequence"],
+        1,
+        "update must return the updated draft: {}",
+        committed[0]
+    );
     assert_eq!(structured(&committed, 1)["phase"], "preview");
     assert_eq!(structured(&committed, 2)["phase"], "commit");
     assert_ne!(

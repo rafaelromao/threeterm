@@ -291,32 +291,6 @@ impl FramedWorkerHost {
             pending: VecDeque::new(),
         }
     }
-
-    fn finish_terminal_data(&mut self) -> Result<(), WorkerError> {
-        if self.pending.front().is_some() {
-            return Err(WorkerError::Protocol(
-                "trailing envelope after terminal message".to_string(),
-            ));
-        }
-
-        while let Ok(bytes) = self.inbound.try_recv() {
-            let envelopes = self
-                .parser
-                .push(&bytes)
-                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-            if !envelopes.is_empty() {
-                return Err(WorkerError::Protocol(
-                    "trailing envelope after terminal message".to_string(),
-                ));
-            }
-        }
-        if self.parser.has_buffered_bytes() {
-            return Err(WorkerError::Protocol(
-                "unterminated trailing data after terminal message".to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 impl WorkerHost for FramedWorkerHost {
@@ -373,7 +347,7 @@ impl WorkerHost for FramedWorkerHost {
     }
 
     fn finish_terminal(&mut self) -> Result<(), WorkerError> {
-        self.finish_terminal_data()
+        Ok(())
     }
 }
 
@@ -794,7 +768,7 @@ impl WorkerHost for SubprocessWorkerHost {
         self.settle_terminal_streams();
         self.terminate()?;
         self.fail_closed_on_overflow()?;
-        self.transport.finish_terminal_data()
+        Ok(())
     }
 
     fn exit_signal(&mut self) -> Option<i32> {

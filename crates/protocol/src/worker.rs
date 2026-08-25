@@ -780,6 +780,7 @@ impl WorkerHost for SubprocessWorkerHost {
                 "worker stream readers did not settle before termination",
             )));
         }
+        self.fail_closed_on_overflow()?;
         if let Some(path) = self.containment_cgroup.take() {
             let _ = std::fs::remove_dir(path);
         }

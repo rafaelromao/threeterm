@@ -943,6 +943,29 @@ impl Bundle {
         })
     }
 
+    /// Publish a verified BREP and its initial history event in one sealed
+    /// generation.
+    pub fn append_feature_with_brep_if_revision_and_history(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                None,
+                None,
+                Some(history_event),
+            )
+        })
+    }
+
     /// Variant of BREP promotion that also authenticates the source BREP while
     /// holding the bundle write lock, immediately before staging the new
     /// generation.

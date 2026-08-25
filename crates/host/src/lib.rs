@@ -1516,20 +1516,33 @@ impl Host {
             }
         };
         let kind = bracket_kind(&request);
-        let snapshot = match self.promote_brep_bytes(
-            &root,
+        let history_event = loaded
+            .history
+            .initialize_l_bracket(
+                &request.feature_id,
+                request.length,
+                request.width,
+                request.height,
+                request.thickness,
+            )
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let snapshot = match Bundle::at(&root).append_feature_with_brep_if_revision_and_history(
             &request.feature_id,
             &kind,
             loaded.revision_hash_hex(),
             &bytes,
-            None,
-            None,
-            None,
+            &history_event,
         ) {
-            Ok(snapshot) => snapshot,
+            Ok(updated) => {
+                let snapshot = SnapshotView::from(&updated);
+                self.current.replace(Some(updated));
+                snapshot
+            }
             Err(error) => {
                 remove_preview_stage(&stage);
-                return Err(error);
+                return Err(error.into());
             }
         };
         remove_preview_stage(&stage);

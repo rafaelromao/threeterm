@@ -3443,8 +3443,11 @@ fn emit_export(
                 "status": "ok",
                 "feature_id": feature_id,
                 "artifacts": view.artifacts,
-                "accepted_stale_geometry": !view.stale_acceptance.stale_features.is_empty(),
-                "stale_geometry": view.stale_acceptance,
+                "accepted_stale_last_valid_geometry": !view
+                    .stale_last_valid_geometry_acceptance
+                    .stale_features
+                    .is_empty(),
+                "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
                 "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
             }),
             stderr,

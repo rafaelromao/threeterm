@@ -797,13 +797,13 @@ pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
-        "type": "object", "required": ["status", "feature_id", "artifacts", "accepted_stale_geometry", "stale_geometry", "schema_version"],
+        "type": "object", "required": ["status", "feature_id", "artifacts", "accepted_stale_last_valid_geometry", "stale_last_valid_geometry", "schema_version"],
         "properties": {
             "status": { "type": "string" },
             "feature_id": { "type": "string" },
             "artifacts": { "type": "array" },
-            "accepted_stale_geometry": { "type": "boolean" },
-            "stale_geometry": {
+            "accepted_stale_last_valid_geometry": { "type": "boolean" },
+            "stale_last_valid_geometry": {
                 "type": "object",
                 "required": ["feature_id", "active_revision", "stale_features"],
                 "properties": {

@@ -6,7 +6,7 @@ use threeterm_domain::{
     FeatureGraph,
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
-use threeterm_host::{HistoryCommitView, Host, stale_geometry_for_export};
+use threeterm_host::{HistoryCommitView, Host, stale_last_valid_geometry_for_export};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -491,7 +491,7 @@ pub struct FeatureTimelineRevision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaleGeometryView {
+pub struct StaleLastValidGeometryView {
     pub feature_id: String,
     pub status: String,
     pub active_revision: String,
@@ -552,7 +552,7 @@ pub struct TuiState {
     pub history: HistoryState,
     pub recoverable_revisions: Vec<String>,
     pub feature_timeline: Option<FeatureTimelineView>,
-    pub stale_geometry: Vec<StaleGeometryView>,
+    pub stale_last_valid_geometry: Vec<StaleLastValidGeometryView>,
     pub presentation_generation: u64,
     pub canonical_revision: String,
     pub last_acknowledgement: Option<GestureAcknowledgement>,
@@ -658,7 +658,7 @@ pub struct TuiSession {
     history: HistoryState,
     recoverable_revisions: Vec<String>,
     feature_timeline: Option<FeatureTimelineView>,
-    stale_geometry: Vec<StaleGeometryView>,
+    stale_last_valid_geometry: Vec<StaleLastValidGeometryView>,
     presentation_generation: u64,
     canonical_revision: String,
     acknowledgement_sequence: u64,
@@ -690,7 +690,7 @@ impl TuiSession {
             },
             recoverable_revisions: Vec::new(),
             feature_timeline: None,
-            stale_geometry: Vec::new(),
+            stale_last_valid_geometry: Vec::new(),
             presentation_generation: 0,
             canonical_revision: canonical_revision.as_ref().to_string(),
             acknowledgement_sequence: 0,
@@ -764,7 +764,7 @@ impl TuiSession {
             history: self.history.clone(),
             recoverable_revisions: self.recoverable_revisions.clone(),
             feature_timeline: self.feature_timeline.clone(),
-            stale_geometry: self.stale_geometry.clone(),
+            stale_last_valid_geometry: self.stale_last_valid_geometry.clone(),
             presentation_generation: self.presentation_generation,
             canonical_revision: self.canonical_revision.clone(),
             last_acknowledgement: self.last_acknowledgement.clone(),
@@ -845,25 +845,26 @@ impl TuiSession {
         self.feature_timeline = None;
     }
 
-    pub fn refresh_stale_geometry(
+    pub fn refresh_stale_last_valid_geometry(
         &mut self,
         history: &CanonicalHistoryState,
         export_feature_id: &str,
     ) {
         let active_revision = history.active_snapshot().revision_id.clone();
-        self.stale_geometry = stale_geometry_for_export(history, export_feature_id)
-            .into_iter()
-            .map(|feature| StaleGeometryView {
-                feature_id: feature.feature_id,
-                status: feature.status,
-                active_revision: active_revision.clone(),
-                last_valid_geometry_fingerprint: feature.last_valid_geometry_fingerprint,
-            })
-            .collect();
+        self.stale_last_valid_geometry =
+            stale_last_valid_geometry_for_export(history, export_feature_id)
+                .into_iter()
+                .map(|feature| StaleLastValidGeometryView {
+                    feature_id: feature.feature_id,
+                    status: feature.status,
+                    active_revision: active_revision.clone(),
+                    last_valid_geometry_fingerprint: feature.last_valid_geometry_fingerprint,
+                })
+                .collect();
     }
 
-    pub fn stale_geometry_overlay(&self) -> Option<String> {
-        let first = self.stale_geometry.first()?;
+    pub fn stale_last_valid_geometry_overlay(&self) -> Option<String> {
+        let first = self.stale_last_valid_geometry.first()?;
         Some(format!(
             "[warning-glyph] stale-last-valid-geometry feature={} status={} revision={} last_valid={}",
             first.feature_id,
@@ -2496,7 +2497,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.tui.state()
     }
 
-    pub fn refresh_stale_geometry(
+    pub fn refresh_stale_last_valid_geometry(
         &mut self,
         host: &Host,
         root: impl AsRef<Path>,
@@ -2512,7 +2513,8 @@ impl<R: Renderer> TuiViewportSession<R> {
             )),
             from: Some("stale-geometry-refresh".to_string()),
         })?;
-        self.tui.refresh_stale_geometry(&history, export_feature_id);
+        self.tui
+            .refresh_stale_last_valid_geometry(&history, export_feature_id);
         Ok(())
     }
 

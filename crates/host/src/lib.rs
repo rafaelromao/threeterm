@@ -308,23 +308,23 @@ pub struct ReplayVerification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StaleGeometryEntry {
+pub struct StaleLastValidGeometryEntry {
     pub feature_id: String,
     pub status: String,
     pub last_valid_geometry_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StaleGeometryAcceptance {
+pub struct StaleLastValidGeometryAcceptance {
     pub feature_id: String,
     pub active_revision: String,
-    pub stale_features: Vec<StaleGeometryEntry>,
+    pub stale_features: Vec<StaleLastValidGeometryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCommitView {
     pub artifacts: Vec<PathBuf>,
-    pub stale_acceptance: StaleGeometryAcceptance,
+    pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -347,7 +347,7 @@ pub enum HostError {
     StaleLastValidGeometry {
         feature_id: String,
         active_revision: String,
-        stale_features: Vec<StaleGeometryEntry>,
+        stale_features: Vec<StaleLastValidGeometryEntry>,
     },
     Persistence(BundleError),
     WorkerFailure {
@@ -559,7 +559,7 @@ impl Host {
             });
         }
         let prior = Bundle::at(root).open()?;
-        let stale_features = stale_geometry_for_export(&prior.history, feature_id);
+        let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
         if !stale_features.is_empty() && !accept_stale_geometry {
             return Err(HostError::StaleLastValidGeometry {
                 feature_id: feature_id.to_string(),
@@ -623,7 +623,7 @@ impl Host {
         let _ = fs::remove_dir_all(stage);
         Ok(ExportCommitView {
             artifacts,
-            stale_acceptance: StaleGeometryAcceptance {
+            stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance {
                 feature_id: feature_id.to_string(),
                 active_revision: prior.history.active_snapshot().revision_id.clone(),
                 stale_features,
@@ -2134,10 +2134,10 @@ fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
     None
 }
 
-pub fn stale_geometry_for_export(
+pub fn stale_last_valid_geometry_for_export(
     history: &HistoryState,
     export_feature_id: &str,
-) -> Vec<StaleGeometryEntry> {
+) -> Vec<StaleLastValidGeometryEntry> {
     let snapshot = history.active_snapshot();
     let mut candidates = BTreeSet::new();
     if snapshot.features.contains_key(export_feature_id) {
@@ -2159,7 +2159,7 @@ pub fn stale_geometry_for_export(
                 HistoryStatus::BlockedByFailure => "blocked-by-failure",
                 _ => return None,
             };
-            Some(StaleGeometryEntry {
+            Some(StaleLastValidGeometryEntry {
                 feature_id,
                 status: status.to_string(),
                 last_valid_geometry_fingerprint: feature

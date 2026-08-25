@@ -369,9 +369,9 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
     let before = host.load(&bundle).expect("canonical state reloads");
     let history = host.history(&bundle).expect("history reloads");
     let mut tui = TuiSession::new([], "before-refresh");
-    tui.refresh_stale_geometry(&history, "l-bracket");
+    tui.refresh_stale_last_valid_geometry(&history, "l-bracket");
     let stale_overlay = tui
-        .stale_geometry_overlay()
+        .stale_last_valid_geometry_overlay()
         .expect("TUI exposes stale marker");
     assert!(stale_overlay.contains("stale-last-valid-geometry"));
     assert!(stale_overlay.contains("l-bracket-base"));
@@ -432,8 +432,11 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
                 "--accept-stale-geometry",
             ],
         );
-        assert_eq!(accepted["accepted_stale_geometry"], true);
-        assert_eq!(accepted["stale_geometry"]["feature_id"], "l-bracket");
+        assert_eq!(accepted["accepted_stale_last_valid_geometry"], true);
+        assert_eq!(
+            accepted["stale_last_valid_geometry"]["feature_id"],
+            "l-bracket"
+        );
         assert!(output.join("l-bracket.stl").is_file());
         assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
         assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);

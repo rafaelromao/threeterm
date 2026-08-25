@@ -559,6 +559,18 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
         "detail": error.to_string(),
         "recovery": "inspect_diagnostic_and_reopen",
     });
+    if matches!(error, HostError::DraftAlreadyExists { .. }) {
+        let current_revision = arguments
+            .get("bundle_path")
+            .and_then(Value::as_str)
+            .and_then(|bundle| Bundle::at(bundle).open().ok())
+            .map(|loaded| loaded.revision_hash_hex().to_string())
+            .unwrap_or_else(|| source_revision.clone());
+        diagnostic["kind"] = Value::String("draft_input_conflict".to_string());
+        diagnostic["source_revision"] = Value::String(current_revision.clone());
+        diagnostic["current_revision"] = Value::String(current_revision);
+        diagnostic["recovery"] = Value::String("use_update_or_refresh_draft".to_string());
+    }
     let status = if let HostError::DraftUnknownOutcome {
         source_revision: authoritative_source,
         current_revision,

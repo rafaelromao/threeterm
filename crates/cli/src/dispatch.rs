@@ -2903,17 +2903,23 @@ pub fn dispatch_registered_command(
                     host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
                 serde_json::to_value(result)
             } else if phase == "commit" {
-                let worker = SlvsWorker::locate().map_err(|error| {
-                    DispatchError::Host(HostError::WorkerUnavailable {
-                        detail: error.to_string(),
-                    })
-                })?;
-                let view = host.commit_sketch_solve_with_worker(
-                    string_field("bundle_path")?,
-                    &typed_request,
-                    &worker,
-                )?;
-                serde_json::to_value(view.result)
+                let preview =
+                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
+                if !preview.is_success() {
+                    serde_json::to_value(preview)
+                } else {
+                    let worker = SlvsWorker::locate().map_err(|error| {
+                        DispatchError::Host(HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })
+                    })?;
+                    let view = host.commit_sketch_solve_with_worker(
+                        string_field("bundle_path")?,
+                        &typed_request,
+                        &worker,
+                    )?;
+                    serde_json::to_value(view.result)
+                }
             } else {
                 return Err(DispatchError::Validation(
                     "phase must be preview or commit".to_string(),

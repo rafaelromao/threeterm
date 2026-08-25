@@ -20,6 +20,8 @@ threeterm-theme = { path = "../theme" }
 
 [dev-dependencies]
 threeterm-persistence = { path = "../persistence", features = ["publication-kill-points"] }
+threeterm-slvs-worker = { path = "../workers/slvs" }
+threeterm-viewport = { path = "../viewport" }
 threeterm-tui = { path = "../tui" }
 
 [[bin]]

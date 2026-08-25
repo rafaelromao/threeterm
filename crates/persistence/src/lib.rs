@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -157,6 +157,11 @@ pub enum PublicationFailurePoint {
     StagedFiles,
     LogSync,
     ManifestSync,
+    BrepCopy,
+    BrepWrite,
+    BrepSync,
+    BrepRename,
+    BrepDirectorySync,
     StagingSync,
     RetirePrevious,
     ReplaceCurrent,
@@ -171,6 +176,11 @@ impl PublicationFailurePoint {
             Self::StagedFiles => PublicationKillPoint::StagedFiles,
             Self::LogSync => PublicationKillPoint::LogSeal,
             Self::ManifestSync => PublicationKillPoint::ManifestSeal,
+            Self::BrepCopy
+            | Self::BrepWrite
+            | Self::BrepSync
+            | Self::BrepRename
+            | Self::BrepDirectorySync => PublicationKillPoint::StagingSync,
             Self::StagingSync => PublicationKillPoint::StagingSync,
             Self::RetirePrevious => PublicationKillPoint::RetirePrevious,
             Self::ReplaceCurrent => PublicationKillPoint::ReplaceCurrent,
@@ -1323,10 +1333,15 @@ impl Bundle {
             if let Some((feature_id, brep_bytes)) = brep {
                 let brep_dir = staging.join("brep");
                 fs::create_dir_all(&brep_dir)?;
-                atomic_write(
+                atomic_write_with_points(
                     &brep_dir.join(format!("{feature_id}.brep")),
                     brep_bytes,
                     None,
+                    Some(PublicationFailurePoint::BrepCopy),
+                    Some(PublicationFailurePoint::BrepWrite),
+                    Some(PublicationFailurePoint::BrepSync),
+                    Some(PublicationFailurePoint::BrepRename),
+                    Some(PublicationFailurePoint::BrepDirectorySync),
                 )?;
             }
             terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
@@ -2223,18 +2238,54 @@ fn atomic_write(
     bytes: &[u8],
     sync_point: Option<PublicationFailurePoint>,
 ) -> Result<(), BundleError> {
+    atomic_write_with_points(path, bytes, sync_point, None, None, None, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn atomic_write_with_points(
+    path: &Path,
+    bytes: &[u8],
+    sync_point: Option<PublicationFailurePoint>,
+    copy_point: Option<PublicationFailurePoint>,
+    write_point: Option<PublicationFailurePoint>,
+    file_sync_point: Option<PublicationFailurePoint>,
+    rename_point: Option<PublicationFailurePoint>,
+    directory_sync_point: Option<PublicationFailurePoint>,
+) -> Result<(), BundleError> {
     let file_name = path
         .file_name()
         .ok_or_else(|| BundleError::Invalid("target has no file name".to_string()))?;
     let temporary = path.with_file_name(format!("{}.tmp", file_name.to_string_lossy()));
-    let mut file = File::create(&temporary)?;
-    file.write_all(bytes)?;
-    if let Some(point) = sync_point {
-        fail_if_injected(point)?;
+    let result = (|| {
+        if let Some(point) = copy_point {
+            fail_if_injected(point)?;
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        if let Some(point) = write_point {
+            fail_if_injected(point)?;
+        }
+        file.write_all(bytes)?;
+        if let Some(point) = sync_point.or(file_sync_point) {
+            fail_if_injected(point)?;
+        }
+        file.sync_all()?;
+        if let Some(point) = rename_point {
+            fail_if_injected(point)?;
+        }
+        fs::rename(&temporary, path)?;
+        if let Some(point) = directory_sync_point {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            sync_directory(parent, point)?;
+        }
+        Ok::<(), std::io::Error>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    file.sync_all()?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    result.map_err(BundleError::from)
 }
 
 fn canonical_manifest_bytes(manifest: &Manifest) -> Vec<u8> {

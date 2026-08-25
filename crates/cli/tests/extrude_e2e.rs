@@ -71,12 +71,12 @@ fn extrude_command_is_registered() {
     assert_eq!(entry.name, "extrude");
     assert_eq!(
         entry.response_schema_version,
-        "threeterm.command.extrude.response/2"
+        "threeterm.command.extrude.response/3"
     );
 }
 
 #[test]
-fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() {
+fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
     if OcctWorker::locate().is_err() {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
             panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
@@ -149,19 +149,19 @@ fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() 
     assert_eq!(parsed["feature_id"], "box-rect");
     assert_eq!(
         parsed["schema_version"],
-        "threeterm.command.extrude.response/2"
+        "threeterm.command.extrude.response/3"
     );
     let brep_path = parsed["brep_path"].as_str().expect("brep_path is a string");
     let brep_pathbuf = PathBuf::from(brep_path);
     assert!(
         brep_pathbuf.is_file(),
-        "validated derived artifact must remain available: {brep_path:?}"
+        "canonical artifact must remain available: {brep_path:?}"
     );
     assert!(
-        !brep_pathbuf.starts_with(root.join("brep")),
-        "derived artifact must not be canonical: {brep_path:?}"
+        brep_pathbuf.starts_with(root.join("brep")),
+        "promoted artifact must be canonical: {brep_path:?}"
     );
-    assert_eq!(parsed["authoritative"], false);
+    assert_eq!(parsed["authoritative"], true);
     assert_eq!(parsed["artifact_kind"], "brep");
     assert!(
         !parsed["artifact_name"]
@@ -177,11 +177,11 @@ fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() 
         parsed["source_snapshot"]["revision_hash"],
         prior_snapshot.revision_hash
     );
-    assert_eq!(
+    assert_ne!(
         parsed["feature_graph_hash"],
         prior_snapshot.feature_graph_hash
     );
-    assert_eq!(parsed["revision_hash"], prior_snapshot.revision_hash);
+    assert_ne!(parsed["revision_hash"], prior_snapshot.revision_hash);
     assert!(!parsed["request_id"].as_str().unwrap_or_default().is_empty());
     assert_eq!(parsed["worker_fingerprint"]["worker_kind"], "occt");
     assert_eq!(
@@ -212,14 +212,14 @@ fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() 
         .len();
     assert_eq!(brep_bytes, on_disk_bytes);
     assert_eq!(
-        sha256_hex(&fs::read(&brep_pathbuf).expect("derived BREP reads")),
+        sha256_hex(&fs::read(&brep_pathbuf).expect("canonical BREP reads")),
         brep_sha
     );
-    assert_eq!(
+    assert_ne!(
         fs::read(root.join("manifest.json")).expect("manifest re-reads"),
         prior_manifest
     );
-    assert_eq!(
+    assert_ne!(
         fs::read(root.join("transactions.log")).expect("log re-reads"),
         prior_log
     );
@@ -227,7 +227,8 @@ fn extrude_cli_returns_a_host_owned_derived_result_without_canonical_mutation() 
         fs::read(root.join("brep/prior-box.brep")).expect("prior BREP re-reads"),
         prior_brep
     );
-    assert!(!root.join("brep/box-rect.brep").exists());
+    assert!(root.join("brep/box-rect.brep").exists());
+    assert!(!root.join(".derived").exists());
 
     let _ = fs::remove_dir_all(root);
 }

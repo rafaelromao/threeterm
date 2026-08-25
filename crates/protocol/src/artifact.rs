@@ -471,6 +471,43 @@ impl Stage {
         Ok(actual_bytes == byte_count && hex_digest(&digest.finalize()) == sha256)
     }
 
+    /// Read a published artifact through the pinned staging directory and
+    /// verify the bytes against the accepted metadata.
+    pub fn read_published(
+        &self,
+        final_name: &str,
+        byte_count: u64,
+        sha256: &str,
+    ) -> Result<Vec<u8>, ArtifactError> {
+        validate_name(final_name)?;
+        let mut file = open_child(
+            &self.root_dir,
+            final_name,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )?;
+        let metadata = file.metadata().map_err(ArtifactError::Io)?;
+        if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+            return Err(ArtifactError::NotRegularFile(final_name.to_string()));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes).map_err(ArtifactError::Io)?;
+        if bytes.len() as u64 != byte_count {
+            return Err(ArtifactError::ByteCountMismatch {
+                expected: byte_count,
+                actual: bytes.len() as u64,
+            });
+        }
+        let actual = sha256_hex(&bytes);
+        if actual != sha256 {
+            return Err(ArtifactError::HashMismatch {
+                expected: sha256.to_string(),
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
     /// Remove an invalid cache-owned final artifact before recovering it from
     /// a newly verified staging file.
     pub fn discard_final(&self, final_name: &str) -> Result<(), ArtifactError> {

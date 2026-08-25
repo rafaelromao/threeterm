@@ -3926,10 +3926,12 @@ fn emit_extrude(
     };
     let request = ExtrudeRequest::new(threeterm_occt_worker::new_request_id(), profile, height)
         .with_feature_id(feature_id);
-    match Host::new().stage_extrude(bundle, request, &worker) {
-        Ok(view) => {
-            write_extrude_derived_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr)
-        }
+    let host = Host::new();
+    match host.stage_extrude(bundle, request, &worker) {
+        Ok(view) => match host.promote_extrude_derived(bundle, view) {
+            Ok(view) => write_extrude_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+            Err(error) => emit_host_error(&error, stderr),
+        },
         Err(error) => emit_host_error(&error, stderr),
     }
 }
@@ -4554,8 +4556,8 @@ fn write_load_snapshot(
     )
 }
 
-fn write_extrude_derived_view(
-    view: &threeterm_host::ExtrudeDerivedResult,
+fn write_extrude_view(
+    view: &threeterm_host::ExtrudeCommitView,
     schema_version: &str,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -4566,23 +4568,23 @@ fn write_extrude_derived_view(
             "status": view.result.status,
             "operation": Operation::Extrude.as_str(),
             "feature_id": view.result.feature_id,
-            "request_id": view.artifact.request_id,
+            "request_id": view.result.request_id,
             "source_snapshot": {
                 "feature_graph_hash": view.source_snapshot.feature_graph_hash,
                 "revision_hash": view.source_snapshot.revision_hash,
             },
-            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
-            "revision_hash": view.source_snapshot.revision_hash,
-            "authoritative": false,
-            "artifact_kind": view.artifact.artifact_kind,
-            "artifact_name": view.artifact.artifact_name,
-            "brep_path": view.artifact.path,
-            "brep_sha256": view.artifact.sha256,
-            "brep_bytes": view.artifact.byte_count,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "authoritative": true,
+            "artifact_kind": "brep",
+            "artifact_name": format!("{}.brep", view.result.feature_id),
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
             "worker_fingerprint": {
-                "worker_kind": view.artifact.worker_fingerprint.worker_kind,
-                "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
-                "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+                "worker_kind": view.worker_fingerprint.worker_kind,
+                "worker_schema_version": view.worker_fingerprint.worker_schema_version,
+                "protocol_schema_version": view.worker_fingerprint.protocol_schema_version,
             },
             "schema_version": schema_version,
         }),

@@ -5,7 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Rust skeleton crate for the disposable libslvs worker boundary. C++ worker code lives outside the workspace."
+description = "Disposable libslvs sketch solver worker boundary."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+threeterm-protocol = { path = "../../protocol" }
+
+[build-dependencies]
+
 
 [lints]
 workspace = true

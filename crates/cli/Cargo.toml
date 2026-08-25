@@ -13,6 +13,7 @@ threeterm-domain = { path = "../domain" }
 threeterm-host = { path = "../host" }
 threeterm-lua-bridge = { path = "../lua-bridge" }
 threeterm-occt-worker = { path = "../workers/occt" }
+threeterm-slvs-worker = { path = "../workers/slvs" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 threeterm-theme = { path = "../theme" }

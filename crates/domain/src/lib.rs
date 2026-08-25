@@ -18,6 +18,12 @@ pub mod component {
 
 pub mod history;
 
+pub mod sketch {
+    pub use super::{
+        SketchConstraint, SketchDiagnostic, SketchEntity, SketchPayload, SolvedCoordinate,
+    };
+}
+
 pub fn schema_version() -> &'static str {
     "threeterm.domain/1"
 }
@@ -62,6 +68,140 @@ impl Feature {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureGraph {
     features: BTreeMap<FeatureId, String>,
+    #[serde(default)]
+    sketches: BTreeMap<FeatureId, SketchPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SketchEntity {
+    Point {
+        id: String,
+        x: f64,
+        y: f64,
+    },
+    LineSegment {
+        id: String,
+        start: String,
+        end: String,
+    },
+    Circle {
+        id: String,
+        center: String,
+        radius: f64,
+    },
+    Arc {
+        id: String,
+        center: String,
+        start: String,
+        end: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SketchConstraint {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub value: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SolvedCoordinate {
+    pub entity_id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SketchDiagnostic {
+    pub code: String,
+    pub detail: String,
+    #[serde(default)]
+    pub constraint_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SketchPayload {
+    pub feature_id: String,
+    pub entities: Vec<SketchEntity>,
+    pub constraints: Vec<SketchConstraint>,
+    pub status: String,
+    pub dof: i32,
+    pub entity_ids: Vec<String>,
+    pub related_constraint_ids: Vec<String>,
+    pub diagnostics: Vec<SketchDiagnostic>,
+    #[serde(default)]
+    pub solved_coordinates: Option<Vec<SolvedCoordinate>>,
+}
+
+impl Eq for SketchPayload {}
+
+impl SketchPayload {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.feature_id.is_empty() || self.entities.is_empty() {
+            return Err("sketch feature and entities must not be empty".to_string());
+        }
+        if self.dof < 0 {
+            return Err("sketch dof must not be negative".to_string());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for entity in &self.entities {
+            let id = match entity {
+                SketchEntity::Point { id, x, y } => {
+                    if !x.is_finite() || !y.is_finite() {
+                        return Err("sketch point coordinates must be finite".to_string());
+                    }
+                    id
+                }
+                SketchEntity::LineSegment { id, .. }
+                | SketchEntity::Circle { id, .. }
+                | SketchEntity::Arc { id, .. } => id,
+            };
+            if id.is_empty() || !ids.insert(id.clone()) {
+                return Err("sketch entity IDs must be unique".to_string());
+            }
+        }
+        for constraint in &self.constraints {
+            if constraint.id.is_empty() || !ids.insert(constraint.id.clone()) {
+                return Err("sketch entity and constraint IDs must be globally unique".to_string());
+            }
+            if constraint.value.is_some_and(|value| !value.is_finite()) {
+                return Err("sketch constraint values must be finite".to_string());
+            }
+            if constraint.entities.iter().any(|reference| {
+                !self.entities.iter().any(|entity| match entity {
+                    SketchEntity::Point { id, .. }
+                    | SketchEntity::LineSegment { id, .. }
+                    | SketchEntity::Circle { id, .. }
+                    | SketchEntity::Arc { id, .. } => id == reference,
+                })
+            }) {
+                return Err("sketch constraint references an unknown entity".to_string());
+            }
+        }
+        if self.status == "solved" {
+            let coordinates = self
+                .solved_coordinates
+                .as_ref()
+                .ok_or_else(|| "solved sketches require coordinates".to_string())?;
+            if coordinates
+                .iter()
+                .any(|coordinate| !coordinate.x.is_finite() || !coordinate.y.is_finite())
+            {
+                return Err("solved sketch coordinates must be finite".to_string());
+            }
+        } else if self.solved_coordinates.is_some() {
+            return Err("failed sketches must not carry solved coordinates".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -363,8 +503,31 @@ impl FeatureGraph {
         previous.as_deref() != Some(feature.kind.as_str())
     }
 
+    pub fn add_sketch(&mut self, feature: Feature, sketch: SketchPayload) -> Result<bool, String> {
+        if sketch.feature_id != feature.id.as_str() {
+            return Err("sketch feature ID does not match its graph feature".to_string());
+        }
+        sketch.validate()?;
+        let changed = self.add_feature(feature.clone());
+        self.sketches.insert(feature.id, sketch);
+        Ok(changed)
+    }
+
+    pub fn sketch(&self, feature_id: &str) -> Option<&SketchPayload> {
+        self.sketches
+            .iter()
+            .find_map(|(id, sketch)| (id.as_str() == feature_id).then_some(sketch))
+    }
+
     pub fn graph_hash_hex(&self) -> String {
-        hash_hex(&serde_json::to_vec(&self.features).expect("feature graph serializes"))
+        let mut bytes = serde_json::to_vec(&self.features).expect("feature graph serializes");
+        if !self.sketches.is_empty() {
+            bytes.push(b'\n');
+            bytes.extend_from_slice(
+                &serde_json::to_vec(&self.sketches).expect("sketch graph serializes"),
+            );
+        }
+        hash_hex(&bytes)
     }
 
     pub fn revision_hash_hex(&self, terminal_log_digest_hex: &str) -> String {

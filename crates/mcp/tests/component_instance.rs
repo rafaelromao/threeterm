@@ -323,6 +323,10 @@ fn invalid_capture_preserves_the_canonical_bundle() {
 
 #[test]
 fn cross_document_component_references_are_rejected_atomically() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("component_instance: no OCCT worker binary found; CI runs this production path");
+        return;
+    }
     let source = bundle();
     let target = bundle();
 

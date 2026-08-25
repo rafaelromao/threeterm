@@ -801,7 +801,8 @@ impl TuiSession {
         host: &Host,
         root: impl AsRef<Path>,
     ) -> Result<(), TuiDiagnostic> {
-        let feature_id = self.selected_target().ok_or_else(|| {
+        let root = root.as_ref();
+        let feature_id = self.selected_target().map(str::to_string).ok_or_else(|| {
             self.operation_diagnostic(
                 TuiDiagnosticCode::NoFeatureTarget,
                 StateAxis::Selection,
@@ -810,7 +811,7 @@ impl TuiSession {
                 "timeline",
             )
         })?;
-        let timeline = host.timeline(root, feature_id).map_err(|error| {
+        let timeline = host.timeline(root, &feature_id).map_err(|error| {
             self.operation_diagnostic(
                 TuiDiagnosticCode::HistoryRejected,
                 StateAxis::History,
@@ -838,7 +839,18 @@ impl TuiSession {
                 .iter()
                 .map(|revision| revision.name.clone())
                 .collect(),
-        )
+        )?;
+        let history = host.history(root).map_err(|error| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                error.to_string(),
+                "stale-last-valid-geometry-refresh",
+            )
+        })?;
+        self.refresh_stale_last_valid_geometry(&history, &feature_id);
+        Ok(())
     }
 
     pub fn clear_feature_timeline(&mut self) {
@@ -1878,6 +1890,9 @@ impl TuiSession {
             .frame
             .render_overlay_with_theme(&self.theme)
             .map_err(|error| self.theme_diagnostic(error))?;
+        let overlay = self
+            .stale_last_valid_geometry_overlay()
+            .map_or(overlay.clone(), |stale| format!("{overlay}\n{stale}"));
         Ok(RenderedInput {
             frame: outcome.frame,
             overlay,

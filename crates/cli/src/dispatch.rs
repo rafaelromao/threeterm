@@ -616,7 +616,6 @@ fn parse_export(args: &[OsString]) -> DispatchPlan {
                     .to_string_lossy()
                     .split(',')
                     .map(str::to_string)
-                    .filter(|id| !id.is_empty())
                     .collect()
             }
             "--formats" => {

@@ -62,7 +62,7 @@ fn write_3mf(
             .collect();
         if vertices.len() < 3 || !vertices.len().is_multiple_of(3) {
             return Err(HostError::BrepInvalid {
-                request_id: Some("export".to_string()),
+                request_id: Some(format!("export-{}", body.label)),
                 detail: format!(
                     "3MF body {} has empty or malformed tessellation",
                     body.label
@@ -698,7 +698,7 @@ impl Host {
         }
         for body_id in &body_ids {
             let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
-            if !stale_body_features.is_empty() {
+            if !accept_stale_geometry && !stale_body_features.is_empty() {
                 return Err(HostError::StaleLastValidGeometry {
                     feature_id: body_id.clone(),
                     active_revision: prior.history.active_snapshot().revision_id.clone(),

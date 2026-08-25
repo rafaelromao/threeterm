@@ -57,6 +57,33 @@ fn run_failed_value(bin: &str, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stderr).expect("diagnostic is JSON")
 }
 
+fn stored_zip_entry(archive: &[u8], wanted: &str) -> Vec<u8> {
+    let mut offset = 0;
+    while offset + 30 <= archive.len() {
+        let signature = &archive[offset..offset + 4];
+        if signature == b"PK\x01\x02" || signature == b"PK\x05\x06" {
+            break;
+        }
+        assert_eq!(signature, b"PK\x03\x04", "3MF uses local ZIP entries");
+        let compressed_size =
+            u32::from_le_bytes(archive[offset + 18..offset + 22].try_into().unwrap()) as usize;
+        let name_length =
+            u16::from_le_bytes(archive[offset + 26..offset + 28].try_into().unwrap()) as usize;
+        let extra_length =
+            u16::from_le_bytes(archive[offset + 28..offset + 30].try_into().unwrap()) as usize;
+        let name_start = offset + 30;
+        let data_start = name_start + name_length + extra_length;
+        let data_end = data_start + compressed_size;
+        assert!(data_end <= archive.len(), "3MF ZIP entry is bounded");
+        let name = std::str::from_utf8(&archive[name_start..name_start + name_length]).unwrap();
+        if name == wanted {
+            return archive[data_start..data_end].to_vec();
+        }
+        offset = data_end;
+    }
+    panic!("3MF entry {wanted} is missing");
+}
+
 fn extrude(bin: &str, bundle: &Path, id: &str, profile: &str) {
     let path = bundle.join(format!("{id}.json"));
     fs::write(&path, profile).unwrap();
@@ -151,6 +178,9 @@ fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
     let output = temp_root("multi-body-output");
     multi_body_l_bracket(bin, &bundle);
     let manifest = fs::read_to_string(bundle.join("manifest.json")).unwrap();
+    let transactions = fs::read(bundle.join("transactions.log")).unwrap();
+    let vertical_brep = fs::read(bundle.join("brep/vertical.brep")).unwrap();
+    let horizontal_brep = fs::read(bundle.join("brep/horizontal.brep")).unwrap();
     let parsed_manifest: Value = serde_json::from_str(&manifest).unwrap();
     run(
         bin,
@@ -172,10 +202,10 @@ fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
 
     let bytes = fs::read(output.join("vertical.3mf")).unwrap();
     assert!(bytes.starts_with(b"PK\x03\x04"));
-    let archive = String::from_utf8_lossy(&bytes).into_owned();
-    for entry in ["[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"] {
-        assert!(archive.contains(entry), "3MF contains {entry}");
-    }
+    let _content_types = stored_zip_entry(&bytes, "[Content_Types].xml");
+    let _relationships = stored_zip_entry(&bytes, "_rels/.rels");
+    let model = stored_zip_entry(&bytes, "3D/3dmodel.model");
+    let archive = String::from_utf8(model).unwrap();
     assert_eq!(archive.matches("<object ").count(), 2);
     assert_eq!(archive.matches("<item ").count(), 2);
     assert!(archive.contains("name=\"vertical\""));
@@ -209,6 +239,18 @@ fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
     assert_eq!(
         fs::read_to_string(bundle.join("manifest.json")).unwrap(),
         manifest
+    );
+    assert_eq!(
+        fs::read(bundle.join("transactions.log")).unwrap(),
+        transactions
+    );
+    assert_eq!(
+        fs::read(bundle.join("brep/vertical.brep")).unwrap(),
+        vertical_brep
+    );
+    assert_eq!(
+        fs::read(bundle.join("brep/horizontal.brep")).unwrap(),
+        horizontal_brep
     );
     let _ = fs::remove_dir_all(bundle);
     let _ = fs::remove_dir_all(output);

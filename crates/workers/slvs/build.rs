@@ -19,6 +19,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=THREETERM_SLVS_DIR");
     println!("cargo:rerun-if-env-changed=THREETERM_SLVSBUILD_WORKER");
     println!("cargo:rerun-if-env-changed=THREETERM_SKIP_SLVSBUILD");
+    println!("cargo:rerun-if-env-changed=THREETERM_SLVS_REQUIRED");
 
     if let Some(existing) = env::var_os("THREETERM_SLVSBUILD_WORKER") {
         let existing = PathBuf::from(existing);
@@ -30,6 +31,10 @@ fn main() {
     {
         compile_worker(&manifest, &worker, &install);
     } else {
+        assert!(
+            env::var_os("THREETERM_SLVS_REQUIRED").is_none(),
+            "libslvs is required but no compatible install was found"
+        );
         println!(
             "cargo:warning=libslvs worker not built; set THREETERM_SLVS_DIR or THREETERM_SLVSBUILD_WORKER to enable real solver integration"
         );

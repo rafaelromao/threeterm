@@ -42,7 +42,10 @@ fn sketch_solve_response_schema_accepts_a_normalized_success() {
             "entity_ids": ["p0", "p1"],
             "related_constraint_ids": [],
             "diagnostics": [],
-            "solved_coordinates": [{"entity_id": "p0", "x": 0.0, "y": 0.0}]
+            "solved_coordinates": [
+                {"entity_id": "p0", "x": 0.0, "y": 0.0},
+                {"entity_id": "p1", "x": 10.0, "y": 0.0}
+            ]
         }),
     )
     .expect("normalized success matches the response schema");

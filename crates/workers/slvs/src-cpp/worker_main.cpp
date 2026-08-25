@@ -316,6 +316,38 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
             entities.push_back(Slvs_MakeLineSegment(handle, group, workplane, handles[start], handles[end]));
             other_entities.push_back({id, handle});
             handles[id] = handle;
+        } else if (kind == "circle") {
+            const std::string center = string_field(json_entity, "center");
+            const double radius = number_field(json_entity, "radius", NAN);
+            if (handles.count(center) == 0 || !std::isfinite(radius) || radius <= 0.0) {
+                error = "circle requires a known center and positive finite radius";
+                return false;
+            }
+            const Slvs_hEntity circle_normal = next_entity++;
+            const Slvs_hEntity radius_entity = next_entity++;
+            const Slvs_hParam radius_param = next_param++;
+            const Slvs_hEntity handle = next_entity++;
+            params.push_back(Slvs_MakeParam(radius_param, group, radius));
+            entities.push_back(Slvs_MakeNormal2d(circle_normal, group, workplane));
+            entities.push_back(Slvs_MakeDistance(radius_entity, group, workplane, radius_param));
+            entities.push_back(Slvs_MakeCircle(handle, group, workplane, handles[center], circle_normal, radius_entity));
+            other_entities.push_back({id, handle});
+            handles[id] = handle;
+        } else if (kind == "arc") {
+            const std::string center = string_field(json_entity, "center");
+            const std::string start = string_field(json_entity, "start");
+            const std::string end = string_field(json_entity, "end");
+            if (handles.count(center) == 0 || handles.count(start) == 0 || handles.count(end) == 0) {
+                error = "arc references an unknown point";
+                return false;
+            }
+            const Slvs_hEntity arc_normal = next_entity++;
+            const Slvs_hEntity handle = next_entity++;
+            entities.push_back(Slvs_MakeNormal2d(arc_normal, group, workplane));
+            entities.push_back(Slvs_MakeArcOfCircle(
+                handle, group, workplane, arc_normal, handles[center], handles[start], handles[end]));
+            other_entities.push_back({id, handle});
+            handles[id] = handle;
         } else {
             error = "unsupported sketch entity kind: " + kind;
             return false;

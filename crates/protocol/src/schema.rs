@@ -1220,7 +1220,7 @@ pub static SKETCH_SOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "code": { "type": "string", "minLength": 1 }, "detail": { "type": "string", "minLength": 1 },
                 "constraint_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } }
             }, "additionalProperties": false } },
-            "solved_coordinates": { "type": "array", "items": { "type": "object", "required": ["entity_id", "x", "y"], "properties": {
+            "solved_coordinates": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["entity_id", "x", "y"], "properties": {
                 "entity_id": { "type": "string", "minLength": 1 }, "x": { "type": "number" }, "y": { "type": "number" }
             }, "additionalProperties": false } },
             "schema_version": { "type": "string", "minLength": 1 },

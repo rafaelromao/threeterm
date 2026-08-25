@@ -165,10 +165,16 @@ fn map_outcome(
                 detail: error.to_string(),
             })
         }
-        SupervisorOutcome::ForceTerminated { record } => Err(WorkerError::Supervised {
-            stage: record.stage,
-            request_id: request_id.to_string(),
-        }),
+        SupervisorOutcome::ForceTerminated { record } => {
+            if let (Some(code), Some(detail)) = (record.failed_code, record.failed_detail) {
+                Err(WorkerError::Diagnostic(SlvsDiagnostic { code, detail }))
+            } else {
+                Err(WorkerError::Supervised {
+                    stage: record.stage,
+                    request_id: request_id.to_string(),
+                })
+            }
+        }
         SupervisorOutcome::Acknowledged { .. } => Err(WorkerError::Supervised {
             stage: "cancelled".to_string(),
             request_id: request_id.to_string(),

@@ -41,6 +41,8 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Message_ProgressRange.hxx>
+#include <Message.hxx>
+#include <Message_PrinterOStream.hxx>
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
@@ -2473,6 +2475,10 @@ bool handle_loft(const JsonParser::Value& request, std::string& error) {
 }  // namespace
 
 int main() {
+    // Keep OCCT diagnostics off stdout, which is reserved for protocol frames.
+    Message::DefaultMessenger()->ChangePrinters().Clear();
+    Message::DefaultMessenger()->AddPrinter(new Message_PrinterOStream("cerr", Standard_False));
+
     // The cancellation probe uses poll(2) after reading the request. Keep
     // stdio from hiding a queued Cancel line in its user-space buffer.
     std::setvbuf(stdin, nullptr, _IONBF, 0);

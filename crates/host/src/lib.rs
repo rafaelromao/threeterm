@@ -1871,15 +1871,29 @@ impl Host {
             });
         }
         let kind = bracket_kind(&draft.request);
+        let draft_semantic_fingerprint = bracket_semantic_fingerprint(&draft);
         if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
             let matching_entry = committed.log.entries().iter().find(|entry| {
                 entry.idempotency_key.as_deref() == Some(draft_id)
                     && entry.feature_id == draft.bracket_id
                     && entry.kind == kind
+                    && draft.source_revision == committed.revision_hash_hex()
+                    && serde_json::from_str::<serde_json::Value>(
+                        entry.idempotency_payload.as_deref().unwrap_or_default(),
+                    )
+                    .ok()
+                    .and_then(|payload| payload["semantic_fingerprint"].as_str().map(str::to_owned))
+                    .as_deref()
+                        == Some(draft_semantic_fingerprint.as_str())
             });
             if let Some(entry) = matching_entry {
                 let snapshot = SnapshotView::from(&committed);
-                let input_fingerprint = entry.idempotency_payload.clone().unwrap_or_default();
+                let input_fingerprint = serde_json::from_str::<serde_json::Value>(
+                    entry.idempotency_payload.as_deref().unwrap_or_default(),
+                )
+                .ok()
+                .and_then(|payload| payload["input_fingerprint"].as_str().map(str::to_owned))
+                .unwrap_or_default();
                 self.current.replace(Some(committed));
                 self.bracket_drafts.borrow_mut().remove(&draft_key);
                 return Ok(BracketCommitView {
@@ -1935,6 +1949,8 @@ impl Host {
             }
         };
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        let idempotency_payload =
+            bracket_idempotency_payload(&draft, &result.brep_sha256, &input_fingerprint);
         let snapshot = match self.promote_brep_bytes(
             &root,
             &draft.bracket_id,
@@ -1943,7 +1959,7 @@ impl Host {
             &bytes,
             Some(&draft.source_brep_sha256),
             Some(draft_id),
-            Some(&input_fingerprint),
+            Some(&idempotency_payload),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1953,7 +1969,7 @@ impl Host {
                             && entry.feature_id == draft.bracket_id
                             && entry.kind == kind
                             && entry.idempotency_payload.as_deref()
-                                == Some(input_fingerprint.as_str())
+                                == Some(idempotency_payload.as_str())
                     })
                     && sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok()
                         == Some(result.brep_sha256.clone())
@@ -2004,7 +2020,10 @@ impl Host {
                     }
                 }
                 remove_preview_stage(&stage);
-                if matches!(&error, HostError::Persistence(_)) {
+                if matches!(
+                    &error,
+                    HostError::Persistence(BundleError::PublicationUnknown(_))
+                ) {
                     return Err(HostError::DraftUnknownOutcome {
                         draft_id: draft_id.to_string(),
                         source_revision: draft.source_revision.clone(),
@@ -3450,6 +3469,32 @@ fn bracket_draft_fingerprint(draft: &BracketParameterDraft) -> String {
     });
     let bytes = serde_json::to_vec(&semantic).expect("bracket draft fingerprint serializes");
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn bracket_semantic_fingerprint(draft: &BracketParameterDraft) -> String {
+    let semantic = serde_json::json!({
+        "bracket_id": draft.bracket_id,
+        "height": format!("{:.17}", draft.request.height),
+        "length": format!("{:.17}", draft.request.length),
+        "thickness": format!("{:.17}", draft.request.thickness),
+        "width": format!("{:.17}", draft.request.width),
+    });
+    let bytes = serde_json::to_vec(&semantic).expect("bracket semantic fingerprint serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn bracket_idempotency_payload(
+    draft: &BracketParameterDraft,
+    result_sha256: &str,
+    input_fingerprint: &str,
+) -> String {
+    serde_json::json!({
+        "input_fingerprint": input_fingerprint,
+        "result_sha256": result_sha256,
+        "semantic_fingerprint": bracket_semantic_fingerprint(draft),
+        "source_revision": draft.source_revision,
+    })
+    .to_string()
 }
 
 fn bracket_input_fingerprint(draft: &BracketParameterDraft, result_sha256: &str) -> String {

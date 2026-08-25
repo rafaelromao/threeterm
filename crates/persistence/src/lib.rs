@@ -462,6 +462,7 @@ pub enum BundleError {
         path: PathBuf,
         source: std::io::Error,
     },
+    PublicationUnknown(String),
     SourceUnreadable {
         path: PathBuf,
         source: std::io::Error,
@@ -487,6 +488,7 @@ impl BundleError {
             Self::SchemaTooNew { .. } => "schema_too_new",
             Self::ManifestFieldUnknown { .. } => "manifest_field_unknown",
             Self::Backup { .. } => "backup_failed",
+            Self::PublicationUnknown(_) => "publication_unknown",
             Self::SourceUnreadable { .. } => "source_unreadable",
             Self::Migration { .. } => "migration_failed",
         }
@@ -534,6 +536,7 @@ impl fmt::Display for BundleError {
                 "persistence.backup-failed: path={} source={source}",
                 path.display()
             ),
+            Self::PublicationUnknown(detail) => formatter.write_str(detail),
             Self::SourceUnreadable { path, source } => write!(
                 formatter,
                 "persistence.source-unreadable: path={} source={source}",
@@ -1268,8 +1271,10 @@ impl Bundle {
             return Err(error);
         }
         terminate_at_requested_publication_point(PublicationKillPoint::StagingValidation);
-        publish_staged(&staging, &self.root)?;
+        publish_staged(&staging, &self.root)
+            .map_err(|error| BundleError::PublicationUnknown(error.to_string()))?;
         self.open_locked()
+            .map_err(|error| BundleError::PublicationUnknown(error.to_string()))
     }
 
     fn manifest_path(&self) -> PathBuf {

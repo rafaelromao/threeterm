@@ -201,6 +201,29 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
     );
     assert_eq!(retried.input_fingerprint, committed.input_fingerprint);
 
+    let next = host
+        .open_bracket_parameter_draft(
+            &root,
+            "bracket-edit-next",
+            "l-bracket",
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 3.0),
+        )
+        .expect("next draft opens");
+    host.commit_bracket_parameter_draft(&root, &next.draft_id, &worker)
+        .expect("next commit succeeds");
+    let reused = host
+        .open_bracket_parameter_draft(
+            &root,
+            "bracket-edit-1",
+            "l-bracket",
+            BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0),
+        )
+        .expect("old key can be inspected after a later revision");
+    assert!(matches!(
+        host.commit_bracket_parameter_draft(&root, &reused.draft_id, &worker),
+        Err(HostError::DraftIdempotencyConflict { .. })
+    ));
+
     let refused_before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let refused_before_log = fs::read(root.join("transactions.log")).expect("log reads");
     let refused_before_brep = fs::read(root.join("brep/l-bracket.brep")).expect("brep reads");

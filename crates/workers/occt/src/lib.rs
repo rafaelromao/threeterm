@@ -297,8 +297,6 @@ impl OcctWorker {
     /// operation this worker executes.
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
-        self.cancellation_grace =
-            CancellationGracePolicy::new(grace).with_operation("boolean_pattern", grace);
         self
     }
 

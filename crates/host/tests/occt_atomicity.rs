@@ -49,6 +49,17 @@ fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
 }
 
+fn required_fixture_worker(test_name: &str) -> Option<threeterm_occt_worker::OcctWorker> {
+    let worker = locate_worker();
+    if worker.is_none()
+        && (std::env::var_os("CI").is_some()
+            || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some())
+    {
+        panic!("{test_name}: OCCT worker is required in this environment");
+    }
+    worker
+}
+
 fn is_brep_invalid<T>(result: &Result<T, HostError>) -> bool {
     match result {
         Err(HostError::BrepInvalid { .. }) => true,
@@ -136,7 +147,9 @@ fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
 
 #[test]
 fn extrude_commits_brep_into_a_new_revision() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) = required_fixture_worker(
+        "cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot",
+    ) else {
         return;
     };
     let root = fresh_bundle_with_feature("commit", "box-seed", "box");

@@ -1093,6 +1093,21 @@ fn cancel_fails_closed_on_a_foreign_acknowledgement() {
 }
 
 #[test]
+fn cancel_fails_closed_on_an_empty_acknowledgement_reason() {
+    let worker = PipeHost::new(vec![Envelope::Cancelled {
+        schema_version: schema_version().to_string(),
+        request_id: "req-1".to_string(),
+        reason: String::new(),
+    }]);
+    let mut supervisor = Supervisor::new(Duration::from_millis(100), Box::new(worker), None);
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("expected ForceTerminated; got non-terminal outcome");
+    };
+    assert_eq!(record.stage, "protocol_violation:empty_cancel_reason");
+}
+
+#[test]
 fn cancel_fails_closed_on_a_terminal_envelope_instead_of_an_acknowledgement() {
     // A worker that completes instead of acknowledging the cancellation
     // is a protocol violation: the cancellation must fail closed rather

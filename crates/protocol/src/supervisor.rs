@@ -344,6 +344,15 @@ impl Supervisor {
                             last_progress.take(),
                         );
                     }
+                    if ack_reason.is_empty() {
+                        return self.force_terminate_outcome(
+                            request_id,
+                            started,
+                            "protocol_violation:empty_cancel_reason",
+                            None,
+                            last_progress.take(),
+                        );
+                    }
                     self.discard_stage();
                     if let Err(error) = self.host.finish_terminal() {
                         let context = TerminationContext {
@@ -559,9 +568,8 @@ impl Supervisor {
             // (send `Cancel`, await `Cancelled` inside the grace period,
             // then force-terminate if the worker does not acknowledge).
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
-                let cancel_deadline = deadline.min(
-                    Instant::now() + self.cancellation_grace.for_operation(&request.command_id),
-                );
+                let cancel_deadline =
+                    Instant::now() + self.cancellation_grace.for_operation(&request.command_id);
                 return self.cancel_with_deadline(
                     &request.request_id,
                     "cancelled by host",

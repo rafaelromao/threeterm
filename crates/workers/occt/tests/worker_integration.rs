@@ -56,9 +56,21 @@ fn locate_worker() -> Option<OcctWorker> {
     None
 }
 
+fn required_fixture_worker(test_name: &str) -> Option<OcctWorker> {
+    let worker = locate_worker();
+    if worker.is_none()
+        && (std::env::var_os("CI").is_some()
+            || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some())
+    {
+        panic!("{test_name}: OCCT worker is required in this environment");
+    }
+    worker
+}
+
 #[test]
 fn extrude_rectangle_returns_ok_with_real_brep() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) = required_fixture_worker("boolean_pattern_cuts_324_holes_with_real_occt")
+    else {
         return;
     };
     let temp = std::env::temp_dir().join(format!("threeterm-occt-extrude-{}", std::process::id()));
@@ -92,7 +104,9 @@ fn extrude_rectangle_returns_ok_with_real_brep() {
 
 #[test]
 fn extrude_with_short_profile_returns_request_malformed() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) =
+        required_fixture_worker("boolean_pattern_acknowledges_cooperative_cancel_after_progress")
+    else {
         return;
     };
     let mut request = ExtrudeRequest::new(

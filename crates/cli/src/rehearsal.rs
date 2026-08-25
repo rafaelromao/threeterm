@@ -707,14 +707,9 @@ fn collect_artifacts(project: &Path, export: &Path) -> Result<Vec<Artifact>, Reh
 pub fn verify_rehearsal_evidence(root: impl AsRef<Path>) -> Result<(), RehearsalError> {
     let root = root.as_ref();
     let diagnostic_root = root.join("run-2").join(PROJECT_DIR);
-    let mut allowed = vec!["run-1", "run-2", CATALOG_FILE];
-    if root.join("adversarial").is_dir() {
-        allowed.push("adversarial");
-    }
+    let allowed = vec!["run-1", "run-2", "adversarial", CATALOG_FILE];
     verify_directory_entries(root, &allowed, &diagnostic_root)?;
-    if root.join("adversarial").is_dir() {
-        verify_adversarial_evidence(root.join("adversarial"))?;
-    }
+    verify_adversarial_evidence(root.join("adversarial"))?;
 
     let aggregate = read_report(
         &root.join(CATALOG_FILE),

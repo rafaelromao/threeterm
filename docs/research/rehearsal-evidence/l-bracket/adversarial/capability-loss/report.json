@@ -1,0 +1,24 @@
+{
+  "canonical_byte_equal": true,
+  "canonical_revision_after": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
+  "canonical_revision_before": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
+  "case": "capability-loss",
+  "diagnostic": {
+    "code": "CAPABILITY_LOSS",
+    "detail": "capability_timeout: direct Ghostty did not acknowledge the Kitty probe image (revision=capability-probe)",
+    "recovery": "bounded cleanup completed and the next command routed to HeadlessOnly"
+  },
+  "lifecycle": "HeadlessOnly",
+  "next_command_route": "HeadlessOnly",
+  "schema_version": "threeterm.rehearsal.adversarial/1",
+  "terminal_state": {
+    "alternate_screen_exited": true,
+    "cursor_and_attributes_restored": true,
+    "kitty_controls_disabled": true,
+    "kitty_image_deleted": true,
+    "kitty_transmission_disabled": true,
+    "second_frame_bytes_added": false,
+    "second_frame_rejected_code": "capability_invalidated",
+    "termios_restored": true
+  }
+}

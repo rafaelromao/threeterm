@@ -1,0 +1,116 @@
+{
+  "artifacts": [
+    {
+      "bytes": 5678,
+      "relative_path": "capability-loss/canonical/brep/l-bracket.brep",
+      "sha256": "c3dd5714d333230188248fd15ed236154fa7c6277120a9dbedc3d4fbdee6d344"
+    },
+    {
+      "bytes": 815,
+      "relative_path": "capability-loss/canonical/manifest.json",
+      "sha256": "170d9747274432c66e7d37bfab1c6d48c623ce9c2264d07a2cee057057191e7d"
+    },
+    {
+      "bytes": 3633,
+      "relative_path": "capability-loss/canonical/transactions.log",
+      "sha256": "040abefa368f8c54edeae67f303fdd47225ccc4807a13129feaa57be97c58d82"
+    },
+    {
+      "bytes": 293,
+      "relative_path": "capability-loss/failed-probe-response.bin",
+      "sha256": "485493101bdb1338d7e8f246e5583d766ae048d948acdcf7c8fdadfd6b1ea2e4"
+    },
+    {
+      "bytes": 999,
+      "relative_path": "capability-loss/report.json",
+      "sha256": "4aabcc099b0f4d554fba10d90b50682a6b1531639f900022dfc396c5e59e0742"
+    },
+    {
+      "bytes": 307,
+      "relative_path": "capability-loss/terminal-state.json",
+      "sha256": "7511da8497b0189d400ad0499408019139300ae57a321462695ab02f13183d67"
+    },
+    {
+      "bytes": 5678,
+      "relative_path": "mismatch-cache/canonical/brep/l-bracket.brep",
+      "sha256": "5df01535a5e20a754c26b0d6f004d8079ffbf05bee65260426972883990298a1"
+    },
+    {
+      "bytes": 815,
+      "relative_path": "mismatch-cache/canonical/manifest.json",
+      "sha256": "9a43966ee5a99c337eb64c659bc07cfe007d99111cd678a155d200915224716d"
+    },
+    {
+      "bytes": 2870,
+      "relative_path": "mismatch-cache/canonical/transactions.log",
+      "sha256": "660333fafdb562a0948cc8cbe50598c96052a3da963e7cf32e487511a4cd7919"
+    },
+    {
+      "bytes": 5678,
+      "relative_path": "mismatch-cache/repaired-cache.brep",
+      "sha256": "5df01535a5e20a754c26b0d6f004d8079ffbf05bee65260426972883990298a1"
+    },
+    {
+      "bytes": 507,
+      "relative_path": "mismatch-cache/repaired-cache.json",
+      "sha256": "b2847762ec41f20984a1457438185ae0a52d27abeceebaa5cb9d87d3ad54622f"
+    },
+    {
+      "bytes": 881,
+      "relative_path": "mismatch-cache/report.json",
+      "sha256": "038afbf37a3c7e743b52c50a2a424d103585b9a6d6915bfe76ea420297aa5725"
+    },
+    {
+      "bytes": 507,
+      "relative_path": "mismatch-cache/tampered-cache.json",
+      "sha256": "b898c90e7b53da78e801f7e7c2827bed8b40074e35983e113cc6c06197388b4c"
+    },
+    {
+      "bytes": 812,
+      "relative_path": "mismatch-cache/working-project.previous-generation/manifest.json",
+      "sha256": "5f2c9e3c771c8282a783bab1a14383631b95e956a5f36cae39f9e20365cffbb1"
+    },
+    {
+      "bytes": 0,
+      "relative_path": "mismatch-cache/working-project.previous-generation/transactions.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 5678,
+      "relative_path": "schema-v0/canonical/brep/l-bracket.brep",
+      "sha256": "c3dd5714d333230188248fd15ed236154fa7c6277120a9dbedc3d4fbdee6d344"
+    },
+    {
+      "bytes": 815,
+      "relative_path": "schema-v0/canonical/manifest.json",
+      "sha256": "170d9747274432c66e7d37bfab1c6d48c623ce9c2264d07a2cee057057191e7d"
+    },
+    {
+      "bytes": 3633,
+      "relative_path": "schema-v0/canonical/transactions.log",
+      "sha256": "040abefa368f8c54edeae67f303fdd47225ccc4807a13129feaa57be97c58d82"
+    },
+    {
+      "bytes": 614,
+      "relative_path": "schema-v0/report.json",
+      "sha256": "049ccf97a02d681dac220494476e9d29e2e9136461d55dc0ebcea2751ca6b26c"
+    },
+    {
+      "bytes": 284,
+      "relative_path": "schema-v0/v0-manifest.json",
+      "sha256": "98cfdcb189dff95f3e5152da66dd31438b7733a995de2631cf6b88ebeefc7858"
+    },
+    {
+      "bytes": 0,
+      "relative_path": "schema-v0/v0-transactions.ndjson",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "cases": [
+    "mismatch-cache",
+    "schema-v0",
+    "capability-loss"
+  ],
+  "fixture": "l-bracket",
+  "schema_version": "threeterm.rehearsal.adversarial/1"
+}

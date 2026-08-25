@@ -783,7 +783,7 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "body_ids", "formats", "output_dir", "tessellation_deflection", "override_warnings", "accept_stale_geometry"],
+        "required": ["bundle_path", "feature_id", "formats", "output_dir", "tessellation_deflection", "override_warnings", "accept_stale_geometry"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },

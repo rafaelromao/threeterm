@@ -94,7 +94,10 @@ fn write_3mf(
     let metadata = [
         ("generation_id", generation_id.to_string()),
         ("revision_id", revision_id.to_string()),
-        ("feature_ids", feature_ids.join(",")),
+        (
+            "feature_ids",
+            serde_json::to_string(feature_ids).expect("feature IDs serialize"),
+        ),
         ("feature_graph_hash", feature_graph_hash.to_string()),
         ("revision_hash", revision_hash.to_string()),
     ]
@@ -694,6 +697,14 @@ impl Host {
             });
         }
         for body_id in &body_ids {
+            let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
+            if !stale_body_features.is_empty() {
+                return Err(HostError::StaleLastValidGeometry {
+                    feature_id: body_id.clone(),
+                    active_revision: prior.history.active_snapshot().revision_id.clone(),
+                    stale_features: stale_body_features,
+                });
+            }
             if !prior
                 .graph
                 .features()
@@ -718,7 +729,10 @@ impl Host {
             .with_output_path(&stage, format!("{feature_id}.stl"))
             .with_feature_id(feature_id);
         let worker = OcctWorker::locate()
-            .map_err(HostError::from)?
+            .map_err(|error| {
+                let _ = fs::remove_dir_all(&stage);
+                HostError::from(error)
+            })?
             .with_revision_id(prior.revision_hash_hex());
         let result = worker.export(&request).map_err(|error| {
             let _ = fs::remove_dir_all(&stage);
@@ -3055,6 +3069,7 @@ mod tests {
         assert!(archive.contains("threeterm.generation_id"));
         assert!(archive.contains("generation-1"));
         assert!(archive.contains("revision-2"));
+        assert!(archive.contains("threeterm.feature_ids\">[&quot;first&quot;,&quot;second&quot;]"));
         assert!(archive.contains(&"a".repeat(64)));
         assert!(archive.contains(&"b".repeat(64)));
         let _ = std::fs::remove_dir_all(root);

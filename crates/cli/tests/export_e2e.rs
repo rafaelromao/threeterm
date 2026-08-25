@@ -170,8 +170,12 @@ fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
         ],
     );
 
-    let archive =
-        String::from_utf8_lossy(&fs::read(output.join("vertical.3mf")).unwrap()).into_owned();
+    let bytes = fs::read(output.join("vertical.3mf")).unwrap();
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+    let archive = String::from_utf8_lossy(&bytes).into_owned();
+    for entry in ["[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"] {
+        assert!(archive.contains(entry), "3MF contains {entry}");
+    }
     assert_eq!(archive.matches("<object ").count(), 2);
     assert_eq!(archive.matches("<item ").count(), 2);
     assert!(archive.contains("name=\"vertical\""));
@@ -197,6 +201,11 @@ fn export_cli_preserves_named_multi_body_3mf_and_project_generation_metadata() {
             "metadata field {field} is recoverable"
         );
     }
+    assert!(
+        archive.contains(
+            "name=\"threeterm.feature_ids\">[&quot;vertical&quot;,&quot;horizontal&quot;]"
+        )
+    );
     assert_eq!(
         fs::read_to_string(bundle.join("manifest.json")).unwrap(),
         manifest

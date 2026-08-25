@@ -684,7 +684,10 @@ impl Bundle {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
-        publish_staged(&staging, &bundle.root)?;
+        publish_staged(&staging, &bundle.root).map_err(|error| match error {
+            PublicationError::Io(error) => BundleError::Io(error.to_string()),
+            PublicationError::Unknown(error) => BundleError::PublicationUnknown(error.to_string()),
+        })?;
         Ok(bundle)
     }
 
@@ -1271,8 +1274,10 @@ impl Bundle {
             return Err(error);
         }
         terminate_at_requested_publication_point(PublicationKillPoint::StagingValidation);
-        publish_staged(&staging, &self.root)
-            .map_err(|error| BundleError::PublicationUnknown(error.to_string()))?;
+        publish_staged(&staging, &self.root).map_err(|error| match error {
+            PublicationError::Io(error) => BundleError::Io(error.to_string()),
+            PublicationError::Unknown(error) => BundleError::PublicationUnknown(error.to_string()),
+        })?;
         self.open_locked()
             .map_err(|error| BundleError::PublicationUnknown(error.to_string()))
     }
@@ -1416,7 +1421,9 @@ fn load_v0_with_migration(
     if let Err(error) = publish_staged(&staging, path) {
         // A validated staging directory is a sealed recovery candidate. Keep
         // it for diagnostics and a later retry rather than discarding data.
-        return Err(BundleError::Io(error.to_string()));
+        return Err(BundleError::Io(match error {
+            PublicationError::Io(error) | PublicationError::Unknown(error) => error.to_string(),
+        }));
     }
 
     Ok(loaded_with(
@@ -1469,7 +1476,18 @@ fn replay_history_events(log: &TransactionLog) -> Result<HistoryState, BundleErr
     Ok(state)
 }
 
-fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
+enum PublicationError {
+    Io(std::io::Error),
+    Unknown(std::io::Error),
+}
+
+impl From<std::io::Error> for PublicationError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn publish_staged(staging: &Path, destination: &Path) -> Result<(), PublicationError> {
     let previous = previous_generation_path(destination);
     if !destination.exists() {
         rename_generation(
@@ -1477,7 +1495,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
             destination,
             PublicationFailurePoint::PromoteStaging,
         )?;
-        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
+        sync_parent_directory(destination, PublicationFailurePoint::ParentSync)
+            .map_err(PublicationError::Unknown)?;
         return Ok(());
     }
     let retired = retired_generation_path(&previous);
@@ -1496,7 +1515,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         if retired.exists() {
             let _ = rename_generation(&retired, &previous, PublicationFailurePoint::ReplaceCurrent);
         }
-        return Err(error);
+        return Err(PublicationError::Io(error));
     }
     // The previous generation is deliberately left in place. `Bundle::open`
     // recognizes an interrupted replacement and opens it explicitly.
@@ -1513,7 +1532,7 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
         if retired.exists() {
             let _ = rename_generation(&retired, &previous, PublicationFailurePoint::RetirePrevious);
         }
-        return Err(error);
+        return Err(PublicationError::Io(error));
     }
     // This is the generation older than the retained predecessor. It is no
     // longer part of recovery, so its cleanup must not block a later publish
@@ -1521,7 +1540,8 @@ fn publish_staged(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // Cleanup is outside the two-generation publication boundary. A failed
     // cleanup is retained for the next publication to reconcile.
     let _ = remove_retired_generation(&retired);
-    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)?;
+    sync_parent_directory(destination, PublicationFailurePoint::ParentSync)
+        .map_err(PublicationError::Unknown)?;
     Ok(())
 }
 

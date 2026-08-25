@@ -1874,16 +1874,34 @@ impl Host {
         let draft_semantic_fingerprint = bracket_semantic_fingerprint(&draft);
         if let Some(committed) = Bundle::at(&root).find_idempotency_key(draft_id)? {
             let matching_entry = committed.log.entries().iter().find(|entry| {
+                let payload = serde_json::from_str::<serde_json::Value>(
+                    entry.idempotency_payload.as_deref().unwrap_or_default(),
+                )
+                .ok();
+                let payload_source_revision = payload
+                    .as_ref()
+                    .and_then(|payload| payload["source_revision"].as_str());
+                let payload_result_sha256 = payload
+                    .as_ref()
+                    .and_then(|payload| payload["result_sha256"].as_str());
+                let canonical_result_sha256 =
+                    sha256_path(&committed_brep_path(&root, &draft.bracket_id)).ok();
+                let source_matches = payload_source_revision
+                    == Some(draft.source_revision.as_str())
+                    || (draft.source_revision == committed.revision_hash_hex()
+                        && entry.log_index + 1 == committed.log.entries().len());
                 entry.idempotency_key.as_deref() == Some(draft_id)
                     && entry.feature_id == draft.bracket_id
                     && entry.kind == kind
-                    && draft.source_revision == committed.revision_hash_hex()
-                    && serde_json::from_str::<serde_json::Value>(
-                        entry.idempotency_payload.as_deref().unwrap_or_default(),
-                    )
-                    .ok()
-                    .and_then(|payload| payload["semantic_fingerprint"].as_str().map(str::to_owned))
-                    .as_deref()
+                    && entry.log_index + 1 == committed.log.entries().len()
+                    && source_matches
+                    && payload_result_sha256 == canonical_result_sha256.as_deref()
+                    && payload
+                        .as_ref()
+                        .and_then(|payload| {
+                            payload["semantic_fingerprint"].as_str().map(str::to_owned)
+                        })
+                        .as_deref()
                         == Some(draft_semantic_fingerprint.as_str())
             });
             if let Some(entry) = matching_entry {

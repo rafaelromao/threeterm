@@ -41,10 +41,10 @@ use threeterm_protocol::worker::{
 pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult,
-    SCHEMA_VERSION, ShellRequest, ShellResult,
+    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExportResult, ExtrudeRequest,
+    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
+    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, Operation,
+    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -470,6 +470,14 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_loft()
+    }
+    pub fn export(&self, request: &ExportRequest) -> Result<ExportResult, WorkerError> {
+        let bytes = bounded_serialize(request, "export", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_export()
     }
 
     fn invoke(
@@ -1097,6 +1105,9 @@ impl RawResult {
     }
 
     fn into_loft(self) -> Result<LoftResult, WorkerError> {
+        self.bounded()
+    }
+    fn into_export(self) -> Result<ExportResult, WorkerError> {
         self.bounded()
     }
 }

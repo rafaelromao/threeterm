@@ -2107,6 +2107,7 @@ bool handle_boolean_pattern(const JsonParser::Value& request, std::string& error
                 const double y = origin[1] + spacing[1] * static_cast<double>(row);
                 gp_Ax2 axis(gp_Pnt(x, y, hole_start), gp_Dir(0.0, 0.0, 1.0));
                 BRepPrimAPI_MakeCylinder cylinder(axis, radius, hole_height);
+                cylinder.Build();
                 if (!cylinder.IsDone()) {
                     error = "could not build boolean_pattern hole cylinder";
                     return false;

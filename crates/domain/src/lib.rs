@@ -598,7 +598,8 @@ impl FeatureGraph {
             return Err("sketch feature ID does not match its graph feature".to_string());
         }
         sketch.validate()?;
-        let changed = self.add_feature(feature.clone());
+        let sketch_changed = self.sketches.get(&feature.id) != Some(&sketch);
+        let changed = self.add_feature(feature.clone()) || sketch_changed;
         self.sketches.insert(feature.id, sketch);
         Ok(changed)
     }

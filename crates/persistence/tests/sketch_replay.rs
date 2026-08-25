@@ -115,5 +115,24 @@ fn solved_sketch_is_canonical_and_replays_after_reload() {
     assert_eq!(reopened.graph.sketch("rectangle"), Some(&payload));
     assert_ne!(committed.revision_hash_hex(), before.revision_hash_hex());
     assert_eq!(reopened.revision_hash_hex(), committed.revision_hash_hex());
+
+    let mut replacement = payload.clone();
+    replacement
+        .solved_coordinates
+        .as_mut()
+        .expect("coordinates")[1]
+        .x = 11.0;
+    let replacement_committed = bundle
+        .append_sketch_if_revision(&replacement, committed.revision_hash_hex())
+        .expect("replacement sketch publishes");
+    let replacement_reopened = bundle.open().expect("replacement sketch reopens");
+    assert_eq!(
+        replacement_reopened.graph.sketch("rectangle"),
+        Some(&replacement)
+    );
+    assert_ne!(
+        replacement_committed.revision_hash_hex(),
+        committed.revision_hash_hex()
+    );
     let _ = fs::remove_dir_all(path);
 }

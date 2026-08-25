@@ -67,3 +67,18 @@ The non-durable focus, selection, gesture, command, preview, and recovery status
 
 **Gesture Acknowledgement**:
 A visible indication of a pending target, active tool or drag, selected result, cancellation, focus/resize recovery, or readiness. It makes transient input state observable without requiring hover, release, or pixel-coordinate events for correctness.
+
+**Sketch**:
+An immutable host-owned collection of stable-ID sketch entities and constraints. Its
+solver output is a Derived Result until a successful revision-bound command commits
+the resolved coordinates.
+
+**Sketch Entity**:
+A stable-ID point, line segment, circle, or arc in a Sketch. Entity IDs are the
+ThreeTerm identity carried across the libslvs worker boundary; solver handles are
+never canonical.
+
+**Sketch Solve**:
+A versioned command that evaluates a Sketch through a disposable libslvs worker and
+normalizes status, degrees of freedom, entity IDs, related constraints, diagnostics,
+and successful solved coordinates.

@@ -25,16 +25,18 @@ pub use threeterm_protocol::schema::{
     LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
     LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
-    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
+    SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
     COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
     HISTORICAL_EDIT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
-    find, find_by_name, iter,
+    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
+use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
 };
@@ -201,6 +203,10 @@ enum DispatchPlan {
         tessellation_deflection: f64,
         override_warnings: bool,
         accept_stale_geometry: bool,
+    },
+    SketchSolve {
+        bundle: String,
+        request_file: String,
     },
     Unknown {
         arg: String,
@@ -481,6 +487,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "draft" => parse_draft(&args[2..]),
         "loft" => parse_loft(&args[2..]),
         "export" => parse_export(&args[2..]),
+        "sketch-solve" => parse_sketch_solve(&args[2..]),
         _ => DispatchPlan::Unknown {
             arg: command.to_string(),
         },
@@ -551,6 +558,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             tessellation_deflection,
             ..
         } => tessellation_deflection.is_finite(),
+        DispatchPlan::SketchSolve { .. } => true,
         DispatchPlan::Bracket {
             length,
             width,
@@ -580,6 +588,45 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         DispatchPlan::Unknown {
             arg: "non-finite numeric value".to_string(),
         }
+    }
+}
+
+fn parse_sketch_solve(args: &[OsString]) -> DispatchPlan {
+    let mut bundle = None;
+    let mut request_file = None;
+    let mut index = 0;
+    while index < args.len() {
+        let Some(flag) = args[index].to_str() else {
+            return DispatchPlan::Unknown {
+                arg: "sketch-solve".to_string(),
+            };
+        };
+        let Some(value) = args.get(index + 1).and_then(|value| value.to_str()) else {
+            return DispatchPlan::Unknown {
+                arg: flag.to_string(),
+            };
+        };
+        match flag {
+            "--bundle" => bundle = Some(value.to_string()),
+            "--request-file" => request_file = Some(value.to_string()),
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: flag.to_string(),
+                };
+            }
+        }
+        index += 2;
+    }
+    match (bundle, request_file) {
+        (Some(bundle), Some(request_file)) if !bundle.is_empty() && !request_file.is_empty() => {
+            DispatchPlan::SketchSolve {
+                bundle,
+                request_file,
+            }
+        }
+        _ => DispatchPlan::Unknown {
+            arg: "sketch-solve".to_string(),
+        },
     }
 }
 
@@ -2448,6 +2495,13 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
+        DispatchPlan::SketchSolve { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, SKETCH_SOLVE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::HistoricalEdit { .. }
         | DispatchPlan::CreateRevision { .. }
         | DispatchPlan::RestoreRevision { .. }
@@ -2810,6 +2864,70 @@ pub fn dispatch_registered_command(
             return Ok(
                 json!({"definitions": graph.definitions, "instances": graph.instances, "schema_version": schema.response_schema_version}),
             );
+        }
+        if command == SKETCH_SOLVE_COMMAND_ID {
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(new_request_id);
+            let typed_request =
+                SketchSolveRequest::new(
+                    request_id,
+                    string_field("feature_id")?,
+                    serde_json::from_value(request.get("entities").cloned().ok_or_else(|| {
+                        DispatchError::Validation("missing entities".to_string())
+                    })?)
+                    .map_err(|error| {
+                        DispatchError::Validation(format!("invalid sketch entities: {error}"))
+                    })?,
+                    serde_json::from_value(request.get("constraints").cloned().ok_or_else(
+                        || DispatchError::Validation("missing constraints".to_string()),
+                    )?)
+                    .map_err(|error| {
+                        DispatchError::Validation(format!("invalid sketch constraints: {error}"))
+                    })?,
+                )
+                .with_source_revision(
+                    request
+                        .get("source_revision")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+            let phase = request
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("commit");
+            let mut response = if phase == "preview" {
+                let result =
+                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
+                serde_json::to_value(result)
+            } else if phase == "commit" {
+                let preview =
+                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
+                if !preview.is_success() {
+                    serde_json::to_value(preview)
+                } else {
+                    let worker = SlvsWorker::locate().map_err(|error| {
+                        DispatchError::Host(HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })
+                    })?;
+                    let view = host.commit_sketch_solve_with_worker(
+                        string_field("bundle_path")?,
+                        &typed_request,
+                        &worker,
+                    )?;
+                    serde_json::to_value(view.result)
+                }
+            } else {
+                return Err(DispatchError::Validation(
+                    "phase must be preview or commit".to_string(),
+                ));
+            }
+            .map_err(|error| DispatchError::Validation(error.to_string()))?;
+            response["schema_version"] = Value::String(schema.response_schema_version.to_string());
+            return Ok(response);
         }
         if command == CAPTURE_COMPONENT_COMMAND_ID {
             let selected_feature_ids = request
@@ -3572,6 +3690,20 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             accept_stale_geometry,
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "body_ids": body_ids, "formats": formats, "output_dir": output_dir, "tessellation_deflection": tessellation_deflection, "override_warnings": override_warnings, "accept_stale_geometry": accept_stale_geometry })
+        }
+        DispatchPlan::SketchSolve {
+            bundle,
+            request_file,
+        } => {
+            let contents = fs::read_to_string(request_file)
+                .map_err(|error| format!("sketch request file could not be read: {error}"))?;
+            let mut request: Value = serde_json::from_str(&contents)
+                .map_err(|error| format!("sketch request file is not JSON: {error}"))?;
+            request
+                .as_object_mut()
+                .ok_or_else(|| "sketch request file must contain a JSON object".to_string())?
+                .insert("bundle_path".to_string(), Value::String(bundle.clone()));
+            request
         }
         DispatchPlan::Registered { .. } | DispatchPlan::Unknown { .. } => {
             return Err("parsed command has no registered request".to_string());
@@ -4936,7 +5068,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 31);
+        assert_eq!(commands.len(), 32);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

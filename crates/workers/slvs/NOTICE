@@ -1,0 +1,11 @@
+ThreeTerm libslvs worker
+
+This worker links SolveSpace libslvs v3.2 at commit
+27b6a080c8b669421bd4d444650c3b8eddec5687.
+
+libslvs is distributed under the GNU General Public License, version 3.
+The corresponding source is available from:
+https://github.com/solvespace/solvespace/tree/v3.2
+
+This notice does not replace the full license text or the source-offer
+obligations that apply to a distributed build.

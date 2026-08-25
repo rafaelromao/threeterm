@@ -69,8 +69,7 @@ fn required_fixture_worker(test_name: &str) -> Option<OcctWorker> {
 
 #[test]
 fn extrude_rectangle_returns_ok_with_real_brep() {
-    let Some(worker) = required_fixture_worker("boolean_pattern_cuts_324_holes_with_real_occt")
-    else {
+    let Some(worker) = locate_worker() else {
         return;
     };
     let temp = std::env::temp_dir().join(format!("threeterm-occt-extrude-{}", std::process::id()));
@@ -104,9 +103,7 @@ fn extrude_rectangle_returns_ok_with_real_brep() {
 
 #[test]
 fn extrude_with_short_profile_returns_request_malformed() {
-    let Some(worker) =
-        required_fixture_worker("boolean_pattern_acknowledges_cooperative_cancel_after_progress")
-    else {
+    let Some(worker) = locate_worker() else {
         return;
     };
     let mut request = ExtrudeRequest::new(
@@ -1069,8 +1066,8 @@ fn boolean_pattern_request(
 
 #[test]
 fn boolean_pattern_cuts_324_holes_with_real_occt() {
-    let Some(worker) = locate_worker() else {
-        eprintln!("boolean_pattern_cuts_324_holes_with_real_occt: skipped; OCCT is unavailable");
+    let Some(worker) = required_fixture_worker("boolean_pattern_cuts_324_holes_with_real_occt")
+    else {
         return;
     };
     let temp = std::env::temp_dir().join(format!(
@@ -1107,10 +1104,9 @@ fn boolean_pattern_cuts_324_holes_with_real_occt() {
 
 #[test]
 fn boolean_pattern_acknowledges_cooperative_cancel_after_progress() {
-    let Some(worker) = locate_worker() else {
-        eprintln!(
-            "boolean_pattern_acknowledges_cooperative_cancel_after_progress: skipped; OCCT is unavailable"
-        );
+    let Some(worker) =
+        required_fixture_worker("boolean_pattern_acknowledges_cooperative_cancel_after_progress")
+    else {
         return;
     };
     let temp = std::env::temp_dir().join(format!(

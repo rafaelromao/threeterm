@@ -147,9 +147,7 @@ fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
 
 #[test]
 fn extrude_commits_brep_into_a_new_revision() {
-    let Some(worker) = required_fixture_worker(
-        "cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot",
-    ) else {
+    let Some(worker) = locate_worker() else {
         return;
     };
     let root = fresh_bundle_with_feature("commit", "box-seed", "box");
@@ -175,10 +173,9 @@ fn extrude_commits_brep_into_a_new_revision() {
 
 #[test]
 fn cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot() {
-    let Some(worker) = locate_worker() else {
-        eprintln!(
-            "cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot: skipped; OCCT is unavailable"
-        );
+    let Some(worker) = required_fixture_worker(
+        "cancelled_324_hole_boolean_pattern_preserves_the_revision_snapshot",
+    ) else {
         return;
     };
     let root = fresh_bundle_with_feature("boolean-pattern-cancel", "box-seed", "box");

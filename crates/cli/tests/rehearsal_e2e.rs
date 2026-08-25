@@ -36,6 +36,19 @@ fn run_rehearsal(output_dir: &Path) -> std::process::Output {
         .expect("rehearsal process runs")
 }
 
+fn run_adversarial(output_dir: &Path, case: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .args([
+            "run",
+            "lbracket",
+            &format!("--adversarial={case}"),
+            "--output-dir",
+            output_dir.to_str().expect("output path is UTF-8"),
+        ])
+        .output()
+        .expect("adversarial process runs")
+}
+
 fn files(root: &Path, prefix: &str, output: &mut Vec<String>) {
     let mut entries = fs::read_dir(root)
         .expect("artifact root reads")
@@ -390,5 +403,44 @@ fn all_adversarial_cases_run_in_order_when_the_occt_worker_is_available() {
         serde_json::json!(["mismatch-cache", "schema-v0", "capability-loss"])
     );
     verify_adversarial_evidence(&output_dir).expect("complete adversarial evidence verifies");
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn capability_loss_is_demoable_through_the_production_binary() {
+    let output_dir = temp_root("adversarial-cli-capability");
+    let output = run_adversarial(&output_dir, "capability-loss");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(report["report"]["diagnostic"]["code"], "CAPABILITY_LOSS");
+    assert_eq!(report["report"]["next_command_route"], "HeadlessOnly");
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn mismatch_cache_is_demoable_through_the_production_binary_when_occt_is_available() {
+    if OcctWorker::locate().is_err() {
+        eprintln!(
+            "adversarial_cli: no OCCT worker binary found; pinned CI runs this production path"
+        );
+        return;
+    }
+    let output_dir = temp_root("adversarial-cli-mismatch");
+    let output = run_adversarial(&output_dir, "mismatch-cache");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(
+        report["report"]["diagnostic"]["code"],
+        "LAYER_1_FINGERPRINT_MISMATCH"
+    );
+    assert!(report["report"]["canonical_byte_equal"].as_bool().unwrap());
     let _ = fs::remove_dir_all(output_dir);
 }

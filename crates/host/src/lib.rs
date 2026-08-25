@@ -4965,7 +4965,10 @@ fn validate_layer1_cache(root: &Path, loaded: &LoadedBundle) -> Result<(), HostE
     let expected = expected_occt_worker_fingerprint();
     if record.worker_fingerprint != expected {
         let _ = fs::remove_file(&record_path);
-        let _ = fs::remove_file(cache.join(&record.artifact_name));
+        // The record is untrusted at this point. Only remove the fixed cache
+        // artifact owned by this boundary; never join an attacker-controlled
+        // filename before validating it.
+        let _ = fs::remove_file(cache.join("l-bracket.brep"));
         return Err(HostError::Layer1FingerprintMismatch {
             expected: Box::new(expected),
             found: Box::new(record.worker_fingerprint),

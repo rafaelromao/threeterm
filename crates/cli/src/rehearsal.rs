@@ -1225,6 +1225,8 @@ fn run_mismatch_cache(root: &Path) -> Result<Value, RehearsalError> {
     tampered[position] = b'p';
     fs::write(root.join("tampered-cache.json"), &tampered)
         .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    fs::write(&cache_record, &tampered)
+        .map_err(|error| rehearsal_io_error("cache_tamper", error, &project))?;
     let mismatch = host
         .load_with_layer1_cache(&project)
         .expect_err("tampered Layer 1 cache must be rejected");
@@ -1383,16 +1385,45 @@ fn run_capability_loss(root: &Path) -> Result<Value, RehearsalError> {
     }
     let terminal = bytes.borrow().clone();
     let after = canonical_state(&project)?;
+    let alternate_screen_exited = terminal.windows(b"?1049l".len()).any(|w| w == b"?1049l");
+    let kitty_image_deleted = terminal.windows(b"a=d,d=I".len()).any(|w| w == b"a=d,d=I");
+    let kitty_transmission_disabled = !terminal[before_cleanup..].windows(3).any(|w| w == b"a=T");
+    let kitty_controls_disabled = [
+        b"?1016l".as_slice(),
+        b"?1006l",
+        b"?1002l",
+        b"?1004l",
+        b"?2026l",
+    ]
+    .into_iter()
+    .all(|sequence| terminal.windows(sequence.len()).any(|w| w == sequence));
+    let cursor_and_attributes_restored = terminal.windows(b"?25h".len()).any(|w| w == b"?25h")
+        && terminal.windows(b"0m".len()).any(|w| w == b"0m");
+    let termios_restored = termios_calls.get() == 1;
     let terminal_state = json!({
-        "alternate_screen_exited": terminal.windows(b"?1049l".len()).any(|w| w == b"?1049l"),
-        "kitty_image_deleted": terminal.windows(b"a=d,d=I".len()).any(|w| w == b"a=d,d=I"),
-        "kitty_transmission_disabled": !terminal[before_cleanup..].windows(3).any(|w| w == b"a=T"),
-        "keyboard_mouse_focus_disabled": terminal.windows(b"?1016l".len()).any(|w| w == b"?1016l"),
-        "cursor_and_attributes_restored": terminal.windows(b"?25h".len()).any(|w| w == b"?25h") && terminal.windows(b"0m".len()).any(|w| w == b"0m"),
-        "termios_restored": termios_calls.get() == 1,
+        "alternate_screen_exited": alternate_screen_exited,
+        "kitty_image_deleted": kitty_image_deleted,
+        "kitty_transmission_disabled": kitty_transmission_disabled,
+        "kitty_controls_disabled": kitty_controls_disabled,
+        "cursor_and_attributes_restored": cursor_and_attributes_restored,
+        "termios_restored": termios_restored,
         "second_frame_bytes_added": after_second_frame > after_cleanup,
         "second_frame_rejected_code": second_frame_error.code.as_str(),
     });
+    if !alternate_screen_exited
+        || !kitty_image_deleted
+        || !kitty_transmission_disabled
+        || !kitty_controls_disabled
+        || !cursor_and_attributes_restored
+        || !termios_restored
+        || after_second_frame != after_cleanup
+    {
+        return Err(rehearsal_detail(
+            "terminal_cleanup",
+            "terminal cleanup snapshot did not satisfy the restoration contract",
+            root,
+        ));
+    }
     write_json(&root.join("terminal-state.json"), &terminal_state)
         .map_err(|error| rehearsal_io_error("evidence", error, root))?;
     fs::write(root.join("failed-probe-response.bin"), &failed_probe.bytes)

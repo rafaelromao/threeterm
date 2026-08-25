@@ -3037,19 +3037,19 @@ fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, 
                         "missing integer field \"draft_sequence\"".to_string(),
                     )
                 })?;
-            let draft_fingerprint = request
-                .get("draft_fingerprint")
+            let input_fingerprint = request
+                .get("input_fingerprint")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     DispatchError::Validation(
-                        "missing string field \"draft_fingerprint\"".to_string(),
+                        "missing string field \"input_fingerprint\"".to_string(),
                     )
                 })?;
             let draft = host.update_bracket_parameter_draft(
                 bundle,
                 draft_id,
                 sequence,
-                draft_fingerprint,
+                input_fingerprint,
                 dimensions()?,
             )?;
             Ok(json!({

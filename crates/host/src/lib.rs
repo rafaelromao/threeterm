@@ -1981,7 +1981,10 @@ impl Host {
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                if let Ok(committed) = Bundle::at(&root).open()
+                if !matches!(
+                    &error,
+                    HostError::Persistence(BundleError::PublicationUnknown(_))
+                ) && let Ok(committed) = Bundle::at(&root).open()
                     && committed.log.entries().iter().any(|entry| {
                         entry.idempotency_key.as_deref() == Some(draft_id)
                             && entry.feature_id == draft.bracket_id

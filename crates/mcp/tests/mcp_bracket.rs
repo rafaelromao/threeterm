@@ -348,7 +348,7 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
         .expect("open returns the draft fingerprint")
         .to_string();
     let mut update = call(5, "update", "edit-commit", 4.0, Some(0));
-    update["params"]["arguments"]["draft_fingerprint"] = draft_fingerprint.into();
+    update["params"]["arguments"]["input_fingerprint"] = draft_fingerprint.into();
     let committed = run_mcp(&[
         update,
         call(6, "preview", "edit-commit", 4.0, None),

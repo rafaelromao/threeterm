@@ -216,6 +216,19 @@ impl McpServer {
                 format!("tools/call arguments failed request-schema validation: {reason}"),
             );
         }
+        if schema_entry.id == BRACKET_EDIT_COMMAND_ID
+            && arguments.get("phase").and_then(Value::as_str) == Some("update")
+        {
+            for field in ["draft_sequence", "input_fingerprint"] {
+                if !arguments.get(field).is_some_and(|value| !value.is_null()) {
+                    return JsonRpcResponse::error(
+                        request.id.clone(),
+                        ERROR_INVALID_PARAMS,
+                        format!("bracket-edit update requires {field}"),
+                    );
+                }
+            }
+        }
 
         let result = match schema_entry.id {
             BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
@@ -302,8 +315,8 @@ impl McpServer {
             .get("draft_sequence")
             .and_then(Value::as_u64)
             .unwrap_or(u64::MAX);
-        let draft_fingerprint = arguments
-            .get("draft_fingerprint")
+        let input_fingerprint = arguments
+            .get("input_fingerprint")
             .and_then(Value::as_str)
             .unwrap_or_default();
         let request = || {
@@ -460,7 +473,7 @@ impl McpServer {
                     &bundle,
                     &draft_id,
                     draft_sequence,
-                    draft_fingerprint,
+                    input_fingerprint,
                     request(),
                 )?;
                 let draft_fingerprint = session

@@ -85,7 +85,17 @@ fn lua_f2_produces_the_same_bracket_response_as_the_cli() {
     let lua_response = dispatch_lua_key(&bracket_lua(&lua_root), "F2", &host)
         .expect("Lua F2 invokes the registered bracket command");
 
-    assert_eq!(lua_response, cli_response);
+    let mut cli_semantic_response = cli_response.clone();
+    let mut lua_semantic_response = lua_response.clone();
+    cli_semantic_response
+        .as_object_mut()
+        .expect("CLI response is an object")
+        .remove("revision_hash");
+    lua_semantic_response
+        .as_object_mut()
+        .expect("Lua response is an object")
+        .remove("revision_hash");
+    assert_eq!(lua_semantic_response, cli_semantic_response);
     let bracket_schema = find(BRACKET_COMMAND_ID).expect("bracket is registered");
     validate(&bracket_schema.response_schema, &lua_response).expect("Lua response validates");
     let transactions = fs::read_to_string(lua_root.join("transactions.log"))

@@ -932,7 +932,7 @@ impl Supervisor {
                 context,
             );
         }
-        if let Err(error) = self.host.terminate() {
+        if let Err(error) = self.host.finish_terminal() {
             self.discard_stage();
             let context = TerminationContext {
                 last_progress,

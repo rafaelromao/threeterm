@@ -267,6 +267,73 @@ fn host_save_surfaces_containing_directory_sync_failure_after_promotion() {
 }
 
 #[test]
+fn named_revision_creation_reopens_the_promoted_generation_after_parent_sync_failure() {
+    let root = temp_root("named-revision-parent-sync-failure");
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("initial bracket succeeds");
+
+    fail_next_publication_at(PublicationFailurePoint::ParentSync);
+    let error = host
+        .create_named_revision(&root, "before-edit")
+        .expect_err("parent sync failure must remain an error");
+    assert!(matches!(error, HostError::Persistence(_)));
+
+    let loaded = Bundle::at(&root)
+        .open()
+        .expect("promoted generation reloads");
+    assert!(loaded.history.named_revisions().contains_key("before-edit"));
+    assert_eq!(
+        host.current().expect("host keeps current state"),
+        threeterm_host::SnapshotView::from(&loaded)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(previous_root(&root));
+}
+
+#[test]
+fn named_revision_creation_rejects_empty_and_duplicate_names_without_publication() {
+    let root = temp_root("named-revision-validation");
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("initial bracket succeeds");
+    host.create_named_revision(&root, "before-edit")
+        .expect("named revision succeeds");
+    let current = host.current();
+    let manifest = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log = std::fs::read(root.join("transactions.log")).expect("log reads");
+
+    for name in ["", "before-edit"] {
+        let error = host
+            .create_named_revision(&root, name)
+            .expect_err("invalid name must be rejected");
+        assert!(matches!(error, HostError::Validation { .. }));
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).expect("manifest reads"),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read(root.join("transactions.log")).expect("log reads"),
+            log
+        );
+        assert_eq!(host.current(), current);
+    }
+
+    assert_eq!(
+        Bundle::at(&root)
+            .open()
+            .expect("bundle opens")
+            .history
+            .named_revisions()
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_later_host_save_recovers_after_each_injected_storage_failure() {
     for point in [
         PublicationFailurePoint::StagedFiles,

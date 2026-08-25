@@ -549,7 +549,18 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let updated = bundle.append_features_with_history(&[], &event)?;
+        let updated = match bundle.append_features_with_history(&[], &event) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Publication can promote before its final parent sync
+                // reports an error. Re-open so in-memory state never lags
+                // the selected generation on disk.
+                if let Ok(loaded) = bundle.open() {
+                    self.current.replace(Some(loaded));
+                }
+                return Err(error.into());
+            }
+        };
         let snapshot = SnapshotView::from(&updated);
         let history = updated.history.clone();
         self.current.replace(Some(updated));

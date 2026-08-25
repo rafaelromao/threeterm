@@ -1,13 +1,17 @@
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::rc::Rc;
 use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use threeterm_host::Host;
+use threeterm_domain::ProjectGeneration;
+use threeterm_host::{Host, HostError};
+use threeterm_persistence::{Bundle, BundleError, write_v0_fixture};
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, BRACKET_EDIT_RESPONSE_SCHEMA,
     BRACKET_RESPONSE_SCHEMA, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
@@ -15,6 +19,11 @@ use threeterm_protocol::schema::{
     REHEARSE_RUN_RESPONSE_SCHEMA, REHEARSE_RUN_RESPONSE_SCHEMA_VERSION, find,
 };
 use threeterm_protocol::schema_validator::validate;
+use threeterm_tui::TuiViewportSession;
+use threeterm_viewport::{
+    CapabilityProbe, CapabilityProbeIo, CapabilityState, GhosttyRenderer, TerminalCapabilityVector,
+    TerminalEnvironment, ViewportDiagnosticCode, ViewportFrame,
+};
 
 const PROJECT_DIR: &str = "project";
 const PREVIOUS_PROJECT_DIR: &str = "project.previous-generation";
@@ -698,7 +707,14 @@ fn collect_artifacts(project: &Path, export: &Path) -> Result<Vec<Artifact>, Reh
 pub fn verify_rehearsal_evidence(root: impl AsRef<Path>) -> Result<(), RehearsalError> {
     let root = root.as_ref();
     let diagnostic_root = root.join("run-2").join(PROJECT_DIR);
-    verify_directory_entries(root, &["run-1", "run-2", CATALOG_FILE], &diagnostic_root)?;
+    let mut allowed = vec!["run-1", "run-2", CATALOG_FILE];
+    if root.join("adversarial").is_dir() {
+        allowed.push("adversarial");
+    }
+    verify_directory_entries(root, &allowed, &diagnostic_root)?;
+    if root.join("adversarial").is_dir() {
+        verify_adversarial_evidence(root.join("adversarial"))?;
+    }
 
     let aggregate = read_report(
         &root.join(CATALOG_FILE),
@@ -935,6 +951,677 @@ fn write_catalog(output_dir: &Path, report: &Value) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+const ADVERSARIAL_SCHEMA: &str = "threeterm.rehearsal.adversarial/1";
+pub const ADVERSARIAL_EVIDENCE_DIR: &str = "docs/research/rehearsal-evidence/l-bracket/adversarial";
+const REFERENCE_MANIFEST: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/manifest.json"
+));
+const REFERENCE_TRANSACTIONS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/transactions.log"
+));
+const REFERENCE_BREP: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialCase {
+    MismatchCache,
+    SchemaV0,
+    CapabilityLoss,
+}
+
+impl AdversarialCase {
+    pub const ALL: [Self; 3] = [Self::MismatchCache, Self::SchemaV0, Self::CapabilityLoss];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MismatchCache => "mismatch-cache",
+            Self::SchemaV0 => "schema-v0",
+            Self::CapabilityLoss => "capability-loss",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|case| case.as_str() == value)
+    }
+}
+
+/// Run one adversarial case and incrementally publish its evidence catalog.
+pub fn run_adversarial_case(
+    output_dir: impl AsRef<Path>,
+    case: AdversarialCase,
+) -> Result<Value, RehearsalError> {
+    let output_dir = output_dir.as_ref();
+    preflight_adversarial_root(output_dir)?;
+    let staging = output_dir.join(format!(".{}-{}", case.as_str(), std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|error| {
+        RehearsalError::new("evidence", json!({"message": error.to_string()}), &staging)
+    })?;
+    let report = match case {
+        AdversarialCase::MismatchCache => run_mismatch_cache(&staging),
+        AdversarialCase::SchemaV0 => run_schema_v0(&staging),
+        AdversarialCase::CapabilityLoss => run_capability_loss(&staging),
+    }?;
+    write_json(&staging.join("report.json"), &report).map_err(|error| {
+        RehearsalError::new("evidence", json!({"message": error.to_string()}), &staging)
+    })?;
+    let final_dir = output_dir.join(case.as_str());
+    let _ = fs::remove_dir_all(&final_dir);
+    fs::rename(&staging, &final_dir).map_err(|error| {
+        RehearsalError::new(
+            "evidence",
+            json!({"message": error.to_string()}),
+            output_dir,
+        )
+    })?;
+    let manifest = write_adversarial_manifest(output_dir)?;
+    Ok(json!({"case": case.as_str(), "report": report, "manifest": manifest}))
+}
+
+/// Run all three cases in the documented order.
+pub fn run_all_adversarial_cases(output_dir: impl AsRef<Path>) -> Result<Value, RehearsalError> {
+    let output_dir = output_dir.as_ref();
+    for case in AdversarialCase::ALL {
+        run_adversarial_case(output_dir, case)?;
+    }
+    let manifest = write_adversarial_manifest(output_dir)?;
+    if manifest["cases"]
+        != json!(
+            AdversarialCase::ALL
+                .iter()
+                .map(|case| case.as_str())
+                .collect::<Vec<_>>()
+        )
+    {
+        return Err(RehearsalError::new(
+            "evidence",
+            json!({"message": "all adversarial cases did not publish"}),
+            output_dir,
+        ));
+    }
+    Ok(manifest)
+}
+
+/// Verify adversarial evidence without starting native workers.
+pub fn verify_adversarial_evidence(root: impl AsRef<Path>) -> Result<(), RehearsalError> {
+    let root = root.as_ref();
+    let manifest_path = root.join(CATALOG_FILE);
+    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string()}),
+            root,
+        )
+    })?)
+    .map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string()}),
+            root,
+        )
+    })?;
+    if manifest["schema_version"] != ADVERSARIAL_SCHEMA {
+        return Err(RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "adversarial manifest schema mismatch"}),
+            root,
+        ));
+    }
+    let expected = manifest["artifacts"].as_array().ok_or_else(|| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "adversarial manifest omitted artifacts"}),
+            root,
+        )
+    })?;
+    let actual = collect_adversarial_artifacts(root).map_err(|error| {
+        RehearsalError::new(
+            "evidence_verification",
+            json!({"message": error.to_string()}),
+            root,
+        )
+    })?;
+    let actual_value = serde_json::to_value(actual).expect("artifact list serializes");
+    if actual_value != Value::Array(expected.clone()) {
+        return Err(RehearsalError::new(
+            "evidence_verification",
+            json!({"message": "adversarial artifact catalog does not match files"}),
+            root,
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_adversarial_root(root: &Path) -> Result<(), RehearsalError> {
+    if root.exists() {
+        let metadata = fs::symlink_metadata(root).map_err(|error| {
+            RehearsalError::new("preflight", json!({"message": error.to_string()}), root)
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(RehearsalError::new(
+                "preflight",
+                json!({"message": "adversarial output root must be a real directory"}),
+                root,
+            ));
+        }
+    } else {
+        fs::create_dir_all(root).map_err(|error| {
+            RehearsalError::new("preflight", json!({"message": error.to_string()}), root)
+        })?;
+    }
+    for entry in fs::read_dir(root).map_err(|error| {
+        RehearsalError::new("preflight", json!({"message": error.to_string()}), root)
+    })? {
+        let entry = entry.map_err(|error| {
+            RehearsalError::new("preflight", json!({"message": error.to_string()}), root)
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !matches!(
+            name.as_str(),
+            "mismatch-cache" | "schema-v0" | "capability-loss" | CATALOG_FILE
+        ) && !name.starts_with('.')
+        {
+            return Err(RehearsalError::new(
+                "preflight",
+                json!({"message": format!("unexpected adversarial output entry {name:?}")}),
+                root,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_adversarial_manifest(root: &Path) -> Result<Value, RehearsalError> {
+    let mut cases = Vec::new();
+    for case in AdversarialCase::ALL {
+        if root.join(case.as_str()).is_dir() {
+            cases.push(case.as_str());
+        }
+    }
+    let artifacts = collect_adversarial_artifacts(root).map_err(|error| {
+        RehearsalError::new("evidence", json!({"message": error.to_string()}), root)
+    })?;
+    let report = json!({
+        "schema_version": ADVERSARIAL_SCHEMA,
+        "fixture": FIXTURE,
+        "cases": cases,
+        "artifacts": artifacts,
+    });
+    write_catalog(root, &report).map_err(|error| {
+        RehearsalError::new("evidence", json!({"message": error.to_string()}), root)
+    })?;
+    Ok(report)
+}
+
+fn collect_adversarial_artifacts(root: &Path) -> io::Result<Vec<Artifact>> {
+    let mut artifacts = Vec::new();
+    for case in AdversarialCase::ALL {
+        let case_root = root.join(case.as_str());
+        if case_root.is_dir() {
+            collect_tree(&case_root, case.as_str(), &mut artifacts)
+                .map_err(|error| io::Error::other(format!("{error:?}")))?;
+        }
+    }
+    artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(artifacts)
+}
+
+fn write_json(path: &Path, value: &Value) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).expect("JSON report serializes");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)
+}
+
+fn run_mismatch_cache(root: &Path) -> Result<Value, RehearsalError> {
+    let project = root.join("working-project");
+    invoke_machine(
+        "project_create",
+        &project,
+        &["--machine", "new-project"],
+        &[project.to_string_lossy().as_ref()],
+    )?;
+    invoke_machine(
+        "bracket_create",
+        &project,
+        &["--machine", "bracket"],
+        &[
+            project.to_string_lossy().as_ref(),
+            "--bracket-id",
+            FIXTURE,
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    )?;
+    let host = Host::new();
+    host.load(&project)
+        .map_err(|error| rehearsal_host_error("load", error, &project))?;
+    let host_before = host.current();
+    let before = canonical_state(&project)?;
+    host.rebuild_lbracket_layer1_cache(&project)
+        .map_err(|error| rehearsal_host_error("cache_rebuild", error, &project))?;
+    let cache_record = project.join("cache/layer1.json");
+    let mut tampered = fs::read(&cache_record)
+        .map_err(|error| rehearsal_io_error("cache_tamper", error, &project))?;
+    let position = tampered
+        .windows(4)
+        .position(|window| window == b"occt")
+        .ok_or_else(|| {
+            rehearsal_detail("cache_tamper", "worker fingerprint was not found", &project)
+        })?;
+    tampered[position] = b'p';
+    fs::write(root.join("tampered-cache.json"), &tampered)
+        .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    let mismatch = host
+        .load_with_layer1_cache(&project)
+        .expect_err("tampered Layer 1 cache must be rejected");
+    if !matches!(&mismatch, HostError::Layer1FingerprintMismatch { .. }) {
+        return Err(rehearsal_detail(
+            "cache_reload",
+            format!("unexpected cache diagnostic: {mismatch}"),
+            &project,
+        ));
+    }
+    let host_snapshot_preserved = host.current() == host_before;
+    let rebuilt = host
+        .rebuild_lbracket_layer1_cache(&project)
+        .map_err(|error| rehearsal_host_error("cache_rebuild", error, &project))?;
+    fs::copy(&cache_record, root.join("repaired-cache.json"))
+        .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    fs::copy(
+        project.join("cache/l-bracket.brep"),
+        root.join("repaired-cache.brep"),
+    )
+    .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    let after = canonical_state(&project)?;
+    copy_canonical(&project, root)?;
+    let canonical_byte_equal = before.files == after.files && before.revision == after.revision;
+    fs::remove_dir_all(&project).map_err(|error| rehearsal_io_error("cleanup", error, root))?;
+    Ok(json!({
+        "schema_version": ADVERSARIAL_SCHEMA,
+        "case": AdversarialCase::MismatchCache.as_str(),
+        "diagnostic": {
+            "code": "LAYER_1_FINGERPRINT_MISMATCH",
+            "detail": mismatch.to_string(),
+            "recovery": "discarded tampered cache and recomputed through the OCCT worker"
+        },
+        "canonical_revision_before": before.revision,
+        "canonical_revision_after": after.revision,
+        "canonical_byte_equal": canonical_byte_equal,
+        "host_snapshot_preserved": host_snapshot_preserved,
+        "recomputations": rebuilt.recomputations,
+    }))
+}
+
+fn run_schema_v0(root: &Path) -> Result<Value, RehearsalError> {
+    let project = root.join("working-project");
+    materialize_reference_bundle(&project)?;
+    let host = Host::new();
+    host.load(&project)
+        .map_err(|error| rehearsal_host_error("load", error, &project))?;
+    let host_before = host.current();
+    let before = canonical_state(&project)?;
+    let v0 = root.join("input-v0");
+    write_v0_fixture(&v0, ProjectGeneration::with_id("adversarial-v0"))
+        .map_err(|error| rehearsal_detail("v0_fixture", error.to_string(), &v0))?;
+    let v0_before = fingerprint_tree(&v0)?;
+    let refusal = host
+        .load_adversarial_v0(&v0)
+        .expect_err("adversarial v0 load must fail closed");
+    if !matches!(
+        &refusal,
+        HostError::Persistence(BundleError::SchemaEpochV0RequiresBackup)
+    ) {
+        return Err(rehearsal_detail("v0_load", refusal.to_string(), &v0));
+    }
+    let host_snapshot_preserved = host.current() == host_before;
+    let after = canonical_state(&project)?;
+    copy_canonical(&project, root)?;
+    copy_file(&v0.join("manifest.json"), &root.join("v0-manifest.json"))?;
+    copy_file(
+        &v0.join("canonical/transactions.ndjson"),
+        &root.join("v0-transactions.ndjson"),
+    )?;
+    let canonical_byte_equal = before.files == after.files && before.revision == after.revision;
+    let backup = v0.with_file_name(format!(
+        "{}{}",
+        v0.file_name().unwrap().to_string_lossy(),
+        threeterm_persistence::PRE_MIGRATION_BACKUP_SUFFIX
+    ));
+    let v0_unchanged = fingerprint_tree(&v0)? == v0_before;
+    let no_backup = !backup.exists();
+    fs::remove_dir_all(&project).map_err(|error| rehearsal_io_error("cleanup", error, root))?;
+    fs::remove_dir_all(&v0).map_err(|error| rehearsal_io_error("cleanup", error, root))?;
+    Ok(json!({
+        "schema_version": ADVERSARIAL_SCHEMA,
+        "case": AdversarialCase::SchemaV0.as_str(),
+        "diagnostic": {
+            "code": "SCHEMA_EPOCH_V0_REQUIRES_BACKUP",
+            "detail": refusal.to_string(),
+            "recovery": "refused the v0 bundle without changing the canonical snapshot"
+        },
+        "canonical_revision_before": before.revision,
+        "canonical_revision_after": after.revision,
+        "canonical_byte_equal": canonical_byte_equal,
+        "host_snapshot_preserved": host_snapshot_preserved,
+        "v0_byte_equal": v0_unchanged,
+        "backup_created": !no_backup,
+    }))
+}
+
+fn run_capability_loss(root: &Path) -> Result<Value, RehearsalError> {
+    let project = root.join("working-project");
+    materialize_reference_bundle(&project)?;
+    let host = Host::new();
+    host.load(&project)
+        .map_err(|error| rehearsal_host_error("load", error, &project))?;
+    let before = canonical_state(&project)?;
+    let bytes = Rc::new(RefCell::new(Vec::new()));
+    let termios_calls = Rc::new(Cell::new(0));
+    let probe = valid_capability_result();
+    let renderer = GhosttyRenderer::with_termios_restorer(
+        SharedWriter(Rc::clone(&bytes)),
+        RecordingTermios(Rc::clone(&termios_calls)),
+    );
+    let mut session = TuiViewportSession::from_host_with_probe(&host, 80, 24, renderer, &probe)
+        .map_err(|error| rehearsal_detail("viewport_start", error.to_string(), &project))?;
+    session
+        .process_terminal_input(b"\x1b[C")
+        .map_err(|error| rehearsal_detail("frame_1", error.to_string(), &project))?;
+    let mut failed_probe = FailedProbe::default();
+    let probe_error = CapabilityProbe::new(77)
+        .probe(&mut failed_probe, valid_terminal_environment())
+        .expect_err("the second capability probe must fail");
+    let before_cleanup = bytes.borrow().len();
+    session
+        .report_viewport_failure(&probe_error)
+        .map_err(|error| rehearsal_detail("capability_loss", format!("{error:?}"), &project))?;
+    let after_cleanup = bytes.borrow().len();
+    let second_frame = ViewportFrame {
+        revision: before.revision.clone(),
+        generation: 2,
+        width: 1,
+        height: 1,
+        rgb: vec![1, 2, 3],
+        frame_token: None,
+    };
+    let second_frame_error = session
+        .coordinator_mut()
+        .submit(second_frame)
+        .expect_err("invalidated renderer must reject the second frame");
+    let after_second_frame = bytes.borrow().len();
+    if second_frame_error.code != ViewportDiagnosticCode::CapabilityInvalidated {
+        return Err(rehearsal_detail(
+            "frame_2",
+            format!("unexpected second-frame diagnostic: {second_frame_error}"),
+            &project,
+        ));
+    }
+    session
+        .complete_viewport_restore()
+        .map_err(|error| rehearsal_detail("headless_restore", format!("{error:?}"), &project))?;
+    let lifecycle = format!("{:?}", session.state().lifecycle);
+    if lifecycle != "HeadlessOnly" {
+        return Err(rehearsal_detail(
+            "headless_restore",
+            format!("unexpected lifecycle state: {lifecycle}"),
+            &project,
+        ));
+    }
+    let terminal = bytes.borrow().clone();
+    let after = canonical_state(&project)?;
+    let terminal_state = json!({
+        "alternate_screen_exited": terminal.windows(b"?1049l".len()).any(|w| w == b"?1049l"),
+        "kitty_image_deleted": terminal.windows(b"a=d,d=I".len()).any(|w| w == b"a=d,d=I"),
+        "kitty_transmission_disabled": !terminal[before_cleanup..].windows(3).any(|w| w == b"a=T"),
+        "keyboard_mouse_focus_disabled": terminal.windows(b"?1016l".len()).any(|w| w == b"?1016l"),
+        "cursor_and_attributes_restored": terminal.windows(b"?25h".len()).any(|w| w == b"?25h") && terminal.windows(b"0m".len()).any(|w| w == b"0m"),
+        "termios_restored": termios_calls.get() == 1,
+        "second_frame_bytes_added": after_second_frame > after_cleanup,
+        "second_frame_rejected_code": second_frame_error.code.as_str(),
+    });
+    write_json(&root.join("terminal-state.json"), &terminal_state)
+        .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    fs::write(root.join("failed-probe-response.bin"), &failed_probe.bytes)
+        .map_err(|error| rehearsal_io_error("evidence", error, root))?;
+    copy_canonical(&project, root)?;
+    let canonical_byte_equal = before.files == after.files && before.revision == after.revision;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit = crate::dispatch::dispatch(
+        [
+            OsString::from("--machine"),
+            OsString::from("load"),
+            OsString::from(project.to_string_lossy().as_ref()),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    if exit != crate::dispatch::EXIT_OK || !stderr.is_empty() {
+        return Err(rehearsal_detail(
+            "headless_route",
+            "headless load failed",
+            &project,
+        ));
+    }
+    fs::remove_dir_all(&project).map_err(|error| rehearsal_io_error("cleanup", error, root))?;
+    Ok(json!({
+        "schema_version": ADVERSARIAL_SCHEMA,
+        "case": AdversarialCase::CapabilityLoss.as_str(),
+        "diagnostic": {
+            "code": "CAPABILITY_LOSS",
+            "detail": probe_error.to_string(),
+            "recovery": "bounded cleanup completed and the next command routed to HeadlessOnly"
+        },
+        "canonical_revision_before": before.revision,
+        "canonical_revision_after": after.revision,
+        "canonical_byte_equal": canonical_byte_equal,
+        "lifecycle": lifecycle,
+        "next_command_route": "HeadlessOnly",
+        "terminal_state": terminal_state,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalState {
+    revision: String,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+fn canonical_state(project: &Path) -> Result<CanonicalState, RehearsalError> {
+    let revision = Bundle::at(project)
+        .open()
+        .map_err(|error| rehearsal_detail("canonical_state", error.to_string(), project))?
+        .revision_hash_hex()
+        .to_string();
+    let mut files = Vec::new();
+    for relative in ["manifest.json", "transactions.log", "brep/l-bracket.brep"] {
+        files.push((
+            relative.to_string(),
+            fs::read(project.join(relative))
+                .map_err(|error| rehearsal_io_error("canonical_state", error, project))?,
+        ));
+    }
+    Ok(CanonicalState { revision, files })
+}
+
+fn copy_canonical(project: &Path, root: &Path) -> Result<(), RehearsalError> {
+    for (relative, _) in canonical_state(project)?.files {
+        copy_file(
+            &project.join(&relative),
+            &root.join("canonical").join(relative),
+        )?;
+    }
+    Ok(())
+}
+
+fn materialize_reference_bundle(project: &Path) -> Result<(), RehearsalError> {
+    fs::create_dir_all(project.join("brep"))
+        .map_err(|error| rehearsal_io_error("fixture", error, project))?;
+    fs::write(project.join("manifest.json"), REFERENCE_MANIFEST)
+        .map_err(|error| rehearsal_io_error("fixture", error, project))?;
+    fs::write(project.join("transactions.log"), REFERENCE_TRANSACTIONS)
+        .map_err(|error| rehearsal_io_error("fixture", error, project))?;
+    fs::write(project.join("brep/l-bracket.brep"), REFERENCE_BREP)
+        .map_err(|error| rehearsal_io_error("fixture", error, project))?;
+    Bundle::at(project)
+        .open()
+        .map_err(|error| rehearsal_detail("fixture", error.to_string(), project))?;
+    Ok(())
+}
+
+fn fingerprint_tree(root: &Path) -> Result<Vec<(String, String)>, RehearsalError> {
+    let mut files = Vec::new();
+    fingerprint_tree_inner(root, root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn fingerprint_tree_inner(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, String)>,
+) -> Result<(), RehearsalError> {
+    for entry in
+        fs::read_dir(current).map_err(|error| rehearsal_io_error("fingerprint", error, current))?
+    {
+        let entry = entry.map_err(|error| rehearsal_io_error("fingerprint", error, current))?;
+        let path = entry.path();
+        if path.is_dir() {
+            fingerprint_tree_inner(root, &path, files)?;
+        } else {
+            let relative = path
+                .strip_prefix(root)
+                .expect("tree entry has root prefix")
+                .to_string_lossy()
+                .into_owned();
+            files.push((
+                relative,
+                format!(
+                    "{:x}",
+                    Sha256::digest(fs::read(&path).map_err(|error| rehearsal_io_error(
+                        "fingerprint",
+                        error,
+                        &path
+                    ))?)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn copy_file(source: &Path, destination: &Path) -> Result<(), RehearsalError> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| rehearsal_io_error("evidence", error, parent))?;
+    }
+    fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| rehearsal_io_error("evidence", error, destination))
+}
+
+fn rehearsal_detail(stage: &str, detail: impl Into<String>, project: &Path) -> RehearsalError {
+    RehearsalError::new(stage, json!({"message": detail.into()}), project)
+}
+
+fn rehearsal_io_error(stage: &str, error: io::Error, project: &Path) -> RehearsalError {
+    rehearsal_detail(stage, error.to_string(), project)
+}
+
+fn rehearsal_host_error(stage: &str, error: HostError, project: &Path) -> RehearsalError {
+    rehearsal_detail(stage, error.to_string(), project)
+}
+
+#[derive(Debug, Clone)]
+struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordingTermios(Rc<Cell<u8>>);
+
+impl threeterm_viewport::TermiosRestorer for RecordingTermios {
+    fn restore(&mut self) -> Result<(), String> {
+        self.0.set(self.0.get() + 1);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailedProbe {
+    bytes: Vec<u8>,
+}
+
+impl Write for FailedProbe {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapabilityProbeIo for FailedProbe {
+    fn read_probe_response(&mut self, _max_bytes: usize) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+fn valid_capability_result() -> threeterm_viewport::CapabilityProbeResult {
+    threeterm_viewport::CapabilityProbeResult {
+        capabilities: TerminalCapabilityVector {
+            state: CapabilityState::Valid,
+            direct_ghostty: true,
+            kitty_rgb_zlib: true,
+            kitty_acknowledgements: true,
+            kitty_keyboard: true,
+            sgr_mouse_cell: true,
+            sgr_mouse_pixel: true,
+            focus_reporting: true,
+            alternate_screen: true,
+            resize_events: true,
+        },
+        unrelated_input: Vec::new(),
+        response_evidence: "injected-valid-probe".to_string(),
+    }
+}
+
+fn valid_terminal_environment() -> TerminalEnvironment {
+    TerminalEnvironment {
+        term: Some("xterm-ghostty".to_string()),
+        term_program: Some("ghostty".to_string()),
+        in_tmux: false,
+        over_ssh: false,
+        foreground_tty: true,
+        utf8: true,
+        width: 80,
+        height: 24,
+    }
 }
 
 #[cfg(test)]

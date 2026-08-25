@@ -15,9 +15,9 @@ threeterm-occt-worker = { path = "../workers/occt" }
 threeterm-viewport = { path = "../viewport" }
 sha2 = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

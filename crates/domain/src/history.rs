@@ -839,9 +839,14 @@ fn validate_event(event: &HistoryEvent) -> Result<(), HistoryError> {
             }
         }
         HistoryOperation::CreateNamedRevision { name } => {
-            if !event.named_revisions.contains_key(name) {
+            let Some(named) = event.named_revisions.get(name) else {
                 return Err(HistoryError::InvalidEvent(
                     "created named revision is missing".to_string(),
+                ));
+            };
+            if named.snapshot != event.active || named.provenance != "explicit-create" {
+                return Err(HistoryError::InvalidEvent(
+                    "created named revision does not capture the active snapshot".to_string(),
                 ));
             }
         }
@@ -956,6 +961,31 @@ mod tests {
     }
 
     #[test]
+    fn created_named_revision_must_capture_the_active_snapshot_with_explicit_provenance() {
+        let mut state = HistoryState::default();
+        let event = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&event).expect("event applies");
+
+        let event = state
+            .create_named_revision("before-edit")
+            .expect("named revision");
+        let mut forged = event.clone();
+        let named = forged
+            .named_revisions
+            .get_mut("before-edit")
+            .expect("created revision");
+        named.snapshot.revision_id = "history-revision-forged".to_string();
+        named.provenance = "historical-edit:l-base".to_string();
+
+        assert!(matches!(
+            state.apply_event(&forged),
+            Err(HistoryError::InvalidEvent(_))
+        ));
+    }
+
+    #[test]
     fn feature_timeline_scopes_active_revisions_and_named_markers() {
         let mut state = HistoryState::default();
         let mut events = Vec::new();
@@ -989,7 +1019,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
+        assert_eq!(first.revisions[1].operation, "create-named-revision");
+        assert_eq!(first.revisions[1].named_revision_names, ["before-second"]);
         assert_eq!(first.named_revisions[0].name, "before-second");
+        assert_eq!(first.named_revisions[0].provenance, "explicit-create");
+        assert_eq!(
+            first.named_revisions[1].name,
+            "recovered-before-historical-edit-4"
+        );
+        assert_eq!(
+            first.named_revisions[1].provenance,
+            "historical-edit:first-base"
+        );
 
         let second = project_feature_timeline(&events, "second-base").expect("second timeline");
         assert_eq!(

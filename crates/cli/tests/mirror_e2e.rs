@@ -23,6 +23,8 @@ use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{MIRROR_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
 
+mod common;
+
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -66,25 +68,8 @@ fn save(bin: &str, root: &Path, feature_id: &str, kind: &str) {
     );
 }
 
-fn extrude(bin: &str, root: &Path, feature_id: &str, profile: serde_json::Value, height: f64) {
-    let profile_path = root.join(format!("{feature_id}-profile.json"));
-    fs::write(&profile_path, profile.to_string()).expect("profile writes");
-    let height_str = format!("{height}");
-    run(
-        bin,
-        &[
-            "--machine",
-            "extrude",
-            "--bundle",
-            root.to_str().expect("utf-8 path"),
-            "--feature-id",
-            feature_id,
-            "--profile-file",
-            profile_path.to_str().expect("utf-8 path"),
-            "--height",
-            &height_str,
-        ],
-    );
+fn extrude(_bin: &str, root: &Path, feature_id: &str, profile: serde_json::Value, height: f64) {
+    common::extrude_canonical(root, feature_id, profile, height);
 }
 
 #[test]

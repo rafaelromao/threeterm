@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use threeterm_protocol::artifact::Stage;
 use threeterm_protocol::supervisor::{
     CancellationGracePolicy, Progress, Request as SupervisorRequest, Supervisor, SupervisorOutcome,
     TerminationRecord,
@@ -240,6 +241,16 @@ pub struct OcctWorker {
     expected_worker_id: Option<String>,
 }
 
+/// A completed staged extrude whose artifact remains owned by the Host for
+/// independent validation. The worker boundary parses the typed completion,
+/// but does not inspect or publish the staged file.
+#[derive(Debug)]
+pub struct StagedExtrudeCompletion {
+    pub result: ExtrudeResult,
+    pub outcome: SupervisorOutcome,
+    pub stage: Stage,
+}
+
 /// Default supervisor grace for OCCT operations. Operations complete in
 /// well under a second; this bound catches hangs without harming
 /// legitimate geometry work.
@@ -364,6 +375,88 @@ impl OcctWorker {
         .into_bracket()
     }
 
+    /// Run one extrude with a Host-owned request stage. The completed result
+    /// and artifact facts are returned together so Host validation remains the
+    /// only acceptance boundary for the staged bytes.
+    pub fn extrude_staged(
+        &self,
+        request: &ExtrudeRequest,
+        stage: Stage,
+    ) -> Result<StagedExtrudeCompletion, WorkerError> {
+        if let Err(detail) = request.validate() {
+            let _ = stage.discard();
+            return Err(WorkerError::Malformed { detail });
+        }
+        let Some(binding) = request.artifact_request.as_ref() else {
+            let _ = stage.discard();
+            return Err(WorkerError::Malformed {
+                detail: "staged extrude request is missing artifact_request".to_string(),
+            });
+        };
+        let expected_filename = format!("{}.partial", binding.staging_name);
+        if binding.request_id != request.request_id
+            || binding.operation != "extrude"
+            || binding.feature_id != request.feature_id
+            || binding.artifact_kind != "brep"
+            || binding.source_revision_id.is_empty()
+            || binding.staging_name.is_empty()
+            || binding.staging_name.contains('/')
+            || binding.staging_name.contains('\\')
+            || request.output_dir != stage.root()
+            || request.output_filename != expected_filename
+        {
+            let _ = stage.discard();
+            return Err(WorkerError::Malformed {
+                detail: "staged extrude request does not match its Host-owned stage binding"
+                    .to_string(),
+            });
+        }
+        let bytes = match bounded_serialize(request, "extrude", &request.request_id) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = stage.discard();
+                return Err(error);
+            }
+        };
+        let expected_output = expected_output_path(&request.output_dir, &request.output_filename);
+        let context = match RequestContext::from_envelope(&bytes, "extrude") {
+            Ok(context) => context,
+            Err(error) => {
+                let _ = stage.discard();
+                return Err(error);
+            }
+        };
+        let (outcome, owned_stage) = self.supervise(&context, None, Some(stage))?;
+        let SupervisorOutcome::Completed { result, .. } = &outcome else {
+            return Err(map_outcome(
+                outcome,
+                &context.request_id,
+                &context.command_id,
+                &context.feature_id,
+                expected_output,
+            )
+            .expect_err("non-completed staged outcome must map to a worker error"));
+        };
+        let Some(stage) = owned_stage else {
+            return Err(WorkerError::Malformed {
+                detail: "completed staged extrude lost its request stage".to_string(),
+            });
+        };
+        let parsed = match serde_json::from_value::<ExtrudeResult>(result.clone()) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = stage.discard();
+                return Err(WorkerError::Malformed {
+                    detail: format!("staged extrude result could not be parsed: {error}"),
+                });
+            }
+        };
+        Ok(StagedExtrudeCompletion {
+            result: parsed,
+            outcome,
+            stage,
+        })
+    }
     /// Extrude `request` with a cooperative cancellation token. The
     /// caller sets the token to request cancellation; the supervisor
     /// sends `Cancel`, waits the grace period for the worker's
@@ -710,6 +803,103 @@ impl OcctWorker {
             cleanup_worker_output(&path);
         }
         mapped.map(|result| result.value)
+    }
+}
+
+#[derive(Debug)]
+struct RequestContext {
+    request_id: String,
+    command_id: String,
+    feature_id: String,
+    args: serde_json::Value,
+}
+
+impl RequestContext {
+    fn from_envelope(envelope: &[u8], command_id: &str) -> Result<Self, WorkerError> {
+        if envelope.len() > threeterm_protocol::frame::MAX_FRAME_BUFFER {
+            return Err(WorkerError::Malformed {
+                detail: format!(
+                    "request envelope of {} bytes exceeds the {} byte input bound",
+                    envelope.len(),
+                    threeterm_protocol::frame::MAX_FRAME_BUFFER
+                ),
+            });
+        }
+        let args: serde_json::Value =
+            serde_json::from_slice(envelope).map_err(|error| WorkerError::Malformed {
+                detail: format!("request serialization failed: {error}"),
+            })?;
+        let request_id = args
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if request_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing request_id".to_string(),
+            });
+        }
+        if command_id.is_empty() {
+            return Err(WorkerError::Malformed {
+                detail: "request envelope is missing command id".to_string(),
+            });
+        }
+        let feature_id = args
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        Ok(Self {
+            request_id,
+            command_id: command_id.to_string(),
+            feature_id,
+            args,
+        })
+    }
+}
+
+impl OcctWorker {
+    fn supervise(
+        &self,
+        context: &RequestContext,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        stage: Option<Stage>,
+    ) -> Result<(SupervisorOutcome, Option<Stage>), WorkerError> {
+        let host = match <Self as WorkerProcess>::spawn(WorkerConfig {
+            worker_id: "occt",
+            schema_version: threeterm_protocol::schema_version(),
+            command_line: vec![self.binary_path.display().to_string()],
+        }) {
+            Ok(host) => host,
+            Err(error) => {
+                if let Some(stage) = stage {
+                    let _ = stage.discard();
+                }
+                return Err(WorkerError::Spawn {
+                    binary: self.binary_path.clone(),
+                    detail: error.to_string(),
+                    request_id: Some(context.request_id.clone()),
+                });
+            }
+        };
+        let mut supervisor = Supervisor::new(self.grace, host, stage);
+        let local_cancel = std::sync::atomic::AtomicBool::new(false);
+        let cancel = cancel.unwrap_or(&local_cancel);
+        let outcome = supervisor.request_with_cancel(
+            SupervisorRequest {
+                request_id: context.request_id.clone(),
+                command_id: context.command_id.clone(),
+                args: context.args.clone(),
+                revision_id: self.revision_id.clone().unwrap_or_default(),
+            },
+            cancel,
+        );
+        let owned_stage = if matches!(outcome, SupervisorOutcome::Completed { .. }) {
+            supervisor.take_stage()
+        } else {
+            None
+        };
+        Ok((outcome, owned_stage))
     }
 }
 
@@ -1310,6 +1500,8 @@ pub fn emit_staged_artifact(
         header: Box::new(ArtifactHeader {
             request_id: request.request_id.clone(),
             source_revision_id: request.source_revision_id.clone(),
+            operation: request.operation.clone(),
+            feature_id: request.feature_id.clone(),
             cache_key,
             worker_fingerprint: fingerprint,
             artifact_kind: request.artifact_kind.clone(),
@@ -1324,6 +1516,9 @@ pub fn emit_staged_artifact(
 mod tests {
     use super::*;
     use crate::envelope::{BooleanFuseRequest, ExtrudeRequest};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use threeterm_protocol::artifact::{Layer1ArtifactRequest, Layer1CacheKey, Stage, sha256_hex};
 
     #[test]
     fn schema_version_matches_pinned_string() {
@@ -1346,6 +1541,84 @@ mod tests {
         let second = new_request_id();
         assert_ne!(first, second);
         assert!(first.starts_with("req-"));
+    }
+
+    #[test]
+    fn extrude_staged_retains_the_stage_after_a_completed_artifact_lifecycle() {
+        let root =
+            std::env::temp_dir().join(format!("threeterm-staged-worker-{}", new_request_id()));
+        let stage_root = root.join("stage");
+        let script = root.join("fake-worker.sh");
+        fs::create_dir_all(&stage_root).expect("stage parent creates");
+        fs::write(
+            &script,
+            r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"fake"}'
+IFS= read -r request || exit 1
+output_dir=$(printf '%s\n' "$request" | sed -n 's/.*"output_dir":"\([^"]*\)".*/\1/p')
+output_filename=$(printf '%s\n' "$request" | sed -n 's/.*"output_filename":"\([^"]*\)".*/\1/p')
+printf 'fake-brep' > "$output_dir/$output_filename"
+printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"req-staged","stage":"computed","percent":100}'
+printf '%s\n' '{"kind":"artifact","schema_version":"threeterm.protocol/1","header":{"request_id":"req-staged","source_revision_id":"source-revision","operation":"extrude","feature_id":"feature-staged","cache_key":{"source_revision_id":"source-revision","worker_fingerprint":{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"},"operation":"extrude","feature_id":"feature-staged","artifact_kind":"brep","semantic_input_sha256":"1111111111111111111111111111111111111111111111111111111111111111","deterministic_settings_sha256":"2222222222222222222222222222222222222222222222222222222222222222"},"worker_fingerprint":{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"},"artifact_kind":"brep","staging_name":"staged.brep","byte_count":9,"sha256":"4eb93fc60c4cd82be45d7386c4ced9eda15ab698c19849a4860184e81c06702e"}}'
+printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"req-staged","result":{"schema_version":"threeterm.workers.occt/1","request_id":"req-staged","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"4eb93fc60c4cd82be45d7386c4ced9eda15ab698c19849a4860184e81c06702e","brep_bytes":9,"feature_id":"feature-staged"}}\n' "$output_dir" "$output_filename"
+"##,
+        )
+        .expect("fake worker writes");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+            .expect("fake worker becomes executable");
+
+        let stage = Stage::open(&stage_root).expect("stage opens");
+        let binding = Layer1ArtifactRequest {
+            request_id: "req-staged".to_string(),
+            source_revision_id: "source-revision".to_string(),
+            operation: "extrude".to_string(),
+            feature_id: "feature-staged".to_string(),
+            artifact_kind: "brep".to_string(),
+            staging_name: "staged.brep".to_string(),
+            semantic_input_sha256: "11".repeat(32),
+            deterministic_settings_sha256: "22".repeat(32),
+        };
+        let request =
+            ExtrudeRequest::new("req-staged", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 1.0)
+                .with_output_path(&stage_root, "staged.brep.partial")
+                .with_feature_id("feature-staged")
+                .with_artifact_request(binding.clone());
+
+        let completion = OcctWorker::with_binary_path(script)
+            .with_revision_id("source-revision")
+            .extrude_staged(&request, stage)
+            .expect("staged worker lifecycle completes");
+
+        assert_eq!(completion.result.request_id, "req-staged");
+        assert_eq!(completion.result.operation, Operation::Extrude);
+        assert_eq!(completion.result.feature_id, "feature-staged");
+        assert_eq!(
+            completion.result.brep_path,
+            stage_root.join("staged.brep.partial")
+        );
+        assert_eq!(completion.result.brep_sha256, sha256_hex(b"fake-brep"));
+        assert_eq!(completion.result.brep_bytes, 9);
+        let SupervisorOutcome::Completed {
+            request_id,
+            artifact_headers,
+            ..
+        } = &completion.outcome
+        else {
+            unreachable!("fake worker completes");
+        };
+        assert_eq!(request_id, "req-staged");
+        assert_eq!(artifact_headers.len(), 1);
+        assert_eq!(
+            artifact_headers[0].header.cache_key,
+            Layer1CacheKey::issue(&binding, &worker_fingerprint())
+        );
+        assert_eq!(
+            fs::read(&completion.result.brep_path).expect("artifact reads"),
+            b"fake-brep"
+        );
+
+        completion.stage.discard().expect("stage discards");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

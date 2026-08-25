@@ -10,6 +10,8 @@ use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_tui::TuiSession;
 
+mod common;
+
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -84,23 +86,12 @@ fn stored_zip_entry(archive: &[u8], wanted: &str) -> Vec<u8> {
     panic!("3MF entry {wanted} is missing");
 }
 
-fn extrude(bin: &str, bundle: &Path, id: &str, profile: &str) {
-    let path = bundle.join(format!("{id}.json"));
-    fs::write(&path, profile).unwrap();
-    run(
-        bin,
-        &[
-            "--machine",
-            "extrude",
-            "--bundle",
-            bundle.to_str().unwrap(),
-            "--feature-id",
-            id,
-            "--profile-file",
-            path.to_str().unwrap(),
-            "--height",
-            "4",
-        ],
+fn extrude(_bin: &str, bundle: &Path, id: &str, profile: &str) {
+    common::extrude_canonical(
+        bundle,
+        id,
+        serde_json::from_str(profile).expect("profile JSON parses"),
+        4.0,
     );
 }
 

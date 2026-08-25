@@ -49,6 +49,8 @@ fn l_bracket_orbit_ten_frames_reuses_layer1_one_worker_invocation() {
     let req = Layer1ArtifactRequest {
         request_id: "req-1".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "l-bracket".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: staged.staging_name.clone(),
         semantic_input_sha256: "aa".repeat(32),
@@ -57,6 +59,8 @@ fn l_bracket_orbit_ten_frames_reuses_layer1_one_worker_invocation() {
     let _header = threeterm_protocol::artifact::ArtifactHeader {
         request_id: req.request_id.clone(),
         source_revision_id: req.source_revision_id.clone(),
+        operation: req.operation.clone(),
+        feature_id: req.feature_id.clone(),
         cache_key: threeterm_protocol::artifact::Layer1CacheKey::issue(&req, &fp),
         worker_fingerprint: fp.clone(),
         artifact_kind: req.artifact_kind.clone(),

@@ -33,7 +33,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "aa2385c8cccf94b794c6a2dc407e6da57f103f9c2401e10741fdafca179aca9a",
+        "8bcb6ed536c5bb7991611f76d9f3cf140170353bb1a61c4dda3f409ad7d23815",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -79,7 +79,7 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
     let extrude = find(EXTRUDE_COMMAND_ID).expect("extrude is registered");
     assert_eq!(
         extrude.response_schema_version,
-        "threeterm.command.extrude.response/1"
+        "threeterm.command.extrude.response/2"
     );
     assert_eq!(
         extrude.request_schema["required"],

@@ -274,21 +274,51 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "worker_fingerprint",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": false },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "worker_fingerprint": {
+                "type": "object",
+                "required": ["worker_kind", "worker_schema_version", "protocol_schema_version"],
+                "properties": {
+                    "worker_kind": { "const": "occt" },
+                    "worker_schema_version": { "const": "threeterm.workers.occt/1" },
+                    "protocol_schema_version": { "const": "threeterm.protocol/1" }
+                },
+                "additionalProperties": false
+            },
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false
@@ -1575,7 +1605,7 @@ pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";
-pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/1";
+pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/2";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
 pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";

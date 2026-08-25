@@ -95,6 +95,8 @@ fn worker_artifact_is_promoted_to_a_layer_1_derived_result() {
     let request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -142,6 +144,8 @@ fn distinct_cache_identities_with_the_same_display_name_preserve_bytes_and_regis
     let first_request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash.clone(),
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "requested-output.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -210,6 +214,8 @@ fn repeated_cache_identity_reuses_the_first_publication_without_overwriting_it()
     let first_request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "first-requested-output.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -281,6 +287,8 @@ fn repeated_cache_identity_recovers_a_corrupted_publication() {
     let first_request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "first-requested-output.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -342,6 +350,8 @@ fn host_accepts_completed_worker_result_before_publishing() {
     let request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -386,6 +396,8 @@ fn worker_completion_is_published_only_by_host_acceptance_and_rejection_cleans_u
     let request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -448,6 +460,8 @@ fn tampered_artifact_is_rejected_without_replacing_host_state() {
     let request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),
@@ -518,6 +532,8 @@ fn misbound_artifact_headers_are_rejected_without_host_mutation() {
     let request = Layer1ArtifactRequest {
         request_id: "request-1".to_string(),
         source_revision_id: snapshot.revision_hash,
+        operation: "extrude".to_string(),
+        feature_id: "box-1".to_string(),
         artifact_kind: "brep".to_string(),
         staging_name: "box-1.brep".to_string(),
         semantic_input_sha256: "11".repeat(32),

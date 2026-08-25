@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use threeterm_protocol::artifact::Layer1ArtifactRequest;
 
 /// Pinned worker schema. The host refuses envelopes that do not match
 /// this string.
@@ -281,6 +282,10 @@ pub struct ExtrudeRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Host-owned artifact binding for the staged extrude path. Ordinary
+    /// worker callers leave this unset and retain the legacy result path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_request: Option<Layer1ArtifactRequest>,
 }
 
 impl ExtrudeRequest {
@@ -294,6 +299,7 @@ impl ExtrudeRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            artifact_request: None,
         }
     }
 
@@ -309,6 +315,11 @@ impl ExtrudeRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_artifact_request(mut self, artifact_request: Layer1ArtifactRequest) -> Self {
+        self.artifact_request = Some(artifact_request);
         self
     }
 

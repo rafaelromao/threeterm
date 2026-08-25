@@ -8,7 +8,7 @@ publish.workspace = true
 description = "Versioned newline-framed worker protocol shared by host and disposable workers."
 
 [dependencies]
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["fs", "signal", "process"] }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -327,6 +327,7 @@ impl McpServer {
                 arguments["height"].as_f64().unwrap_or_default(),
                 arguments["thickness"].as_f64().unwrap_or_default(),
             )
+            .with_output_path(&bundle, "unused.brep")
             .with_feature_id(&bracket_id)
         };
         let canonical_bundle = Bundle::at(&bundle).canonical_root().to_path_buf();

@@ -155,7 +155,7 @@ impl Stage {
         root_dir
             .set_permissions(fs::Permissions::from_mode(0o700))
             .map_err(ArtifactError::Io)?;
-        Self::from_pinned_root(root, parent, root_name, root_dir)
+        Ok(Self::from_pinned_root(root, parent, root_name, root_dir))
     }
 
     /// Open an existing staging namespace without creating any missing
@@ -166,7 +166,7 @@ impl Stage {
         let (parent_path, root_name) = root_parts(&root)?;
         let parent = open_directory_tree(&parent_path, false)?;
         let root_dir = open_root_child(&parent, &root_name, &root)?;
-        Self::from_pinned_root(root, parent, root_name, root_dir)
+        Ok(Self::from_pinned_root(root, parent, root_name, root_dir))
     }
 
     /// Create a new private staging directory without reusing an existing
@@ -208,7 +208,12 @@ impl Stage {
                         let _ = unlink_child(&parent_dir, &candidate_name);
                         return Err(error);
                     }
-                    return Self::from_pinned_root(candidate, parent_dir, candidate_name, root_dir);
+                    return Ok(Self::from_pinned_root(
+                        candidate,
+                        parent_dir,
+                        candidate_name,
+                        root_dir,
+                    ));
                 }
                 Err(ArtifactError::Io(error))
                     if error.kind() == std::io::ErrorKind::AlreadyExists =>
@@ -538,14 +543,14 @@ impl Stage {
         parent: fs::File,
         root_name: String,
         root_dir: fs::File,
-    ) -> Result<Self, ArtifactError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             root,
             parent,
             root_name,
             root_dir,
             verified_files: RefCell::new(HashMap::new()),
-        })
+        }
     }
 }
 

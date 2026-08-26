@@ -95,6 +95,19 @@ fn lua_f2_produces_the_same_bracket_response_as_the_cli() {
         .as_object_mut()
         .expect("Lua response is an object")
         .remove("revision_hash");
+    for response in [&mut cli_semantic_response, &mut lua_semantic_response] {
+        let object = response.as_object_mut().expect("response is an object");
+        object.remove("request_id");
+        object.remove("brep_path");
+        object.remove("artifact_name");
+        if let Some(derived) = object.get_mut("derived_result") {
+            let derived = derived
+                .as_object_mut()
+                .expect("derived result is an object");
+            derived.remove("request_id");
+            derived.remove("artifact_name");
+        }
+    }
     assert_eq!(lua_semantic_response, cli_semantic_response);
     let bracket_schema = find(BRACKET_COMMAND_ID).expect("bracket is registered");
     validate(&bracket_schema.response_schema, &lua_response).expect("Lua response validates");

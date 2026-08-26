@@ -1495,6 +1495,11 @@ impl Bundle {
             && source_brep.is_some()
             && entries.len() == 1
             && entries[0].1.starts_with("bracket:")
+            && loaded
+                .graph
+                .features()
+                .find(|feature| feature.id.as_str() == entries[0].0)
+                .is_some_and(|feature| feature.kind.starts_with("bracket:"))
         {
             Some(entries[0].0)
         } else {

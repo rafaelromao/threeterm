@@ -7,10 +7,11 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HOLE_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID,
-    MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, registry_hash,
+    APPLY_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
+    DRAFT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID,
+    LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID,
+    SHELL_COMMAND_ID, find, registry_hash,
 };
 
 #[test]
@@ -33,7 +34,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "c1152dd3b37f216c65850b0ac963061b00cf738befd076c159f7920a90d6f86d",
+        "33c7d691f0c5411f2d882cf0de5744408cae78230341e916f68e064207c43d42",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -72,6 +73,36 @@ fn registry_contains_versioned_save_and_load_contracts() {
         serde_json::json!(["bundle_path"])
     );
     assert_eq!(load.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_identity_and_transactional_apply_contracts() {
+    let identity = find(IDENTITY_COMMAND_ID).expect("identity is registered");
+    assert_eq!(identity.name, "identity");
+    assert_eq!(
+        identity.response_schema_version,
+        "threeterm.command.identity.response/1"
+    );
+    assert_eq!(
+        identity.request_schema["required"],
+        serde_json::json!(["bundle_path"])
+    );
+
+    let apply = find(APPLY_COMMAND_ID).expect("apply is registered");
+    assert_eq!(apply.name, "apply");
+    assert_eq!(
+        apply.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "expected_revision",
+            "operation",
+            "feature_id"
+        ])
+    );
+    assert_eq!(
+        apply.request_schema["properties"]["operation"]["enum"],
+        serde_json::json!(["add", "set", "remove"])
+    );
 }
 
 #[test]

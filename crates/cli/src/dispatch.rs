@@ -16,6 +16,15 @@ use threeterm_occt_worker::{
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
+use threeterm_protocol::schema::{
+    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
+    find_by_name, iter,
+};
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
     BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
@@ -27,14 +36,6 @@ pub use threeterm_protocol::schema::{
     REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
-};
-use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
-    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
-    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
-    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
 use threeterm_theme::{
@@ -86,6 +87,16 @@ enum DispatchPlan {
     },
     Load {
         bundle: String,
+    },
+    Identity {
+        bundle: String,
+    },
+    Apply {
+        bundle: String,
+        expected_revision: String,
+        operation: String,
+        feature_id: String,
+        kind: Option<String>,
     },
     Bracket {
         bundle: String,
@@ -481,6 +492,8 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "rehearse" => parse_rehearse(&args[2..]),
         "save" => parse_save(&args[2..]),
         "load" => parse_load(&args[2..]),
+        "identity" => parse_identity(&args[2..]),
+        "apply" => parse_apply(&args[2..]),
         "bracket" => parse_bracket(&args[2..]),
         "define-component" => parse_component(DEFINE_COMPONENT_COMMAND_ID, &args[2..]),
         "create-component-instance" => {
@@ -691,6 +704,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::Adversarial { .. }
         | DispatchPlan::Save { .. }
         | DispatchPlan::Load { .. }
+        | DispatchPlan::Identity { .. }
+        | DispatchPlan::Apply { .. }
         | DispatchPlan::BooleanFuse { .. }
         | DispatchPlan::Component { .. }
         | DispatchPlan::CreateRevision { .. }
@@ -1040,6 +1055,73 @@ fn parse_load(args: &[OsString]) -> DispatchPlan {
         },
         [] => DispatchPlan::Unknown {
             arg: "load".to_string(),
+        },
+    }
+}
+
+fn parse_identity(args: &[OsString]) -> DispatchPlan {
+    match args {
+        [bundle] if !bundle.to_string_lossy().starts_with("--") => DispatchPlan::Identity {
+            bundle: bundle.to_string_lossy().into_owned(),
+        },
+        [flag, value] if flag == "--bundle" => DispatchPlan::Identity {
+            bundle: value.to_string_lossy().into_owned(),
+        },
+        [argument, ..] => DispatchPlan::Unknown {
+            arg: argument.to_string_lossy().into_owned(),
+        },
+        [] => DispatchPlan::Unknown {
+            arg: "identity".to_string(),
+        },
+    }
+}
+
+fn parse_apply(args: &[OsString]) -> DispatchPlan {
+    let mut bundle = None;
+    let mut expected_revision = None;
+    let mut operation = None;
+    let mut feature_id = None;
+    let mut kind = None;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy();
+        if !argument.starts_with("--") && bundle.is_none() {
+            bundle = Some(argument.into_owned());
+            index += 1;
+            continue;
+        }
+        let Some(value) = args.get(index + 1) else {
+            return DispatchPlan::Unknown {
+                arg: argument.into_owned(),
+            };
+        };
+        let value = value.to_string_lossy().into_owned();
+        match argument.as_ref() {
+            "--bundle" => bundle = Some(value),
+            "--expected-revision" => expected_revision = Some(value),
+            "--operation" => operation = Some(value),
+            "--feature-id" => feature_id = Some(value),
+            "--kind" => kind = Some(value),
+            _ => {
+                return DispatchPlan::Unknown {
+                    arg: argument.into_owned(),
+                };
+            }
+        }
+        index += 2;
+    }
+    match (bundle, expected_revision, operation, feature_id) {
+        (Some(bundle), Some(expected_revision), Some(operation), Some(feature_id)) => {
+            DispatchPlan::Apply {
+                bundle,
+                expected_revision,
+                operation,
+                feature_id,
+                kind,
+            }
+        }
+        _ => DispatchPlan::Unknown {
+            arg: "apply".to_string(),
         },
     }
 }
@@ -2708,6 +2790,17 @@ fn execute_handler(
             kind,
         } => emit_save(&bundle, &feature_id, &kind, stdout, stderr),
         DispatchPlan::Load { bundle } => emit_load(&bundle, stdout, stderr),
+        DispatchPlan::Identity { .. } | DispatchPlan::Apply { .. } => {
+            let command = match &plan {
+                DispatchPlan::Identity { .. } => IDENTITY_COMMAND_ID,
+                DispatchPlan::Apply { .. } => APPLY_COMMAND_ID,
+                _ => unreachable!(),
+            };
+            match dispatch_registered_command(&Host::new(), command, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Bracket {
             bundle,
             bracket_id,
@@ -3147,6 +3240,44 @@ pub fn dispatch_registered_command(
         };
         if command == BRACKET_EDIT_COMMAND_ID {
             return dispatch_bracket_edit_command(host, &request);
+        }
+        if command == IDENTITY_COMMAND_ID {
+            let identity = host.identity(string_field("bundle_path")?)?;
+            return Ok(identity_value(&identity, schema.response_schema_version));
+        }
+        if command == APPLY_COMMAND_ID {
+            let operation = string_field("operation")?;
+            let feature_id = string_field("feature_id")?;
+            let kind = request.get("kind").and_then(Value::as_str);
+            if matches!(operation, "add" | "set") && kind.is_none() {
+                return Err(DispatchError::Validation(format!(
+                    "{operation} requires kind"
+                )));
+            }
+            if operation == "remove" && kind.is_some() {
+                return Err(DispatchError::Validation(
+                    "remove does not accept kind".to_string(),
+                ));
+            }
+            let view = host.apply_feature(
+                string_field("bundle_path")?,
+                operation,
+                feature_id,
+                kind,
+                string_field("expected_revision")?,
+            )?;
+            return Ok(json!({
+                "status": "committed",
+                "operation": view.operation,
+                "feature_id": view.feature_id,
+                "generation_id": view.identity.generation_id,
+                "revision_id": view.identity.revision_id,
+                "feature_graph_hash": view.identity.feature_graph_hash,
+                "revision_hash": view.identity.revision_hash,
+                "transaction_count": view.identity.transaction_count,
+                "terminal_log_digest": view.identity.terminal_log_digest,
+                "schema_version": schema.response_schema_version,
+            }));
         }
         if command == COMPONENT_STATE_COMMAND_ID {
             let graph = host.component_graph(string_field("bundle_path")?)?;
@@ -3853,6 +3984,28 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             kind,
         } => json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
         DispatchPlan::Load { bundle } => json!({ "bundle_path": bundle }),
+        DispatchPlan::Identity { bundle } => json!({ "bundle_path": bundle }),
+        DispatchPlan::Apply {
+            bundle,
+            expected_revision,
+            operation,
+            feature_id,
+            kind,
+        } => {
+            let mut request = serde_json::Map::from_iter([
+                ("bundle_path".to_string(), Value::String(bundle.clone())),
+                (
+                    "expected_revision".to_string(),
+                    Value::String(expected_revision.clone()),
+                ),
+                ("operation".to_string(), Value::String(operation.clone())),
+                ("feature_id".to_string(), Value::String(feature_id.clone())),
+            ]);
+            if let Some(kind) = kind {
+                request.insert("kind".to_string(), Value::String(kind.clone()));
+            }
+            Value::Object(request)
+        }
         DispatchPlan::Bracket {
             bundle,
             bracket_id,
@@ -5007,6 +5160,18 @@ fn read_profile_3d(profile_file: &str) -> Result<Vec<[f64; 3]>, String> {
     Ok(profile)
 }
 
+fn identity_value(identity: &threeterm_host::ProjectIdentity, schema_version: &str) -> Value {
+    json!({
+        "generation_id": identity.generation_id,
+        "revision_id": identity.revision_id,
+        "feature_graph_hash": identity.feature_graph_hash,
+        "revision_hash": identity.revision_hash,
+        "transaction_count": identity.transaction_count,
+        "terminal_log_digest": identity.terminal_log_digest,
+        "schema_version": schema_version,
+    })
+}
+
 fn write_snapshot(
     feature_graph_hash: &str,
     revision_hash: &str,
@@ -5634,7 +5799,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 34);
+        assert_eq!(commands.len(), 36);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

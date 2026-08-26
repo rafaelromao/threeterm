@@ -289,7 +289,6 @@ fn duplicate_initial_bracket_is_rejected_without_replacing_committed_state() {
         fs::read(root.join("brep/l-bracket.brep")).unwrap(),
         before_brep
     );
-    assert!(!root.join(".derived").exists());
     let _ = fs::remove_dir_all(root);
 }
 

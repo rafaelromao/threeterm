@@ -15,6 +15,7 @@ threeterm-viewport = { path = "../viewport" }
 
 [dev-dependencies]
 threeterm-persistence = { path = "../persistence" }
+threeterm-occt-worker = { path = "../workers/occt" }
 
 [lints]
 workspace = true

@@ -68,18 +68,31 @@ fn bracket_request_schema_requires_six_fields_with_positive_dimensions() {
 }
 
 #[test]
-fn bracket_response_schema_requires_snapshot_keys() {
+fn bracket_response_schema_requires_derived_result_keys() {
     let entry = find(BRACKET_COMMAND_ID).expect("`bracket` is registered");
     let response = &entry.response_schema;
 
     assert_eq!(
         response["required"],
         Value::Array(vec![
+            Value::from("status"),
+            Value::from("operation"),
+            Value::from("feature_id"),
+            Value::from("request_id"),
+            Value::from("source_snapshot"),
             Value::from("feature_graph_hash"),
             Value::from("revision_hash"),
+            Value::from("authoritative"),
+            Value::from("artifact_kind"),
+            Value::from("artifact_name"),
+            Value::from("brep_path"),
+            Value::from("brep_sha256"),
+            Value::from("brep_bytes"),
+            Value::from("worker_fingerprint"),
+            Value::from("derived_result"),
             Value::from("schema_version"),
         ]),
-        "bracket response schema requires the three snapshot keys"
+        "bracket response schema requires the typed derived-result contract"
     );
     assert_eq!(response["additionalProperties"], Value::Bool(false));
 

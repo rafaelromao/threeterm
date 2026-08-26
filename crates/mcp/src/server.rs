@@ -775,8 +775,42 @@ fn dispatch_bracket_tool(arguments: &Value) -> Result<Value, DispatchError> {
         .unwrap_or_default();
     let view = dispatch_bracket(bundle, bracket_id, length, width, height, thickness)?;
     Ok(json!({
-        "feature_graph_hash": view.feature_graph_hash,
-        "revision_hash": view.revision_hash,
+        "status": view.result.status,
+        "operation": "bracket",
+        "feature_id": view.result.feature_id,
+        "request_id": view.result.request_id,
+        "source_snapshot": {
+            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+            "revision_hash": view.source_snapshot.revision_hash,
+        },
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "authoritative": true,
+        "artifact_kind": view.artifact.artifact_kind,
+        "artifact_name": view.artifact.artifact_name,
+        "brep_path": view.result.brep_path,
+        "brep_sha256": view.result.brep_sha256,
+        "brep_bytes": view.result.brep_bytes,
+        "worker_fingerprint": {
+            "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+            "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+            "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+        },
+        "derived_result": {
+            "request_id": view.artifact.request_id,
+            "operation": view.artifact.operation,
+            "feature_id": view.artifact.feature_id,
+            "source_revision_id": view.source_snapshot.revision_hash,
+            "worker_fingerprint": {
+                "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+                "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+                "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+            },
+            "artifact_kind": view.artifact.artifact_kind,
+            "artifact_name": view.artifact.artifact_name,
+            "byte_count": view.artifact.byte_count,
+            "sha256": view.artifact.sha256,
+        },
         "schema_version": threeterm_protocol::schema::BRACKET_RESPONSE_SCHEMA_VERSION,
     }))
 }

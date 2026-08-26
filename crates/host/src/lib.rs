@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, FeatureGraph, FitDimension,
@@ -20,7 +20,7 @@ use threeterm_occt_worker::{
     CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
     FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    OcctWorker, Operation, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{
     Bundle, BundleError, LoadPolicy, LoadedBundle, load, load_with_policy, previous_generation_path,
@@ -31,8 +31,11 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
+use threeterm_viewport::{SceneSolid, SceneTriangle, ViewportScene};
 
 pub const BREP_SUBDIR: &str = "brep";
+const MAX_VIEWPORT_TESSELLATION_BYTES: u64 = 64 * 1024 * 1024;
+static TESSELLATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const LAYER1_CACHE_DIR: &str = "cache";
 const LAYER1_CACHE_RECORD: &str = "layer1.json";
 const LAYER1_CACHE_SCHEMA: &str = "threeterm.host.layer1-cache/1";
@@ -332,9 +335,11 @@ pub fn is_layer1_excluded(request: &Layer1ArtifactRequest) -> bool {
         &request.semantic_input_sha256,
         &request.deterministic_settings_sha256,
     ];
-    for field in fields {
+    for (index, field) in fields.into_iter().enumerate() {
         let lower = field.to_ascii_lowercase();
-        if lower.contains("draft")
+        let canonical_staging_name = index == 1
+            && lower.starts_with(&format!("{}-", request.operation.to_ascii_lowercase()));
+        if (lower.contains("draft") && !canonical_staging_name)
             || lower.contains("hover")
             || lower.contains("candidate")
             || lower.contains("pointer")
@@ -407,77 +412,107 @@ pub struct ExtrudeDerivedResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct StagedOcctResult<R> {
+    pub source_snapshot: SnapshotView,
+    pub result: R,
+    pub artifact: Layer1DerivedResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExtrudeCommitView {
     pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: ExtrudeResult,
     pub worker_fingerprint: WorkerFingerprint,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BooleanFuseCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: BooleanFuseResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilletCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: FilletResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChamferCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: ChamferResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoleCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: HoleResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RevolveCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: RevolveResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirrorCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: MirrorResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearPatternCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: LinearPatternResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CircularPatternCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: CircularPatternResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BooleanPatternCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: BooleanPatternResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: ShellResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DraftCommitView {
+    pub source_snapshot: Option<SnapshotView>,
     pub snapshot: SnapshotView,
     pub result: DraftResult,
+    pub artifact: Option<Layer1DerivedResult>,
 }
 
 /// A transient semantic command input bound to one canonical Revision Snapshot.
@@ -530,6 +565,14 @@ pub struct BracketPreviewView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BracketCommitView {
+    pub source_snapshot: SnapshotView,
+    pub snapshot: SnapshotView,
+    pub result: BracketResult,
+    pub artifact: Layer1DerivedResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketDraftCommitView {
     pub snapshot: SnapshotView,
     pub input_fingerprint: String,
 }
@@ -603,14 +646,30 @@ pub struct Layer1CacheRebuild {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCommitView {
+    pub source_snapshot: SnapshotView,
     pub artifacts: Vec<PathBuf>,
+    pub derived_artifacts: Vec<ExportDerivedArtifact>,
     pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportDerivedArtifact {
+    pub request_id: String,
+    pub source_revision_id: String,
+    pub operation: String,
+    pub feature_id: String,
+    pub artifact_kind: String,
+    pub artifact_name: String,
+    pub byte_count: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoftCommitView {
+    pub source_snapshot: SnapshotView,
     pub snapshot: SnapshotView,
     pub result: LoftResult,
+    pub artifact: Layer1DerivedResult,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1095,6 +1154,9 @@ impl Host {
         accept_stale_geometry: bool,
         body_ids: &[String],
     ) -> Result<ExportCommitView, HostError> {
+        // Export outputs are disposable Derived Results, not canonical BREP
+        // mutations. They use the same host-owned private staging and atomic
+        // publication discipline, but remain outside the transaction log.
         if deflection > 0.5 && !override_warnings {
             return Err(HostError::Validation {
                 detail: format!(
@@ -1225,12 +1287,42 @@ impl Host {
                 (source, output_dir.join(format!("{feature_id}.{format}")))
             })
             .collect::<Vec<_>>();
+        let derived_artifacts = staged_artifacts
+            .iter()
+            .zip(formats)
+            .map(|((source, destination), format)| {
+                let byte_count = fs::metadata(source)
+                    .map_err(|error| HostError::BrepIo {
+                        detail: format!("read staged export metadata failed: {error}"),
+                    })?
+                    .len();
+                let sha256 = sha256_path(source).map_err(|error| HostError::BrepIo {
+                    detail: format!("hash staged export failed: {error}"),
+                })?;
+                Ok(ExportDerivedArtifact {
+                    request_id: "export".to_string(),
+                    source_revision_id: prior.revision_hash_hex().to_string(),
+                    operation: "export".to_string(),
+                    feature_id: feature_id.to_string(),
+                    artifact_kind: format.to_string(),
+                    artifact_name: destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    byte_count,
+                    sha256,
+                })
+            })
+            .collect::<Result<Vec<_>, HostError>>()?;
         let artifacts = publish_export_artifacts(&staged_artifacts).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
         })?;
         let _ = fs::remove_dir_all(stage);
         Ok(ExportCommitView {
+            source_snapshot: SnapshotView::from(&prior),
             artifacts,
+            derived_artifacts,
             stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance {
                 feature_id: feature_id.to_string(),
                 active_revision: prior.history.active_snapshot().revision_id.clone(),
@@ -1936,6 +2028,62 @@ impl Host {
         })
     }
 
+    /// Build the production viewport scene from the committed BREP artifacts
+    /// in the currently loaded canonical generation.
+    pub fn presentation_viewport_scene(&self) -> Result<ViewportScene, HostError> {
+        let current = self
+            .current
+            .borrow()
+            .clone()
+            .ok_or_else(|| HostError::Validation {
+                detail: "host has no canonical presentation snapshot".to_string(),
+            })?;
+        let revision = current.revision_hash_hex().to_string();
+        let root = current.canonical_root.clone();
+        let mut scene = ViewportScene::from_feature_graph(revision.clone(), &current.graph, None);
+        let stage = std::env::temp_dir().join(format!(
+            "threeterm-viewport-tessellation-{}-{}",
+            std::process::id(),
+            TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create viewport tessellation stage failed: {error}"),
+        })?;
+        let result = (|| {
+            for feature in current.graph.features() {
+                if !is_geometric_feature_kind(&feature.kind) {
+                    continue;
+                }
+                let feature_id = feature.id.as_str();
+                let brep = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+                if !brep.is_file() {
+                    return Err(HostError::BrepFileMissing { path: brep });
+                }
+                let worker = OcctWorker::locate()
+                    .map_err(HostError::from)?
+                    .with_revision_id(revision.clone());
+                let request =
+                    ExportRequest::new(format!("viewport-tessellation-{feature_id}"), brep, 0.1)
+                        .with_output_path(&stage, format!("{feature_id}.stl"))
+                        .with_feature_id(feature_id);
+                let exported = worker.export(&request).map_err(HostError::from)?;
+                if !exported.is_success() || !exported.brep_path.is_file() {
+                    return Err(HostError::BrepInvalid {
+                        request_id: Some(request.request_id),
+                        detail: format!(
+                            "viewport tessellation did not produce a mesh: {feature_id}"
+                        ),
+                    });
+                }
+                let triangles = parse_ascii_stl(&exported.brep_path, feature_id)?;
+                scene = scene.with_solid(SceneSolid::new(feature_id, triangles));
+            }
+            Ok(scene)
+        })();
+        let _ = fs::remove_dir_all(&stage);
+        result
+    }
+
     /// Open a transient command draft against the current canonical source.
     /// The caller supplies only the source feature identity; the canonical
     /// BREP path and source digest are derived by the host.
@@ -2192,7 +2340,12 @@ impl Host {
         self.current.replace(Some(updated));
         remove_preview_stage(&stage);
         self.drafts.borrow_mut().remove(&draft_key);
-        Ok(DraftCommitView { snapshot, result })
+        Ok(DraftCommitView {
+            source_snapshot: None,
+            snapshot,
+            result,
+            artifact: None,
+        })
     }
 
     /// Refuse a draft and remove every transient preview artifact.
@@ -2233,13 +2386,406 @@ impl Host {
         }
     }
 
+    fn stage_occt_result<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.stage_occt_result_inner(root, request, operation, worker, None, None)
+    }
+
+    fn stage_occt_result_with_cancel_and_progress<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        cancel: &AtomicBool,
+        on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.stage_occt_result_inner(
+            root,
+            request,
+            operation,
+            worker,
+            Some(cancel),
+            Some(on_progress),
+        )
+    }
+
+    fn stage_occt_result_inner<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        cancel: Option<&AtomicBool>,
+        on_progress: Option<&mut dyn FnMut(&threeterm_protocol::supervisor::Progress)>,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        let source_snapshot = self.load(root)?;
+        let mut request_value =
+            serde_json::to_value(request).map_err(|error| HostError::Validation {
+                detail: format!("{operation:?} request serialization failed: {error}"),
+            })?;
+        let request_id = request_value["request_id"]
+            .as_str()
+            .ok_or_else(|| HostError::Validation {
+                detail: "OCCT request is missing request_id".to_string(),
+            })?
+            .to_string();
+        let feature_id = request_value["feature_id"]
+            .as_str()
+            .ok_or_else(|| HostError::Validation {
+                detail: "OCCT request is missing feature_id".to_string(),
+            })?
+            .to_string();
+        if self.current_graph().is_some_and(|graph| {
+            graph
+                .features()
+                .any(|feature| feature.id.as_str() == feature_id)
+        }) {
+            return Err(HostError::Validation {
+                detail: format!("feature ID {feature_id:?} already exists"),
+            });
+        }
+        let binding = occt_artifact_request(
+            &request_value,
+            operation,
+            &source_snapshot,
+            &request_id,
+            &feature_id,
+        )?;
+        let stage =
+            Stage::create_fresh(root.join(".derived"), operation.as_str()).map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create {operation:?} request stage failed: {error}"),
+                }
+            })?;
+        request_value["output_dir"] =
+            serde_json::Value::String(stage.root().to_string_lossy().into_owned());
+        request_value["output_filename"] =
+            serde_json::Value::String("pending.brep.partial".to_string());
+        request_value["artifact_request"] = match serde_json::to_value(&binding) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = stage.discard();
+                return Err(HostError::Validation {
+                    detail: format!("OCCT artifact binding serialization failed: {error}"),
+                });
+            }
+        };
+        let completion_result = match cancel {
+            Some(cancel) => match on_progress {
+                Some(on_progress) => worker
+                    .clone()
+                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .invoke_staged_with_cancel_and_progress(
+                        request_value,
+                        operation,
+                        stage,
+                        cancel,
+                        on_progress,
+                    ),
+                None => worker
+                    .clone()
+                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .invoke_staged_with_cancel(request_value, operation, stage, cancel),
+            },
+            None => worker
+                .clone()
+                .with_revision_id(source_snapshot.revision_hash.clone())
+                .invoke_staged(request_value, operation, stage),
+        };
+        let completion = match completion_result {
+            Ok(completion) => completion,
+            Err(error) => {
+                return Err(HostError::from(error));
+            }
+        };
+        let typed_result = match serde_json::from_value::<R>(completion.result.clone()) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = completion.stage.discard();
+                return Err(HostError::DerivedResult {
+                    diagnostic: Diagnostic::artifact_promotion_failure(&format!(
+                        "typed_result_schema_mismatch:{error}"
+                    )),
+                });
+            }
+        };
+        let typed_value = match serde_json::to_value(&typed_result) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = completion.stage.discard();
+                return Err(HostError::Validation {
+                    detail: format!("typed OCCT result serialization failed: {error}"),
+                });
+            }
+        };
+        if typed_value["status"].as_str() != Some("ok") {
+            let _ = completion.stage.discard();
+            return Err(HostError::BrepInvalid {
+                request_id: typed_value["request_id"].as_str().map(str::to_string),
+                detail: format!(
+                    "{} returned non-ok status: status={} feature_id={}",
+                    operation.as_str(),
+                    typed_value["status"].as_str().unwrap_or("unknown"),
+                    typed_value["feature_id"].as_str().unwrap_or("unknown"),
+                ),
+            });
+        }
+        let artifact = self
+            .accept_staged_occt_result(
+                completion.stage,
+                &binding,
+                operation,
+                &typed_value,
+                completion.outcome,
+            )
+            .map_err(|diagnostic| HostError::DerivedResult { diagnostic })?;
+        Ok(StagedOcctResult {
+            source_snapshot,
+            result: typed_result,
+            artifact,
+        })
+    }
+
+    fn accept_staged_occt_result(
+        &self,
+        stage: Stage,
+        binding: &Layer1ArtifactRequest,
+        operation: threeterm_occt_worker::Operation,
+        typed_result: &serde_json::Value,
+        outcome: SupervisorOutcome,
+    ) -> Result<Layer1DerivedResult, Diagnostic> {
+        let stage_root = stage.root().to_path_buf();
+        let SupervisorOutcome::Completed {
+            result, request_id, ..
+        } = &outcome
+        else {
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
+            ));
+        };
+        if result != typed_result {
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
+            ));
+        }
+        let expected_path = stage_root.join(format!("{}.partial", binding.staging_name));
+        if request_id != &binding.request_id
+            || typed_result["request_id"].as_str() != Some(binding.request_id.as_str())
+            || typed_result["operation"].as_str() != Some(operation.as_str())
+            || typed_result["feature_id"].as_str() != Some(binding.feature_id.as_str())
+            || typed_result["status"].as_str() != Some("ok")
+            || typed_result["brep_path"].as_str() != Some(expected_path.to_string_lossy().as_ref())
+            || typed_result["brep_bytes"].as_u64().is_none()
+            || typed_result["brep_sha256"].as_str().is_none()
+        {
+            return Err(discard_stage(
+                stage,
+                Diagnostic::artifact_promotion_failure("typed_result_identity_mismatch"),
+            ));
+        }
+        self.accept_derived_result(
+            stage.root(),
+            binding,
+            &expected_occt_worker_fingerprint(),
+            outcome,
+        )
+    }
+
+    fn promote_occt_result<R>(
+        &self,
+        root: &Path,
+        derived: StagedOcctResult<R>,
+    ) -> Result<(SnapshotView, R, Layer1DerivedResult), HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, current, artifact, bytes, provenance| {
+                let feature_id = &artifact.feature_id;
+                let kind = format!("brep:{feature_id}");
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                    feature_id,
+                    &kind,
+                    &current.manifest.revision_hash,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )
+    }
+
+    fn promote_occt_result_with_append<R, F>(
+        &self,
+        root: &Path,
+        derived: StagedOcctResult<R>,
+        append: F,
+    ) -> Result<(SnapshotView, R, Layer1DerivedResult), HostError>
+    where
+        R: DeserializeOwned + Serialize,
+        F: FnOnce(
+            &Bundle,
+            &LoadedBundle,
+            &Layer1DerivedResult,
+            &[u8],
+            &str,
+        ) -> Result<LoadedBundle, BundleError>,
+    {
+        let derived_root = root.join(".derived");
+        let stage_root = derived
+            .artifact
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(
+                    "derived_artifact_stage_missing",
+                ),
+            })?;
+        if !stage_root.starts_with(&derived_root) {
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(
+                    "derived_artifact_stage_not_owned",
+                ),
+            });
+        }
+        let stage =
+            Stage::open_existing(&stage_root).map_err(|error| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
+            })?;
+        let current = Bundle::at(root).open()?;
+        let final_name = derived
+            .artifact
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure("derived_artifact_name_missing"),
+            })?
+            .to_string();
+        let bytes = stage
+            .read_published(
+                &final_name,
+                derived.artifact.byte_count,
+                &derived.artifact.sha256,
+            )
+            .map_err(|error| HostError::DerivedResult {
+                diagnostic: artifact_error_diagnostic(&error),
+            })?;
+        if derived.source_snapshot.revision_hash != current.manifest.revision_hash
+            || derived.artifact.source_revision_id != current.manifest.revision_hash
+        {
+            let diagnostic =
+                Diagnostic::artifact_revision_mismatch("derived_artifact_source_revision_mismatch");
+            self.retain_stale_last_valid_geometry(
+                &derived.source_snapshot,
+                &current,
+                &derived.artifact.feature_id,
+                &bytes,
+                &diagnostic,
+            );
+            let _ = stage.discard();
+            self.layer1_results
+                .borrow_mut()
+                .remove(&derived.artifact.cache_key);
+            let _ = fs::remove_dir(&derived_root);
+            self.current.replace(Some(current));
+            return Err(HostError::DerivedResult { diagnostic });
+        }
+        let provenance = serde_json::json!({
+            "request_id": derived.artifact.request_id,
+            "operation": derived.artifact.operation,
+            "feature_id": derived.artifact.feature_id,
+            "source_revision_id": derived.artifact.source_revision_id,
+            "worker_fingerprint": derived.artifact.worker_fingerprint,
+            "byte_count": derived.artifact.byte_count,
+            "sha256": derived.artifact.sha256,
+        })
+        .to_string();
+        let feature_id = derived.artifact.feature_id.clone();
+        let bundle = Bundle::at(root);
+        let updated = match append(&bundle, &current, &derived.artifact, &bytes, &provenance) {
+            Ok(updated) => updated,
+            Err(error) => {
+                let is_stale = matches!(&error, BundleError::Invalid(detail) if detail.starts_with("worker result belongs to revision"));
+                if is_stale && let Ok(reconciled) = bundle.open() {
+                    let diagnostic = Diagnostic::artifact_revision_mismatch(
+                        "derived_artifact_source_revision_mismatch",
+                    );
+                    self.retain_stale_last_valid_geometry(
+                        &derived.source_snapshot,
+                        &reconciled,
+                        &feature_id,
+                        &bytes,
+                        &diagnostic,
+                    );
+                    self.current.replace(Some(reconciled));
+                    let _ = stage.discard();
+                    self.layer1_results
+                        .borrow_mut()
+                        .remove(&derived.artifact.cache_key);
+                    let _ = fs::remove_dir(&derived_root);
+                    return Err(HostError::DerivedResult { diagnostic });
+                }
+                let _ = stage.discard();
+                self.layer1_results
+                    .borrow_mut()
+                    .remove(&derived.artifact.cache_key);
+                let _ = fs::remove_dir(&derived_root);
+                if let Ok(reconciled) = bundle.open() {
+                    self.current.replace(Some(reconciled));
+                }
+                return Err(error.into());
+            }
+        };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
+        let _ = stage.discard();
+        let mut artifact = derived.artifact;
+        artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+        let mut value =
+            serde_json::to_value(derived.result).map_err(|error| HostError::Validation {
+                detail: format!("typed OCCT result serialization failed: {error}"),
+            })?;
+        value["brep_path"] =
+            serde_json::Value::String(artifact.path.to_string_lossy().into_owned());
+        value["brep_bytes"] = serde_json::Value::from(artifact.byte_count);
+        value["brep_sha256"] = serde_json::Value::String(artifact.sha256.clone());
+        let result = serde_json::from_value(value).map_err(|error| HostError::Validation {
+            detail: format!("typed OCCT result promotion failed: {error}"),
+        })?;
+        Ok((snapshot, result, artifact))
+    }
+
     /// Create the initial parameterized L-bracket through the OCCT worker.
     pub fn create_bracket(
         &self,
         root: impl AsRef<Path>,
         request: BracketRequest,
         worker: &OcctWorker,
-    ) -> Result<SnapshotView, HostError> {
+    ) -> Result<BracketCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         if root.exists() && !root.is_dir() {
             return Err(HostError::BundlePathNotDirectory { path: root });
@@ -2250,39 +2796,17 @@ impl Host {
         } else {
             Bundle::create(&root)?.open()?
         };
-        let stage = preview_stage_path(&root, &format!("create-{}", request.feature_id));
-        request = request.with_output_path(&stage, "bracket.brep");
+        request = request.with_output_path(&root, "bracket.brep");
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create bracket stage failed: {error}"),
-        })?;
-        let result = match worker
-            .clone()
-            .with_revision_id(loaded.revision_hash_hex())
-            .bracket(&request)
-        {
-            Ok(result) if result.is_success() => result,
-            Ok(result) => {
-                remove_preview_stage(&stage);
-                return Err(HostError::BrepInvalid {
-                    request_id: Some(request.request_id),
-                    detail: format!("bracket returned status {}", result.status),
-                });
-            }
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
-            }
-        };
-        let bytes = match read_verified_worker_brep(&result) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error);
-            }
-        };
+        let derived = self.stage_occt_result::<BracketResult>(
+            &root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
         let kind = bracket_kind(&request);
         let history_event = loaded
             .history
@@ -2303,26 +2827,29 @@ impl Host {
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let snapshot = match Bundle::at(&root).append_features_with_brep_if_revision_and_history(
-            &entries,
-            &request.feature_id,
-            loaded.revision_hash_hex(),
-            &bytes,
-            &history_event,
-        ) {
-            Ok(updated) => {
-                let snapshot = SnapshotView::from(&updated);
-                self.current.replace(Some(updated));
-                snapshot
-            }
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
-            }
-        };
-        remove_preview_stage(&stage);
-        let _ = result;
-        Ok(snapshot)
+        let request_id = request.request_id.clone();
+        let feature_id = request.feature_id.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result_with_append(
+            &root,
+            derived,
+            move |bundle, current, _artifact, bytes, shared_provenance| {
+                bundle.append_features_with_brep_if_revision_and_history_and_provenance(
+                    &entries,
+                    &feature_id,
+                    current.revision_hash_hex(),
+                    bytes,
+                    &history_event,
+                    &request_id,
+                    shared_provenance,
+                )
+            },
+        )?;
+        Ok(BracketCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     pub fn open_bracket_parameter_draft(
@@ -2539,7 +3066,7 @@ impl Host {
         root: impl AsRef<Path>,
         draft_id: &str,
         worker: &OcctWorker,
-    ) -> Result<BracketCommitView, HostError> {
+    ) -> Result<BracketDraftCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let draft_key = draft_map_key(&root, draft_id);
         let draft = self
@@ -2638,7 +3165,7 @@ impl Host {
         };
         remove_preview_stage(&stage);
         self.bracket_drafts.borrow_mut().remove(&draft_key);
-        Ok(BracketCommitView {
+        Ok(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         })
@@ -2652,7 +3179,7 @@ impl Host {
         draft: &BracketParameterDraft,
         kind: &str,
         semantic_fingerprint: &str,
-    ) -> Result<Option<BracketCommitView>, HostError> {
+    ) -> Result<Option<BracketDraftCommitView>, HostError> {
         let Some(committed) = Bundle::at(root).find_idempotency_key(draft_id)? else {
             return Ok(None);
         };
@@ -2701,7 +3228,7 @@ impl Host {
         let snapshot = SnapshotView::from(&committed);
         self.current.replace(Some(committed));
         self.bracket_drafts.borrow_mut().remove(draft_key);
-        Ok(Some(BracketCommitView {
+        Ok(Some(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         }))
@@ -2714,7 +3241,7 @@ impl Host {
         draft: &BracketParameterDraft,
         result_sha256: &str,
         error: &HostError,
-    ) -> Option<BracketCommitView> {
+    ) -> Option<BracketDraftCommitView> {
         if matches!(
             error,
             HostError::Persistence(BundleError::PublicationUnknown(_))
@@ -2744,7 +3271,7 @@ impl Host {
         self.current.replace(Some(committed));
         self.bracket_drafts.borrow_mut().remove(&draft_key);
         remove_preview_stage(&stage);
-        Some(BracketCommitView {
+        Some(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         })
@@ -3139,6 +3666,7 @@ impl Host {
             })?;
         let source_snapshot = derived.source_snapshot.clone();
         let worker_fingerprint = derived.artifact.worker_fingerprint.clone();
+        let mut artifact = derived.artifact.clone();
         let feature_id = derived.artifact.feature_id.clone();
         let cache_key = derived.artifact.cache_key.clone();
         let final_name = derived
@@ -3264,18 +3792,20 @@ impl Host {
             }
         };
         self.layer1_results.borrow_mut().remove(&cache_key);
-        let _ = fs::remove_dir(&derived_root);
+        let _ = fs::remove_dir_all(&derived_root);
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         let mut result = derived.result;
         result.brep_path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
         result.brep_bytes = bytes.len();
         result.brep_sha256 = sha256_hex(&bytes);
+        artifact.path = result.brep_path.clone();
         Ok(ExtrudeCommitView {
             source_snapshot,
             snapshot,
             result,
             worker_fingerprint,
+            artifact,
         })
     }
 
@@ -3820,34 +4350,52 @@ impl Host {
                     .to_string(),
             });
         }
+        let prior_view = SnapshotView::from(&loaded);
+        let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
+        let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
+        if loaded
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == feature_id)
+        {
+            cleanup_worker_stage(root, brep_path);
+            self.current.replace(Some(loaded));
+            return Err(HostError::Validation {
+                detail: format!("feature ID {feature_id:?} already exists"),
+            });
+        }
+
         let brep_bytes = match read_brep_verified(brep_path, expected) {
             Ok(bytes) => bytes,
             Err(detail) => {
-                cleanup_worker_stage(root, brep_path);
                 self.current.replace(Some(loaded));
                 return Err(HostError::BrepIo { detail });
             }
         };
+
+        let expected_revision = expected_revision.unwrap_or(prior_view.revision_hash.as_str());
         let kind = format!("brep:{feature_id}");
-        let updated_result = match expected_revision {
-            Some(expected_revision) => bundle.append_feature_with_brep_if_revision(
-                feature_id,
-                &kind,
-                expected_revision,
-                &brep_bytes,
-            ),
-            None => bundle.append_feature_with_brep_if_revision(
-                feature_id,
-                &kind,
-                &loaded.manifest.revision_hash,
-                &brep_bytes,
-            ),
-        };
+        let updated_result = bundle.append_new_feature_with_brep_if_revision(
+            feature_id,
+            &kind,
+            expected_revision,
+            &brep_bytes,
+        );
         let updated = match updated_result {
             Ok(loaded) => loaded,
             Err(error) => {
+                if let (Ok(manifest), Ok(log)) = (
+                    read_bundle_file(&bundle_root(root), "manifest.json"),
+                    read_bundle_file(&bundle_root(root), "transactions.log"),
+                ) && (manifest != prior_manifest || log != prior_log)
+                {
+                    if let Ok(committed) = bundle.open() {
+                        self.current.replace(Some(committed));
+                    }
+                } else {
+                    self.current.replace(Some(loaded));
+                }
                 cleanup_worker_stage(root, brep_path);
-                self.current.replace(Some(loaded));
                 return Err(HostError::from(error));
             }
         };
@@ -3855,6 +4403,38 @@ impl Host {
         self.current.replace(Some(updated));
         cleanup_worker_stage(root, brep_path);
         Ok(view)
+    }
+
+    fn validate_worker_result_artifact(
+        root: &Path,
+        request_id: &str,
+        expected_operation: Operation,
+        feature_id: &str,
+        output_dir: &Path,
+        output_filename: &str,
+        result_request_id: &str,
+        result_operation: Operation,
+        result_feature_id: &str,
+        result_path: &Path,
+    ) -> Result<(), HostError> {
+        let expected_stage = root.join("stage");
+        let expected_path = output_dir.join(output_filename);
+        if result_request_id != request_id {
+            return Err(HostError::BrepIo {
+                detail: "worker result request ID does not match the command".to_string(),
+            });
+        }
+        if result_operation != expected_operation || result_feature_id != feature_id {
+            return Err(HostError::BrepIo {
+                detail: "worker result identity does not match the command".to_string(),
+            });
+        }
+        if output_dir != expected_stage || result_path != expected_path {
+            return Err(HostError::BrepIo {
+                detail: "worker result path is outside its host-owned stage".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Extrude `request` against the disposable OCCT worker and, on
@@ -3872,50 +4452,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .extrude(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "extrude returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<ExtrudeResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
+            &request,
+            threeterm_occt_worker::Operation::Extrude,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(ExtrudeCommitView {
-            source_snapshot: prior_view,
+            source_snapshot,
             snapshot,
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact,
         })
     }
 
@@ -3930,50 +4480,23 @@ impl Host {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .extrude_with_cancel(&request, cancel)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "extrude returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        let derived = self.stage_occt_result_inner::<ExtrudeResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
+            &request,
+            threeterm_occt_worker::Operation::Extrude,
+            worker,
+            Some(cancel),
+            Some(&mut on_progress),
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(ExtrudeCommitView {
-            source_snapshot: prior_view,
+            source_snapshot,
             snapshot,
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact,
         })
     }
 
@@ -3986,47 +4509,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<BooleanFuseCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .boolean_fuse(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "boolean_fuse returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<BooleanFuseResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(BooleanFuseCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::BooleanFuse,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(BooleanFuseCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Fillet `request` against the disposable OCCT worker and, on
@@ -4038,47 +4534,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<FilletCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .fillet(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "fillet returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<FilletResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(FilletCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Fillet,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(FilletCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Chamfer `request` against the disposable OCCT worker and, on
@@ -4090,47 +4559,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ChamferCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .chamfer(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "chamfer returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<ChamferResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(ChamferCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Chamfer,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(ChamferCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Hole `request` against the disposable OCCT worker and, on
@@ -4142,47 +4584,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<HoleCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .hole(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "hole returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<HoleResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(HoleCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Hole,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(HoleCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Revolve `request` against the disposable OCCT worker and, on
@@ -4194,47 +4609,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<RevolveCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .revolve(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "revolve returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<RevolveResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(RevolveCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Revolve,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(RevolveCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Mirror `request` against the disposable OCCT worker and, on
@@ -4246,47 +4634,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<MirrorCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .mirror(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "mirror returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<MirrorResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(MirrorCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Mirror,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(MirrorCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Linear pattern `request` against the disposable OCCT worker
@@ -4299,47 +4660,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<LinearPatternCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .linear_pattern(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "linear_pattern returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<LinearPatternResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(LinearPatternCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::LinearPattern,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(LinearPatternCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Circular pattern `request` against the disposable OCCT worker
@@ -4352,47 +4686,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<CircularPatternCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .circular_pattern(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "circular_pattern returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<CircularPatternResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(CircularPatternCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::CircularPattern,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(CircularPatternCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Run the real sequential Boolean-cut pattern with cooperative
@@ -4424,40 +4731,22 @@ impl Host {
         on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
     ) -> Result<BooleanPatternCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .boolean_pattern_with_cancel_and_progress(&request, cancel, on_progress)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "boolean_pattern returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result_with_cancel_and_progress::<BooleanPatternResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
+            &request,
+            threeterm_occt_worker::Operation::BooleanPattern,
+            worker,
+            cancel,
+            on_progress,
         )?;
-        Ok(BooleanPatternCommitView { snapshot, result })
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(BooleanPatternCommitView {
+            source_snapshot,
+            snapshot,
+            artifact,
+            result,
+        })
     }
 
     /// Shell `request` against the disposable OCCT worker and, on
@@ -4469,47 +4758,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ShellCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .shell(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "shell returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<ShellResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        let _ = prior_view;
-        Ok(ShellCommitView { snapshot, result })
+            &request,
+            threeterm_occt_worker::Operation::Shell,
+            worker,
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(ShellCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Draft `request` against the disposable OCCT worker and, on
@@ -4521,42 +4783,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<DraftCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .draft(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "draft returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<DraftResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
+            &request,
+            threeterm_occt_worker::Operation::Draft,
+            worker,
         )?;
-        let _ = prior_view;
-        Ok(DraftCommitView { snapshot, result })
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(DraftCommitView {
+            source_snapshot: Some(source_snapshot),
+            snapshot,
+            result,
+            artifact: Some(artifact),
+        })
     }
 
     /// Loft `request` against the disposable OCCT worker and, on
@@ -4568,42 +4808,20 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<LoftCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .loft(&request)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "loft returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = self.commit_brep_feature_verified_at_revision(
+        let derived = self.stage_occt_result::<LoftResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
+            &request,
+            threeterm_occt_worker::Operation::Loft,
+            worker,
         )?;
-        let _ = prior_view;
-        Ok(LoftCommitView { snapshot, result })
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(LoftCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 }
 
@@ -4704,6 +4922,69 @@ fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+fn is_geometric_feature_kind(kind: &str) -> bool {
+    kind.starts_with("brep:") || kind.starts_with("bracket:")
+}
+
+fn parse_ascii_stl(path: &Path, feature_id: &str) -> Result<Vec<SceneTriangle>, HostError> {
+    let metadata = fs::metadata(path).map_err(|error| HostError::BrepIo {
+        detail: format!("read viewport tessellation metadata failed: {error}"),
+    })?;
+    if metadata.len() > MAX_VIEWPORT_TESSELLATION_BYTES {
+        return Err(HostError::BrepInvalid {
+            request_id: Some(format!("viewport-tessellation-{feature_id}")),
+            detail: "viewport tessellation exceeds the bounded ASCII STL size".to_string(),
+        });
+    }
+    let bytes = fs::read(path).map_err(|error| HostError::BrepIo {
+        detail: format!("read viewport tessellation failed: {error}"),
+    })?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| HostError::BrepInvalid {
+        request_id: Some(format!("viewport-tessellation-{feature_id}")),
+        detail: format!("viewport tessellation is not ASCII STL: {error}"),
+    })?;
+    let mut vertices = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(values) = trimmed.strip_prefix("vertex") else {
+            continue;
+        };
+        let values: Vec<_> = values.split_whitespace().collect();
+        if values.len() != 3 {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: "viewport tessellation vertex must contain three coordinates".to_string(),
+            });
+        }
+        let mut vertex = [0.0_f64; 3];
+        for (index, value) in values.iter().enumerate() {
+            vertex[index] = value.parse().map_err(|error| HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: format!("viewport tessellation coordinate is invalid: {error}"),
+            })?;
+        }
+        if vertex.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: "viewport tessellation contains a non-finite coordinate".to_string(),
+            });
+        }
+        vertices.push(vertex);
+    }
+    if vertices.is_empty() || !vertices.len().is_multiple_of(3) {
+        return Err(HostError::BrepInvalid {
+            request_id: Some(format!("viewport-tessellation-{feature_id}")),
+            detail: "viewport tessellation must contain complete non-empty triangles".to_string(),
+        });
+    }
+    Ok(vertices
+        .chunks_exact(3)
+        .map(|vertices| SceneTriangle {
+            vertices: [vertices[0], vertices[1], vertices[2]],
+        })
+        .collect())
 }
 
 pub fn stale_last_valid_geometry_for_export(
@@ -4999,6 +5280,46 @@ fn extrude_artifact_request(
     })
 }
 
+fn occt_artifact_request(
+    request: &serde_json::Value,
+    operation: threeterm_occt_worker::Operation,
+    source_snapshot: &SnapshotView,
+    request_id: &str,
+    feature_id: &str,
+) -> Result<Layer1ArtifactRequest, HostError> {
+    let mut semantic = request.clone();
+    if let Some(object) = semantic.as_object_mut() {
+        for field in ["output_dir", "output_filename", "artifact_request"] {
+            object.remove(field);
+        }
+        for field in ["base_path", "tool_path"] {
+            if object.contains_key(field) {
+                object.insert(
+                    field.to_string(),
+                    serde_json::Value::String("<canonical-source>".to_string()),
+                );
+            }
+        }
+    }
+    let semantic_input = threeterm_protocol::worker::serialize_capped(
+        &semantic,
+        threeterm_protocol::frame::MAX_FRAME_BUFFER,
+    )
+    .map_err(|error| HostError::Validation {
+        detail: format!("OCCT semantic input serialization failed: {error}"),
+    })?;
+    Ok(Layer1ArtifactRequest {
+        request_id: request_id.to_string(),
+        source_revision_id: source_snapshot.revision_hash.clone(),
+        operation: operation.as_str().to_string(),
+        feature_id: feature_id.to_string(),
+        artifact_kind: "brep".to_string(),
+        staging_name: format!("{}-{}.brep", operation.as_str(), request_id),
+        semantic_input_sha256: sha256_hex(&semantic_input),
+        deterministic_settings_sha256: sha256_hex(b"threeterm.occt.derived-settings/1"),
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct ExtrudeSemanticInput<'a> {
     operation: &'static str,
@@ -5030,6 +5351,18 @@ fn bundle_root(root: &Path) -> PathBuf {
     previous
 }
 
+fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
+    let path = root.join(name);
+    let mut file = fs::File::open(&path).map_err(|error| HostError::BrepIo {
+        detail: format!("could not read {}: {}", path.display(), error),
+    })?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .map_err(|error| HostError::BrepIo {
+            detail: format!("could not read {}: {}", path.display(), error),
+        })?;
+    Ok(buffer)
+}
 #[cfg(test)]
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
     copy_brep_verified(source, target, None)
@@ -5095,73 +5428,20 @@ fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<
     Ok(content)
 }
 
+#[cfg(test)]
 fn copy_brep_verified(
     source: &Path,
     target: &Path,
     expected: Option<(usize, &str)>,
 ) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // Open the source without following symlinks and pin the opened
-    // handle: promotion copies from one verified file identity, so a
-    // path swapped between validation and promotion cannot redirect the
-    // copy.
-    let mut options = fs::OpenOptions::new();
-    // O_NOFOLLOW = 0o400000 on Linux: refuse to open through a symlink.
-    options.read(true).custom_flags(0o400000);
-    let mut reader = options
-        .open(source)
-        .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
-    let opened_metadata = reader
-        .metadata()
-        .map_err(|error| format!("stat opened BREP {} failed: {error}", source.display()))?;
-    let verified_metadata = fs::symlink_metadata(source)
-        .map_err(|error| format!("stat source BREP {} failed: {error}", source.display()))?;
-    use std::os::unix::fs::MetadataExt;
-    if opened_metadata.dev() != verified_metadata.dev()
-        || opened_metadata.ino() != verified_metadata.ino()
-    {
-        return Err(format!(
-            "source BREP {} changed identity between validation and promotion",
-            source.display()
-        ));
-    }
-    let artifact_limit = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
-    if opened_metadata.len() > artifact_limit {
-        return Err(format!(
-            "source BREP {} exceeds the {artifact_limit} byte bound",
-            source.display()
-        ));
-    }
-    let mut buffer = vec![0u8; 8 * 1024];
-    let mut content = Vec::new();
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("read source BREP failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        if content.len() + read > artifact_limit as usize {
-            return Err(format!(
-                "source BREP {} exceeds the {artifact_limit} byte bound",
-                source.display()
-            ));
-        }
-        content.extend_from_slice(&buffer[..read]);
-    }
-    if let Some((expected_bytes, expected_sha256)) = expected {
-        use sha2::{Digest, Sha256};
-        let actual_sha256 = format!("{:x}", Sha256::digest(&content));
-        if content.len() != expected_bytes || actual_sha256 != expected_sha256 {
-            return Err(format!(
-                "source BREP content does not match the worker advertisement: bytes={} expected_bytes={} sha256={} expected_sha256={}",
-                content.len(),
-                expected_bytes,
-                actual_sha256,
-                expected_sha256
-            ));
-        }
-    }
+    let content = read_brep_verified(source, expected)?;
+    write_brep_bytes(target, &content)
+}
+
+#[cfg(test)]
+fn write_brep_bytes(target: &Path, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
     // Never create the canonical target before the complete replacement is
     // durable: File::create(target) would truncate a prior BREP before a
     // later write or sync failure could be reported.
@@ -5183,7 +5463,7 @@ fn copy_brep_verified(
                 temporary.display()
             )
         })?;
-    if let Err(error) = writer.write_all(&content) {
+    if let Err(error) = writer.write_all(content) {
         let _ = fs::remove_file(&temporary);
         return Err(format!("write temporary BREP failed: {error}"));
     }
@@ -5261,6 +5541,41 @@ mod tests {
                 .expect("clock is after epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn viewport_scene_requires_the_committed_brep_for_geometric_records() {
+        let root = temp_root("viewport-missing-brep");
+        Bundle::create(&root)
+            .expect("bundle creates")
+            .append_feature("lofted", "bracket:lofted")
+            .expect("geometric feature appends");
+        let host = Host::new();
+        host.load(&root).expect("bundle loads");
+
+        assert!(matches!(
+            host.presentation_viewport_scene(),
+            Err(HostError::BrepFileMissing { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn viewport_stl_parser_rejects_incomplete_triangle_data() {
+        let root = temp_root("viewport-malformed-stl");
+        fs::create_dir_all(&root).expect("stage creates");
+        let path = root.join("malformed.stl");
+        fs::write(
+            &path,
+            "solid malformed\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex 1 0 0\n    endloop\n  endfacet\nendsolid malformed\n",
+        )
+        .expect("malformed STL writes");
+
+        assert!(matches!(
+            parse_ascii_stl(&path, "lofted"),
+            Err(HostError::BrepInvalid { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5631,30 +5946,35 @@ mod tests {
     }
 
     #[test]
-    fn commit_brep_feature_replaces_prior_bytes_post_commit() {
+    fn commit_brep_feature_rejects_existing_feature_id_without_replacing_bytes() {
         let root = temp_root("brep-replace");
-        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        let bundle = Bundle::create(&root).expect("bundle creates");
+        let revision = bundle
+            .open()
+            .expect("bundle opens")
+            .revision_hash_hex()
+            .to_string();
         let staging = root.join("staging");
         std::fs::create_dir_all(&staging).expect("staging dir creates");
         let brep_dir = root.join("brep");
-        std::fs::create_dir_all(&brep_dir).expect("brep dir creates");
         let prior_bytes: Vec<u8> = (0..128u8).collect();
-        std::fs::write(brep_dir.join("box-1.brep"), &prior_bytes).expect("prior BREP writes");
+        bundle
+            .append_feature_with_brep_if_revision("box-1", "brep:box-1", &revision, &prior_bytes)
+            .expect("prior BREP publishes");
 
         let new_source = staging.join("new.brep");
         let new_bytes: Vec<u8> = (128..=255u8).cycle().take(128).collect();
         std::fs::write(&new_source, &new_bytes).expect("new BREP writes");
 
         let host = Host::new();
-        let view = host
-            .commit_brep_feature(&root, "box-1", &new_source)
-            .expect("commit succeeds");
-        assert!(view.feature_graph_hash.len() == 64);
+        let prior = host.load(&root).expect("host loads prior");
+        let result = host.commit_brep_feature(&root, "box-1", &new_source);
+        assert!(matches!(result, Err(HostError::Validation { .. })));
 
         let committed = std::fs::read(brep_dir.join("box-1.brep")).expect("reads");
-        assert_eq!(committed, new_bytes, "BREP bytes are replaced post-commit");
+        assert_eq!(committed, prior_bytes, "BREP bytes remain unchanged");
         let reloaded = host.load(&root).expect("reloads");
-        assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
+        assert_eq!(reloaded, prior);
 
         let _ = std::fs::remove_dir_all(root);
     }

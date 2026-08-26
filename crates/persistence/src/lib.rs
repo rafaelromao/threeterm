@@ -451,6 +451,9 @@ impl TransactionLog {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedBundle {
+    /// The exact sealed generation selected by `Bundle::open`, including a
+    /// previous-generation recovery path when the canonical root is absent.
+    pub canonical_root: PathBuf,
     pub manifest: Manifest,
     pub generation: ProjectGeneration,
     pub transactions: String,
@@ -906,6 +909,7 @@ impl Bundle {
         let transactions = String::from_utf8(transaction_bytes)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
         Ok(LoadedBundle {
+            canonical_root: self.root.clone(),
             manifest,
             generation,
             transactions,
@@ -982,6 +986,7 @@ impl Bundle {
                 None,
                 None,
                 Some(fit),
+                false,
             )
         })
     }
@@ -1090,6 +1095,82 @@ impl Bundle {
         })
     }
 
+    /// Publish one verified BREP and its command provenance as one canonical
+    /// transaction. The provenance is metadata only: worker paths and raw
+    /// artifact bytes remain outside the Canonical Transaction Log.
+    pub fn append_feature_with_brep_if_revision_and_provenance(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+            )
+        })
+    }
+
+    /// Publish a verified BREP and command provenance for a new feature ID.
+    /// The duplicate check and complete generation publication run under the
+    /// same bundle write lock.
+    pub fn append_new_feature_with_brep_if_revision_and_provenance(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+            )
+        })
+    }
+
+    /// Publish a BREP for a new feature ID only. The duplicate check and the
+    /// complete generation publication run under the bundle write lock.
+    pub fn append_new_feature_with_brep_if_revision(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+        })
+    }
+
     /// Publish a verified BREP and its initial history event in one sealed
     /// generation.
     pub fn append_feature_with_brep_if_revision_and_history(
@@ -1127,6 +1208,30 @@ impl Bundle {
                 None,
                 None,
                 None,
+                Some(history_event),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_features_with_brep_if_revision_and_history_and_provenance(
+        &self,
+        entries: &[(&str, &str)],
+        brep_feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+        request_id: &str,
+        provenance: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                entries,
+                Some(expected_revision),
+                Some((brep_feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
                 Some(history_event),
             )
         })
@@ -1268,6 +1373,7 @@ impl Bundle {
             idempotency_payload,
             history_event,
             None,
+            false,
         )
     }
 
@@ -1282,6 +1388,7 @@ impl Bundle {
         idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
         fit_dimension: Option<&FitDimension>,
+        reject_existing_brep: bool,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1337,6 +1444,17 @@ impl Bundle {
             return Err(BundleError::Invalid(
                 "BREP feature ID is not part of the transaction".to_string(),
             ));
+        }
+        if reject_existing_brep
+            && let Some((feature_id, _)) = brep
+            && loaded
+                .graph
+                .features()
+                .any(|feature| feature.id.as_str() == feature_id)
+        {
+            return Err(BundleError::Invalid(format!(
+                "feature ID {feature_id:?} already exists"
+            )));
         }
         if let Some((feature_id, expected_sha256)) = source_brep {
             let source = self.root.join("brep").join(format!("{feature_id}.brep"));
@@ -1787,6 +1905,7 @@ fn load_v0_with_migration(
 
     Ok(loaded_with(
         validated,
+        path.to_path_buf(),
         manifest,
         generation,
         transactions,
@@ -1796,12 +1915,14 @@ fn load_v0_with_migration(
 
 fn loaded_with(
     stale: LoadedBundle,
+    canonical_root: PathBuf,
     manifest: Manifest,
     generation: ProjectGeneration,
     transactions: String,
     recovered_from_previous: bool,
 ) -> LoadedBundle {
     LoadedBundle {
+        canonical_root,
         manifest,
         generation,
         transactions,

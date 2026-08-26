@@ -234,7 +234,6 @@ fn brep_parent_sync_failure_reconciles_to_the_selected_generation() {
     );
     let _ = fs::remove_dir_all(root);
 }
-
 #[test]
 fn duplicate_brep_feature_id_is_rejected_before_replacing_the_generation() {
     let root = temp_root("duplicate-feature");
@@ -298,5 +297,50 @@ fn loading_rejects_tampered_promoted_brep_bytes() {
         "tampered BREP must fail closed on load"
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+#[test]
+fn new_brep_feature_rejects_duplicate_ids_without_replacing_state() {
+    let root = temp_root("duplicate-new-feature");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let empty_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let initial = bundle
+        .append_feature_with_brep_if_revision(
+            "feature-1",
+            "brep:feature-1",
+            &empty_revision,
+            b"prior-brep",
+        )
+        .expect("initial BREP publishes");
+    let prior_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let prior_log = fs::read(root.join("transactions.log")).expect("log reads");
+    let prior_brep = fs::read(root.join("brep/feature-1.brep")).expect("BREP reads");
+
+    let error = bundle
+        .append_new_feature_with_brep_if_revision(
+            "feature-1",
+            "brep:replacement",
+            initial.revision_hash_hex(),
+            b"replacement-brep",
+        )
+        .expect_err("a new feature commit must reject a duplicate ID");
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        prior_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), prior_log);
+    assert_eq!(
+        fs::read(root.join("brep/feature-1.brep")).unwrap(),
+        prior_brep
+    );
+    assert_eq!(
+        bundle.open().unwrap().revision_hash_hex(),
+        initial.revision_hash_hex()
+    );
     let _ = fs::remove_dir_all(root);
 }

@@ -21,6 +21,7 @@ fn scene(revision: &str) -> ViewportScene {
             id: "a".to_string(),
             kind: "plate-vertical".to_string(),
         }],
+        solids: vec![],
         selected_id: None,
         layer1_references: vec!["derived-abc".to_string()],
         fit_relationships: vec![],

@@ -71,6 +71,7 @@ fn v0_fixture_loads_on_v1_reader_with_sealed_backup() {
     ));
 
     let loaded = load(&root).expect("v0 migrates to v1");
+    assert_eq!(loaded.canonical_root, root);
     assert_eq!(loaded.manifest.schema_version, schema_epoch());
     assert!(loaded.transactions.is_empty());
     assert!(loaded.manifest.canonical_root_sha256.len() == 64);

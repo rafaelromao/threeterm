@@ -592,6 +592,7 @@ version = "0.1.0"
 dependencies = [
  "threeterm-domain",
  "threeterm-host",
+ "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-theme",
  "threeterm-viewport",

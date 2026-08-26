@@ -2339,8 +2339,14 @@ impl<R: Renderer> TuiViewportSession<R> {
             )
         })?;
         let revision = presentation.snapshot.revision_hash.clone();
-        let mut scene =
-            ViewportScene::from_feature_graph(revision.clone(), &presentation.graph, None);
+        let mut scene = host.presentation_viewport_scene().map_err(|error| {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::InvalidScene,
+                format!("committed viewport geometry could not be loaded: {error}"),
+                &revision,
+                "repair or recompute the committed BREP before starting the viewport",
+            )
+        })?;
         for result in presentation.layer1_results {
             scene = scene.with_layer1_reference(result.request_id);
         }

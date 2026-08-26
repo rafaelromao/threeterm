@@ -276,9 +276,35 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
     let mcp = &mcp_responses[0];
     assert!(mcp["error"].is_null(), "mcp response must not be an error");
     let structured = &mcp["result"]["structuredContent"];
+    let mut cli_semantic = cli.clone();
+    let mut mcp_semantic = structured.clone();
+    cli_semantic
+        .as_object_mut()
+        .expect("CLI response is an object")
+        .remove("revision_hash");
+    mcp_semantic
+        .as_object_mut()
+        .expect("MCP response is an object")
+        .remove("revision_hash");
+    for response in [&mut cli_semantic, &mut mcp_semantic] {
+        let object = response.as_object_mut().expect("response is an object");
+        object.remove("request_id");
+        object.remove("brep_path");
+        object.remove("artifact_name");
+        if let Some(derived) = object.get_mut("derived_result") {
+            derived
+                .as_object_mut()
+                .expect("derived result is an object")
+                .remove("request_id");
+            derived
+                .as_object_mut()
+                .expect("derived result is an object")
+                .remove("artifact_name");
+        }
+    }
     assert_eq!(
-        structured, &cli,
-        "the MCP bracket result must be structurally equal to the CLI bracket result"
+        mcp_semantic, cli_semantic,
+        "the MCP bracket result must be semantically equal to the CLI bracket result"
     );
 
     let loaded = Command::new(threeterm_binary())
@@ -297,8 +323,8 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
         "load must report the same feature_graph_hash as the bracket write"
     );
     assert_eq!(
-        loaded["revision_hash"], cli["revision_hash"],
-        "load must report the same revision_hash as the bracket write"
+        loaded["revision_hash"], structured["revision_hash"],
+        "load must report the same revision_hash as the MCP bracket write"
     );
     assert_eq!(
         loaded["schema_version"], "threeterm.command.load.response/2",

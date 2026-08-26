@@ -254,8 +254,13 @@ fn worker_spawn_failure_preserves_canonical_state() {
 
     let bad_worker =
         threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from("/no/such/worker"));
+    let caller_output_dir = root.join("caller-output");
+    fs::create_dir_all(&caller_output_dir).expect("caller output directory creates");
+    let caller_output = caller_output_dir.join("existing.brep");
+    let caller_bytes = b"caller-owned output";
+    fs::write(&caller_output, caller_bytes).expect("caller output writes");
     let request = rectangle_extrude_request("spawn-fail")
-        .with_output_path(root.join("stage"), "extrude.brep");
+        .with_output_path(&caller_output_dir, "existing.brep");
     let request_id = request.request_id.clone();
     let result = host.extrude(&root, request, &bad_worker);
     match &result {
@@ -271,6 +276,10 @@ fn worker_spawn_failure_preserves_canonical_state() {
     assert_eq!(prior_manifest, post_manifest, "manifest must be unchanged");
     assert_eq!(prior_log, post_log, "log must be unchanged");
     assert_eq!(host.current(), Some(prior_view));
+    assert_eq!(
+        fs::read(&caller_output).expect("caller output remains"),
+        caller_bytes
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -3167,9 +3176,10 @@ fn adversarial_trailing_worker_data_preserves_canonical_host_state() {
     assert_eq!(prior_log, post_log);
     assert_eq!(host.current(), Some(prior_view));
     assert!(!root.join("brep/adversarial-box.brep").exists());
-    assert!(
-        !output.exists(),
-        "rejected staged output must be cleaned up"
+    assert_eq!(
+        fs::read(&output).expect("caller output remains"),
+        bytes,
+        "rejected caller output must be preserved"
     );
 
     let _ = fs::remove_dir_all(root);

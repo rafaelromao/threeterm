@@ -2269,10 +2269,6 @@ impl Host {
                     detail: format!("create {operation:?} request stage failed: {error}"),
                 }
             })?;
-        let original_output = request_value["output_dir"]
-            .as_str()
-            .zip(request_value["output_filename"].as_str())
-            .map(|(directory, filename)| Path::new(directory).join(filename));
         request_value["output_dir"] =
             serde_json::Value::String(stage.root().to_string_lossy().into_owned());
         request_value["output_filename"] =
@@ -2311,9 +2307,6 @@ impl Host {
         let completion = match completion_result {
             Ok(completion) => completion,
             Err(error) => {
-                if let Some(path) = &original_output {
-                    cleanup_worker_output(path);
-                }
                 return Err(HostError::from(error));
             }
         };
@@ -2321,9 +2314,6 @@ impl Host {
             Ok(result) => result,
             Err(error) => {
                 let _ = completion.stage.discard();
-                if let Some(path) = &original_output {
-                    cleanup_worker_output(path);
-                }
                 return Err(HostError::DerivedResult {
                     diagnostic: Diagnostic::artifact_promotion_failure(&format!(
                         "typed_result_schema_mismatch:{error}"
@@ -2335,9 +2325,6 @@ impl Host {
             Ok(value) => value,
             Err(error) => {
                 let _ = completion.stage.discard();
-                if let Some(path) = &original_output {
-                    cleanup_worker_output(path);
-                }
                 return Err(HostError::Validation {
                     detail: format!("typed OCCT result serialization failed: {error}"),
                 });
@@ -2345,9 +2332,6 @@ impl Host {
         };
         if typed_value["status"].as_str() != Some("ok") {
             let _ = completion.stage.discard();
-            if let Some(path) = &original_output {
-                cleanup_worker_output(path);
-            }
             return Err(HostError::BrepInvalid {
                 request_id: typed_value["request_id"].as_str().map(str::to_string),
                 detail: format!(
@@ -5118,18 +5102,6 @@ fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
     }
     let _ = fs::remove_file(root.join(format!("{staging_name}.partial")));
     let _ = fs::remove_file(root.join(format!(".{staging_name}.verified")));
-}
-
-fn cleanup_worker_output(path: &Path) {
-    let _ = fs::remove_file(path);
-    let temporary = path.with_file_name(format!(
-        "{}.tmp-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    let _ = fs::remove_file(temporary);
 }
 
 fn bundle_root(root: &Path) -> PathBuf {

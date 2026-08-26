@@ -24,6 +24,14 @@ selection, help, tree, timeline, load, save, replay, recompute, export, Lua,
 plugin, and any other per-class or product-wide performance claim. A claim that
 is outside the measured fixture is refused rather than generalized.
 
+For this runbook, a **measured band** is an observed result tied to one
+evidence artifact, fixture, profile, scale, and method; it is not a product
+promise. An **admitted target** is a measured band that passed all six gates and
+was signed by the product owner. A **fixture** is the named workflow and
+project data, together with the renderer and terminal path, that produced the
+measurement. A band or fixture may change only through a new evidence artifact
+and a new signed run.
+
 ## Source Decisions
 
 The six-gate structure is the executable form of the closed Wayfinder decision
@@ -311,6 +319,23 @@ counts, or a named limitations document; its one sample per class is below the
 interpretation of the STEP/3MF comparison. Catalog integrity therefore does
 not promote these bands.
 
+### Gate Assessment
+
+| Gate | Result | Current-run evidence and reasoning |
+| --- | --- | --- |
+| 1. Rehearsal spike | `PASS` | Checked-in L-bracket root, two candidate runs, and catalog verification are present. |
+| 2. Hardware profile | `FAIL` | CPU, memory, container, package, and Ghostty profile fields are not declared in the artifact. |
+| 3. Project scale | `FAIL` | Feature, transaction, and `Derived Result` counts are not declared in the artifact. |
+| 4. Statistical method | `FAIL` | The label is `nearest-rank`, but every class has `n: 1`, below the per-class `n >= 30` requirement. |
+| 5. Fixture-vs-product limits | `FAIL` | No named limitations document is published with this artifact. |
+| 6. Two-release regression | `FAIL` | Nine per-class comparisons and equal format hashes are present, but matching profile/scale and a signed STEP/3MF interpretation are not evidenced. |
+
+Current-run gate owner: ______________________________________________
+
+Current-run gate signature or initials: ______________________________________________
+
+Current-run gate sign-off date (UTC): ______________________________________________
+
 ### Decision
 
 **Bands admitted:** none.
@@ -326,6 +351,20 @@ remain internal measured bands only. The two release candidates must not be
 pooled to turn `n: 1` into a qualifying sample count. No release note, marketing
 statement, README claim, or per-class MVP target may use these values as an
 admitted performance claim.
+
+### Current Per-Class Decisions
+
+| Class | Metric/unit | n per RC | Band or target | Evidence identity | Gate result | Decision | Reasoning |
+| --- | --- | ---: | --- | --- | --- | --- | --- |
+| `project_create` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `bracket_create` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `edit_open` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `edit_update` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `edit_preview` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `edit_commit` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `reload` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `export` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
+| `catalog` | timing / ms | 1 | measured band | aggregate manifest | Gates 2-6 fail | `REFUSE` | Missing profile, scale, limitations, and qualifying sample count. |
 
 Owner name and role: ______________________________________________
 
@@ -353,8 +392,8 @@ all of these boxes:
 - [ ] All six gate statuses are `PASS`.
 - [ ] All six owner sign-off lines are complete and dated.
 - [ ] Each published class is inside the declared fixture, profile, and scale.
-- [ ] Each published percentile has `n >= 30` per class, or the claim is not a
-  percentile claim and is explicitly labeled as a refused measured band.
+- [ ] Each published percentile has `n >= 30` per class. Refused measured bands
+  are omitted from public claims and targets.
 - [ ] The admitted/refused decision table and reasoning are attached to the
   release record.
 - [ ] STEP/3MF divergence and STL determinism are documented for the exact

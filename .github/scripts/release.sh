@@ -14,6 +14,26 @@ readonly -a REQUIRED_ROWS=(
     E-REHEARSAL G-TAG G-GITHUB G-AUR G-COPR
 )
 
+declare -A REQUIRED_QUERY_TOKENS=(
+    [T-USPTO]='USPTO'
+    [T-WIPO]='WIPO'
+    [T-TMVIEW]='TMview'
+    [T-EUIPO]='EUIPO'
+    [T-NATIONAL]='national'
+    [T-VARIANTS]='Terminal Three'
+    [D-DOMAINS]='.com'
+    [P-PACKAGES]='crates.io'
+    [O-OPPOSITION]='91298824'
+    [U-TERM]='terminal-native'
+    [U-SCOPE]='downloadable'
+    [U-BRANDING]='branding'
+    [E-REHEARSAL]='rehearsal'
+    [G-TAG]='release tag'
+    [G-GITHUB]='GitHub Release'
+    [G-AUR]='AUR push'
+    [G-COPR]='COPR build'
+)
+
 fail() {
     printf 'release gate: %s\n' "$1" >&2
     exit 1
@@ -63,7 +83,7 @@ verify_runbook() {
     if grep -Eq '^- \[[^xX]\]' <<<"$gate"; then
         fail "current gate contains an unchecked item"
     fi
-    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked|record exact|list each .* here|inspect all public-facing uses' <<<"$gate"; then
+    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked|record exact|list each .* here|inspect all public-facing uses|example\.(com|invalid)|placeholder|live check' <<<"$gate"; then
         fail "current gate contains an incomplete value"
     fi
 
@@ -90,8 +110,10 @@ verify_runbook() {
             || fail "current gate must contain exactly one checked row for ${id}"
         row="$(row_text "$gate" "$id")"
         require_line "$row" '^  - Evidence date: `[0-9]{4}-[0-9]{2}-[0-9]{2}`$'
-        require_line "$row" '^  - Evidence record: `query="[^"]+"; source="[^"]+"; result="[^"]+"`$'
+        require_line "$row" '^  - Evidence record: `query="[^"]+"; source="(https?://|docs/|\.github/)[^"]+"; result="[^" ]([^" ]| )*"`$'
         require_line "$row" '^  - Sources consulted: `[^`]+`$'
+        grep -Fq "${REQUIRED_QUERY_TOKENS[$id]}" <<<"$row" \
+            || fail "evidence query for ${id} is missing ${REQUIRED_QUERY_TOKENS[$id]}"
         require_line "$row" '^  - Disposition: `\[(PASS|ACCEPTED)\] .+`$'
         signoff_re='Product-owner sign-off: `([^`]*)`; signed: `([0-9]{4}-[0-9]{2}-[0-9]{2})`'
         if [[ ! "$row" =~ $signoff_re ]]; then

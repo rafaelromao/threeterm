@@ -2624,6 +2624,7 @@ pub fn probe_and_route_to_headless<W: threeterm_viewport::CapabilityProbeIo>(
     let host_snapshot = host
         .current()
         .unwrap_or_else(|| threeterm_host::SnapshotView {
+            generation_id: String::new(),
             feature_graph_hash: String::new(),
             revision_hash: "unknown".to_string(),
             recovered_from_previous: false,

@@ -156,6 +156,10 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
     );
     assert_eq!(before_log, after_log, "log unchanged after cancel");
     assert_eq!(host.current().expect("after snapshot"), before_snapshot);
+    assert_eq!(
+        host.current().expect("after generation").generation_id,
+        before_snapshot.generation_id
+    );
     assert!(
         !dir.root.join("out.brep").exists(),
         "staged output must be discarded"
@@ -197,6 +201,10 @@ fn force_stop_does_not_mutate_canonical_state() {
     assert_eq!(before_manifest, after_manifest);
     assert_eq!(before_log, after_log);
     assert_eq!(host.current().expect("after"), before_snapshot);
+    assert_eq!(
+        host.current().expect("after generation").generation_id,
+        before_snapshot.generation_id
+    );
     assert!(!dir.root.join("out.brep").exists());
 }
 

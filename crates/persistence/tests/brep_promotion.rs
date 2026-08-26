@@ -1,6 +1,7 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use threeterm_domain::history::HistoryState;
 use threeterm_persistence::{
     Bundle, BundleError, PublicationFailurePoint, fail_next_publication_at,
 };
@@ -398,6 +399,28 @@ fn loading_rejects_a_fifo_substituted_for_a_promoted_brep() {
             .expect("FIFO load does not block"),
         true
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn historically_used_feature_ids_are_rejected_without_replacement_authorization() {
+    let root = temp_root("historical-feature-id");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let event = HistoryState::default()
+        .initialize_l_bracket("bracket", 10.0, 5.0, 3.0, 1.0)
+        .expect("history event creates");
+    let history = bundle
+        .append_features_with_history(&[], &event)
+        .expect("history event publishes");
+
+    let duplicate = bundle.append_feature_with_brep_if_revision(
+        "history-event-0",
+        "brep:history-event-0",
+        history.revision_hash_hex(),
+        b"replacement-brep",
+    );
+    assert!(matches!(duplicate, Err(BundleError::Invalid(_))));
 
     let _ = fs::remove_dir_all(root);
 }

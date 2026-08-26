@@ -24,7 +24,10 @@ use threeterm_occt_worker::{
     DraftRequest, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest,
     MirrorRequest, Operation, ShellRequest,
 };
-use threeterm_persistence::{Bundle, MANIFEST_FILENAME, TRANSACTIONS_LOG_FILENAME};
+use threeterm_persistence::{
+    Bundle, MANIFEST_FILENAME, PublicationFailurePoint, TRANSACTIONS_LOG_FILENAME,
+    fail_next_publication_at,
+};
 
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -103,6 +106,20 @@ fn fresh_bundle_with_feature(label: &str, feature_id: &str, kind: &str) -> PathB
     root
 }
 
+fn fresh_bundle_with_brep(label: &str, feature_id: &str, kind: &str, bytes: &[u8]) -> PathBuf {
+    let root = temp_root(label);
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision(feature_id, kind, &revision, bytes)
+        .expect("seed BREP publishes");
+    root
+}
+
 fn rectangle_extrude_request(label: &str) -> ExtrudeRequest {
     ExtrudeRequest::new(
         unique_request_id(label),
@@ -167,6 +184,127 @@ fn extrude_commits_brep_into_a_new_revision() {
     assert!(brep_path.is_file(), "BREP is on disk at {brep_path:?}");
     let reloaded = Host::new().load(&root).expect("reloads after commit");
     assert_eq!(view.snapshot, reloaded);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn verified_brep_manifest_failure_preserves_the_prior_generation_and_can_retry() {
+    let root = fresh_bundle_with_brep(
+        "verified-manifest-failure",
+        "box-seed",
+        "box",
+        b"prior-brep",
+    );
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+    let prior_files = snapshot_files(&root);
+    let prior_breps = brep_inventory(&root);
+    let stage = root.join("stage/verified-manifest.brep");
+    fs::create_dir_all(stage.parent().expect("stage parent")).expect("stage creates");
+    fs::write(&stage, b"new-brep").expect("staged BREP writes");
+    let digest = threeterm_occt_worker::sha256_file(&stage).expect("staged BREP hashes");
+
+    fail_next_publication_at(PublicationFailurePoint::ManifestSync);
+    let result = host.commit_brep_feature_verified(
+        &root,
+        "manifest-failure-1",
+        &stage,
+        b"new-brep".len(),
+        &digest,
+    );
+    assert!(
+        matches!(result, Err(HostError::Persistence(_))),
+        "got {result:?}"
+    );
+    assert_eq!(snapshot_files(&root), prior_files);
+    assert_eq!(brep_inventory(&root), prior_breps);
+    assert_eq!(host.current(), Some(prior.clone()));
+    assert_eq!(Host::new().load(&root).expect("prior reloads"), prior);
+    assert!(!stage.exists(), "failed worker stage is cleaned up");
+
+    fs::create_dir_all(stage.parent().expect("stage parent")).expect("stage recreates");
+    fs::write(&stage, b"new-brep").expect("retry BREP writes");
+    let digest = threeterm_occt_worker::sha256_file(&stage).expect("retry BREP hashes");
+    host.commit_brep_feature_verified(
+        &root,
+        "manifest-failure-1",
+        &stage,
+        b"new-brep".len(),
+        &digest,
+    )
+    .expect("retry succeeds");
+    assert_eq!(
+        fs::read(root.join("brep/manifest-failure-1.brep")).unwrap(),
+        b"new-brep"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn verified_brep_duplicate_feature_id_preserves_artifact_and_host_snapshot() {
+    let root = fresh_bundle_with_brep("verified-duplicate", "box-seed", "box", b"prior-brep");
+    let host = Host::new();
+    let prior = host.load(&root).expect("host loads prior");
+    let prior_files = snapshot_files(&root);
+    let prior_breps = brep_inventory(&root);
+    let stage = root.join("stage/duplicate.brep");
+    fs::create_dir_all(stage.parent().expect("stage parent")).expect("stage creates");
+    fs::write(&stage, b"replacement-brep").expect("staged BREP writes");
+    let digest = threeterm_occt_worker::sha256_file(&stage).expect("staged BREP hashes");
+
+    let result = host.commit_brep_feature_verified(
+        &root,
+        "box-seed",
+        &stage,
+        b"replacement-brep".len(),
+        &digest,
+    );
+    assert!(
+        matches!(result, Err(HostError::Validation { .. })),
+        "got {result:?}"
+    );
+    assert_eq!(snapshot_files(&root), prior_files);
+    assert_eq!(brep_inventory(&root), prior_breps);
+    assert_eq!(host.current(), Some(prior.clone()));
+    assert_eq!(Host::new().load(&root).expect("prior reloads"), prior);
+    assert!(!stage.exists(), "rejected worker stage is cleaned up");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn verified_brep_parent_sync_failure_retains_the_promoted_generation() {
+    let root = fresh_bundle_with_brep("verified-parent-sync", "box-seed", "box", b"prior-brep");
+    let host = Host::new();
+    host.load(&root).expect("host loads prior");
+    let stage = root.join("stage/parent-sync.brep");
+    fs::create_dir_all(stage.parent().expect("stage parent")).expect("stage creates");
+    fs::write(&stage, b"new-brep").expect("staged BREP writes");
+    let digest = threeterm_occt_worker::sha256_file(&stage).expect("staged BREP hashes");
+
+    fail_next_publication_at(PublicationFailurePoint::ParentSync);
+    let result = host.commit_brep_feature_verified(
+        &root,
+        "parent-sync-1",
+        &stage,
+        b"new-brep".len(),
+        &digest,
+    );
+    assert!(
+        matches!(result, Err(HostError::Persistence(_))),
+        "got {result:?}"
+    );
+    assert_eq!(
+        fs::read(root.join("brep/parent-sync-1.brep")).unwrap(),
+        b"new-brep"
+    );
+    let current = Host::new()
+        .load(&root)
+        .expect("promoted generation reloads");
+    assert_eq!(host.current(), Some(current.clone()));
+    assert!(!stage.exists(), "worker stage is cleaned up");
 
     let _ = fs::remove_dir_all(root);
 }

@@ -946,6 +946,7 @@ impl Bundle {
                 None,
                 None,
                 Some(fit),
+                false,
             )
         })
     }
@@ -1075,6 +1076,30 @@ impl Bundle {
                 Some(request_id),
                 Some(provenance),
                 None,
+            )
+        })
+    }
+
+    /// Publish a BREP for a new feature ID only. The duplicate check and the
+    /// complete generation publication run under the bundle write lock.
+    pub fn append_new_feature_with_brep_if_revision(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
             )
         })
     }
@@ -1281,6 +1306,7 @@ impl Bundle {
             idempotency_payload,
             history_event,
             None,
+            false,
         )
     }
 
@@ -1295,6 +1321,7 @@ impl Bundle {
         idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
         fit_dimension: Option<&FitDimension>,
+        reject_existing_brep: bool,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1330,6 +1357,17 @@ impl Bundle {
             return Err(BundleError::Invalid(format!(
                 "worker result belongs to revision {expected_revision:?}, but current revision is {:?}",
                 loaded.revision_hash_hex()
+            )));
+        }
+        if reject_existing_brep
+            && let Some((feature_id, _)) = brep
+            && loaded
+                .graph
+                .features()
+                .any(|feature| feature.id.as_str() == feature_id)
+        {
+            return Err(BundleError::Invalid(format!(
+                "feature ID {feature_id:?} already exists"
             )));
         }
         if let Some((feature_id, expected_sha256)) = source_brep {

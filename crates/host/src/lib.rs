@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -4285,43 +4285,34 @@ impl Host {
         let prior_view = SnapshotView::from(&loaded);
         let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
         let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
-
-        let brep_dir = bundle_root(root).join(BREP_SUBDIR);
-        if let Err(detail) = ensure_dir(&brep_dir) {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepIo { detail });
-        }
-        let target = brep_dir.join(format!("{feature_id}.brep"));
-        // Preserve any prior committed BREP for this feature id so a
-        // mid-commit failure doesn't orphan the canonical log entry.
-        let prior_brep = if target.is_file() {
-            let mut buffer = Vec::new();
-            std::io::Read::read_to_end(
-                &mut fs::File::open(&target).map_err(|error| HostError::BrepIo {
-                    detail: format!("open prior BREP failed: {error}"),
-                })?,
-                &mut buffer,
-            )
-            .map_err(|error| HostError::BrepIo {
-                detail: format!("read prior BREP failed: {error}"),
-            })?;
-            Some(buffer)
-        } else {
-            None
-        };
-        if let Err(detail) = copy_brep_verified(brep_path, &target, expected) {
+        if loaded
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == feature_id)
+        {
             cleanup_worker_stage(root, brep_path);
             self.current.replace(Some(loaded));
-            return Err(HostError::BrepIo { detail });
+            return Err(HostError::Validation {
+                detail: format!("feature ID {feature_id:?} already exists"),
+            });
         }
 
-        let kind = format!("brep:{feature_id}");
-        let updated_result = match expected_revision {
-            Some(expected_revision) => {
-                bundle.append_feature_if_revision(feature_id, &kind, expected_revision)
+        let brep_bytes = match read_brep_verified(brep_path, expected) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                self.current.replace(Some(loaded));
+                return Err(HostError::BrepIo { detail });
             }
-            None => bundle.append_feature(feature_id, &kind),
         };
+
+        let expected_revision = expected_revision.unwrap_or(prior_view.revision_hash.as_str());
+        let kind = format!("brep:{feature_id}");
+        let updated_result = bundle.append_new_feature_with_brep_if_revision(
+            feature_id,
+            &kind,
+            expected_revision,
+            &brep_bytes,
+        );
         let updated = match updated_result {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -4333,22 +4324,13 @@ impl Host {
                     if let Ok(committed) = bundle.open() {
                         self.current.replace(Some(committed));
                     }
-                    return Err(HostError::from(error));
+                } else {
+                    self.current.replace(Some(loaded));
                 }
-                // Restore the prior BREP bytes (or remove the new file if
-                // there was no prior) and verify the canonical state
-                // survived. The prior manifest and log are untouched
-                // because we never reached a successful append.
-                restore_brep(&target, prior_brep.as_deref());
                 cleanup_worker_stage(root, brep_path);
-                // Fail-closed: if the canonical state was not preserved
-                // by the append, surface the persistence error so the
-                // diagnostic taxonomy sees the failure.
-                self.current.replace(Some(loaded));
                 return Err(HostError::from(error));
             }
         };
-        let _ = prior_view;
         let view = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         cleanup_worker_stage(root, brep_path);
@@ -5219,20 +5201,12 @@ fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
     Ok(buffer)
 }
 
-fn ensure_dir(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("create_dir_all failed: {error}"))
-}
-
 #[cfg(test)]
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
     copy_brep_verified(source, target, None)
 }
 
-fn copy_brep_verified(
-    source: &Path,
-    target: &Path,
-    expected: Option<(usize, &str)>,
-) -> Result<(), String> {
+fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::OpenOptionsExt;
     // Open the source without following symlinks and pin the opened
     // handle: promotion copies from one verified file identity, so a
@@ -5295,6 +5269,23 @@ fn copy_brep_verified(
             ));
         }
     }
+    Ok(content)
+}
+
+#[cfg(test)]
+fn copy_brep_verified(
+    source: &Path,
+    target: &Path,
+    expected: Option<(usize, &str)>,
+) -> Result<(), String> {
+    let content = read_brep_verified(source, expected)?;
+    write_brep_bytes(target, &content)
+}
+
+#[cfg(test)]
+fn write_brep_bytes(target: &Path, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
     // Never create the canonical target before the complete replacement is
     // durable: File::create(target) would truncate a prior BREP before a
     // later write or sync failure could be reported.
@@ -5316,7 +5307,7 @@ fn copy_brep_verified(
                 temporary.display()
             )
         })?;
-    if let Err(error) = writer.write_all(&content) {
+    if let Err(error) = writer.write_all(content) {
         let _ = fs::remove_file(&temporary);
         return Err(format!("write temporary BREP failed: {error}"));
     }
@@ -5367,37 +5358,6 @@ struct WorkerStageCleanup<'a> {
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
-    }
-}
-
-fn restore_brep(target: &Path, prior_bytes: Option<&[u8]>) {
-    match prior_bytes {
-        Some(bytes) => {
-            let Some(file_name) = target.file_name() else {
-                return;
-            };
-            let temporary = target.with_file_name(format!(
-                ".{}.restore-tmp-{}",
-                file_name.to_string_lossy(),
-                std::process::id()
-            ));
-            if let Ok(mut writer) = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-            {
-                if writer.write_all(bytes).is_ok()
-                    && writer.sync_all().is_ok()
-                    && fs::rename(&temporary, target).is_ok()
-                {
-                    return;
-                }
-                let _ = fs::remove_file(&temporary);
-            }
-        }
-        None => {
-            let _ = fs::remove_file(target);
-        }
     }
 }
 
@@ -5795,30 +5755,35 @@ mod tests {
     }
 
     #[test]
-    fn commit_brep_feature_replaces_prior_bytes_post_commit() {
+    fn commit_brep_feature_rejects_existing_feature_id_without_replacing_bytes() {
         let root = temp_root("brep-replace");
-        Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+        let bundle = Bundle::create(&root).expect("bundle creates");
+        let revision = bundle
+            .open()
+            .expect("bundle opens")
+            .revision_hash_hex()
+            .to_string();
         let staging = root.join("staging");
         std::fs::create_dir_all(&staging).expect("staging dir creates");
         let brep_dir = root.join("brep");
-        std::fs::create_dir_all(&brep_dir).expect("brep dir creates");
         let prior_bytes: Vec<u8> = (0..128u8).collect();
-        std::fs::write(brep_dir.join("box-1.brep"), &prior_bytes).expect("prior BREP writes");
+        bundle
+            .append_feature_with_brep_if_revision("box-1", "brep:box-1", &revision, &prior_bytes)
+            .expect("prior BREP publishes");
 
         let new_source = staging.join("new.brep");
         let new_bytes: Vec<u8> = (128..=255u8).cycle().take(128).collect();
         std::fs::write(&new_source, &new_bytes).expect("new BREP writes");
 
         let host = Host::new();
-        let view = host
-            .commit_brep_feature(&root, "box-1", &new_source)
-            .expect("commit succeeds");
-        assert!(view.feature_graph_hash.len() == 64);
+        let prior = host.load(&root).expect("host loads prior");
+        let result = host.commit_brep_feature(&root, "box-1", &new_source);
+        assert!(matches!(result, Err(HostError::Validation { .. })));
 
         let committed = std::fs::read(brep_dir.join("box-1.brep")).expect("reads");
-        assert_eq!(committed, new_bytes, "BREP bytes are replaced post-commit");
+        assert_eq!(committed, prior_bytes, "BREP bytes remain unchanged");
         let reloaded = host.load(&root).expect("reloads");
-        assert_eq!(reloaded.feature_graph_hash, view.feature_graph_hash);
+        assert_eq!(reloaded, prior);
 
         let _ = std::fs::remove_dir_all(root);
     }

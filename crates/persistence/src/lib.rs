@@ -944,7 +944,20 @@ impl Bundle {
             serde_json::to_string(payload)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?
         );
-        self.append_feature_if_revision(&payload.feature_id, &encoded, expected_revision)
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(&payload.feature_id, &encoded)],
+                Some(expected_revision),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                true,
+            )
+        })
     }
 
     /// Append one versioned component command as a canonical transaction.
@@ -986,6 +999,7 @@ impl Bundle {
                 None,
                 None,
                 Some(fit),
+                false,
                 false,
             )
         })
@@ -1143,6 +1157,7 @@ impl Bundle {
                 None,
                 None,
                 true,
+                false,
             )
         })
     }
@@ -1167,6 +1182,7 @@ impl Bundle {
                 None,
                 None,
                 true,
+                false,
             )
         })
     }
@@ -1374,6 +1390,7 @@ impl Bundle {
             history_event,
             None,
             false,
+            false,
         )
     }
 
@@ -1389,6 +1406,7 @@ impl Bundle {
         history_event: Option<&HistoryEvent>,
         fit_dimension: Option<&FitDimension>,
         reject_existing_brep: bool,
+        allow_existing_sketch_update: bool,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1426,14 +1444,15 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
-        let allow_existing = (idempotency_key.is_some()
+        let allow_existing_bracket_edit = idempotency_key.is_some()
             && source_brep.is_some()
             && entries.len() == 1
-            && entries[0].1.starts_with("bracket:"))
-            || entries
-                .iter()
-                .all(|(_, kind)| kind.starts_with(SKETCH_COMMAND_KIND_PREFIX));
-        validate_feature_entries(&loaded.graph, entries, allow_existing)?;
+            && entries[0].1.starts_with("bracket:");
+        validate_feature_entries(
+            &loaded.graph,
+            entries,
+            allow_existing_bracket_edit || allow_existing_sketch_update,
+        )?;
         if let Some((brep_feature_id, _)) = brep
             && !entries
                 .iter()

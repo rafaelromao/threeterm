@@ -2450,15 +2450,6 @@ impl Host {
                 detail: "OCCT request is missing feature_id".to_string(),
             })?
             .to_string();
-        if self.current_graph().is_some_and(|graph| {
-            graph
-                .features()
-                .any(|feature| feature.id.as_str() == feature_id)
-        }) {
-            return Err(HostError::Validation {
-                detail: format!("feature ID {feature_id:?} already exists"),
-            });
-        }
         let binding = occt_artifact_request(
             &request_value,
             operation,

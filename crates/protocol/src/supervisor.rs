@@ -149,6 +149,13 @@ pub struct TerminationRecord {
     pub failed_code: Option<String>,
     /// Offending detail from a cooperative `Failed` envelope.
     pub failed_detail: Option<String>,
+    /// Stable protocol evidence when the worker violated the cancellation
+    /// acknowledgement contract.
+    pub protocol_diagnostic: Option<ProtocolDiagnostic>,
+    /// Error returned while attempting forced termination or reap. A
+    /// termination attempt that cannot prove cleanup is never hidden as a
+    /// successful no-op.
+    pub termination_error: Option<String>,
     pub exit_kind: ExitKind,
 }
 
@@ -193,6 +200,110 @@ impl ExitKind {
 pub struct Progress {
     pub stage: String,
     pub percent: u8,
+}
+
+/// The only acknowledgement that can complete a cooperative cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationAcknowledgement {
+    pub request_id: String,
+    pub reason: String,
+}
+
+/// Stable protocol failure evidence for a rejected cancellation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolDiagnosticCode {
+    MalformedAcknowledgement,
+    MismatchedRequestId,
+    SchemaMismatch,
+    InvalidCancellationState,
+    EmptyCancellationReason,
+}
+
+impl ProtocolDiagnosticCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedAcknowledgement => "malformed_cancellation_acknowledgement",
+            Self::MismatchedRequestId => "mismatched_cancellation_request_id",
+            Self::SchemaMismatch => "cancellation_acknowledgement_schema_mismatch",
+            Self::InvalidCancellationState => "invalid_cancellation_state",
+            Self::EmptyCancellationReason => "empty_cancellation_reason",
+        }
+    }
+}
+
+/// Structured protocol failure detail retained on a terminal worker record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolDiagnostic {
+    pub code: ProtocolDiagnosticCode,
+    pub detail: String,
+}
+
+/// Validate the wire-level cancellation acknowledgement before any
+/// cooperative outcome is reported.
+pub fn validate_cancellation_ack(
+    envelope: &Envelope,
+    expected_request_id: &str,
+) -> Result<CancellationAcknowledgement, ProtocolDiagnostic> {
+    let Envelope::Cancelled {
+        schema_version,
+        request_id,
+        reason,
+    } = envelope
+    else {
+        return Err(ProtocolDiagnostic {
+            code: ProtocolDiagnosticCode::InvalidCancellationState,
+            detail: format!(
+                "received={} expected=cancelled",
+                envelope_kind_label(envelope)
+            ),
+        });
+    };
+    if schema_version != crate::schema_version() {
+        return Err(ProtocolDiagnostic {
+            code: ProtocolDiagnosticCode::SchemaMismatch,
+            detail: format!(
+                "received={schema_version:?} expected={:?}",
+                crate::schema_version()
+            ),
+        });
+    }
+    if request_id != expected_request_id {
+        return Err(ProtocolDiagnostic {
+            code: ProtocolDiagnosticCode::MismatchedRequestId,
+            detail: format!("received={request_id:?} expected={expected_request_id:?}"),
+        });
+    }
+    if reason.trim().is_empty() {
+        return Err(ProtocolDiagnostic {
+            code: ProtocolDiagnosticCode::EmptyCancellationReason,
+            detail: "cancellation acknowledgement reason must not be empty".to_string(),
+        });
+    }
+    Ok(CancellationAcknowledgement {
+        request_id: request_id.clone(),
+        reason: reason.clone(),
+    })
+}
+
+fn protocol_diagnostic_stage(diagnostic: &ProtocolDiagnostic) -> String {
+    match diagnostic.code {
+        ProtocolDiagnosticCode::MismatchedRequestId => {
+            format!(
+                "protocol_violation:mismatched_request_id:{}",
+                diagnostic.detail
+            )
+        }
+        ProtocolDiagnosticCode::EmptyCancellationReason => {
+            "protocol_violation:empty_cancel_reason".to_string()
+        }
+        ProtocolDiagnosticCode::SchemaMismatch => "envelope_schema_mismatch".to_string(),
+        ProtocolDiagnosticCode::InvalidCancellationState => {
+            "protocol_violation:expected_cancelled_ack".to_string()
+        }
+        ProtocolDiagnosticCode::MalformedAcknowledgement => {
+            "worker_recv_error:malformed_cancel_acknowledgement".to_string()
+        }
+    }
 }
 
 /// Drives a single worker process through the request and cancellation
@@ -322,46 +433,37 @@ impl Supervisor {
                     // canonical protocol version, or cancellation fails
                     // closed (the version is part of the message
                     // binding contract).
-                    return self.force_terminate_outcome(
+                    return self.force_terminate_with_protocol_diagnostic(
                         request_id,
                         started,
                         "envelope_schema_mismatch",
-                        Some(format!(
-                            "received={:?} expected={:?}",
-                            envelope.schema_version(),
-                            crate::schema_version()
-                        )),
+                        ProtocolDiagnostic {
+                            code: ProtocolDiagnosticCode::SchemaMismatch,
+                            detail: format!(
+                                "received={:?} expected={:?}",
+                                envelope.schema_version(),
+                                crate::schema_version()
+                            ),
+                        },
                         last_progress.take(),
                     );
                 }
-                Ok(Envelope::Cancelled {
-                    request_id: ack_request_id,
-                    reason: ack_reason,
-                    ..
-                }) => {
-                    if ack_request_id != request_id {
-                        // A cancellation acknowledgement bound to a
-                        // foreign request is a protocol violation; the
-                        // staged output is discarded and the cancellation
-                        // fails closed rather than being kept alive by a
-                        // stream of misbound acknowledgements.
-                        return self.force_terminate_outcome(
-                            request_id,
-                            started,
-                            &format!("protocol_violation:mismatched_request_id:{ack_request_id}"),
-                            None,
-                            last_progress.take(),
-                        );
-                    }
-                    if ack_reason.is_empty() {
-                        return self.force_terminate_outcome(
-                            request_id,
-                            started,
-                            "protocol_violation:empty_cancel_reason",
-                            None,
-                            last_progress.take(),
-                        );
-                    }
+                Ok(envelope @ Envelope::Cancelled { .. }) => {
+                    let acknowledgement = match validate_cancellation_ack(&envelope, request_id) {
+                        Ok(acknowledgement) => acknowledgement,
+                        Err(diagnostic) => {
+                            let stage = protocol_diagnostic_stage(&diagnostic);
+                            return self.force_terminate_with_protocol_diagnostic(
+                                request_id,
+                                started,
+                                &stage,
+                                diagnostic,
+                                last_progress.take(),
+                            );
+                        }
+                    };
+                    let ack_request_id = acknowledgement.request_id;
+                    let ack_reason = acknowledgement.reason;
                     self.discard_stage();
                     if let Err(error) = self.host.finish_terminal() {
                         let context = TerminationContext {
@@ -369,15 +471,15 @@ impl Supervisor {
                             last_artifact_error: self.last_artifact_error.take(),
                             failed: None,
                         };
-                        return SupervisorOutcome::ForceTerminated {
-                            record: self.termination_record(
-                                ack_request_id,
-                                format!("cancel_terminal_finalize_failed:{error}"),
-                                started,
-                                context,
-                                ExitKind::ForceAfterGrace,
-                            ),
-                        };
+                        let mut record = self.termination_record(
+                            ack_request_id,
+                            format!("cancel_terminal_finalize_failed:{error}"),
+                            started,
+                            context,
+                            ExitKind::ForceAfterGrace,
+                        );
+                        record.termination_error = Some(error.to_string());
+                        return SupervisorOutcome::ForceTerminated { record };
                     }
                     // The worker acknowledged cooperatively; verify it
                     // exited cleanly (no signal, exit code 0) before
@@ -446,16 +548,19 @@ impl Supervisor {
                 // discard the staged output. A WorkerReady left over
                 // from the handshake is tolerated.
                 Ok(
-                    Envelope::Completed { .. }
+                    envelope @ (Envelope::Completed { .. }
                     | Envelope::Failed { .. }
                     | Envelope::Request { .. }
-                    | Envelope::Cancel { .. },
+                    | Envelope::Cancel { .. }),
                 ) => {
-                    return self.force_terminate_outcome(
+                    let diagnostic = validate_cancellation_ack(&envelope, request_id)
+                        .expect_err("non-cancelled envelope has invalid cancellation state");
+                    let stage = protocol_diagnostic_stage(&diagnostic);
+                    return self.force_terminate_with_protocol_diagnostic(
                         request_id,
                         started,
-                        "protocol_violation:expected_cancelled_ack",
-                        None,
+                        &stage,
+                        diagnostic,
                         last_progress.take(),
                     );
                 }
@@ -474,6 +579,20 @@ impl Supervisor {
                 // the cancellation when the grace expires.
                 Err(WorkerError::TimedOut) => {}
                 Err(error) => {
+                    if let WorkerError::Protocol(detail) = &error {
+                        let diagnostic = ProtocolDiagnostic {
+                            code: ProtocolDiagnosticCode::MalformedAcknowledgement,
+                            detail: detail.clone(),
+                        };
+                        let stage = protocol_diagnostic_stage(&diagnostic);
+                        return self.force_terminate_with_protocol_diagnostic(
+                            request_id,
+                            started,
+                            &stage,
+                            diagnostic,
+                            last_progress.take(),
+                        );
+                    }
                     return self.force_terminate_outcome(
                         request_id,
                         started,
@@ -939,15 +1058,15 @@ impl Supervisor {
                 last_artifact_error: self.last_artifact_error.take(),
                 failed: None,
             };
-            return SupervisorOutcome::ForceTerminated {
-                record: self.termination_record(
-                    request_id,
-                    format!("completed_terminal_finalize_failed:{error}"),
-                    started,
-                    context,
-                    ExitKind::ForceAfterGrace,
-                ),
-            };
+            let mut record = self.termination_record(
+                request_id,
+                format!("completed_terminal_finalize_failed:{error}"),
+                started,
+                context,
+                ExitKind::ForceAfterGrace,
+            );
+            record.termination_error = Some(error.to_string());
+            return SupervisorOutcome::ForceTerminated { record };
         }
         // Exit status is diagnostic context, not a completion gate. The
         // protocol terminal envelope and the validated stream/reap state are
@@ -1158,18 +1277,31 @@ impl Supervisor {
             last_artifact_error: self.last_artifact_error.take(),
             failed: None,
         };
-        SupervisorOutcome::ForceTerminated {
-            record: self.termination_record(
-                request_id.to_string(),
-                match termination_error {
-                    Some(error) => format!("{stage_label}:terminate_failed:{error}"),
-                    None => stage_label,
-                },
-                started,
-                context,
-                ExitKind::ForceAfterGrace,
-            ),
+        let mut record = self.termination_record(
+            request_id.to_string(),
+            stage_label,
+            started,
+            context,
+            ExitKind::ForceAfterGrace,
+        );
+        record.termination_error = termination_error.map(|error| error.to_string());
+        SupervisorOutcome::ForceTerminated { record }
+    }
+
+    fn force_terminate_with_protocol_diagnostic(
+        &mut self,
+        request_id: &str,
+        started: Instant,
+        stage: &str,
+        diagnostic: ProtocolDiagnostic,
+        last_progress: Option<Progress>,
+    ) -> SupervisorOutcome {
+        let mut outcome =
+            self.force_terminate_outcome(request_id, started, stage, None, last_progress);
+        if let SupervisorOutcome::ForceTerminated { record } = &mut outcome {
+            record.protocol_diagnostic = Some(diagnostic);
         }
+        outcome
     }
 
     /// Assemble a structured terminal record, copying the worker's
@@ -1204,6 +1336,8 @@ impl Supervisor {
             stderr_tail: self.host.stderr_tail(),
             failed_code,
             failed_detail,
+            protocol_diagnostic: None,
+            termination_error: None,
             exit_kind,
         }
     }
@@ -1304,6 +1438,10 @@ mod tests {
         fn terminate(&mut self) -> Result<(), WorkerError> {
             *self.terminated.lock().expect("termination log mutex") += 1;
             Ok(())
+        }
+
+        fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+            self.terminate()
         }
     }
 

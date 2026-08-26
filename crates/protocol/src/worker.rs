@@ -229,14 +229,16 @@ pub trait WorkerHost {
 
     /// Force-terminate and reap the disposable worker after grace expires.
     fn terminate(&mut self) -> Result<(), WorkerError> {
-        Ok(())
+        Err(WorkerError::TerminationUnsupported)
     }
 
     /// Finalize a terminal envelope before the supervisor accepts its result.
     /// Implementations terminate/reap the worker, settle bounded stream
     /// readers, and reject buffered or trailing protocol data.
     fn finish_terminal(&mut self) -> Result<(), WorkerError> {
-        self.terminate()
+        // In-process test transports have no process to reap. Production
+        // subprocess transports override this with real cleanup.
+        Ok(())
     }
 
     /// Returns the actual Linux signal the worker process exited by, if
@@ -1043,6 +1045,9 @@ pub enum WorkerError {
     /// The worker emitted an envelope with a schema_version the host
     /// does not recognize.
     SchemaMismatch { received: String, expected: String },
+    /// This transport does not own a disposable process and cannot truthfully
+    /// claim that termination and reap completed.
+    TerminationUnsupported,
     /// I/O error talking to the worker's stdin/stdout.
     Io(std::io::Error),
 }
@@ -1063,6 +1068,9 @@ impl fmt::Display for WorkerError {
                 formatter,
                 "worker schema mismatch: received {received:?}, expected {expected:?}"
             ),
+            Self::TerminationUnsupported => {
+                formatter.write_str("worker transport cannot terminate and reap a process")
+            }
             Self::Io(error) => write!(formatter, "worker io error: {error}"),
         }
     }
@@ -1343,6 +1351,18 @@ mod tests {
         assert!(matches!(
             transport.recv(Instant::now()),
             Err(WorkerError::TimedOut)
+        ));
+    }
+
+    #[test]
+    fn non_process_transport_cannot_claim_successful_termination() {
+        let (_inbound_tx, inbound_rx) = mpsc::channel();
+        let (outbound_tx, _outbound_rx) = mpsc::channel();
+        let mut transport = FramedWorkerHost::new(inbound_rx, outbound_tx);
+
+        assert!(matches!(
+            transport.terminate(),
+            Err(WorkerError::TerminationUnsupported)
         ));
     }
 

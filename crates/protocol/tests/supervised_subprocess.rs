@@ -378,6 +378,52 @@ fn foreign_cancellation_acknowledgement_is_rejected_with_active_request_id() {
 }
 
 #[test]
+fn malformed_cancellation_acknowledgement_is_diagnosed_and_worker_is_killed() {
+    let child = spawn_ready_worker(
+        "read line; printf '%s\\n' '{\\\"kind\\\":\\\"cancelled\\\",\\\"schema_version\\\":'; sleep 100",
+    );
+    let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(host), None);
+
+    let outcome = supervisor.cancel("req-1", "stop");
+    let SupervisorOutcome::ForceTerminated { record } = outcome else {
+        panic!("malformed cancellation acknowledgement must fail closed: {outcome:?}");
+    };
+    assert_eq!(
+        record
+            .protocol_diagnostic
+            .expect("malformed ack has structured diagnostic")
+            .code
+            .as_str(),
+        "malformed_cancellation_acknowledgement"
+    );
+    assert_eq!(record.exit_signal, Some(9));
+}
+
+#[test]
+fn schema_mismatched_cancellation_acknowledgement_is_rejected() {
+    let child = spawn_ready_worker(
+        "read line; printf '%s\\n' '{\"kind\":\"cancelled\",\"schema_version\":\"threeterm.protocol/0\",\"request_id\":\"req-1\",\"reason\":\"stop\"}'; sleep 100",
+    );
+    let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(host), None);
+
+    let outcome = supervisor.cancel("req-1", "stop");
+    let SupervisorOutcome::ForceTerminated { record } = outcome else {
+        panic!("schema-mismatched cancellation acknowledgement must fail closed: {outcome:?}");
+    };
+    assert_eq!(
+        record
+            .protocol_diagnostic
+            .expect("schema mismatch has structured diagnostic")
+            .code
+            .as_str(),
+        "cancellation_acknowledgement_schema_mismatch"
+    );
+    assert_eq!(record.exit_signal, Some(9));
+}
+
+#[test]
 fn cancellation_token_is_observed_mid_flight_well_before_the_deadline() {
     // A silent worker (never emits a terminal envelope) with a request
     // grace of 2s. The cancel token is set 300ms after the request

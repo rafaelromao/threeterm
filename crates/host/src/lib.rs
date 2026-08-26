@@ -357,6 +357,7 @@ pub fn is_layer1_excluded(request: &Layer1ArtifactRequest) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
+    pub generation_id: String,
     pub feature_graph_hash: String,
     pub revision_hash: String,
     pub recovered_from_previous: bool,
@@ -371,6 +372,7 @@ pub struct FitDimensionCommitView {
 impl From<&LoadedBundle> for SnapshotView {
     fn from(bundle: &LoadedBundle) -> Self {
         Self {
+            generation_id: bundle.generation.id.clone(),
             feature_graph_hash: bundle.feature_graph_hash_hex().to_string(),
             revision_hash: bundle.revision_hash_hex().to_string(),
             recovered_from_previous: bundle.recovered_from_previous,
@@ -988,6 +990,8 @@ impl From<WorkerError> for HostError {
                     stderr_tail,
                     failed_code: None,
                     failed_detail: None,
+                    protocol_diagnostic: None,
+                    termination_error: None,
                     exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
                 }),
             },
@@ -5995,6 +5999,7 @@ mod tests {
             ExtrudeRequest::new("request-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 2.0)
                 .with_feature_id("feature-1");
         let snapshot = SnapshotView {
+            generation_id: "generation-1".to_string(),
             feature_graph_hash: "a".repeat(64),
             revision_hash: "b".repeat(64),
             recovered_from_previous: false,
@@ -6018,6 +6023,7 @@ mod tests {
             ExtrudeRequest::new("request-1", vec![(0.0, 0.0); 3], 2.0).with_feature_id("feature-1");
         request.profile = vec![[0.0, 0.0]; threeterm_protocol::frame::MAX_FRAME_BUFFER];
         let snapshot = SnapshotView {
+            generation_id: "generation-1".to_string(),
             feature_graph_hash: "a".repeat(64),
             revision_hash: "b".repeat(64),
             recovered_from_previous: false,

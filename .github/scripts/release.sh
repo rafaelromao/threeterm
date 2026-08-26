@@ -34,6 +34,26 @@ declare -A REQUIRED_QUERY_TOKENS=(
     [G-COPR]='COPR build'
 )
 
+declare -A REQUIRED_SOURCE_TOKENS=(
+    [T-USPTO]='tmsearch.uspto.gov'
+    [T-WIPO]='branddb.wipo.int'
+    [T-TMVIEW]='tmdn.org/tmview'
+    [T-EUIPO]='euipo.europa.eu'
+    [T-NATIONAL]='national'
+    [T-VARIANTS]='tmsearch.uspto.gov'
+    [D-DOMAINS]='rdap.verisign.com'
+    [P-PACKAGES]='crates.io'
+    [O-OPPOSITION]='ttabvue.uspto.gov'
+    [U-TERM]='docs/'
+    [U-SCOPE]='release'
+    [U-BRANDING]='repository'
+    [E-REHEARSAL]='rehearsal'
+    [G-TAG]='.github/scripts/'
+    [G-GITHUB]='.github/scripts/'
+    [G-AUR]='.github/scripts/'
+    [G-COPR]='.github/scripts/'
+)
+
 fail() {
     printf 'release gate: %s\n' "$1" >&2
     exit 1
@@ -83,7 +103,7 @@ verify_runbook() {
     if grep -Eq '^- \[[^xX]\]' <<<"$gate"; then
         fail "current gate contains an unchecked item"
     fi
-    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked|record exact|list each .* here|inspect all public-facing uses|example\.(com|invalid)|placeholder|live check' <<<"$gate"; then
+    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked|record exact|list each .* here|inspect all public-facing uses|example\.(com|invalid)|placeholder|live check|(^|["` ;])(TBD|TODO|unknown|n/a|test result)(["` ;]|$)' <<<"$gate"; then
         fail "current gate contains an incomplete value"
     fi
 
@@ -114,6 +134,8 @@ verify_runbook() {
         require_line "$row" '^  - Sources consulted: `[^`]+`$'
         grep -Fq "${REQUIRED_QUERY_TOKENS[$id]}" <<<"$row" \
             || fail "evidence query for ${id} is missing ${REQUIRED_QUERY_TOKENS[$id]}"
+        grep -Fq "${REQUIRED_SOURCE_TOKENS[$id]}" <<<"$row" \
+            || fail "evidence source for ${id} is missing ${REQUIRED_SOURCE_TOKENS[$id]}"
         require_line "$row" '^  - Disposition: `\[(PASS|ACCEPTED)\] .+`$'
         signoff_re='Product-owner sign-off: `([^`]*)`; signed: `([0-9]{4}-[0-9]{2}-[0-9]{2})`'
         if [[ ! "$row" =~ $signoff_re ]]; then

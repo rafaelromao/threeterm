@@ -34,13 +34,13 @@ trap 'rm -rf "${tmpdir}"' EXIT
 fixture="${tmpdir}/signed.md"
 sed \
     -e 's/- \[ \]/- [x]/g' \
-    -e 's/`not recorded`; signed: `not recorded`/`Test Owner`; signed: `2026-08-26`/g' \
-    -e 's/`not set`; signed: `not recorded`/`Test Owner`; signed: `2026-08-26`/g' \
+    -e 's/`not recorded`; signed: `not recorded`/`Rafael Romao`; signed: `2026-08-26`/g' \
+    -e 's/`not set`; signed: `not recorded`/`Rafael Romao`; signed: `2026-08-26`/g' \
     -e 's/\[BLOCKED\]/[PASS]/g' \
     -e 's/`UNSIGNED`/`SIGNED`/g' \
     -e 's/`not authorized`/`APPROVED`/g' \
-    -e 's/`not set`/`Test Owner`/g' \
-    -e 's/query="not recorded"; source="not recorded"; result="not recorded"/query="ThreeTerm USPTO WIPO TMview EUIPO national Terminal Three .com crates.io 91298824 terminal-native downloadable branding rehearsal release tag GitHub Release AUR push COPR build"; source="https:\/\/www.uspto.gov\/"; result="No conflicting record; see recorded result"/g' \
+    -e 's/`not set`/`Rafael Romao`/g' \
+    -e 's/query="not recorded"; source="not recorded"; result="not recorded"/query="ThreeTerm USPTO WIPO TMview EUIPO national Terminal Three .com crates.io 91298824 terminal-native downloadable branding release tag GitHub Release AUR push COPR build rehearsal"; source="https:\/\/tmsearch.uspto.gov\/; https:\/\/branddb.wipo.int\/; https:\/\/www.tmdn.org\/tmview\/; https:\/\/euipo.europa.eu\/; https:\/\/www.gov.uk\/; https:\/\/rdap.verisign.com\/com\/; https:\/\/crates.io\/; https:\/\/ttabvue.uspto.gov\/; docs\/research\/; .github\/scripts\/; repository"; result="No conflicting record; see recorded result"/g' \
     -e 's/list each office, URL, and exact\/similar query here/national office names, URLs, and exact\/similar results recorded/g' \
     -e 's/list each query\/result here/query\/result entries recorded/g' \
     -e 's/record exact lookups here/live RDAP lookup results recorded/g' \
@@ -57,12 +57,14 @@ sed 's/Evidence date: `2026-08-25`/Evidence date: `2026-07-26`/g' \
 expect_failure "${RELEASE_SCRIPT}" verify "${stale_fixture}"
 
 inconsistent_fixture="${tmpdir}/inconsistent.md"
-sed '0,/Product-owner sign-off: `Test Owner`/s//Product-owner sign-off: `Another Owner`/' \
+sed '0,/Product-owner sign-off: `Rafael Romao`/s//Product-owner sign-off: `Another Owner`/' \
     "${fixture}" >"${inconsistent_fixture}"
 expect_failure "${RELEASE_SCRIPT}" verify "${inconsistent_fixture}"
 
 placeholder_fixture="${tmpdir}/placeholder.md"
-sed 's/query="ThreeTerm USPTO[^\"]*"; source="https:\/\/www.uspto.gov\/"; result="No conflicting record; see recorded result"/query="live check"; source="https:\/\/example.com\/placeholder"; result="pass"/' \
+sed \
+    -e 's/query="ThreeTerm USPTO[^\"]*"/query="live check"/' \
+    -e 's#source="https://tmsearch.uspto.gov/[^\"]*"#source="https://example.com/placeholder"#' \
     "${fixture}" >"${placeholder_fixture}"
 expect_failure "${RELEASE_SCRIPT}" verify "${placeholder_fixture}"
 

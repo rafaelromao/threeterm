@@ -6,6 +6,8 @@
 #   4. cargo fmt --all -- --check passes.
 #   5. cargo clippy --workspace --all-targets -- -D warnings passes.
 #   6. serialized cargo test --workspace passes.
+#   7. the unsigned trademark and namespace release gate is refused, while a
+#      complete fixture is accepted by the gate verifier.
 #
 # Exits non-zero on the first failure. Intended for humans and pre-PR
 # inspection; CI uses ci.sh instead.

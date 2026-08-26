@@ -53,86 +53,103 @@ Evidence freshness window: `30 days`
 
 - [ ] **T-USPTO** Search `ThreeTerm` and the close variants in the USPTO trademark database, including live similar-mark results.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `USPTO Trademark Search https://tmsearch.uspto.gov/; exact and similar queries`
   - Disposition: `[BLOCKED] fresh professional search not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **T-WIPO** Search `ThreeTerm` and the close variants in the WIPO Global Brand Database for intended markets.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `WIPO Global Brand Database https://branddb.wipo.int/; exact and similar queries`
   - Disposition: `[BLOCKED] fresh professional search not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **T-TMVIEW** Search `ThreeTerm` and the close variants in TMview across relevant participating offices.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `TMview https://www.tmdn.org/tmview/; exact and similar queries`
   - Disposition: `[BLOCKED] fresh professional search not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **T-EUIPO** Search `ThreeTerm` and the close variants in EUIPO records for the intended goods and services.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `EUIPO eSearch plus https://euipo.europa.eu/; exact and similar queries`
   - Disposition: `[BLOCKED] fresh professional search not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **T-NATIONAL** Search relevant national offices for every intended market, recording the office and query rather than relying on an aggregator.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `relevant national offices; list each office, URL, and exact/similar query here`
   - Disposition: `[BLOCKED] relevant national offices not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **T-VARIANTS** Search each of `ThreeTerm`, `3Term`, `Terminal3`, `Terminal Three`, and `Terminal 3` in every applicable trademark source, including spelling, phonetic, and conceptual similarities.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `USPTO, WIPO, TMview, EUIPO, and relevant national offices; list each query/result here`
   - Disposition: `[BLOCKED] close-variant analysis not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **D-DOMAINS** Perform a fresh availability and registration check for `threeterm.com`, `threeterm.app`, `threeterm.dev`, `threeterm.io`, and all project-specific TLDs.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `registrar/RDAP sources; .com, .app, .dev, .io, and project-specific TLDs; record exact lookups here`
   - Disposition: `[BLOCKED] domain checks not refreshed`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **P-PACKAGES** Perform a fresh namespace check for crates.io, npm, PyPI, AUR, Homebrew, and every relevant package or distribution channel.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `crates.io, npm, PyPI, AUR, Homebrew, and relevant package/distribution channels; record exact queries here`
   - Disposition: `[BLOCKED] package namespace checks not refreshed`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **O-OPPOSITION** Reassess pending USPTO opposition `TERMINAL3`, proceeding `91298824`, against the planned ThreeTerm use, goods/services, markets, and collision risk.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `USPTO proceeding 91298824 https://ttabvue.uspto.gov/; planned-use comparison and current status`
   - Disposition: `[BLOCKED] opposition reassessment not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **U-TERM** Confirm `ThreeTerm` is paired with terminal-native parametric CAD terminology in product, documentation, and release copy.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `planned product, documentation, and release copy; inspect all public-facing uses`
   - Disposition: `[BLOCKED] use-condition confirmation not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **U-SCOPE** Confirm initial use is limited to downloadable or open-source CAD software and does not imply broader goods or services.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `release metadata, download pages, source repository, and planned notices`
   - Disposition: `[BLOCKED] scope confirmation not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **U-BRANDING** Confirm `3Term`, `Terminal3`, `Terminal Three`, and `Terminal 3` are forbidden in branding, release names, package names, and product-facing copy.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `repository, release metadata, package manifests, distribution recipes, and public copy`
   - Disposition: `[BLOCKED] branding prohibition not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **E-REHEARSAL** Compare the release candidate with the latest published rehearsal evidence and record its date, sources, and item-by-item disposition.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `docs/research/rehearsal-evidence/README.md; committed L-bracket run-1, run-2, and adversarial catalogs`
   - Disposition: `[BLOCKED] rehearsal comparison and clearance disposition not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **G-TAG** Confirm the signed gate is committed before creating the release tag.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `.github/scripts/release.sh tag; signed runbook commit and candidate tag`
   - Disposition: `[BLOCKED] release tag authorization not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **G-GITHUB** Confirm the signed gate is verified immediately before creating the GitHub Release.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `.github/scripts/release.sh github-release; GitHub Release target and assets`
   - Disposition: `[BLOCKED] GitHub Release authorization not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **G-AUR** Confirm the signed gate is verified immediately before the AUR push.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `.github/scripts/release.sh aur-push; AUR package metadata and remote`
   - Disposition: `[BLOCKED] AUR push authorization not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`
 - [ ] **G-COPR** Confirm the signed gate is verified immediately before the COPR build.
   - Evidence date: `2026-08-25`
+  - Evidence record: `query="not recorded"; source="not recorded"; result="not recorded"`
   - Sources consulted: `.github/scripts/release.sh copr-build; COPR project and spec metadata`
   - Disposition: `[BLOCKED] COPR build authorization not recorded`
   - Product-owner sign-off: `not recorded`; signed: `not recorded`

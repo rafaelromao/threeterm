@@ -40,6 +40,12 @@ sed \
     -e 's/`UNSIGNED`/`SIGNED`/g' \
     -e 's/`not authorized`/`APPROVED`/g' \
     -e 's/`not set`/`Test Owner`/g' \
+    -e 's/query="not recorded"; source="not recorded"; result="not recorded"/query="ThreeTerm live check"; source="https:\/\/evidence.example\/three-term"; result="No conflicting record"/g' \
+    -e 's/list each office, URL, and exact\/similar query here/national office names, URLs, and exact\/similar results recorded/g' \
+    -e 's/list each query\/result here/query\/result entries recorded/g' \
+    -e 's/record exact lookups here/live RDAP lookup results recorded/g' \
+    -e 's/record exact queries here/live registry query results recorded/g' \
+    -e 's/inspect all public-facing uses/all public-facing uses inspected/g' \
     -e 's/not recorded/evidence captured/g' \
     "${RUNBOOK}" >"${fixture}"
 

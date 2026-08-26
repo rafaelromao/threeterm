@@ -63,7 +63,7 @@ verify_runbook() {
     if grep -Eq '^- \[[^xX]\]' <<<"$gate"; then
         fail "current gate contains an unchecked item"
     fi
-    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked' <<<"$gate"; then
+    if grep -Eiq 'not (set|recorded|authorized)|unresolved|blocked|record exact|list each .* here|inspect all public-facing uses' <<<"$gate"; then
         fail "current gate contains an incomplete value"
     fi
 
@@ -90,6 +90,7 @@ verify_runbook() {
             || fail "current gate must contain exactly one checked row for ${id}"
         row="$(row_text "$gate" "$id")"
         require_line "$row" '^  - Evidence date: `[0-9]{4}-[0-9]{2}-[0-9]{2}`$'
+        require_line "$row" '^  - Evidence record: `query="[^"]+"; source="[^"]+"; result="[^"]+"`$'
         require_line "$row" '^  - Sources consulted: `[^`]+`$'
         require_line "$row" '^  - Disposition: `\[(PASS|ACCEPTED)\] .+`$'
         signoff_re='Product-owner sign-off: `([^`]*)`; signed: `([0-9]{4}-[0-9]{2}-[0-9]{2})`'

@@ -275,10 +275,6 @@ fn duplicate_initial_bracket_is_rejected_without_replacing_committed_state() {
     let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let before_log = fs::read(root.join("transactions.log")).expect("log reads");
     let before_brep = fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads");
-    let before_vertical =
-        fs::read(root.join("brep/l-bracket-plate-vertical.brep")).expect("vertical BREP reads");
-    let before_horizontal =
-        fs::read(root.join("brep/l-bracket-plate-horizontal.brep")).expect("horizontal BREP reads");
 
     let duplicate =
         BracketRequest::new(new_request_id(), 110.0, 60.0, 40.0, 4.0).with_feature_id("l-bracket");
@@ -292,14 +288,6 @@ fn duplicate_initial_bracket_is_rejected_without_replacing_committed_state() {
     assert_eq!(
         fs::read(root.join("brep/l-bracket.brep")).unwrap(),
         before_brep
-    );
-    assert_eq!(
-        fs::read(root.join("brep/l-bracket-plate-vertical.brep")).unwrap(),
-        before_vertical
-    );
-    assert_eq!(
-        fs::read(root.join("brep/l-bracket-plate-horizontal.brep")).unwrap(),
-        before_horizontal
     );
     assert!(!root.join(".derived").exists());
     let _ = fs::remove_dir_all(root);

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, Feature, FeatureGraph, FitDimension, ProjectGeneration,
-    Revision,
+    ComponentCommand, ComponentGraph, Feature, FeatureGraph, FeatureId, FitDimension,
+    ProjectGeneration, Revision,
     history::{
         HistoryEvent, HistoryOperation, HistoryState, HistoryTimeline, project_feature_timeline,
     },
@@ -815,6 +815,7 @@ impl Bundle {
         let mut components = ComponentGraph::default();
         let mut history = HistoryState::default();
         let mut history_events = Vec::new();
+        let mut feature_ids = Vec::new();
         for entry in log.entries() {
             if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
                 let event: HistoryEvent =
@@ -876,6 +877,7 @@ impl Bundle {
                             detail: "remove operation targets a missing feature".to_string(),
                         });
                     }
+                    feature_ids.retain(|id: &FeatureId| id.as_str() != entry.feature_id);
                     continue;
                 }
                 Some("set") => {
@@ -907,6 +909,14 @@ impl Bundle {
             } else {
                 graph.add_feature(feature);
             }
+            if !feature_ids.iter().any(|id| id.as_str() == entry.feature_id) {
+                feature_ids.push(FeatureId::new(&entry.feature_id).map_err(|error| {
+                    BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: error.to_string(),
+                    }
+                })?);
+            }
             if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
                 let command: ComponentCommand =
                     serde_json::from_str(command).map_err(|error| BundleError::LogBrokenLink {
@@ -921,7 +931,6 @@ impl Bundle {
                     })?;
             }
         }
-        let feature_ids = graph.features().map(|feature| feature.id).collect();
         if manifest.transaction_count != log.len()
             || manifest.transaction_bytes != transaction_bytes.len()
             || manifest.transaction_sha256 != hash(&transaction_bytes)

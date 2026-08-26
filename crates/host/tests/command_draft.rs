@@ -159,8 +159,8 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
     let preview = host
         .preview_bracket_parameter_draft(&root, &draft.draft_id, &worker)
         .expect("parameter preview succeeds");
-    assert_eq!(preview.source_revision, before.revision_hash);
-    assert_ne!(preview.preview_revision, before.revision_hash);
+    assert_eq!(preview.source_revision, before.snapshot.revision_hash);
+    assert_ne!(preview.preview_revision, before.snapshot.revision_hash);
     assert_eq!(
         fs::read(root.join("manifest.json")).unwrap(),
         before_manifest
@@ -175,7 +175,10 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
     let committed = host
         .commit_bracket_parameter_draft(&root, &draft.draft_id, &worker)
         .expect("parameter commit succeeds");
-    assert_ne!(committed.snapshot.revision_hash, before.revision_hash);
+    assert_ne!(
+        committed.snapshot.revision_hash,
+        before.snapshot.revision_hash
+    );
     assert_eq!(committed.input_fingerprint, preview.input_fingerprint);
     assert!(!host.has_bracket_parameter_draft(&root, &draft.draft_id));
     assert_ne!(

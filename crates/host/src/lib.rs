@@ -562,6 +562,14 @@ pub struct BracketPreviewView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BracketCommitView {
+    pub source_snapshot: SnapshotView,
+    pub snapshot: SnapshotView,
+    pub result: BracketResult,
+    pub artifact: Layer1DerivedResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketDraftCommitView {
     pub snapshot: SnapshotView,
     pub input_fingerprint: String,
 }
@@ -2709,7 +2717,7 @@ impl Host {
         root: impl AsRef<Path>,
         request: BracketRequest,
         worker: &OcctWorker,
-    ) -> Result<SnapshotView, HostError> {
+    ) -> Result<BracketCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         if root.exists() && !root.is_dir() {
             return Err(HostError::BundlePathNotDirectory { path: root });
@@ -2730,6 +2738,7 @@ impl Host {
             threeterm_occt_worker::Operation::Bracket,
             worker,
         )?;
+        let source_snapshot = derived.source_snapshot.clone();
         let kind = bracket_kind(&request);
         let history_event = loaded
             .history
@@ -2752,7 +2761,7 @@ impl Host {
         ];
         let request_id = request.request_id.clone();
         let feature_id = request.feature_id.clone();
-        let (snapshot, _, _) = self.promote_occt_result_with_append(
+        let (snapshot, result, artifact) = self.promote_occt_result_with_append(
             &root,
             derived,
             move |bundle, current, _artifact, bytes, shared_provenance| {
@@ -2767,7 +2776,12 @@ impl Host {
                 )
             },
         )?;
-        Ok(snapshot)
+        Ok(BracketCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     pub fn open_bracket_parameter_draft(
@@ -2984,7 +2998,7 @@ impl Host {
         root: impl AsRef<Path>,
         draft_id: &str,
         worker: &OcctWorker,
-    ) -> Result<BracketCommitView, HostError> {
+    ) -> Result<BracketDraftCommitView, HostError> {
         let root = Bundle::at(root.as_ref()).canonical_root().to_path_buf();
         let draft_key = draft_map_key(&root, draft_id);
         let draft = self
@@ -3083,7 +3097,7 @@ impl Host {
         };
         remove_preview_stage(&stage);
         self.bracket_drafts.borrow_mut().remove(&draft_key);
-        Ok(BracketCommitView {
+        Ok(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         })
@@ -3097,7 +3111,7 @@ impl Host {
         draft: &BracketParameterDraft,
         kind: &str,
         semantic_fingerprint: &str,
-    ) -> Result<Option<BracketCommitView>, HostError> {
+    ) -> Result<Option<BracketDraftCommitView>, HostError> {
         let Some(committed) = Bundle::at(root).find_idempotency_key(draft_id)? else {
             return Ok(None);
         };
@@ -3146,7 +3160,7 @@ impl Host {
         let snapshot = SnapshotView::from(&committed);
         self.current.replace(Some(committed));
         self.bracket_drafts.borrow_mut().remove(draft_key);
-        Ok(Some(BracketCommitView {
+        Ok(Some(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         }))
@@ -3159,7 +3173,7 @@ impl Host {
         draft: &BracketParameterDraft,
         result_sha256: &str,
         error: &HostError,
-    ) -> Option<BracketCommitView> {
+    ) -> Option<BracketDraftCommitView> {
         if matches!(
             error,
             HostError::Persistence(BundleError::PublicationUnknown(_))
@@ -3189,7 +3203,7 @@ impl Host {
         self.current.replace(Some(committed));
         self.bracket_drafts.borrow_mut().remove(&draft_key);
         remove_preview_stage(&stage);
-        Some(BracketCommitView {
+        Some(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
         })

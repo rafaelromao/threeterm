@@ -1404,10 +1404,57 @@ pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static BRACKET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["feature_graph_hash", "revision_hash", "schema_version"],
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "request_id",
+            "source_snapshot",
+            "feature_graph_hash",
+            "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
+            "brep_path",
+            "brep_sha256",
+            "brep_bytes",
+            "worker_fingerprint",
+            "derived_result",
+            "schema_version"
+        ],
         "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "worker_fingerprint": {
+                "type": "object",
+                "required": ["worker_kind", "worker_schema_version", "protocol_schema_version"],
+                "properties": {
+                    "worker_kind": { "const": "occt" },
+                    "worker_schema_version": { "const": "threeterm.workers.occt/1" },
+                    "protocol_schema_version": { "const": "threeterm.protocol/1" }
+                },
+                "additionalProperties": false
+            },
+            "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
         "additionalProperties": false

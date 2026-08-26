@@ -96,12 +96,36 @@ fn machine_new_project_then_bracket_commits_a_reloadable_l_bracket() {
     )
     .expect("bracket response validates against its registered schema");
 
-    for key in ["feature_graph_hash", "revision_hash", "schema_version"] {
+    for key in [
+        "feature_graph_hash",
+        "revision_hash",
+        "schema_version",
+        "status",
+        "operation",
+        "feature_id",
+        "request_id",
+        "source_snapshot",
+        "authoritative",
+        "artifact_kind",
+        "artifact_name",
+        "brep_path",
+        "brep_sha256",
+        "brep_bytes",
+        "worker_fingerprint",
+        "derived_result",
+    ] {
         assert!(
             saved.get(key).is_some(),
             "response is missing {key:?}; got {saved}"
         );
     }
+    assert_eq!(saved["operation"], "bracket");
+    assert_eq!(saved["feature_id"], "l-1");
+    assert_eq!(saved["derived_result"]["request_id"], saved["request_id"]);
+    assert_eq!(
+        saved["derived_result"]["source_revision_id"],
+        saved["source_snapshot"]["revision_hash"]
+    );
     assert_eq!(
         saved["schema_version"],
         "threeterm.command.bracket.response/1"

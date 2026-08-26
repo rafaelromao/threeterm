@@ -286,6 +286,22 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
         .as_object_mut()
         .expect("MCP response is an object")
         .remove("revision_hash");
+    for response in [&mut cli_semantic, &mut mcp_semantic] {
+        let object = response.as_object_mut().expect("response is an object");
+        object.remove("request_id");
+        object.remove("brep_path");
+        object.remove("artifact_name");
+        if let Some(derived) = object.get_mut("derived_result") {
+            derived
+                .as_object_mut()
+                .expect("derived result is an object")
+                .remove("request_id");
+            derived
+                .as_object_mut()
+                .expect("derived result is an object")
+                .remove("artifact_name");
+        }
+    }
     assert_eq!(
         mcp_semantic, cli_semantic,
         "the MCP bracket result must be semantically equal to the CLI bracket result"

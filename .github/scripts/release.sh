@@ -125,6 +125,11 @@ verify_checked_in_runbook() {
     verify_runbook "$RUNBOOK"
 }
 
+require_committed_runbook() {
+    [[ -z "$(git status --porcelain -- "$RUNBOOK")" ]] \
+        || fail 'signed runbook must be committed before publishing'
+}
+
 valid_tag() {
     [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
 }
@@ -149,23 +154,28 @@ case "$action" in
     tag)
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
+        require_committed_runbook
         git tag -a "$1" -m "ThreeTerm $1"
         ;;
     github-release)
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
+        require_committed_runbook
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
         gh release create "$1" --verify-tag --title "$1"
         ;;
     aur-push)
         [[ $# == 1 && "$1" != -* ]] || { usage >&2; exit 2; }
+        [[ "$1" == 'HEAD:refs/heads/master' ]] || fail 'AUR push is fixed to HEAD:refs/heads/master'
         verify_checked_in_runbook
-        git push aur "$1"
+        require_committed_runbook
+        git push aur HEAD:refs/heads/master
         ;;
     copr-build)
         [[ $# == 1 || ( $# == 2 && "$2" == '--nowait' ) ]] || { usage >&2; exit 2; }
-        [[ "$1" == *.spec && "$1" != -* ]] || fail 'COPR build requires a .spec file'
+        [[ "$1" == 'threeterm.spec' ]] || fail 'COPR build is fixed to threeterm.spec'
         verify_checked_in_runbook
+        require_committed_runbook
         command -v copr >/dev/null 2>&1 || fail 'copr is required for COPR build'
         if [[ $# == 2 ]]; then
             copr build threeterm "$1" --nowait

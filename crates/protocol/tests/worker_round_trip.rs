@@ -20,9 +20,12 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::frame::FrameParser;
 use threeterm_protocol::schema_version;
 use threeterm_protocol::supervisor::{
-    ExitKind, Progress, Request, Supervisor, SupervisorOutcome, TerminationRecord,
+    CancellationAcknowledgement, ExitKind, Progress, Request, Supervisor, SupervisorOutcome,
+    TerminationRecord, validate_cancellation_ack,
 };
-use threeterm_protocol::worker::{Envelope, WorkerError, WorkerHost, encode_frame};
+use threeterm_protocol::worker::{
+    Envelope, FramedWorkerHost, WorkerError, WorkerHost, encode_frame,
+};
 
 /// A fake worker that serves envelopes from a `mpsc`-style queue. `recv`
 /// returns the next envelope and `send` records what the host emitted.
@@ -57,6 +60,10 @@ impl WorkerHost for FakeWorker {
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.cancel_calls
             .push((request_id.to_string(), reason.to_string()));
+        Ok(())
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
         Ok(())
     }
 }
@@ -173,6 +180,10 @@ impl WorkerHost for PipeHost {
     fn cancel(&mut self, _request_id: &str, _reason: &str) -> Result<(), WorkerError> {
         Ok(())
     }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        Ok(())
+    }
 }
 
 fn envelope_or_closed(envelopes: Vec<Envelope>) -> Result<Envelope, WorkerError> {
@@ -187,6 +198,38 @@ fn envelope_round_trip_through_frame_parser() {
         reason: "user pressed stop".to_string(),
     };
     assert_eq!(round_trip(&envelope), envelope);
+}
+
+#[test]
+fn cancellation_acknowledgement_validator_accepts_only_matching_cancelled_state() {
+    let acknowledgement = validate_cancellation_ack(
+        &Envelope::Cancelled {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            reason: "user pressed stop".to_string(),
+        },
+        "req-1",
+    )
+    .expect("matching cancellation acknowledgement is valid");
+
+    assert_eq!(
+        acknowledgement,
+        CancellationAcknowledgement {
+            request_id: "req-1".to_string(),
+            reason: "user pressed stop".to_string(),
+        }
+    );
+
+    let diagnostic = validate_cancellation_ack(
+        &Envelope::Completed {
+            schema_version: schema_version().to_string(),
+            request_id: "req-1".to_string(),
+            result: serde_json::json!({}),
+        },
+        "req-1",
+    )
+    .expect_err("a completion is not a cancellation acknowledgement");
+    assert_eq!(diagnostic.code.as_str(), "invalid_cancellation_state");
 }
 
 #[test]
@@ -497,6 +540,7 @@ fn termination_record_carries_elapsed_duration_and_request_id() {
         failed_code,
         failed_detail,
         exit_kind,
+        ..
     } = match outcome {
         SupervisorOutcome::ForceTerminated { record } => record,
         other => panic!("expected ForceTerminated; got {other:?}"),
@@ -581,6 +625,10 @@ impl WorkerHost for CapturingFake {
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
     }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
+    }
 }
 
 #[test]
@@ -640,6 +688,10 @@ impl WorkerHost for CancelLoggingWorker {
             .expect("cancel log mutex")
             .push((request_id.to_string(), reason.to_string()));
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 }
 
@@ -712,6 +764,10 @@ impl WorkerHost for SignalReportingWorker {
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 
     fn exit_signal(&mut self) -> Option<i32> {
@@ -1094,6 +1150,42 @@ fn cancel_fails_closed_on_a_foreign_acknowledgement() {
         record.stage
     );
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
+    let diagnostic = record
+        .protocol_diagnostic
+        .expect("foreign acknowledgement has structured protocol evidence");
+    assert_eq!(
+        diagnostic.code.as_str(),
+        "mismatched_cancellation_request_id"
+    );
+}
+
+#[test]
+fn cancel_reports_malformed_acknowledgement_as_structured_protocol_failure() {
+    let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+    let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
+    inbound_tx
+        .send(b"{\"kind\":\"cancelled\",\"schema_version\":\n".to_vec())
+        .expect("malformed acknowledgement queues");
+    let mut supervisor = Supervisor::new(
+        Duration::from_millis(100),
+        Box::new(FramedWorkerHost::new(inbound_rx, outbound_tx)),
+        None,
+    );
+
+    let SupervisorOutcome::ForceTerminated { record } = supervisor.cancel("req-1", "stop") else {
+        panic!("malformed acknowledgement must fail closed");
+    };
+    let diagnostic = record
+        .protocol_diagnostic
+        .expect("malformed acknowledgement has structured protocol evidence");
+    assert_eq!(
+        diagnostic.code.as_str(),
+        "malformed_cancellation_acknowledgement"
+    );
+    assert_eq!(
+        record.termination_error.as_deref(),
+        Some("worker transport cannot terminate and reap a process")
+    );
 }
 
 #[test]
@@ -1159,6 +1251,10 @@ impl WorkerHost for ExitStatusWorker {
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 
     fn exit_signal(&mut self) -> Option<i32> {

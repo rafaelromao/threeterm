@@ -210,13 +210,20 @@ fn worker_that_ignores_cancel_is_force_terminated_after_grace() {
     let child = spawn_ready_worker("read line; sleep 100");
     let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
     let mut supervisor = Supervisor::new(Duration::from_millis(300), Box::new(host), None);
+    let configured_grace = supervisor.cancellation_grace_for("extrude");
 
+    let started = std::time::Instant::now();
     let outcome = supervisor.cancel("req-1", "user pressed stop");
+    let elapsed = started.elapsed();
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
     };
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
     assert_eq!(record.exit_signal, Some(9), "SIGKILL after grace");
+    assert!(
+        elapsed < configured_grace + Duration::from_millis(500),
+        "forced cancellation must remain bounded by the configured grace and cleanup allowance; grace={configured_grace:?} elapsed={elapsed:?}"
+    );
 }
 
 #[test]
@@ -375,6 +382,52 @@ fn foreign_cancellation_acknowledgement_is_rejected_with_active_request_id() {
         "stage: {:?}",
         record.stage
     );
+}
+
+#[test]
+fn malformed_cancellation_acknowledgement_is_diagnosed_and_worker_is_killed() {
+    let child = spawn_ready_worker(
+        "read line; printf '%s\\n' '{\\\"kind\\\":\\\"cancelled\\\",\\\"schema_version\\\":'; sleep 100",
+    );
+    let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(host), None);
+
+    let outcome = supervisor.cancel("req-1", "stop");
+    let SupervisorOutcome::ForceTerminated { record } = outcome else {
+        panic!("malformed cancellation acknowledgement must fail closed: {outcome:?}");
+    };
+    assert_eq!(
+        record
+            .protocol_diagnostic
+            .expect("malformed ack has structured diagnostic")
+            .code
+            .as_str(),
+        "malformed_cancellation_acknowledgement"
+    );
+    assert_eq!(record.exit_signal, Some(9));
+}
+
+#[test]
+fn schema_mismatched_cancellation_acknowledgement_is_rejected() {
+    let child = spawn_ready_worker(
+        "read line; printf '%s\\n' '{\"kind\":\"cancelled\",\"schema_version\":\"threeterm.protocol/0\",\"request_id\":\"req-1\",\"reason\":\"stop\"}'; sleep 100",
+    );
+    let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
+    let mut supervisor = Supervisor::new(Duration::from_secs(1), Box::new(host), None);
+
+    let outcome = supervisor.cancel("req-1", "stop");
+    let SupervisorOutcome::ForceTerminated { record } = outcome else {
+        panic!("schema-mismatched cancellation acknowledgement must fail closed: {outcome:?}");
+    };
+    assert_eq!(
+        record
+            .protocol_diagnostic
+            .expect("schema mismatch has structured diagnostic")
+            .code
+            .as_str(),
+        "cancellation_acknowledgement_schema_mismatch"
+    );
+    assert_eq!(record.exit_signal, Some(9));
 }
 
 #[test]

@@ -29,6 +29,10 @@ impl WorkerHost for CompletedWorker {
     fn cancel(&mut self, _request_id: &str, _reason: &str) -> Result<(), WorkerError> {
         Ok(())
     }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        Ok(())
+    }
 }
 
 fn temp_root(label: &str) -> PathBuf {

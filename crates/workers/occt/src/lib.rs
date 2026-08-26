@@ -2210,6 +2210,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: String::new(),
                 failed_code: Some("brep_invalid".to_string()),
                 failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::Cooperative,
             },
         };
@@ -2245,6 +2247,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: "worker crashed".to_string(),
                 failed_code: Some("brep_invalid".to_string()),
                 failed_detail: Some("BRepCheck_Analyzer failed".to_string()),
+                protocol_diagnostic: None,
+                termination_error: None,
                 // A Failed envelope can be observed before the worker dies;
                 // the signal must still keep the structured termination record.
                 exit_kind: ExitKind::Cooperative,
@@ -2278,6 +2282,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: String::new(),
                 failed_code: None,
                 failed_detail: None,
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
@@ -2308,6 +2314,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: "segmentation fault".to_string(),
                 failed_code: None,
                 failed_detail: None,
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
@@ -2343,6 +2351,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: "malformed request".to_string(),
                 failed_code: None,
                 failed_detail: None,
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
@@ -2379,6 +2389,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: String::new(),
                 failed_code: None,
                 failed_detail: None,
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };
@@ -2406,6 +2418,8 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
                 stderr_tail: "worker trace".to_string(),
                 failed_code: None,
                 failed_detail: None,
+                protocol_diagnostic: None,
+                termination_error: None,
                 exit_kind: ExitKind::ForceAfterGrace,
             },
         };

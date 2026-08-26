@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Local acceptance verifier. Mirrors the acceptance contract:
 #   1. The pinned Rust toolchain matches rust-toolchain-channel.txt.
-#   2. cargo metadata reports exactly the 12 documented member packages.
+#   2. cargo metadata reports exactly the 13 documented member packages.
 #   3. cargo check --workspace succeeds.
 #   4. cargo fmt --all -- --check passes.
 #   5. cargo clippy --workspace --all-targets -- -D warnings passes.
-#   6. cargo test --workspace passes.
+#   6. serialized cargo test --workspace passes.
+#   7. the unsigned trademark and namespace release gate is refused, while a
+#      complete fixture is accepted by the gate verifier.
 #
 # Exits non-zero on the first failure. Intended for humans and pre-PR
 # inspection; CI uses ci.sh instead.
@@ -28,6 +30,7 @@ EXPECTED_MEMBERS=(
     "threeterm-lua-bridge"
     "threeterm-domain"
     "threeterm-protocol"
+    "rehearsal"
 )
 
 echo "==> Verifying pinned Rust toolchain channel == ${EXPECTED_CHANNEL}"
@@ -37,7 +40,7 @@ if [ "${ACTUAL_CHANNEL}" != "${EXPECTED_CHANNEL}" ]; then
     exit 1
 fi
 
-echo "==> Verifying cargo metadata reports the 12 expected member packages"
+echo "==> Verifying cargo metadata reports the 13 expected member packages"
 ACTUAL_MEMBERS_RAW="$(cargo metadata --no-deps --format-version 1 \
     | jq -r '.packages[].name' | sort)"
 ACTUAL_MEMBERS_COUNT="$(wc -l <<<"${ACTUAL_MEMBERS_RAW}" | tr -d ' ')"
@@ -67,6 +70,10 @@ echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
-cargo test --workspace
+# Native-worker tests are serialized to avoid resource contention, matching CI.
+cargo test --workspace --jobs 1 -- --test-threads=1
+
+echo "==> trademark and namespace release-gate test"
+bash tests/release-gate.sh
 
 echo "==> Acceptance contract satisfied"

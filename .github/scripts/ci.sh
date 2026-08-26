@@ -62,4 +62,7 @@ echo "==> cargo test --workspace"
 # harness so the rootless CI container does not kill workers under fan-out.
 THREETERM_REQUIRE_OCCT=1 cargo test --workspace --jobs 1 -- --test-threads=1
 
+echo "==> trademark and namespace release-gate test"
+bash tests/release-gate.sh
+
 echo "==> CI contract satisfied"

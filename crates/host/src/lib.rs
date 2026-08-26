@@ -3701,6 +3701,7 @@ impl Host {
             .features()
             .any(|feature| feature.id.as_str() == feature_id)
         {
+            cleanup_worker_stage(root, brep_path);
             self.current.replace(Some(loaded));
             return Err(HostError::Validation {
                 detail: format!("feature ID {feature_id:?} already exists"),

@@ -21,6 +21,7 @@ fn scene(revision: &str) -> ViewportScene {
             id: "a".to_string(),
             kind: "plate-vertical".to_string(),
         }],
+        solids: vec![],
         selected_id: None,
         layer1_references: vec!["derived-abc".to_string()],
         fit_relationships: vec![],
@@ -537,6 +538,7 @@ fn layer2_failures_preserve_state_with_structured_diagnostics() {
     let empty_scene = ViewportScene {
         revision: "".to_string(),
         features: vec![],
+        solids: vec![],
         selected_id: None,
         layer1_references: vec![],
         fit_relationships: vec![],

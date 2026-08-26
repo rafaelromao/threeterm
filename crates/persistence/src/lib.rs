@@ -416,6 +416,9 @@ impl TransactionLog {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedBundle {
+    /// The exact sealed generation selected by `Bundle::open`, including a
+    /// previous-generation recovery path when the canonical root is absent.
+    pub canonical_root: PathBuf,
     pub manifest: Manifest,
     pub generation: ProjectGeneration,
     pub transactions: String,
@@ -870,6 +873,7 @@ impl Bundle {
         let transactions = String::from_utf8(transaction_bytes)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
         Ok(LoadedBundle {
+            canonical_root: self.root.clone(),
             manifest,
             generation,
             transactions,
@@ -1698,6 +1702,7 @@ fn load_v0_with_migration(
 
     Ok(loaded_with(
         validated,
+        path.to_path_buf(),
         manifest,
         generation,
         transactions,
@@ -1707,12 +1712,14 @@ fn load_v0_with_migration(
 
 fn loaded_with(
     stale: LoadedBundle,
+    canonical_root: PathBuf,
     manifest: Manifest,
     generation: ProjectGeneration,
     transactions: String,
     recovered_from_previous: bool,
 ) -> LoadedBundle {
     LoadedBundle {
+        canonical_root,
         manifest,
         generation,
         transactions,

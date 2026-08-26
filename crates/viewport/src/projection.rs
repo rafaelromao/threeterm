@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity};
 
@@ -50,13 +50,34 @@ pub struct SceneFeature {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewportScene {
     pub revision: String,
     pub features: Vec<SceneFeature>,
+    pub solids: Vec<SceneSolid>,
     pub selected_id: Option<String>,
     pub layer1_references: Vec<String>,
     pub fit_relationships: Vec<FitDimension>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneSolid {
+    pub feature_id: String,
+    pub triangles: Vec<SceneTriangle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneTriangle {
+    pub vertices: [[f64; 3]; 3],
+}
+
+impl SceneSolid {
+    pub fn new(feature_id: impl Into<String>, triangles: Vec<SceneTriangle>) -> Self {
+        Self {
+            feature_id: feature_id.into(),
+            triangles,
+        }
+    }
 }
 
 impl ViewportScene {
@@ -102,6 +123,7 @@ impl ViewportScene {
         Self {
             revision: revision.into(),
             features,
+            solids: Vec::new(),
             selected_id,
             layer1_references: Vec::new(),
             fit_relationships: graph.fit_dimensions().cloned().collect(),
@@ -114,6 +136,11 @@ impl ViewportScene {
 
     pub fn with_layer1_reference(mut self, reference: impl Into<String>) -> Self {
         self.layer1_references.push(reference.into());
+        self
+    }
+
+    pub fn with_solid(mut self, solid: SceneSolid) -> Self {
+        self.solids.push(solid);
         self
     }
 }
@@ -226,6 +253,32 @@ impl ProtocolNeutralViewport {
         fill_background(&mut rgb);
         draw_grid(&mut rgb, width, height);
 
+        for solid in &scene.solids {
+            if solid.feature_id.is_empty() || solid.triangles.is_empty() {
+                return Err(diagnostic(
+                    ViewportDiagnosticCode::InvalidScene,
+                    "viewport solid has no feature identity or triangles",
+                    &scene.revision,
+                    "rebuild the scene from validated committed tessellation",
+                )
+                .with_generation(request.generation));
+            }
+            if solid
+                .triangles
+                .iter()
+                .flat_map(|triangle| triangle.vertices)
+                .any(|vertex| vertex.iter().any(|coordinate| !coordinate.is_finite()))
+            {
+                return Err(diagnostic(
+                    ViewportDiagnosticCode::InvalidScene,
+                    "viewport solid contains a non-finite vertex",
+                    &scene.revision,
+                    "discard the tessellation and rebuild it from the committed BREP",
+                )
+                .with_generation(request.generation));
+            }
+        }
+
         let columns = (scene.features.len().max(1) as f64).sqrt().ceil() as usize;
         let rows = scene.features.len().div_ceil(columns.max(1));
         let scale = f64::from(request.camera.zoom_percent) / 100.0;
@@ -236,8 +289,16 @@ impl ProtocolNeutralViewport {
             .round()
             .clamp(3.0, (min_dimension * 0.4).max(3.0)) as i32;
 
+        let solid_ids: BTreeSet<_> = scene
+            .solids
+            .iter()
+            .map(|solid| solid.feature_id.as_str())
+            .collect();
         for (index, feature) in scene.features.iter().enumerate() {
             if feature.kind.starts_with("sketch-segment:") {
+                continue;
+            }
+            if solid_ids.contains(feature.id.as_str()) {
                 continue;
             }
             let column = index % columns.max(1);
@@ -258,6 +319,8 @@ impl ProtocolNeutralViewport {
             let color = marker_color(feature, selected);
             draw_beveled_cuboid(&mut rgb, width, center_x, center_y, marker_size, color);
         }
+
+        draw_solids(&mut rgb, width, height, scene, &request);
 
         for feature in &scene.features {
             let Some((x1, y1, x2, y2)) = sketch_segment_coordinates(&feature.kind) else {
@@ -286,6 +349,148 @@ impl ProtocolNeutralViewport {
             frame_token: None,
         })
     }
+}
+
+fn draw_solids(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    scene: &ViewportScene,
+    request: &ViewportRequest,
+) {
+    let Some((min, max)) = scene
+        .solids
+        .iter()
+        .flat_map(|solid| solid.triangles.iter())
+        .fold(None, |bounds: Option<([f64; 3], [f64; 3])>, triangle| {
+            let mut bounds = bounds.unwrap_or((triangle.vertices[0], triangle.vertices[0]));
+            for vertex in triangle.vertices {
+                for (axis, coordinate) in vertex.iter().enumerate() {
+                    bounds.0[axis] = bounds.0[axis].min(*coordinate);
+                    bounds.1[axis] = bounds.1[axis].max(*coordinate);
+                }
+            }
+            Some(bounds)
+        })
+    else {
+        return;
+    };
+    let center = [
+        (min[0] + max[0]) / 2.0,
+        (min[1] + max[1]) / 2.0,
+        (min[2] + max[2]) / 2.0,
+    ];
+    let extent = (0..3)
+        .map(|axis| max[axis] - min[axis])
+        .fold(1.0_f64, f64::max);
+    let scale =
+        width.min(height) as f64 * 0.72 * f64::from(request.camera.zoom_percent) / (100.0 * extent);
+    let yaw = f64::from(request.camera.yaw_degrees).to_radians();
+    let pitch = f64::from(request.camera.pitch_degrees).to_radians();
+    let mut depth = vec![f64::INFINITY; width * height];
+    for solid in &scene.solids {
+        let color = solid_color(
+            solid.feature_id.as_bytes(),
+            scene.selected_id.as_deref() == Some(solid.feature_id.as_str()),
+        );
+        for triangle in &solid.triangles {
+            let projected = triangle.vertices.map(|vertex| {
+                let x = vertex[0] - center[0];
+                let y = vertex[1] - center[1];
+                let z = vertex[2] - center[2];
+                let yaw_x = x * yaw.cos() - z * yaw.sin();
+                let yaw_z = x * yaw.sin() + z * yaw.cos();
+                let rotated_y = y * pitch.cos() - yaw_z * pitch.sin();
+                let rotated_z = y * pitch.sin() + yaw_z * pitch.cos();
+                (
+                    (width as f64 / 2.0 + yaw_x * scale).round() as i32,
+                    (height as f64 / 2.0 - rotated_y * scale).round() as i32,
+                    rotated_z,
+                )
+            });
+            fill_depth_triangle(rgb, &mut depth, width, height, projected, color);
+        }
+    }
+}
+
+fn fill_depth_triangle(
+    rgb: &mut [u8],
+    depth: &mut [f64],
+    width: usize,
+    height: usize,
+    points: [(i32, i32, f64); 3],
+    color: [u8; 3],
+) {
+    let min_x = points.iter().map(|point| point.0).min().unwrap_or(0).max(0);
+    let max_x = points
+        .iter()
+        .map(|point| point.0)
+        .max()
+        .unwrap_or(-1)
+        .min(width.saturating_sub(1) as i32);
+    let min_y = points.iter().map(|point| point.1).min().unwrap_or(0).max(0);
+    let max_y = points
+        .iter()
+        .map(|point| point.1)
+        .max()
+        .unwrap_or(-1)
+        .min(height.saturating_sub(1) as i32);
+    if min_x > max_x || min_y > max_y {
+        return;
+    }
+    let area = edge(
+        (points[0].0, points[0].1),
+        (points[1].0, points[1].1),
+        (points[2].0, points[2].1),
+    );
+    if area == 0 {
+        return;
+    }
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let point = (x, y);
+            let w0 = edge(
+                (points[1].0, points[1].1),
+                (points[2].0, points[2].1),
+                point,
+            );
+            let w1 = edge(
+                (points[2].0, points[2].1),
+                (points[0].0, points[0].1),
+                point,
+            );
+            let w2 = edge(
+                (points[0].0, points[0].1),
+                (points[1].0, points[1].1),
+                point,
+            );
+            let inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if !inside {
+                continue;
+            }
+            let denominator = area as f64;
+            let z = (w0 as f64 * points[0].2 + w1 as f64 * points[1].2 + w2 as f64 * points[2].2)
+                / denominator;
+            let offset = y as usize * width + x as usize;
+            if z < depth[offset] {
+                depth[offset] = z;
+                let pixel = offset * 3;
+                rgb[pixel..pixel + 3].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
+fn solid_color(feature_id: &[u8], selected: bool) -> [u8; 3] {
+    if selected {
+        return [245, 194, 66];
+    }
+    let hash = stable_hash(feature_id, b"solid");
+    [
+        100 + ((hash & 0x7f) as u8),
+        100 + (((hash >> 8) & 0x7f) as u8),
+        120 + (((hash >> 16) & 0x7f) as u8),
+    ]
 }
 
 fn diagnostic(

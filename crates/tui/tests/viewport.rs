@@ -2,6 +2,8 @@ use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::Host;
+use threeterm_occt_worker::{LoftRequest, OcctWorker};
+use threeterm_persistence::Bundle;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
@@ -150,6 +152,70 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
         threeterm_tui::LifecycleState::HeadlessOnly
     );
     assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_viewport_renders_a_committed_loft_tessellation() {
+    let Ok(worker) = OcctWorker::locate() else {
+        eprintln!(
+            "production_viewport_renders_a_committed_loft_tessellation: OCCT worker unavailable"
+        );
+        return;
+    };
+    let root = temporary_bundle_root();
+    Bundle::create(&root).expect("project bundle creates");
+    let host = Host::new();
+    host.load(&root).expect("project loads");
+    host.loft(
+        &root,
+        LoftRequest::new(
+            "viewport-loft-request",
+            vec![
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.0, 10.0, 0.0],
+                ],
+                vec![
+                    [2.5, 2.5, 5.0],
+                    [7.5, 2.5, 5.0],
+                    [7.5, 7.5, 5.0],
+                    [2.5, 7.5, 5.0],
+                ],
+            ],
+        )
+        .with_output_path(&root, "viewport-loft.brep")
+        .with_feature_id("lofted-frustum"),
+        &worker,
+    )
+    .expect("real loft commits through the host");
+
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("committed loft loads through the production viewport path");
+    let submitted = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("viewport selection submits a frame");
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("lofted-frustum")
+    );
+    let identity = submitted.submission.started.expect("frame is in flight");
+    let visible = session
+        .acknowledge(FrameAcknowledgement::from(&identity))
+        .expect("viewport acknowledgement makes the frame visible")
+        .visible
+        .expect("acknowledged frame is visible");
+    assert!(
+        visible
+            .rgb
+            .chunks_exact(3)
+            .any(|pixel| pixel == [245, 194, 66]),
+        "the selected committed loft must contribute solid pixels"
+    );
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }

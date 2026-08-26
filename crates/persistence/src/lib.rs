@@ -28,6 +28,13 @@ pub enum SchemaStatus {
     Unknown,
 }
 
+/// Controls whether a prior schema epoch may be migrated during load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadPolicy {
+    MigrateV0,
+    RejectV0RequiresBackup,
+}
+
 /// Sealed prior-epoch (epoch 0) project manifest.
 ///
 /// This is the migration source: it carries generation/revision identity and
@@ -60,12 +67,12 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, LoadedBundle,
-        LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
+        Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, LoadPolicy,
+        LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
         PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
         PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
-        V0Manifest, detect_schema, fail_next_publication_at, load, migrate_v0_to_v1,
-        prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
+        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -483,6 +490,7 @@ pub enum BundleError {
     Migration {
         source: Box<BundleError>,
     },
+    SchemaEpochV0RequiresBackup,
 }
 
 impl BundleError {
@@ -504,6 +512,7 @@ impl BundleError {
             Self::PublicationUnknown(_) => "publication_unknown",
             Self::SourceUnreadable { .. } => "source_unreadable",
             Self::Migration { .. } => "migration_failed",
+            Self::SchemaEpochV0RequiresBackup => "SCHEMA_EPOCH_V0_REQUIRES_BACKUP",
         }
     }
 }
@@ -557,6 +566,9 @@ impl fmt::Display for BundleError {
             ),
             Self::Migration { source } => {
                 write!(formatter, "persistence.migration-failed: {source}")
+            }
+            Self::SchemaEpochV0RequiresBackup => {
+                formatter.write_str("schema epoch v0 requires a backup before loading")
             }
         }
     }
@@ -1465,6 +1477,11 @@ pub fn write_fresh(path: &Path, generation: ProjectGeneration) -> Result<Manifes
 }
 
 pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
+    load_with_policy(path, LoadPolicy::MigrateV0)
+}
+
+/// Load a bundle with an explicit migration policy.
+pub fn load_with_policy(path: &Path, policy: LoadPolicy) -> Result<LoadedBundle, BundleError> {
     // The whole existence and schema classification runs under the per-root
     // write lock. A publisher renames the canonical root into the previous
     // slot mid-publication and promotes staging afterwards, so an unlocked
@@ -1474,14 +1491,14 @@ pub fn load(path: &Path) -> Result<LoadedBundle, BundleError> {
     // them. The root is canonicalized first so a symlink alias and the
     // target share one lock and one set of recovery siblings.
     let root = canonical_bundle_root(path);
-    with_bundle_write_lock(&root, || load_unlocked(&root))
+    with_bundle_write_lock(&root, || load_unlocked(&root, policy))
 }
 
 /// The lock-free body of `load`. Callers must hold the per-root write lock
 /// whenever the bundle may need mutation (migration or recovery); the
 /// classification is re-made here so a lock holder always acts on the
 /// current on-disk state.
-fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
+fn load_unlocked(path: &Path, policy: LoadPolicy) -> Result<LoadedBundle, BundleError> {
     let root = path;
     if !root.exists() {
         let previous = previous_generation_path(root);
@@ -1489,6 +1506,9 @@ fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
             return match detect_schema(&previous)? {
                 SchemaStatus::Current => Bundle::at(&previous).open_sealed(true),
                 SchemaStatus::Prior => {
+                    if policy == LoadPolicy::RejectV0RequiresBackup {
+                        return Err(BundleError::SchemaEpochV0RequiresBackup);
+                    }
                     fs::rename(&previous, root)?;
                     load_v0_with_migration(root, true)
                 }
@@ -1512,7 +1532,13 @@ fn load_unlocked(path: &Path) -> Result<LoadedBundle, BundleError> {
     let status = detect_schema(root)?;
     match status {
         SchemaStatus::Current => Bundle::at(root).open_locked(),
-        SchemaStatus::Prior => load_v0_with_migration(root, false),
+        SchemaStatus::Prior => {
+            if policy == LoadPolicy::RejectV0RequiresBackup {
+                Err(BundleError::SchemaEpochV0RequiresBackup)
+            } else {
+                load_v0_with_migration(root, false)
+            }
+        }
         SchemaStatus::Unknown => Err(BundleError::SchemaUnknown {
             found: read_schema_version_raw(root).unwrap_or_default(),
             expected_current: schema_epoch(),

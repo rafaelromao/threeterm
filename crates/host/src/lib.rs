@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, FeatureGraph, FitDimension,
@@ -22,7 +22,9 @@ use threeterm_occt_worker::{
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
     OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
-use threeterm_persistence::{Bundle, BundleError, LoadedBundle, load, previous_generation_path};
+use threeterm_persistence::{
+    Bundle, BundleError, LoadPolicy, LoadedBundle, load, load_with_policy, previous_generation_path,
+};
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
 };
@@ -31,6 +33,9 @@ use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
 
 pub const BREP_SUBDIR: &str = "brep";
+const LAYER1_CACHE_DIR: &str = "cache";
+const LAYER1_CACHE_RECORD: &str = "layer1.json";
+const LAYER1_CACHE_SCHEMA: &str = "threeterm.host.layer1-cache/1";
 
 struct ThreeMfBody {
     label: String,
@@ -577,6 +582,25 @@ pub struct RetainedStaleLastValidGeometry {
     pub diagnostic_code: DiagnosticCode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Layer1CacheRecord {
+    pub schema_version: String,
+    pub source_revision: String,
+    pub operation: String,
+    pub feature_id: String,
+    pub worker_fingerprint: WorkerFingerprint,
+    pub artifact_name: String,
+    pub byte_count: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layer1CacheRebuild {
+    pub record: Layer1CacheRecord,
+    pub recomputations: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCommitView {
     pub artifacts: Vec<PathBuf>,
@@ -689,6 +713,10 @@ pub enum HostError {
     DerivedResult {
         diagnostic: Diagnostic,
     },
+    Layer1FingerprintMismatch {
+        expected: Box<WorkerFingerprint>,
+        found: Box<WorkerFingerprint>,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -745,6 +773,10 @@ impl std::fmt::Display for HostError {
                     diagnostic.code, diagnostic.arg
                 )
             }
+            Self::Layer1FingerprintMismatch { expected, found } => write!(
+                formatter,
+                "LAYER_1_FINGERPRINT_MISMATCH: expected={expected:?} found={found:?}"
+            ),
             Self::BrepFileMissing { path } => {
                 write!(formatter, "occt brep file missing: {}", path.display())
             }
@@ -1634,6 +1666,101 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    /// Load a canonical bundle and validate its optional non-authoritative
+    /// Layer 1 cache before replacing the in-memory snapshot.
+    pub fn load_with_layer1_cache(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        if root.exists() && !root.is_dir() {
+            return Err(HostError::BundlePathNotDirectory {
+                path: root.to_path_buf(),
+            });
+        }
+        let loaded = load(root).map_err(HostError::from)?;
+        validate_layer1_cache(root, &loaded)?;
+        let view = SnapshotView::from(&loaded);
+        self.current.replace(Some(loaded));
+        Ok(view)
+    }
+
+    /// Exercise the v0 fail-closed reader without changing the current Host
+    /// snapshot when the policy rejects the bundle.
+    pub fn load_adversarial_v0(&self, root: impl AsRef<Path>) -> Result<SnapshotView, HostError> {
+        let loaded = load_with_policy(root.as_ref(), LoadPolicy::RejectV0RequiresBackup)
+            .map_err(HostError::from)?;
+        let view = SnapshotView::from(&loaded);
+        self.current.replace(Some(loaded));
+        Ok(view)
+    }
+
+    /// Rebuild the saved, non-authoritative L-bracket Layer 1 cache through
+    /// the real OCCT worker without touching the Canonical Transaction Log.
+    pub fn rebuild_lbracket_layer1_cache(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<Layer1CacheRebuild, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let cache = root.join(LAYER1_CACHE_DIR);
+        fs::create_dir_all(&cache).map_err(|error| HostError::BrepIo {
+            detail: format!("create Layer 1 cache failed: {error}"),
+        })?;
+        let artifact_name = "l-bracket.brep";
+        let request = BracketRequest::new(
+            format!("layer1-cache-{}", std::process::id()),
+            60.0,
+            30.0,
+            40.0,
+            3.0,
+        )
+        .with_output_path(&cache, artifact_name)
+        .with_feature_id("l-bracket");
+        let worker = OcctWorker::locate()
+            .map_err(|error| HostError::WorkerUnavailable {
+                detail: error.to_string(),
+            })?
+            .with_revision_id(loaded.revision_hash_hex());
+        let result = worker.bracket(&request).map_err(HostError::from)?;
+        if !result.is_success() || !result.brep_path.is_file() {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(result.request_id),
+                detail: "Layer 1 cache worker did not produce a BREP".to_string(),
+            });
+        }
+        let sha256 = sha256_path(&result.brep_path).map_err(|error| HostError::BrepIo {
+            detail: error.to_string(),
+        })?;
+        let record = Layer1CacheRecord {
+            schema_version: LAYER1_CACHE_SCHEMA.to_string(),
+            source_revision: loaded.revision_hash_hex().to_string(),
+            operation: "bracket".to_string(),
+            feature_id: "l-bracket".to_string(),
+            worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact_name: artifact_name.to_string(),
+            byte_count: result.brep_bytes as u64,
+            sha256,
+        };
+        let record_bytes =
+            serde_json::to_vec_pretty(&record).map_err(|error| HostError::BrepIo {
+                detail: format!("serialize Layer 1 cache record failed: {error}"),
+            })?;
+        let temporary = cache.join(format!(".{LAYER1_CACHE_RECORD}.tmp-{}", std::process::id()));
+        fs::write(&temporary, record_bytes).map_err(|error| HostError::BrepIo {
+            detail: format!("write Layer 1 cache record failed: {error}"),
+        })?;
+        fs::rename(temporary, cache.join(LAYER1_CACHE_RECORD)).map_err(|error| {
+            HostError::BrepIo {
+                detail: format!("publish Layer 1 cache record failed: {error}"),
+            }
+        })?;
+        Ok(Layer1CacheRebuild {
+            record,
+            recomputations: 1,
+        })
     }
 
     /// Runs `load` as a schema-migration preflight and reconciles `Host` state
@@ -4820,6 +4947,57 @@ fn expected_occt_worker_fingerprint() -> WorkerFingerprint {
         worker_schema_version: threeterm_occt_worker::SCHEMA_VERSION.to_string(),
         protocol_schema_version: threeterm_protocol::schema_version().to_string(),
     }
+}
+
+fn validate_layer1_cache(root: &Path, loaded: &LoadedBundle) -> Result<(), HostError> {
+    let cache = root.join(LAYER1_CACHE_DIR);
+    let record_path = cache.join(LAYER1_CACHE_RECORD);
+    if !record_path.exists() {
+        return Ok(());
+    }
+    let record: Layer1CacheRecord =
+        serde_json::from_slice(&fs::read(&record_path).map_err(|error| HostError::BrepIo {
+            detail: format!("read Layer 1 cache record failed: {error}"),
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("Layer 1 cache record is invalid: {error}"),
+        })?;
+    let expected = expected_occt_worker_fingerprint();
+    if record.worker_fingerprint != expected {
+        let _ = fs::remove_file(&record_path);
+        // The record is untrusted at this point. Only remove the fixed cache
+        // artifact owned by this boundary; never join an attacker-controlled
+        // filename before validating it.
+        let _ = fs::remove_file(cache.join("l-bracket.brep"));
+        return Err(HostError::Layer1FingerprintMismatch {
+            expected: Box::new(expected),
+            found: Box::new(record.worker_fingerprint),
+        });
+    }
+    if record.schema_version != LAYER1_CACHE_SCHEMA
+        || record.source_revision != loaded.revision_hash_hex()
+        || record.operation != "bracket"
+        || record.feature_id != "l-bracket"
+        || record.artifact_name.contains('/')
+        || record.artifact_name.contains('\\')
+    {
+        return Err(HostError::Validation {
+            detail: "Layer 1 cache record does not match the canonical revision".to_string(),
+        });
+    }
+    let artifact = cache.join(&record.artifact_name);
+    let metadata = fs::metadata(&artifact).map_err(|error| HostError::BrepIo {
+        detail: format!("read Layer 1 cache artifact failed: {error}"),
+    })?;
+    let actual = sha256_path(&artifact).map_err(|error| HostError::BrepIo {
+        detail: error.to_string(),
+    })?;
+    if !metadata.is_file() || metadata.len() != record.byte_count || actual != record.sha256 {
+        return Err(HostError::Validation {
+            detail: "Layer 1 cache artifact failed integrity validation".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn is_sha256_hex(value: &str) -> bool {

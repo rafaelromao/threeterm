@@ -1426,16 +1426,14 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
-        validate_feature_entries(
-            &loaded.graph,
-            entries,
-            idempotency_key.is_some()
-                || source_brep.is_some()
-                || (brep.is_some() && entries.iter().all(|(_, kind)| !kind.starts_with("brep:")))
-                || entries
-                    .iter()
-                    .all(|(_, kind)| kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)),
-        )?;
+        let allow_existing = (idempotency_key.is_some()
+            && source_brep.is_some()
+            && entries.len() == 1
+            && entries[0].1.starts_with("bracket:"))
+            || entries
+                .iter()
+                .all(|(_, kind)| kind.starts_with(SKETCH_COMMAND_KIND_PREFIX));
+        validate_feature_entries(&loaded.graph, entries, allow_existing)?;
         if let Some((brep_feature_id, _)) = brep
             && !entries
                 .iter()
@@ -1786,7 +1784,6 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
         if entry.brep_path.is_some()
             || entry.brep_byte_count.is_some()
             || entry.brep_sha256.is_some()
-            || entry.kind.starts_with("brep:")
         {
             latest.insert(entry.feature_id.as_str(), entry);
         }
@@ -1818,7 +1815,18 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
             });
         }
         let path = root.join(path);
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(0o400000)
+            .open(&path)
+            .map_err(|error| {
+                BundleError::Invalid(format!(
+                    "promoted BREP for {} could not be read: {error}",
+                    entry.feature_id
+                ))
+            })?;
+        let metadata = file.metadata().map_err(|error| {
             BundleError::Invalid(format!(
                 "promoted BREP for {} could not be read: {error}",
                 entry.feature_id
@@ -1830,7 +1838,8 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
                 entry.feature_id
             )));
         }
-        let bytes = fs::read(&path).map_err(|error| {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
             BundleError::Invalid(format!(
                 "promoted BREP for {} could not be read: {error}",
                 entry.feature_id

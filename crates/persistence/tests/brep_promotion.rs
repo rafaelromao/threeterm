@@ -29,10 +29,13 @@ fn revision_guarded_brep_promotion_publishes_log_and_bytes_together() {
         .expect("initial promotion succeeds");
     let before = fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads");
     let committed = bundle
-        .append_feature_with_brep_if_revision(
+        .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
             "l-bracket",
             "bracket:length=110.00000000000000000;thickness=5.00000000000000000",
             initial.revision_hash_hex(),
+            "664ced6fc3297e324b3998958492b5338635f4b887100a012eaae3c4d9733889",
+            Some("parameter-edit-1"),
+            Some("length=110"),
             b"new-brep",
         )
         .expect("parameter replacement succeeds");
@@ -299,6 +302,36 @@ fn loading_rejects_tampered_promoted_brep_bytes() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn loading_rejects_symlinked_promoted_brep() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("symlinked-brep");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("promotion succeeds");
+
+    let target = root.join("brep/solid-1.brep");
+    let replacement = root.join("replacement.brep");
+    fs::write(&replacement, b"prior-brep").expect("replacement writes");
+    fs::remove_file(&target).expect("committed BREP removes");
+    symlink(&replacement, &target).expect("BREP symlink creates");
+
+    assert!(
+        bundle.open().is_err(),
+        "symlinked BREP must fail closed on load"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn new_brep_feature_rejects_duplicate_ids_without_replacing_state() {
     let root = temp_root("duplicate-new-feature");

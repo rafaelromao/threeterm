@@ -365,6 +365,44 @@ fn loading_rejects_a_symlinked_brep_directory() {
 }
 
 #[test]
+fn loading_rejects_a_fifo_substituted_for_a_promoted_brep() {
+    let root = temp_root("fifo-brep");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("promotion succeeds");
+
+    let target = root.join("brep/solid-1.brep");
+    fs::remove_file(&target).expect("committed BREP removes");
+    let status = std::process::Command::new("mkfifo")
+        .arg("-m")
+        .arg("600")
+        .arg(&target)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success(), "FIFO creates");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let load_root = root.clone();
+    std::thread::spawn(move || {
+        sender.send(Bundle::at(load_root).open().is_err()).unwrap();
+    });
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FIFO load does not block"),
+        true
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn loading_rejects_tampered_brep_provenance_metadata() {
     let root = temp_root("tampered-brep-metadata");
     let bundle = Bundle::create(&root).expect("bundle creates");

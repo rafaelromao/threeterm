@@ -1836,6 +1836,7 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         const O_DIRECTORY: i32 = 0o200000;
+        const O_NONBLOCK: i32 = 0o4000;
         const O_NOFOLLOW: i32 = 0o400000;
         let directory = OpenOptions::new()
             .read(true)
@@ -1852,7 +1853,7 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
             PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(file_name);
         let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(O_NOFOLLOW)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
             .open(&path)
             .map_err(|error| {
                 BundleError::Invalid(format!(

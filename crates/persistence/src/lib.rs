@@ -1447,7 +1447,12 @@ impl Bundle {
         let allow_existing_bracket_edit = idempotency_key.is_some()
             && source_brep.is_some()
             && entries.len() == 1
-            && entries[0].1.starts_with("bracket:");
+            && entries[0].1.starts_with("bracket:")
+            || history_event.is_some()
+                && brep.is_some()
+                && entries
+                    .first()
+                    .is_some_and(|(_, kind)| kind.starts_with("bracket:"));
         validate_feature_entries(
             &loaded.graph,
             entries,

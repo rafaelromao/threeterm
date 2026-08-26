@@ -358,6 +358,9 @@ fn the_shipped_cli_keeps_one_lua_session_alive_across_reload_failures() {
         .read_line(&mut failed_response)
         .expect("failed reload response reads");
     assert!(!failed_response.trim().is_empty());
+    let failed_json: Value =
+        serde_json::from_str(&failed_response).expect("failed response is JSON");
+    assert_eq!(failed_json["code"], "lua_dispatch_failure");
     assert!(first_root.join("transactions.log").is_file());
 
     fs::write(&config, bracket_lua(&second_root)).expect("recovery reload writes");

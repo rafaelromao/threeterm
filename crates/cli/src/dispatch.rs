@@ -3078,6 +3078,32 @@ pub fn dispatch_lua_session<R: BufRead>(
                         }
                     }
                     Err(error) => {
+                        let response = watcher.diagnostic().map_or_else(
+                            || {
+                                json!({
+                                    "code": "lua_dispatch_failure",
+                                    "schema_version": threeterm_lua_bridge::schema_version(),
+                                    "detail": error.to_string(),
+                                })
+                            },
+                            |diagnostic| {
+                                serde_json::to_value(diagnostic).unwrap_or_else(|_| {
+                                    json!({
+                                        "code": "lua_dispatch_failure",
+                                        "schema_version": threeterm_lua_bridge::schema_version(),
+                                        "detail": error.to_string(),
+                                    })
+                                })
+                            },
+                        );
+                        if serde_json::to_writer(&mut *stdout, &response).is_err() {
+                            return emit_internal_error(
+                                "failed to serialize Lua error response",
+                                stderr,
+                            );
+                        }
+                        let _ = writeln!(stdout);
+                        let _ = stdout.flush();
                         if let Some(diagnostic) = watcher.diagnostic() {
                             write_lua_diagnostic(stderr, diagnostic);
                         } else {

@@ -175,6 +175,16 @@ require_committed_runbook() {
         || fail 'signed runbook must be committed before publishing'
 }
 
+require_tag_at_head() {
+    local tag=$1 tag_commit head_commit
+    tag_commit="$(git rev-parse --verify "${tag}^{commit}" 2>/dev/null)" \
+        || fail "release tag does not exist: ${tag}"
+    head_commit="$(git rev-parse --verify HEAD)" \
+        || fail 'unable to resolve the verified checkout revision'
+    [[ "$tag_commit" == "$head_commit" ]] \
+        || fail "release tag ${tag} does not point at the verified checkout revision"
+}
+
 valid_tag() {
     [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
 }
@@ -206,6 +216,7 @@ case "$action" in
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
         require_committed_runbook
+        require_tag_at_head "$1"
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
         gh release create "$1" --verify-tag --title "$1"
         ;;

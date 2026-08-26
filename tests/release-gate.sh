@@ -55,6 +55,33 @@ sed \
 
 "${RELEASE_SCRIPT}" verify "${fixture}"
 
+release_root="${tmpdir}/release-root"
+fake_bin="${tmpdir}/bin"
+mkdir -p "${release_root}/.github/scripts" "${release_root}/docs/release" "${fake_bin}"
+cp "${RELEASE_SCRIPT}" "${release_root}/.github/scripts/release.sh"
+cp "${fixture}" "${release_root}/docs/release/trademark-and-namespace-gate.md"
+cat >"${fake_bin}/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == status ]]; then
+    exit 0
+fi
+exec /usr/bin/git "$@"
+EOF
+cat >"${fake_bin}/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${fake_bin}/git" "${fake_bin}/gh"
+
+current_tag="v0.0.0-release-gate-current-${BASHPID}"
+old_tag="v0.0.0-release-gate-old-${BASHPID}"
+git tag -a "${current_tag}" -m "current release gate test" HEAD
+git tag -a "${old_tag}" -m "old release gate test" HEAD~1
+trap 'git tag -d "${current_tag}" "${old_tag}" >/dev/null 2>&1 || true; rm -rf "${tmpdir}"' EXIT
+PATH="${fake_bin}:${PATH}" "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+expect_failure env PATH="${fake_bin}:${PATH}" \
+    "${release_root}/.github/scripts/release.sh" github-release "${old_tag}"
+
 stale_fixture="${tmpdir}/stale.md"
 sed "s|Evidence date: \`${candidate_date}\`|Evidence date: \`${stale_date}\`|g" \
     "${fixture}" >"${stale_fixture}"

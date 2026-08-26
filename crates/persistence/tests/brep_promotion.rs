@@ -333,6 +333,38 @@ fn loading_rejects_symlinked_promoted_brep() {
 }
 
 #[test]
+fn loading_rejects_a_symlinked_brep_directory() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("symlinked-brep-directory");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("promotion succeeds");
+
+    let external = temp_root("external-brep-directory");
+    fs::create_dir_all(&external).expect("external directory creates");
+    fs::write(external.join("solid-1.brep"), b"prior-brep").expect("external BREP writes");
+    let committed_dir = root.join("brep");
+    let retained_dir = root.join("brep-retained");
+    fs::rename(&committed_dir, &retained_dir).expect("BREP directory moves");
+    symlink(&external, &committed_dir).expect("BREP directory symlink creates");
+
+    assert!(
+        bundle.open().is_err(),
+        "a symlinked BREP directory must fail closed on load"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(external);
+}
+
+#[test]
 fn loading_rejects_tampered_brep_provenance_metadata() {
     let root = temp_root("tampered-brep-metadata");
     let bundle = Bundle::create(&root).expect("bundle creates");

@@ -1814,11 +1814,29 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
                 detail: "BREP path does not match its feature ID".to_string(),
             });
         }
-        let path = root.join(path);
+        let file_name = Path::new(path)
+            .file_name()
+            .expect("validated BREP path has a file name");
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
+        const O_DIRECTORY: i32 = 0o200000;
+        const O_NOFOLLOW: i32 = 0o400000;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+            .open(root.join("brep"))
+            .map_err(|error| {
+                BundleError::Invalid(format!(
+                    "promoted BREP directory could not be read: {error}"
+                ))
+            })?;
+        // Read through the opened directory handle so replacing `brep/` after
+        // this point cannot redirect verification outside the bundle.
+        let path =
+            PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(file_name);
         let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(0o400000)
+            .custom_flags(O_NOFOLLOW)
             .open(&path)
             .map_err(|error| {
                 BundleError::Invalid(format!(

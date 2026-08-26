@@ -427,7 +427,7 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let bundle = temp_root("stale-history");
     let output = temp_root("stale-history-output");
-    l_bracket(bin, &bundle);
+    run(bin, &["new-project", bundle.to_str().unwrap()]);
     run_value(
         bin,
         &[

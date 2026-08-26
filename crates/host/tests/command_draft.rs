@@ -261,6 +261,70 @@ fn l_bracket_parameter_preview_commit_and_refuse_use_one_canonical_path() {
 }
 
 #[test]
+fn duplicate_initial_bracket_is_rejected_without_replacing_committed_state() {
+    let Some(worker) = skip_without_worker() else {
+        return;
+    };
+    let root = temp_root("duplicate-initial-bracket");
+    let host = Host::new();
+    Bundle::create(&root).expect("bundle creates");
+    let initial =
+        BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 5.0).with_feature_id("l-bracket");
+    host.create_bracket(&root, initial, &worker)
+        .expect("initial L-bracket commits");
+    let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let before_log = fs::read(root.join("transactions.log")).expect("log reads");
+    let before_brep = fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads");
+
+    let duplicate =
+        BracketRequest::new(new_request_id(), 110.0, 60.0, 40.0, 4.0).with_feature_id("l-bracket");
+    assert!(host.create_bracket(&root, duplicate, &worker).is_err());
+
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        before_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+    assert_eq!(
+        fs::read(root.join("brep/l-bracket.brep")).unwrap(),
+        before_brep
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bracket_parameter_edit_rejects_a_non_bracket_brep_without_replacing_state() {
+    let Some(worker) = skip_without_worker() else {
+        return;
+    };
+    let root = temp_root("non-bracket-edit");
+    let host = Host::new();
+    let feature_id = seed_solid(&host, &root, &worker);
+    let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let before_log = fs::read(root.join("transactions.log")).expect("log reads");
+    let before_brep = fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads");
+    let request = BracketRequest::new(new_request_id(), 100.0, 60.0, 40.0, 4.0);
+    let draft = host
+        .open_bracket_parameter_draft(&root, "non-bracket-edit", feature_id, request)
+        .expect("draft opens for the existing BREP");
+
+    assert!(
+        host.commit_bracket_parameter_draft(&root, &draft.draft_id, &worker)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        before_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+    assert_eq!(
+        fs::read(root.join("brep/l-bracket.brep")).unwrap(),
+        before_brep
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn bracket_draft_ids_are_scoped_to_their_bundle_root() {
     let Some(worker) = skip_without_worker() else {
         return;

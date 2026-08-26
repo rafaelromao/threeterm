@@ -287,6 +287,12 @@ pub struct LogEntry {
     pub feature_id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_byte_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload: Option<String>,
@@ -300,6 +306,9 @@ impl LogEntry {
             previous_digest: previous_digest.to_string(),
             feature_id: feature_id.to_string(),
             kind: kind.to_string(),
+            brep_path: None,
+            brep_byte_count: None,
+            brep_sha256: None,
             idempotency_key: None,
             idempotency_payload: None,
             terminal_digest: String::new(),
@@ -311,6 +320,14 @@ impl LogEntry {
     fn with_idempotency_key(mut self, key: &str, payload: Option<&str>) -> Self {
         self.idempotency_key = Some(key.to_string());
         self.idempotency_payload = payload.map(str::to_string);
+        self.terminal_digest = self.recomputed_digest();
+        self
+    }
+
+    fn with_brep(mut self, bytes: &[u8]) -> Self {
+        self.brep_path = Some(format!("brep/{}.brep", self.feature_id));
+        self.brep_byte_count = Some(bytes.len() as u64);
+        self.brep_sha256 = Some(hash(bytes));
         self.terminal_digest = self.recomputed_digest();
         self
     }
@@ -366,6 +383,24 @@ impl TransactionLog {
             LogEntry::new(self.entries.len(), &previous, feature_id, kind)
                 .with_idempotency_key(idempotency_key, idempotency_payload),
         );
+    }
+
+    fn append_feature_with_brep(
+        &mut self,
+        feature_id: &str,
+        kind: &str,
+        brep_bytes: &[u8],
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+    ) {
+        let previous = self.terminal_digest_hex().to_string();
+        let entry =
+            LogEntry::new(self.entries.len(), &previous, feature_id, kind).with_brep(brep_bytes);
+        let entry = match idempotency_key {
+            Some(key) => entry.with_idempotency_key(key, idempotency_payload),
+            None => entry,
+        };
+        self.entries.push(entry);
     }
 
     pub fn terminal_digest_hex(&self) -> &str {
@@ -862,6 +897,7 @@ impl Bundle {
         {
             return Err(BundleError::LogDigestMismatch);
         }
+        verify_brep_provenance(&self.root, &log)?;
 
         let generation = ProjectGeneration {
             id: manifest.generation_id.clone(),
@@ -908,7 +944,21 @@ impl Bundle {
             serde_json::to_string(payload)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?
         );
-        self.append_feature_if_revision(&payload.feature_id, &encoded, expected_revision)
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(&payload.feature_id, &encoded)],
+                Some(expected_revision),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                true,
+                false,
+            )
+        })
     }
 
     /// Append one versioned component command as a canonical transaction.
@@ -950,6 +1000,8 @@ impl Bundle {
                 None,
                 None,
                 Some(fit),
+                false,
+                false,
                 false,
             )
         })
@@ -1084,6 +1136,35 @@ impl Bundle {
         })
     }
 
+    /// Publish a verified BREP and command provenance for a new feature ID.
+    /// The duplicate check and complete generation publication run under the
+    /// same bundle write lock.
+    pub fn append_new_feature_with_brep_if_revision_and_provenance(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+                false,
+                false,
+            )
+        })
+    }
+
     /// Publish a BREP for a new feature ID only. The duplicate check and the
     /// complete generation publication run under the bundle write lock.
     pub fn append_new_feature_with_brep_if_revision(
@@ -1104,6 +1185,8 @@ impl Bundle {
                 None,
                 None,
                 true,
+                false,
+                false,
             )
         })
     }
@@ -1239,6 +1322,46 @@ impl Bundle {
         })
     }
 
+    /// Replace an existing parameterized bracket only through its explicit
+    /// draft-edit authorization. Ordinary BREP promotions remain append-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency key".to_string(),
+            ));
+        };
+        let Some(idempotency_payload) = idempotency_payload else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency payload".to_string(),
+            ));
+        };
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                Some((feature_id, expected_source_sha256)),
+                Some(idempotency_key),
+                Some(idempotency_payload),
+                None,
+                None,
+                false,
+                false,
+                true,
+            )
+        })
+    }
+
     /// Look up a previously published transaction by its durable idempotency
     /// key while holding the same bundle lock used by promotion.
     pub fn find_idempotency_key(
@@ -1311,6 +1434,8 @@ impl Bundle {
             history_event,
             None,
             false,
+            false,
+            false,
         )
     }
 
@@ -1326,6 +1451,8 @@ impl Bundle {
         history_event: Option<&HistoryEvent>,
         fit_dimension: Option<&FitDimension>,
         reject_existing_brep: bool,
+        allow_existing_sketch_update: bool,
+        allow_existing_bracket_edit: bool,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1362,6 +1489,37 @@ impl Bundle {
                 "worker result belongs to revision {expected_revision:?}, but current revision is {:?}",
                 loaded.revision_hash_hex()
             )));
+        }
+        let allow_existing_bracket_edit = if allow_existing_bracket_edit
+            && idempotency_key.is_some()
+            && source_brep.is_some()
+            && entries.len() == 1
+            && entries[0].1.starts_with("bracket:")
+            && loaded
+                .graph
+                .features()
+                .find(|feature| feature.id.as_str() == entries[0].0)
+                .is_some_and(|feature| feature.kind.starts_with("bracket:"))
+        {
+            Some(entries[0].0)
+        } else {
+            None
+        };
+        validate_feature_entries(
+            &loaded.graph,
+            &loaded.log,
+            entries,
+            allow_existing_bracket_edit,
+            allow_existing_sketch_update,
+        )?;
+        if let Some((brep_feature_id, _)) = brep
+            && !entries
+                .iter()
+                .any(|(feature_id, _)| *feature_id == brep_feature_id)
+        {
+            return Err(BundleError::Invalid(
+                "BREP feature ID is not part of the transaction".to_string(),
+            ));
         }
         if reject_existing_brep
             && let Some((feature_id, _)) = brep
@@ -1413,12 +1571,30 @@ impl Bundle {
             };
             if graph_changed {
                 if let Some(idempotency_key) = idempotency_key {
-                    loaded.log.append_feature_with_idempotency(
-                        feature_id,
-                        kind,
-                        idempotency_key,
-                        idempotency_payload,
-                    );
+                    if let Some((brep_feature_id, brep_bytes)) = brep
+                        && brep_feature_id == *feature_id
+                    {
+                        loaded.log.append_feature_with_brep(
+                            feature_id,
+                            kind,
+                            brep_bytes,
+                            Some(idempotency_key),
+                            idempotency_payload,
+                        );
+                    } else {
+                        loaded.log.append_feature_with_idempotency(
+                            feature_id,
+                            kind,
+                            idempotency_key,
+                            idempotency_payload,
+                        );
+                    }
+                } else if let Some((brep_feature_id, brep_bytes)) = brep
+                    && brep_feature_id == *feature_id
+                {
+                    loaded
+                        .log
+                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None);
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }
@@ -1642,6 +1818,142 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
     let raw = fs::read(path.join(MANIFEST_FILENAME)).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     value.get("schema_version")?.as_str().map(str::to_string)
+}
+
+fn validate_feature_entries(
+    graph: &FeatureGraph,
+    log: &TransactionLog,
+    entries: &[(&str, &str)],
+    allow_existing_bracket_edit: Option<&str>,
+    allow_existing_sketch_update: bool,
+) -> Result<(), BundleError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for (feature_id, kind) in entries {
+        Feature::new(*feature_id, *kind)
+            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+        if !ids.insert(*feature_id) {
+            return Err(BundleError::Invalid(format!(
+                "feature ID {feature_id:?} is duplicated in one transaction"
+            )));
+        }
+        let existing_kind = graph
+            .features()
+            .find(|feature| feature.id.as_str() == *feature_id)
+            .map(|feature| feature.kind);
+        let historical = log
+            .entries()
+            .iter()
+            .any(|entry| entry.feature_id == *feature_id);
+        if existing_kind.is_some() || historical {
+            let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
+                && allow_existing_sketch_update
+                && existing_kind == Some("sketch".to_string());
+            let bracket_update = allow_existing_bracket_edit == Some(*feature_id);
+            if !bracket_update && !sketch_update {
+                return Err(BundleError::Invalid(format!(
+                    "feature ID {feature_id:?} already exists"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {
+    let mut latest = std::collections::BTreeMap::new();
+    for entry in log.entries() {
+        if entry.brep_path.is_some()
+            || entry.brep_byte_count.is_some()
+            || entry.brep_sha256.is_some()
+        {
+            latest.insert(entry.feature_id.as_str(), entry);
+        }
+    }
+    for entry in latest.into_values() {
+        let Some(path) = entry.brep_path.as_deref() else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP transaction is missing its path".to_string(),
+            });
+        };
+        let Some(expected_bytes) = entry.brep_byte_count else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path is missing its byte count".to_string(),
+            });
+        };
+        let Some(expected_sha256) = entry.brep_sha256.as_deref() else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path is missing its digest".to_string(),
+            });
+        };
+        let expected_path = format!("brep/{}.brep", entry.feature_id);
+        if path != expected_path {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path does not match its feature ID".to_string(),
+            });
+        }
+        let file_name = Path::new(path)
+            .file_name()
+            .expect("validated BREP path has a file name");
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        const O_DIRECTORY: i32 = 0o200000;
+        const O_NONBLOCK: i32 = 0o4000;
+        const O_NOFOLLOW: i32 = 0o400000;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+            .open(root.join("brep"))
+            .map_err(|error| {
+                BundleError::Invalid(format!(
+                    "promoted BREP directory could not be read: {error}"
+                ))
+            })?;
+        // Read through the opened directory handle so replacing `brep/` after
+        // this point cannot redirect verification outside the bundle.
+        let path =
+            PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(file_name);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(&path)
+            .map_err(|error| {
+                BundleError::Invalid(format!(
+                    "promoted BREP for {} could not be read: {error}",
+                    entry.feature_id
+                ))
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            BundleError::Invalid(format!(
+                "promoted BREP for {} could not be read: {error}",
+                entry.feature_id
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(BundleError::Invalid(format!(
+                "promoted BREP for {} is not a regular file",
+                entry.feature_id
+            )));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
+            BundleError::Invalid(format!(
+                "promoted BREP for {} could not be read: {error}",
+                entry.feature_id
+            ))
+        })?;
+        let actual_sha256 = hash(&bytes);
+        if bytes.len() as u64 != expected_bytes || actual_sha256 != expected_sha256 {
+            return Err(BundleError::Invalid(format!(
+                "promoted BREP for {} failed integrity verification",
+                entry.feature_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Orchestrated prior-epoch load: sealed backup → deterministic migration →
@@ -2530,7 +2842,7 @@ mod tests {
     }
 
     #[test]
-    fn append_then_verified_reopen_preserves_graph_revision_and_entry_count() {
+    fn duplicate_append_is_rejected_without_advancing_the_revision() {
         let root = temp_root("append");
         let bundle =
             Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
@@ -2541,8 +2853,8 @@ mod tests {
 
         let duplicate = bundle
             .append_feature("box-1", "box")
-            .expect("duplicate saves");
-        assert_eq!(duplicate.log.len(), 1);
+            .expect_err("duplicate feature IDs are rejected");
+        assert!(matches!(duplicate, BundleError::Invalid(_)));
 
         let loaded = bundle.open().expect("bundle reopens");
         assert_eq!(loaded.log.len(), 1);

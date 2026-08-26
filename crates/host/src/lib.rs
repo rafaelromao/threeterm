@@ -2617,7 +2617,7 @@ impl Host {
             |bundle, current, artifact, bytes, provenance| {
                 let feature_id = &artifact.feature_id;
                 let kind = format!("brep:{feature_id}");
-                bundle.append_feature_with_brep_if_revision_and_provenance(
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
                     feature_id,
                     &kind,
                     &current.manifest.revision_hash,
@@ -3518,7 +3518,7 @@ impl Host {
         let bundle = Bundle::at(root);
         let updated = match source_brep_sha256 {
             Some(source_brep_sha256) => bundle
-                .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+                .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
                     feature_id,
                     kind,
                     expected_revision,
@@ -5326,7 +5326,6 @@ fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
         })?;
     Ok(buffer)
 }
-
 #[cfg(test)]
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
     copy_brep_verified(source, target, None)
@@ -5334,19 +5333,22 @@ fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
 
 fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::OpenOptionsExt;
-    // Open the source without following symlinks and pin the opened
-    // handle: promotion copies from one verified file identity, so a
-    // path swapped between validation and promotion cannot redirect the
-    // copy.
+    const O_NOFOLLOW: i32 = 0o400000;
+    const O_NONBLOCK: i32 = 0o4000;
     let mut options = fs::OpenOptions::new();
-    // O_NOFOLLOW = 0o400000 on Linux: refuse to open through a symlink.
-    options.read(true).custom_flags(0o400000);
+    options.read(true).custom_flags(O_NOFOLLOW | O_NONBLOCK);
     let mut reader = options
         .open(source)
         .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
     let opened_metadata = reader
         .metadata()
         .map_err(|error| format!("stat opened BREP {} failed: {error}", source.display()))?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "source BREP {} is not a regular file",
+            source.display()
+        ));
+    }
     let verified_metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("stat source BREP {} failed: {error}", source.display()))?;
     use std::os::unix::fs::MetadataExt;
@@ -5365,7 +5367,7 @@ fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<
             source.display()
         ));
     }
-    let mut buffer = vec![0u8; 8 * 1024];
+    let mut buffer = [0u8; 8 * 1024];
     let mut content = Vec::new();
     loop {
         let read = reader
@@ -5383,7 +5385,6 @@ fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<
         content.extend_from_slice(&buffer[..read]);
     }
     if let Some((expected_bytes, expected_sha256)) = expected {
-        use sha2::{Digest, Sha256};
         let actual_sha256 = format!("{:x}", Sha256::digest(&content));
         if content.len() != expected_bytes || actual_sha256 != expected_sha256 {
             return Err(format!(

@@ -4989,7 +4989,7 @@ fn write_brep_bytes(target: &Path, content: &[u8]) -> Result<(), String> {
                 temporary.display()
             )
         })?;
-    if let Err(error) = writer.write_all(&content) {
+    if let Err(error) = writer.write_all(content) {
         let _ = fs::remove_file(&temporary);
         return Err(format!("write temporary BREP failed: {error}"));
     }

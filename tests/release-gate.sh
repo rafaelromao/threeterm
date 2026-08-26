@@ -15,7 +15,7 @@ expect_failure() {
 expect_failure "${RELEASE_SCRIPT}" verify
 tag="v0.0.0-release-gate-${BASHPID}"
 expect_failure "${RELEASE_SCRIPT}" tag "${tag}"
-if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+if command -v git >/dev/null 2>&1 && git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
     printf 'tag was created despite a failed release gate\n' >&2
     exit 1
 fi
@@ -65,7 +65,15 @@ cat >"${fake_bin}/git" <<'EOF'
 if [[ "${1:-}" == status ]]; then
     exit 0
 fi
-exec /usr/bin/git "$@"
+if [[ "${1:-}" == rev-parse ]]; then
+    if [[ "$*" == *"${RELEASE_GATE_OLD_TAG}^{commit}"* ]]; then
+        printf 'old-commit\n'
+    else
+        printf 'current-commit\n'
+    fi
+    exit 0
+fi
+exit 1
 EOF
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -75,11 +83,12 @@ chmod +x "${fake_bin}/git" "${fake_bin}/gh"
 
 current_tag="v0.0.0-release-gate-current-${BASHPID}"
 old_tag="v0.0.0-release-gate-old-${BASHPID}"
-git tag -a "${current_tag}" -m "current release gate test" HEAD
-git tag -a "${old_tag}" -m "old release gate test" HEAD~1
-trap 'git tag -d "${current_tag}" "${old_tag}" >/dev/null 2>&1 || true; rm -rf "${tmpdir}"' EXIT
-PATH="${fake_bin}:${PATH}" "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+trap 'rm -rf "${tmpdir}"' EXIT
+PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
+    RELEASE_GATE_OLD_TAG="${old_tag}" \
+    "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
 expect_failure env PATH="${fake_bin}:${PATH}" \
+    RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
     "${release_root}/.github/scripts/release.sh" github-release "${old_tag}"
 
 stale_fixture="${tmpdir}/stale.md"

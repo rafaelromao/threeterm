@@ -2993,7 +2993,7 @@ fn execute_handler(
 ///
 /// Both transports call this same function so the only difference between
 /// CLI and MCP is framing, parsing, and serialization — not the dispatch
-/// logic. On success the post-write `SnapshotView` is returned; on failure
+/// logic. On success the typed bracket commit view is returned; on failure
 /// a structured `DispatchError` carries the same diagnostic detail the
 /// CLI would have written to stderr.
 pub fn dispatch_bracket(
@@ -3003,7 +3003,7 @@ pub fn dispatch_bracket(
     width: f64,
     height: f64,
     thickness: f64,
-) -> Result<SnapshotView, DispatchError> {
+) -> Result<threeterm_host::BracketCommitView, DispatchError> {
     let host = Host::new();
     dispatch_bracket_with_host(&host, bundle, bracket_id, length, width, height, thickness)
 }
@@ -3284,8 +3284,8 @@ pub fn dispatch_registered_command(
                 "schema_version": schema.response_schema_version,
             }));
         }
-        let view = if command == BRACKET_COMMAND_ID {
-            dispatch_bracket_with_host(
+        if command == BRACKET_COMMAND_ID {
+            let view = dispatch_bracket_with_host(
                 host,
                 string_field("bundle_path")?,
                 string_field("bracket_id")?,
@@ -3293,8 +3293,10 @@ pub fn dispatch_registered_command(
                 number_field("width")?,
                 number_field("height")?,
                 number_field("thickness")?,
-            )?
-        } else {
+            )?;
+            return Ok(bracket_view_value(&view, schema.response_schema_version));
+        }
+        let view = {
             let transform = || -> Result<[f64; 3], DispatchError> {
                 let values = request
                     .get("transform")
@@ -3385,7 +3387,7 @@ fn dispatch_bracket_with_host(
     width: f64,
     height: f64,
     thickness: f64,
-) -> Result<SnapshotView, DispatchError> {
+) -> Result<threeterm_host::BracketCommitView, DispatchError> {
     let worker = OcctWorker::locate().map_err(|error| {
         DispatchError::Host(HostError::WorkerUnavailable {
             detail: error.to_string(),
@@ -4061,6 +4063,8 @@ fn emit_export(
                 "status": "ok",
                 "feature_id": feature_id,
                 "artifacts": view.artifacts,
+                "source_revision_id": view.source_snapshot.revision_hash,
+                "derived_artifacts": view.derived_artifacts,
                 "accepted_stale_last_valid_geometry": !view
                     .stale_last_valid_geometry_acceptance
                     .stale_features
@@ -4301,13 +4305,7 @@ fn emit_bracket(
     stderr: &mut dyn Write,
 ) -> i32 {
     match dispatch_bracket(bundle, bracket_id, length, width, height, thickness) {
-        Ok(view) => write_snapshot(
-            &view.feature_graph_hash,
-            &view.revision_hash,
-            BRACKET_RESPONSE_SCHEMA_VERSION,
-            stdout,
-            stderr,
-        ),
+        Ok(view) => write_bracket_view(&view, BRACKET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => match error {
             DispatchError::Host(host_error) => emit_host_error(&host_error, stderr),
             DispatchError::Validation(detail) => {
@@ -4321,6 +4319,46 @@ fn emit_bracket(
             ),
         },
     }
+}
+
+fn write_bracket_view(
+    view: &threeterm_host::BracketCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(stdout, &bracket_view_value(view, schema_version), stderr)
+}
+
+fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: &str) -> Value {
+    serde_json::json!({
+        "status": view.result.status,
+        "operation": Operation::Bracket.as_str(),
+        "feature_id": view.result.feature_id,
+        "request_id": view.result.request_id,
+        "source_snapshot": {
+            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+            "revision_hash": view.source_snapshot.revision_hash,
+        },
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "authoritative": true,
+        "artifact_kind": view.artifact.artifact_kind,
+        "artifact_name": view.artifact.artifact_name,
+        "brep_path": view.result.brep_path,
+        "brep_sha256": view.result.brep_sha256,
+        "brep_bytes": view.result.brep_bytes,
+        "worker_fingerprint": {
+            "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+            "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+            "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+        },
+        "derived_result": derived_result_metadata(
+            Some(&view.source_snapshot),
+            Some(&view.artifact),
+        ),
+        "schema_version": schema_version,
+    })
 }
 
 fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
@@ -5011,6 +5049,10 @@ fn write_extrude_view(
                 "worker_schema_version": view.worker_fingerprint.worker_schema_version,
                 "protocol_schema_version": view.worker_fingerprint.protocol_schema_version,
             },
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5034,6 +5076,10 @@ fn write_boolean_fuse_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5057,6 +5103,10 @@ fn write_fillet_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5080,6 +5130,10 @@ fn write_chamfer_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5103,6 +5157,10 @@ fn write_hole_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5126,6 +5184,10 @@ fn write_revolve_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5149,6 +5211,10 @@ fn write_mirror_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5172,6 +5238,10 @@ fn write_linear_pattern_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5195,6 +5265,10 @@ fn write_circular_pattern_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5218,6 +5292,10 @@ fn write_shell_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5241,6 +5319,10 @@ fn write_draft_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                view.source_snapshot.as_ref(),
+                view.artifact.as_ref(),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
@@ -5264,10 +5346,40 @@ fn write_loft_view(
             "brep_path": view.result.brep_path,
             "brep_sha256": view.result.brep_sha256,
             "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
             "schema_version": schema_version,
         }),
         stderr,
     )
+}
+
+fn derived_result_metadata(
+    source_snapshot: Option<&SnapshotView>,
+    artifact: Option<&threeterm_host::Layer1DerivedResult>,
+) -> Value {
+    let Some(artifact) = artifact else {
+        return Value::Null;
+    };
+    serde_json::json!({
+        "request_id": artifact.request_id,
+        "operation": artifact.operation,
+        "feature_id": artifact.feature_id,
+        "source_revision_id": source_snapshot
+            .map(|snapshot| snapshot.revision_hash.clone())
+            .unwrap_or_else(|| artifact.source_revision_id.clone()),
+        "worker_fingerprint": {
+            "worker_kind": artifact.worker_fingerprint.worker_kind,
+            "worker_schema_version": artifact.worker_fingerprint.worker_schema_version,
+            "protocol_schema_version": artifact.worker_fingerprint.protocol_schema_version,
+        },
+        "artifact_kind": artifact.artifact_kind,
+        "artifact_name": artifact.artifact_name,
+        "byte_count": artifact.byte_count,
+        "sha256": artifact.sha256,
+    })
 }
 
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {

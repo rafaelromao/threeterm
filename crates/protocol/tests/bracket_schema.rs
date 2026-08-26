@@ -136,7 +136,24 @@ fn bracket_response_schema_requires_three_identifier_keys() {
         .and_then(Value::as_array)
         .expect("response schema declares required fields");
     let required_keys: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
-    for key in ["feature_graph_hash", "revision_hash", "schema_version"] {
+    for key in [
+        "status",
+        "operation",
+        "feature_id",
+        "request_id",
+        "source_snapshot",
+        "feature_graph_hash",
+        "revision_hash",
+        "authoritative",
+        "artifact_kind",
+        "artifact_name",
+        "brep_path",
+        "brep_sha256",
+        "brep_bytes",
+        "worker_fingerprint",
+        "derived_result",
+        "schema_version",
+    ] {
         assert!(
             required_keys.contains(&key),
             "response schema must require {key:?}; required={required_keys:?}"
@@ -155,13 +172,47 @@ fn bracket_response_schema_requires_three_identifier_keys() {
 }
 
 #[test]
-fn bracket_response_schema_validator_accepts_a_snapshot_response() {
+fn bracket_response_schema_validator_accepts_a_derived_result_response() {
     let response = serde_json::json!({
+        "status": "ok",
+        "operation": "bracket",
+        "feature_id": "l-1",
+        "request_id": "request-1",
+        "source_snapshot": {
+            "feature_graph_hash": "f".repeat(64),
+            "revision_hash": "0".repeat(64)
+        },
         "feature_graph_hash": "f".repeat(64),
         "revision_hash": "0".repeat(64),
+        "authoritative": true,
+        "artifact_kind": "brep",
+        "artifact_name": "bracket-request-1.brep",
+        "brep_path": "/tmp/bracket.brep",
+        "brep_sha256": "1".repeat(64),
+        "brep_bytes": 10,
+        "worker_fingerprint": {
+            "worker_kind": "occt",
+            "worker_schema_version": "threeterm.workers.occt/1",
+            "protocol_schema_version": "threeterm.protocol/1"
+        },
+        "derived_result": {
+            "request_id": "request-1",
+            "operation": "bracket",
+            "feature_id": "l-1",
+            "source_revision_id": "0".repeat(64),
+            "worker_fingerprint": {
+                "worker_kind": "occt",
+                "worker_schema_version": "threeterm.workers.occt/1",
+                "protocol_schema_version": "threeterm.protocol/1"
+            },
+            "artifact_kind": "brep",
+            "artifact_name": "bracket-request-1.brep",
+            "byte_count": 10,
+            "sha256": "1".repeat(64)
+        },
         "schema_version": "threeterm.command.bracket.response/1"
     });
 
     validate(&BRACKET_RESPONSE_SCHEMA, &response)
-        .expect("a well-formed snapshot response must satisfy the schema");
+        .expect("a well-formed derived result response must satisfy the schema");
 }

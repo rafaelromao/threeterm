@@ -1146,14 +1146,15 @@ bool handle_bracket(const JsonParser::Value& request, std::string& error) {
     return status == "ok";
 }
 
-bool write_extrude_artifact(const JsonParser::Value& request, std::string& error) {
+bool write_staged_artifact(const JsonParser::Value& request,
+                           const std::string& operation,
+                           std::string& error) {
     const auto* binding = find_field(request, "artifact_request");
     if (binding == nullptr || binding->kind != JsonParser::ValueKind::Object) {
-        error = "staged extrude is missing artifact_request";
+        error = "staged OCCT request is missing artifact_request";
         return false;
     }
     const std::string request_id = get_string(request, "request_id");
-    const std::string operation = "extrude";
     const std::string feature_id = get_string(request, "feature_id");
     const std::string output_dir = get_string(request, "output_dir");
     const std::string output_filename = get_string(request, "output_filename");
@@ -1168,18 +1169,24 @@ bool write_extrude_artifact(const JsonParser::Value& request, std::string& error
     const std::string deterministic_settings_sha256 =
         get_string(*binding, "deterministic_settings_sha256");
 
-    if (request_id.empty() || operation != "extrude" || feature_id.empty() ||
+    const bool is_brep_operation = operation == "extrude" || operation == "bracket" ||
+        operation == "boolean_fuse" || operation == "fillet" || operation == "chamfer" ||
+        operation == "hole" || operation == "revolve" || operation == "mirror" ||
+        operation == "linear_pattern" || operation == "circular_pattern" ||
+        operation == "boolean_pattern" || operation == "shell" || operation == "draft" ||
+        operation == "loft";
+    if (request_id.empty() || !is_brep_operation || feature_id.empty() ||
         binding_request_id != request_id || binding_operation != operation ||
         binding_feature_id != feature_id || source_revision_id.empty() ||
         artifact_kind != "brep" || staging_name.empty() ||
         semantic_input_sha256.empty() || deterministic_settings_sha256.empty()) {
-        error = "staged extrude artifact_request identity is invalid";
+        error = "staged OCCT artifact_request identity is invalid";
         return false;
     }
     if (staging_name.find('/') != std::string::npos ||
         staging_name.find('\\') != std::string::npos ||
         output_filename != staging_name + ".partial") {
-        error = "staged extrude artifact location does not match the Host binding";
+        error = "staged OCCT artifact location does not match the Host binding";
         return false;
     }
 
@@ -1187,14 +1194,14 @@ bool write_extrude_artifact(const JsonParser::Value& request, std::string& error
         std::filesystem::path(output_dir) / output_filename;
     std::ifstream stream(output_path, std::ios::binary);
     if (!stream.is_open()) {
-        error = "staged extrude artifact could not be reopened";
+        error = "staged OCCT artifact could not be reopened";
         return false;
     }
     std::ostringstream bytes;
     bytes << stream.rdbuf();
     const std::string payload = bytes.str();
     if (payload.size() > kMaxArtifactBytes) {
-        error = "staged extrude artifact exceeds the byte bound";
+        error = "staged OCCT artifact exceeds the byte bound";
         return false;
     }
     const std::string digest = sha256_hex(payload);
@@ -3050,8 +3057,8 @@ int main() {
         return exit_code;
     }
 
-    if (command_id == "extrude" && find_field(*args, "artifact_request") != nullptr) {
-        if (!write_extrude_artifact(*args, error)) {
+    if (find_field(*args, "artifact_request") != nullptr) {
+        if (!write_staged_artifact(*args, command_id, error)) {
             write_failed(request_id, "request_malformed", error);
             write_stderr_line(error);
             return 2;

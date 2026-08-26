@@ -132,7 +132,7 @@ fn export_cli_writes_stl_3mf_and_step_for_a_fused_l_bracket() {
     let bundle = temp_root("bundle");
     let output = temp_root("output");
     l_bracket(bin, &bundle);
-    run(
+    let response = run_value(
         bin,
         &[
             "--machine",
@@ -147,6 +147,9 @@ fn export_cli_writes_stl_3mf_and_step_for_a_fused_l_bracket() {
             output.to_str().unwrap(),
         ],
     );
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["derived_artifacts"].as_array().unwrap().len(), 3);
+    assert_eq!(response["source_revision_id"].as_str().unwrap().len(), 64);
 
     let stl = fs::read(output.join("l-bracket.stl")).unwrap();
     let three_mf = fs::read(output.join("l-bracket.3mf")).unwrap();

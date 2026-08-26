@@ -3820,73 +3820,37 @@ impl Host {
                     .to_string(),
             });
         }
-        let prior_view = SnapshotView::from(&loaded);
-        let prior_manifest = read_bundle_file(&bundle_root(root), "manifest.json")?;
-        let prior_log = read_bundle_file(&bundle_root(root), "transactions.log")?;
-
-        let brep_dir = bundle_root(root).join(BREP_SUBDIR);
-        if let Err(detail) = ensure_dir(&brep_dir) {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepIo { detail });
-        }
-        let target = brep_dir.join(format!("{feature_id}.brep"));
-        // Preserve any prior committed BREP for this feature id so a
-        // mid-commit failure doesn't orphan the canonical log entry.
-        let prior_brep = if target.is_file() {
-            let mut buffer = Vec::new();
-            std::io::Read::read_to_end(
-                &mut fs::File::open(&target).map_err(|error| HostError::BrepIo {
-                    detail: format!("open prior BREP failed: {error}"),
-                })?,
-                &mut buffer,
-            )
-            .map_err(|error| HostError::BrepIo {
-                detail: format!("read prior BREP failed: {error}"),
-            })?;
-            Some(buffer)
-        } else {
-            None
+        let brep_bytes = match read_brep_verified(brep_path, expected) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                cleanup_worker_stage(root, brep_path);
+                self.current.replace(Some(loaded));
+                return Err(HostError::BrepIo { detail });
+            }
         };
-        if let Err(detail) = copy_brep_verified(brep_path, &target, expected) {
-            cleanup_worker_stage(root, brep_path);
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepIo { detail });
-        }
-
         let kind = format!("brep:{feature_id}");
         let updated_result = match expected_revision {
-            Some(expected_revision) => {
-                bundle.append_feature_if_revision(feature_id, &kind, expected_revision)
-            }
-            None => bundle.append_feature(feature_id, &kind),
+            Some(expected_revision) => bundle.append_feature_with_brep_if_revision(
+                feature_id,
+                &kind,
+                expected_revision,
+                &brep_bytes,
+            ),
+            None => bundle.append_feature_with_brep_if_revision(
+                feature_id,
+                &kind,
+                &loaded.manifest.revision_hash,
+                &brep_bytes,
+            ),
         };
         let updated = match updated_result {
             Ok(loaded) => loaded,
             Err(error) => {
-                if let (Ok(manifest), Ok(log)) = (
-                    read_bundle_file(&bundle_root(root), "manifest.json"),
-                    read_bundle_file(&bundle_root(root), "transactions.log"),
-                ) && (manifest != prior_manifest || log != prior_log)
-                {
-                    if let Ok(committed) = bundle.open() {
-                        self.current.replace(Some(committed));
-                    }
-                    return Err(HostError::from(error));
-                }
-                // Restore the prior BREP bytes (or remove the new file if
-                // there was no prior) and verify the canonical state
-                // survived. The prior manifest and log are untouched
-                // because we never reached a successful append.
-                restore_brep(&target, prior_brep.as_deref());
                 cleanup_worker_stage(root, brep_path);
-                // Fail-closed: if the canonical state was not preserved
-                // by the append, surface the persistence error so the
-                // diagnostic taxonomy sees the failure.
                 self.current.replace(Some(loaded));
                 return Err(HostError::from(error));
             }
         };
-        let _ = prior_view;
         let view = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
         cleanup_worker_stage(root, brep_path);
@@ -5066,26 +5030,69 @@ fn bundle_root(root: &Path) -> PathBuf {
     previous
 }
 
-fn read_bundle_file(root: &Path, name: &str) -> Result<Vec<u8>, HostError> {
-    let path = root.join(name);
-    let mut file = fs::File::open(&path).map_err(|error| HostError::BrepIo {
-        detail: format!("could not read {}: {}", path.display(), error),
-    })?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)
-        .map_err(|error| HostError::BrepIo {
-            detail: format!("could not read {}: {}", path.display(), error),
-        })?;
-    Ok(buffer)
-}
-
-fn ensure_dir(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("create_dir_all failed: {error}"))
-}
-
 #[cfg(test)]
 fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
     copy_brep_verified(source, target, None)
+}
+
+fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(0o400000);
+    let mut reader = options
+        .open(source)
+        .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
+    let opened_metadata = reader
+        .metadata()
+        .map_err(|error| format!("stat opened BREP {} failed: {error}", source.display()))?;
+    let verified_metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("stat source BREP {} failed: {error}", source.display()))?;
+    use std::os::unix::fs::MetadataExt;
+    if opened_metadata.dev() != verified_metadata.dev()
+        || opened_metadata.ino() != verified_metadata.ino()
+    {
+        return Err(format!(
+            "source BREP {} changed identity between validation and promotion",
+            source.display()
+        ));
+    }
+    let artifact_limit = threeterm_protocol::worker::MAX_ARTIFACT_BYTES as u64;
+    if opened_metadata.len() > artifact_limit {
+        return Err(format!(
+            "source BREP {} exceeds the {artifact_limit} byte bound",
+            source.display()
+        ));
+    }
+    let mut buffer = [0u8; 8 * 1024];
+    let mut content = Vec::new();
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("read source BREP failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        if content.len() + read > artifact_limit as usize {
+            return Err(format!(
+                "source BREP {} exceeds the {artifact_limit} byte bound",
+                source.display()
+            ));
+        }
+        content.extend_from_slice(&buffer[..read]);
+    }
+    if let Some((expected_bytes, expected_sha256)) = expected {
+        let actual_sha256 = format!("{:x}", Sha256::digest(&content));
+        if content.len() != expected_bytes || actual_sha256 != expected_sha256 {
+            return Err(format!(
+                "source BREP content does not match the worker advertisement: bytes={} expected_bytes={} sha256={} expected_sha256={}",
+                content.len(),
+                expected_bytes,
+                actual_sha256,
+                expected_sha256
+            ));
+        }
+    }
+    Ok(content)
 }
 
 fn copy_brep_verified(
@@ -5227,37 +5234,6 @@ struct WorkerStageCleanup<'a> {
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
-    }
-}
-
-fn restore_brep(target: &Path, prior_bytes: Option<&[u8]>) {
-    match prior_bytes {
-        Some(bytes) => {
-            let Some(file_name) = target.file_name() else {
-                return;
-            };
-            let temporary = target.with_file_name(format!(
-                ".{}.restore-tmp-{}",
-                file_name.to_string_lossy(),
-                std::process::id()
-            ));
-            if let Ok(mut writer) = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-            {
-                if writer.write_all(bytes).is_ok()
-                    && writer.sync_all().is_ok()
-                    && fs::rename(&temporary, target).is_ok()
-                {
-                    return;
-                }
-                let _ = fs::remove_file(&temporary);
-            }
-        }
-        None => {
-            let _ = fs::remove_file(target);
-        }
     }
 }
 

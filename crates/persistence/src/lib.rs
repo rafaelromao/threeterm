@@ -1444,15 +1444,22 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
-        let allow_existing_bracket_edit = idempotency_key.is_some()
+        let allow_existing_bracket_edit = if idempotency_key.is_some()
             && source_brep.is_some()
             && entries.len() == 1
             && entries[0].1.starts_with("bracket:")
-            || history_event.is_some()
-                && brep.is_some()
-                && entries
-                    .first()
-                    .is_some_and(|(_, kind)| kind.starts_with("bracket:"));
+        {
+            Some(entries[0].0)
+        } else if history_event.is_some()
+            && let Some((brep_feature_id, _)) = brep
+            && entries.first().is_some_and(|(feature_id, kind)| {
+                *feature_id == brep_feature_id && kind.starts_with("bracket:")
+            })
+        {
+            Some(brep_feature_id)
+        } else {
+            None
+        };
         validate_feature_entries(
             &loaded.graph,
             &loaded.log,
@@ -1772,7 +1779,7 @@ fn validate_feature_entries(
     graph: &FeatureGraph,
     log: &TransactionLog,
     entries: &[(&str, &str)],
-    allow_existing_bracket_edit: bool,
+    allow_existing_bracket_edit: Option<&str>,
     allow_existing_sketch_update: bool,
 ) -> Result<(), BundleError> {
     let mut ids = std::collections::BTreeSet::new();
@@ -1796,7 +1803,8 @@ fn validate_feature_entries(
             let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
                 && allow_existing_sketch_update
                 && existing_kind == Some("sketch".to_string());
-            if !allow_existing_bracket_edit && !sketch_update {
+            let bracket_update = allow_existing_bracket_edit == Some(*feature_id);
+            if !bracket_update && !sketch_update {
                 return Err(BundleError::Invalid(format!(
                     "feature ID {feature_id:?} already exists"
                 )));

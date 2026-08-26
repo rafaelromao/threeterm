@@ -425,6 +425,49 @@ fn historically_used_feature_ids_are_rejected_without_replacement_authorization(
 }
 
 #[test]
+fn bracket_replacement_does_not_authorize_other_duplicate_entries() {
+    let root = temp_root("bracket-duplicate-entry");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let empty_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision(
+            "bracket",
+            "bracket:length=10.00000000000000000",
+            &empty_revision,
+            b"prior-brep",
+        )
+        .expect("bracket publishes");
+    let prior = bundle
+        .append_feature("bracket-plate", "plate")
+        .expect("plate publishes");
+    let event = HistoryState::default()
+        .initialize_l_bracket("bracket", 10.0, 5.0, 3.0, 1.0)
+        .expect("history event creates");
+
+    let duplicate = bundle.append_features_with_brep_if_revision_and_history(
+        &[
+            ("bracket", "bracket:length=20.00000000000000000"),
+            ("bracket-plate", "plate"),
+        ],
+        "bracket",
+        prior.revision_hash_hex(),
+        b"replacement-brep",
+        &event,
+    );
+    assert!(matches!(duplicate, Err(BundleError::Invalid(_))));
+    assert_eq!(
+        bundle.open().unwrap().revision_hash_hex(),
+        prior.revision_hash_hex()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn loading_rejects_tampered_brep_provenance_metadata() {
     let root = temp_root("tampered-brep-metadata");
     let bundle = Bundle::create(&root).expect("bundle creates");

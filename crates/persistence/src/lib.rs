@@ -287,6 +287,12 @@ pub struct LogEntry {
     pub feature_id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_byte_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload: Option<String>,
@@ -300,6 +306,9 @@ impl LogEntry {
             previous_digest: previous_digest.to_string(),
             feature_id: feature_id.to_string(),
             kind: kind.to_string(),
+            brep_path: None,
+            brep_byte_count: None,
+            brep_sha256: None,
             idempotency_key: None,
             idempotency_payload: None,
             terminal_digest: String::new(),
@@ -311,6 +320,14 @@ impl LogEntry {
     fn with_idempotency_key(mut self, key: &str, payload: Option<&str>) -> Self {
         self.idempotency_key = Some(key.to_string());
         self.idempotency_payload = payload.map(str::to_string);
+        self.terminal_digest = self.recomputed_digest();
+        self
+    }
+
+    fn with_brep(mut self, bytes: &[u8]) -> Self {
+        self.brep_path = Some(format!("brep/{}.brep", self.feature_id));
+        self.brep_byte_count = Some(bytes.len() as u64);
+        self.brep_sha256 = Some(hash(bytes));
         self.terminal_digest = self.recomputed_digest();
         self
     }
@@ -366,6 +383,24 @@ impl TransactionLog {
             LogEntry::new(self.entries.len(), &previous, feature_id, kind)
                 .with_idempotency_key(idempotency_key, idempotency_payload),
         );
+    }
+
+    fn append_feature_with_brep(
+        &mut self,
+        feature_id: &str,
+        kind: &str,
+        brep_bytes: &[u8],
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+    ) {
+        let previous = self.terminal_digest_hex().to_string();
+        let entry =
+            LogEntry::new(self.entries.len(), &previous, feature_id, kind).with_brep(brep_bytes);
+        let entry = match idempotency_key {
+            Some(key) => entry.with_idempotency_key(key, idempotency_payload),
+            None => entry,
+        };
+        self.entries.push(entry);
     }
 
     pub fn terminal_digest_hex(&self) -> &str {
@@ -859,6 +894,7 @@ impl Bundle {
         {
             return Err(BundleError::LogDigestMismatch);
         }
+        verify_brep_provenance(&self.root, &log)?;
 
         let generation = ProjectGeneration {
             id: manifest.generation_id.clone(),
@@ -1283,6 +1319,25 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
+        validate_feature_entries(
+            &loaded.graph,
+            entries,
+            idempotency_key.is_some()
+                || source_brep.is_some()
+                || (brep.is_some() && entries.iter().all(|(_, kind)| !kind.starts_with("brep:")))
+                || entries
+                    .iter()
+                    .all(|(_, kind)| kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)),
+        )?;
+        if let Some((brep_feature_id, _)) = brep
+            && !entries
+                .iter()
+                .any(|(feature_id, _)| *feature_id == brep_feature_id)
+        {
+            return Err(BundleError::Invalid(
+                "BREP feature ID is not part of the transaction".to_string(),
+            ));
+        }
         if let Some((feature_id, expected_sha256)) = source_brep {
             let source = self.root.join("brep").join(format!("{feature_id}.brep"));
             let actual = fs::read(&source)
@@ -1322,12 +1377,30 @@ impl Bundle {
             };
             if graph_changed {
                 if let Some(idempotency_key) = idempotency_key {
-                    loaded.log.append_feature_with_idempotency(
-                        feature_id,
-                        kind,
-                        idempotency_key,
-                        idempotency_payload,
-                    );
+                    if let Some((brep_feature_id, brep_bytes)) = brep
+                        && brep_feature_id == *feature_id
+                    {
+                        loaded.log.append_feature_with_brep(
+                            feature_id,
+                            kind,
+                            brep_bytes,
+                            Some(idempotency_key),
+                            idempotency_payload,
+                        );
+                    } else {
+                        loaded.log.append_feature_with_idempotency(
+                            feature_id,
+                            kind,
+                            idempotency_key,
+                            idempotency_payload,
+                        );
+                    }
+                } else if let Some((brep_feature_id, brep_bytes)) = brep
+                    && brep_feature_id == *feature_id
+                {
+                    loaded
+                        .log
+                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None);
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }
@@ -1551,6 +1624,109 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
     let raw = fs::read(path.join(MANIFEST_FILENAME)).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     value.get("schema_version")?.as_str().map(str::to_string)
+}
+
+fn validate_feature_entries(
+    graph: &FeatureGraph,
+    entries: &[(&str, &str)],
+    allow_existing: bool,
+) -> Result<(), BundleError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for (feature_id, kind) in entries {
+        Feature::new(*feature_id, *kind)
+            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+        if !ids.insert(*feature_id) {
+            return Err(BundleError::Invalid(format!(
+                "feature ID {feature_id:?} is duplicated in one transaction"
+            )));
+        }
+        if let Some(existing) = graph
+            .features()
+            .find(|feature| feature.id.as_str() == *feature_id)
+        {
+            let effective_kind = if kind.starts_with(SKETCH_COMMAND_KIND_PREFIX) {
+                "sketch"
+            } else {
+                *kind
+            };
+            if !allow_existing
+                || (!kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
+                    && existing.kind == effective_kind)
+            {
+                return Err(BundleError::Invalid(format!(
+                    "feature ID {feature_id:?} already exists"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {
+    let mut latest = std::collections::BTreeMap::new();
+    for entry in log.entries() {
+        if entry.brep_path.is_some()
+            || entry.brep_byte_count.is_some()
+            || entry.brep_sha256.is_some()
+            || entry.kind.starts_with("brep:")
+        {
+            latest.insert(entry.feature_id.as_str(), entry);
+        }
+    }
+    for entry in latest.into_values() {
+        let Some(path) = entry.brep_path.as_deref() else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP transaction is missing its path".to_string(),
+            });
+        };
+        let Some(expected_bytes) = entry.brep_byte_count else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path is missing its byte count".to_string(),
+            });
+        };
+        let Some(expected_sha256) = entry.brep_sha256.as_deref() else {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path is missing its digest".to_string(),
+            });
+        };
+        let expected_path = format!("brep/{}.brep", entry.feature_id);
+        if path != expected_path {
+            return Err(BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: "BREP path does not match its feature ID".to_string(),
+            });
+        }
+        let path = root.join(path);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            BundleError::Invalid(format!(
+                "promoted BREP for {} could not be read: {error}",
+                entry.feature_id
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(BundleError::Invalid(format!(
+                "promoted BREP for {} is not a regular file",
+                entry.feature_id
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            BundleError::Invalid(format!(
+                "promoted BREP for {} could not be read: {error}",
+                entry.feature_id
+            ))
+        })?;
+        let actual_sha256 = hash(&bytes);
+        if bytes.len() as u64 != expected_bytes || actual_sha256 != expected_sha256 {
+            return Err(BundleError::Invalid(format!(
+                "promoted BREP for {} failed integrity verification",
+                entry.feature_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Orchestrated prior-epoch load: sealed backup → deterministic migration →
@@ -2436,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    fn append_then_verified_reopen_preserves_graph_revision_and_entry_count() {
+    fn duplicate_append_is_rejected_without_advancing_the_revision() {
         let root = temp_root("append");
         let bundle =
             Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
@@ -2447,8 +2623,8 @@ mod tests {
 
         let duplicate = bundle
             .append_feature("box-1", "box")
-            .expect("duplicate saves");
-        assert_eq!(duplicate.log.len(), 1);
+            .expect_err("duplicate feature IDs are rejected");
+        assert!(matches!(duplicate, BundleError::Invalid(_)));
 
         let loaded = bundle.open().expect("bundle reopens");
         assert_eq!(loaded.log.len(), 1);

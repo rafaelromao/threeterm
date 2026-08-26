@@ -234,3 +234,69 @@ fn brep_parent_sync_failure_reconciles_to_the_selected_generation() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn duplicate_brep_feature_id_is_rejected_before_replacing_the_generation() {
+    let root = temp_root("duplicate-feature");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let initial = bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("initial promotion succeeds");
+    let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let before_log = fs::read(root.join("transactions.log")).expect("log reads");
+    let before_brep = fs::read(root.join("brep/solid-1.brep")).expect("BREP reads");
+
+    let duplicate = bundle.append_feature_with_brep_if_revision(
+        "solid-1",
+        "brep:solid-1",
+        initial.revision_hash_hex(),
+        b"replacement-brep",
+    );
+    assert!(matches!(duplicate, Err(BundleError::Invalid(_))));
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        before_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+    assert_eq!(
+        fs::read(root.join("brep/solid-1.brep")).unwrap(),
+        before_brep
+    );
+    assert_eq!(
+        bundle.open().unwrap().revision_hash_hex(),
+        initial.revision_hash_hex()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn loading_rejects_tampered_promoted_brep_bytes() {
+    let root = temp_root("tampered-brep");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let initial = bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("promotion succeeds");
+    assert_eq!(
+        initial.revision_hash_hex(),
+        bundle.open().unwrap().revision_hash_hex()
+    );
+
+    fs::write(root.join("brep/solid-1.brep"), b"tampered-brep").expect("BREP tampers");
+    assert!(
+        bundle.open().is_err(),
+        "tampered BREP must fail closed on load"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}

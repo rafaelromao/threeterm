@@ -211,12 +211,18 @@ fn worker_that_ignores_cancel_is_force_terminated_after_grace() {
     let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
     let mut supervisor = Supervisor::new(Duration::from_millis(300), Box::new(host), None);
 
+    let started = std::time::Instant::now();
     let outcome = supervisor.cancel("req-1", "user pressed stop");
+    let elapsed = started.elapsed();
     let SupervisorOutcome::ForceTerminated { record } = outcome else {
         panic!("expected ForceTerminated; got {outcome:?}");
     };
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
     assert_eq!(record.exit_signal, Some(9), "SIGKILL after grace");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "forced cancellation must remain bounded; took {elapsed:?}"
+    );
 }
 
 #[test]

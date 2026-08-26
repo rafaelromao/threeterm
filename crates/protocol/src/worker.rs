@@ -236,9 +236,7 @@ pub trait WorkerHost {
     /// Implementations terminate/reap the worker, settle bounded stream
     /// readers, and reject buffered or trailing protocol data.
     fn finish_terminal(&mut self) -> Result<(), WorkerError> {
-        // In-process test transports have no process to reap. Production
-        // subprocess transports override this with real cleanup.
-        Ok(())
+        Err(WorkerError::TerminationUnsupported)
     }
 
     /// Returns the actual Linux signal the worker process exited by, if

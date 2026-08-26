@@ -62,6 +62,10 @@ impl WorkerHost for FakeWorker {
             .push((request_id.to_string(), reason.to_string()));
         Ok(())
     }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        Ok(())
+    }
 }
 
 fn sample_request() -> Request {
@@ -174,6 +178,10 @@ impl WorkerHost for PipeHost {
     }
 
     fn cancel(&mut self, _request_id: &str, _reason: &str) -> Result<(), WorkerError> {
+        Ok(())
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
         Ok(())
     }
 }
@@ -617,6 +625,10 @@ impl WorkerHost for CapturingFake {
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
     }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
+    }
 }
 
 #[test]
@@ -676,6 +688,10 @@ impl WorkerHost for CancelLoggingWorker {
             .expect("cancel log mutex")
             .push((request_id.to_string(), reason.to_string()));
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 }
 
@@ -748,6 +764,10 @@ impl WorkerHost for SignalReportingWorker {
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 
     fn exit_signal(&mut self) -> Option<i32> {
@@ -1231,6 +1251,10 @@ impl WorkerHost for ExitStatusWorker {
 
     fn cancel(&mut self, request_id: &str, reason: &str) -> Result<(), WorkerError> {
         self.inner.cancel(request_id, reason)
+    }
+
+    fn finish_terminal(&mut self) -> Result<(), WorkerError> {
+        self.inner.finish_terminal()
     }
 
     fn exit_signal(&mut self) -> Option<i32> {

@@ -333,6 +333,48 @@ fn loading_rejects_symlinked_promoted_brep() {
 }
 
 #[test]
+fn loading_rejects_tampered_brep_provenance_metadata() {
+    let root = temp_root("tampered-brep-metadata");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    bundle
+        .append_feature_with_brep_if_revision(
+            "solid-1",
+            "brep:solid-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"prior-brep",
+        )
+        .expect("promotion succeeds");
+
+    let log_path = root.join("transactions.log");
+    let log = fs::read_to_string(&log_path).expect("log reads");
+    let tampered = log.replace("\"brep_byte_count\":10", "\"brep_byte_count\":11");
+    assert_ne!(tampered, log, "test must change authenticated metadata");
+    fs::write(log_path, tampered).expect("tampered log writes");
+
+    assert!(
+        bundle.open().is_err(),
+        "tampered BREP provenance must fail closed on load"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_brep_kind_without_provenance_remains_loadable() {
+    let root = temp_root("legacy-brep-kind");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    bundle
+        .append_feature("legacy", "brep:legacy")
+        .expect("legacy feature publishes");
+    fs::create_dir_all(root.join("brep")).expect("BREP directory creates");
+    fs::write(root.join("brep/legacy.brep"), b"legacy-brep").expect("legacy BREP writes");
+
+    assert!(bundle.open().is_ok(), "legacy BREP entries remain loadable");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn new_brep_feature_rejects_duplicate_ids_without_replacing_state() {
     let root = temp_root("duplicate-new-feature");
     let bundle = Bundle::create(&root).expect("bundle creates");

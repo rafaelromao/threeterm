@@ -1,5 +1,7 @@
 use threeterm_domain::{Feature, FeatureGraph};
-use threeterm_viewport::{CameraState, ProtocolNeutralViewport, ViewportRequest, ViewportScene};
+use threeterm_viewport::{
+    CameraState, ProtocolNeutralViewport, SceneSolid, SceneTriangle, ViewportRequest, ViewportScene,
+};
 
 #[test]
 fn canonical_graph_projection_produces_revision_bound_rgb_frames() {
@@ -70,4 +72,36 @@ fn invalid_viewport_dimensions_are_structured_without_scene_mutation() {
     assert_eq!(diagnostic.code.as_str(), "invalid_dimensions");
     assert_eq!(diagnostic.source_revision, "revision-empty");
     assert_eq!(scene.feature_count(), 0);
+}
+
+#[test]
+fn tessellated_solid_produces_filled_pixels_with_feature_ownership() {
+    let mut graph = FeatureGraph::empty();
+    graph.add_feature(Feature::new("loft", "brep:loft").expect("feature is valid"));
+    let scene = ViewportScene::from_feature_graph("revision-solid", &graph, Some("loft".into()))
+        .with_solid(SceneSolid::new(
+            "loft",
+            vec![
+                SceneTriangle {
+                    vertices: [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+                },
+                SceneTriangle {
+                    vertices: [[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]],
+                },
+            ],
+        ));
+
+    let frame = ProtocolNeutralViewport::project(
+        &scene,
+        ViewportRequest::new("revision-solid", 1, 64, 48, CameraState::default()),
+    )
+    .expect("tessellated solid projection succeeds");
+
+    assert!(
+        frame
+            .rgb
+            .chunks_exact(3)
+            .any(|pixel| pixel != [18, 22, 31] && pixel != [36, 43, 56]),
+        "the solid must contribute pixels distinct from the background and grid"
+    );
 }

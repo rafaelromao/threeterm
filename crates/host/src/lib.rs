@@ -29,8 +29,11 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
+use threeterm_viewport::{SceneSolid, SceneTriangle, ViewportScene};
 
 pub const BREP_SUBDIR: &str = "brep";
+const MAX_VIEWPORT_TESSELLATION_BYTES: u64 = 64 * 1024 * 1024;
+static TESSELLATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct ThreeMfBody {
     label: String,
@@ -1807,6 +1810,62 @@ impl Host {
             graph: loaded.graph.clone(),
             layer1_results,
         })
+    }
+
+    /// Build the production viewport scene from the committed BREP artifacts
+    /// in the currently loaded canonical generation.
+    pub fn presentation_viewport_scene(&self) -> Result<ViewportScene, HostError> {
+        let current = self
+            .current
+            .borrow()
+            .clone()
+            .ok_or_else(|| HostError::Validation {
+                detail: "host has no canonical presentation snapshot".to_string(),
+            })?;
+        let revision = current.revision_hash_hex().to_string();
+        let root = current.canonical_root.clone();
+        let mut scene = ViewportScene::from_feature_graph(revision.clone(), &current.graph, None);
+        let stage = std::env::temp_dir().join(format!(
+            "threeterm-viewport-tessellation-{}-{}",
+            std::process::id(),
+            TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create viewport tessellation stage failed: {error}"),
+        })?;
+        let result = (|| {
+            for feature in current.graph.features() {
+                if !is_geometric_feature_kind(&feature.kind) {
+                    continue;
+                }
+                let feature_id = feature.id.as_str();
+                let brep = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+                if !brep.is_file() {
+                    return Err(HostError::BrepFileMissing { path: brep });
+                }
+                let worker = OcctWorker::locate()
+                    .map_err(HostError::from)?
+                    .with_revision_id(revision.clone());
+                let request =
+                    ExportRequest::new(format!("viewport-tessellation-{feature_id}"), brep, 0.1)
+                        .with_output_path(&stage, format!("{feature_id}.stl"))
+                        .with_feature_id(feature_id);
+                let exported = worker.export(&request).map_err(HostError::from)?;
+                if !exported.is_success() || !exported.brep_path.is_file() {
+                    return Err(HostError::BrepInvalid {
+                        request_id: Some(request.request_id),
+                        detail: format!(
+                            "viewport tessellation did not produce a mesh: {feature_id}"
+                        ),
+                    });
+                }
+                let triangles = parse_ascii_stl(&exported.brep_path, feature_id)?;
+                scene = scene.with_solid(SceneSolid::new(feature_id, triangles));
+            }
+            Ok(scene)
+        })();
+        let _ = fs::remove_dir_all(&stage);
+        result
     }
 
     /// Open a transient command draft against the current canonical source.
@@ -4615,6 +4674,69 @@ fn l_bracket_feature_role(feature_id: &str) -> Option<(&str, &str)> {
     None
 }
 
+fn is_geometric_feature_kind(kind: &str) -> bool {
+    kind.starts_with("brep:") || kind.starts_with("bracket:")
+}
+
+fn parse_ascii_stl(path: &Path, feature_id: &str) -> Result<Vec<SceneTriangle>, HostError> {
+    let metadata = fs::metadata(path).map_err(|error| HostError::BrepIo {
+        detail: format!("read viewport tessellation metadata failed: {error}"),
+    })?;
+    if metadata.len() > MAX_VIEWPORT_TESSELLATION_BYTES {
+        return Err(HostError::BrepInvalid {
+            request_id: Some(format!("viewport-tessellation-{feature_id}")),
+            detail: "viewport tessellation exceeds the bounded ASCII STL size".to_string(),
+        });
+    }
+    let bytes = fs::read(path).map_err(|error| HostError::BrepIo {
+        detail: format!("read viewport tessellation failed: {error}"),
+    })?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| HostError::BrepInvalid {
+        request_id: Some(format!("viewport-tessellation-{feature_id}")),
+        detail: format!("viewport tessellation is not ASCII STL: {error}"),
+    })?;
+    let mut vertices = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(values) = trimmed.strip_prefix("vertex") else {
+            continue;
+        };
+        let values: Vec<_> = values.split_whitespace().collect();
+        if values.len() != 3 {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: "viewport tessellation vertex must contain three coordinates".to_string(),
+            });
+        }
+        let mut vertex = [0.0_f64; 3];
+        for (index, value) in values.iter().enumerate() {
+            vertex[index] = value.parse().map_err(|error| HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: format!("viewport tessellation coordinate is invalid: {error}"),
+            })?;
+        }
+        if vertex.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(format!("viewport-tessellation-{feature_id}")),
+                detail: "viewport tessellation contains a non-finite coordinate".to_string(),
+            });
+        }
+        vertices.push(vertex);
+    }
+    if vertices.is_empty() || !vertices.len().is_multiple_of(3) {
+        return Err(HostError::BrepInvalid {
+            request_id: Some(format!("viewport-tessellation-{feature_id}")),
+            detail: "viewport tessellation must contain complete non-empty triangles".to_string(),
+        });
+    }
+    Ok(vertices
+        .chunks_exact(3)
+        .map(|vertices| SceneTriangle {
+            vertices: [vertices[0], vertices[1], vertices[2]],
+        })
+        .collect())
+}
+
 pub fn stale_last_valid_geometry_for_export(
     history: &HistoryState,
     export_feature_id: &str,
@@ -5107,6 +5229,41 @@ mod tests {
                 .expect("clock is after epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn viewport_scene_requires_the_committed_brep_for_geometric_records() {
+        let root = temp_root("viewport-missing-brep");
+        Bundle::create(&root)
+            .expect("bundle creates")
+            .append_feature("lofted", "brep:lofted")
+            .expect("geometric feature appends");
+        let host = Host::new();
+        host.load(&root).expect("bundle loads");
+
+        assert!(matches!(
+            host.presentation_viewport_scene(),
+            Err(HostError::BrepFileMissing { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn viewport_stl_parser_rejects_incomplete_triangle_data() {
+        let root = temp_root("viewport-malformed-stl");
+        fs::create_dir_all(&root).expect("stage creates");
+        let path = root.join("malformed.stl");
+        fs::write(
+            &path,
+            "solid malformed\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex 1 0 0\n    endloop\n  endfacet\nendsolid malformed\n",
+        )
+        .expect("malformed STL writes");
+
+        assert!(matches!(
+            parse_ascii_stl(&path, "lofted"),
+            Err(HostError::BrepInvalid { .. })
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

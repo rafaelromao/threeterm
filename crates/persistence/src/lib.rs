@@ -956,6 +956,7 @@ impl Bundle {
                 None,
                 false,
                 true,
+                false,
             )
         })
     }
@@ -999,6 +1000,7 @@ impl Bundle {
                 None,
                 None,
                 Some(fit),
+                false,
                 false,
                 false,
             )
@@ -1158,6 +1160,7 @@ impl Bundle {
                 None,
                 true,
                 false,
+                false,
             )
         })
     }
@@ -1182,6 +1185,7 @@ impl Bundle {
                 None,
                 None,
                 true,
+                false,
                 false,
             )
         })
@@ -1318,6 +1322,46 @@ impl Bundle {
         })
     }
 
+    /// Replace an existing parameterized bracket only through its explicit
+    /// draft-edit authorization. Ordinary BREP promotions remain append-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency key".to_string(),
+            ));
+        };
+        let Some(idempotency_payload) = idempotency_payload else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency payload".to_string(),
+            ));
+        };
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                Some((feature_id, expected_source_sha256)),
+                Some(idempotency_key),
+                Some(idempotency_payload),
+                None,
+                None,
+                false,
+                false,
+                true,
+            )
+        })
+    }
+
     /// Look up a previously published transaction by its durable idempotency
     /// key while holding the same bundle lock used by promotion.
     pub fn find_idempotency_key(
@@ -1391,6 +1435,7 @@ impl Bundle {
             None,
             false,
             false,
+            false,
         )
     }
 
@@ -1407,6 +1452,7 @@ impl Bundle {
         fit_dimension: Option<&FitDimension>,
         reject_existing_brep: bool,
         allow_existing_sketch_update: bool,
+        allow_existing_bracket_edit: bool,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1444,8 +1490,7 @@ impl Bundle {
                 loaded.revision_hash_hex()
             )));
         }
-        let allow_existing_bracket_edit = if idempotency_key.is_some()
-            && source_brep.is_some()
+        let allow_existing_bracket_edit = if allow_existing_bracket_edit
             && entries.len() == 1
             && entries[0].1.starts_with("bracket:")
         {

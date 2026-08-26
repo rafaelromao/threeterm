@@ -30,7 +30,7 @@ fn revision_guarded_brep_promotion_publishes_log_and_bytes_together() {
         .expect("initial promotion succeeds");
     let before = fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads");
     let committed = bundle
-        .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
             "l-bracket",
             "bracket:length=110.00000000000000000;thickness=5.00000000000000000",
             initial.revision_hash_hex(),
@@ -81,7 +81,7 @@ fn parameterized_idempotency_retries_only_the_same_payload() {
         )
         .expect("initial promotion succeeds");
     let committed = bundle
-        .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
             "l-bracket",
             "bracket:length=110.00000000000000000;thickness=5.00000000000000000",
             initial.revision_hash_hex(),
@@ -92,7 +92,7 @@ fn parameterized_idempotency_retries_only_the_same_payload() {
         )
         .expect("parameterized promotion succeeds");
     let retry = bundle
-        .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
             "l-bracket",
             "bracket:length=110.00000000000000000;thickness=5.00000000000000000",
             initial.revision_hash_hex(),
@@ -105,7 +105,7 @@ fn parameterized_idempotency_retries_only_the_same_payload() {
     assert_eq!(retry.revision_hash_hex(), committed.revision_hash_hex());
 
     let conflict = bundle
-        .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+        .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
             "l-bracket",
             "bracket:length=120.00000000000000000;thickness=5.00000000000000000",
             initial.revision_hash_hex(),

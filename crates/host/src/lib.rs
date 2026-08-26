@@ -3518,7 +3518,7 @@ impl Host {
         let bundle = Bundle::at(root);
         let updated = match source_brep_sha256 {
             Some(source_brep_sha256) => bundle
-                .append_feature_with_brep_if_revision_and_source_and_idempotency_payload(
+                .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
                     feature_id,
                     kind,
                     expected_revision,

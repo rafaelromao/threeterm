@@ -20,7 +20,7 @@ use threeterm_occt_worker::{
     CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
     FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, Operation, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{
     Bundle, BundleError, LoadPolicy, LoadedBundle, load, load_with_policy, previous_generation_path,
@@ -4403,38 +4403,6 @@ impl Host {
         self.current.replace(Some(updated));
         cleanup_worker_stage(root, brep_path);
         Ok(view)
-    }
-
-    fn validate_worker_result_artifact(
-        root: &Path,
-        request_id: &str,
-        expected_operation: Operation,
-        feature_id: &str,
-        output_dir: &Path,
-        output_filename: &str,
-        result_request_id: &str,
-        result_operation: Operation,
-        result_feature_id: &str,
-        result_path: &Path,
-    ) -> Result<(), HostError> {
-        let expected_stage = root.join("stage");
-        let expected_path = output_dir.join(output_filename);
-        if result_request_id != request_id {
-            return Err(HostError::BrepIo {
-                detail: "worker result request ID does not match the command".to_string(),
-            });
-        }
-        if result_operation != expected_operation || result_feature_id != feature_id {
-            return Err(HostError::BrepIo {
-                detail: "worker result identity does not match the command".to_string(),
-            });
-        }
-        if output_dir != expected_stage || result_path != expected_path {
-            return Err(HostError::BrepIo {
-                detail: "worker result path is outside its host-owned stage".to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// Extrude `request` against the disposable OCCT worker and, on

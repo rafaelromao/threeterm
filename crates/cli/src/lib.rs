@@ -1,4 +1,5 @@
 pub mod dispatch;
+pub mod rehearsal;
 
 pub fn schema_version() -> &'static str {
     "threeterm.cli/1"

@@ -1450,19 +1450,6 @@ impl Bundle {
             && entries[0].1.starts_with("bracket:")
         {
             Some(entries[0].0)
-        } else if let Some((brep_feature_id, _)) = brep
-            && history_event.is_some_and(|event| {
-                matches!(
-                    &event.operation,
-                    HistoryOperation::InitializeLBracket { bracket_id, .. }
-                        if bracket_id == brep_feature_id
-                )
-            })
-            && entries.first().is_some_and(|(feature_id, kind)| {
-                *feature_id == brep_feature_id && kind.starts_with("bracket:")
-            })
-        {
-            Some(brep_feature_id)
         } else {
             None
         };

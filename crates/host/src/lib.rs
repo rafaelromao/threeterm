@@ -5515,7 +5515,7 @@ mod tests {
         let root = temp_root("viewport-missing-brep");
         Bundle::create(&root)
             .expect("bundle creates")
-            .append_feature("lofted", "bracket:lofted")
+            .append_feature("lofted", "brep:lofted")
             .expect("geometric feature appends");
         let host = Host::new();
         host.load(&root).expect("bundle loads");

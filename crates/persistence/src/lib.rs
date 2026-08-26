@@ -1451,7 +1451,8 @@ impl Bundle {
         validate_feature_entries(
             &loaded.graph,
             entries,
-            allow_existing_bracket_edit || allow_existing_sketch_update,
+            allow_existing_bracket_edit,
+            allow_existing_sketch_update,
         )?;
         if let Some((brep_feature_id, _)) = brep
             && !entries
@@ -1764,7 +1765,8 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
 fn validate_feature_entries(
     graph: &FeatureGraph,
     entries: &[(&str, &str)],
-    allow_existing: bool,
+    allow_existing_bracket_edit: bool,
+    allow_existing_sketch_update: bool,
 ) -> Result<(), BundleError> {
     let mut ids = std::collections::BTreeSet::new();
     for (feature_id, kind) in entries {
@@ -1779,15 +1781,10 @@ fn validate_feature_entries(
             .features()
             .find(|feature| feature.id.as_str() == *feature_id)
         {
-            let effective_kind = if kind.starts_with(SKETCH_COMMAND_KIND_PREFIX) {
-                "sketch"
-            } else {
-                *kind
-            };
-            if !allow_existing
-                || (!kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
-                    && existing.kind == effective_kind)
-            {
+            let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
+                && allow_existing_sketch_update
+                && existing.kind == "sketch";
+            if !allow_existing_bracket_edit && !sketch_update {
                 return Err(BundleError::Invalid(format!(
                     "feature ID {feature_id:?} already exists"
                 )));

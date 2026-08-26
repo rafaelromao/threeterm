@@ -32,6 +32,8 @@ expect_failure "${RELEASE_SCRIPT}" copr-build invalid-package.txt
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT
 fixture="${tmpdir}/signed.md"
+candidate_date="$(date -u +%F)"
+stale_date="$(date -u -d "${candidate_date} - 31 days" +%F)"
 sed \
     -e 's/- \[ \]/- [x]/g' \
     -e 's/`not recorded`; signed: `not recorded`/`Rafael Romao`; signed: `2026-08-26`/g' \
@@ -47,12 +49,14 @@ sed \
     -e 's/record exact queries here/live registry query results recorded/g' \
     -e 's/inspect all public-facing uses/all public-facing uses inspected/g' \
     -e 's/not recorded/evidence captured/g' \
+    -e "s|2026-08-25|${candidate_date}|g" \
+    -e "s|2026-08-26|${candidate_date}|g" \
     "${RUNBOOK}" >"${fixture}"
 
 "${RELEASE_SCRIPT}" verify "${fixture}"
 
 stale_fixture="${tmpdir}/stale.md"
-sed 's/Evidence date: `2026-08-25`/Evidence date: `2026-07-26`/g' \
+sed "s|Evidence date: \`${candidate_date}\`|Evidence date: \`${stale_date}\`|g" \
     "${fixture}" >"${stale_fixture}"
 expect_failure "${RELEASE_SCRIPT}" verify "${stale_fixture}"
 

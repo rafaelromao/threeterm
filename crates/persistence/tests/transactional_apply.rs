@@ -24,10 +24,15 @@ fn add_set_and_remove_are_one_revision_bound_transaction_each() {
     assert_eq!(added.log.entries()[0].operation.as_deref(), Some("add"));
     let added_revision = added.revision_hash_hex().to_string();
 
+    let same_kind = bundle
+        .apply_feature_if_revision("set", "box", Some("cube"), &added_revision)
+        .expect("same-kind set commits");
+    assert_eq!(same_kind.log.len(), 2);
+
     let set = bundle
-        .apply_feature_if_revision("set", "box", Some("sphere"), &added_revision)
+        .apply_feature_if_revision("set", "box", Some("sphere"), same_kind.revision_hash_hex())
         .expect("set commits");
-    assert_eq!(set.log.entries()[1].operation.as_deref(), Some("set"));
+    assert_eq!(set.log.entries()[2].operation.as_deref(), Some("set"));
     assert_eq!(
         set.graph.features().next().expect("feature exists").kind,
         "sphere"
@@ -38,14 +43,14 @@ fn add_set_and_remove_are_one_revision_bound_transaction_each() {
         .apply_feature_if_revision("remove", "box", None, &set_revision)
         .expect("remove commits");
     assert_eq!(
-        removed.log.entries()[2].operation.as_deref(),
+        removed.log.entries()[3].operation.as_deref(),
         Some("remove")
     );
     assert!(removed.graph.features().next().is_none());
     let readded = bundle
         .apply_feature_if_revision("add", "box", Some("cube"), removed.revision_hash_hex())
         .expect("removed feature can be added again");
-    assert_eq!(readded.log.len(), 4);
+    assert_eq!(readded.log.len(), 5);
     assert_eq!(bundle.open().expect("reload succeeds").graph, readded.graph);
 
     let _ = fs::remove_dir_all(&root);

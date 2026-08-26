@@ -1668,7 +1668,8 @@ impl Bundle {
                             "feature ID {feature_id:?} does not exist"
                         )));
                     }
-                    loaded.graph.set_feature(feature)
+                    loaded.graph.set_feature(feature);
+                    true
                 }
                 _ if let Some(payload) = sketch_payload => loaded
                     .graph

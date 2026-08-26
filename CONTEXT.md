@@ -29,6 +29,9 @@ The sealed compatibility and integrity metadata that identifies the project/cont
 **Project Generation**:
 One complete sealed on-disk save of a project bundle. The current and immediately preceding valid generations provide bounded recovery; generations do not make caches authoritative.
 
+**Project Identity**:
+The externally inspectable identity of one loaded Project Generation: its generation digest, Revision Snapshot ID and hashes, and Canonical Transaction Log position.
+
 **Derived Result**:
 A revision-bound, non-authoritative worker result, cache entry, or staged artifact. It becomes current only after host validation and atomic promotion against its Revision Snapshot.
 

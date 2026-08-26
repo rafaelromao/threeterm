@@ -14,6 +14,10 @@ fn root() -> std::path::PathBuf {
 }
 
 fn run(args: &[&str]) -> Value {
+    run_raw(args).1
+}
+
+fn run_raw(args: &[&str]) -> (Vec<u8>, Value) {
     let output = Command::new(env!("CARGO_BIN_EXE_threeterm"))
         .args(args)
         .output()
@@ -25,7 +29,8 @@ fn run(args: &[&str]) -> Value {
     );
     assert!(output.stderr.is_empty());
     let text = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-    serde_json::from_str(text.trim()).expect("stdout is one JSON value")
+    let value = serde_json::from_str(text.trim()).expect("stdout is one JSON value");
+    (text.trim().as_bytes().to_vec(), value)
 }
 
 fn apply(
@@ -114,9 +119,13 @@ fn machine_mode_applies_operations_and_reloads_identical_identity() {
         before_rejection_log
     );
 
-    let before_load = run(&["--machine", "identity", path]);
+    let (before_load_bytes, before_load) = run_raw(&["--machine", "identity", path]);
     let _loaded = run(&["--machine", "load", path]);
-    let after_load = run(&["--machine", "identity", path]);
+    let (after_load_bytes, after_load) = run_raw(&["--machine", "identity", path]);
+    assert_eq!(
+        after_load_bytes, before_load_bytes,
+        "identity bytes are stable after reload"
+    );
     assert_eq!(
         after_load, before_load,
         "identity is byte-equal after reload"

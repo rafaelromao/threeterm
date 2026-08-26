@@ -1455,6 +1455,7 @@ impl Bundle {
                     .is_some_and(|(_, kind)| kind.starts_with("bracket:"));
         validate_feature_entries(
             &loaded.graph,
+            &loaded.log,
             entries,
             allow_existing_bracket_edit,
             allow_existing_sketch_update,
@@ -1769,6 +1770,7 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
 
 fn validate_feature_entries(
     graph: &FeatureGraph,
+    log: &TransactionLog,
     entries: &[(&str, &str)],
     allow_existing_bracket_edit: bool,
     allow_existing_sketch_update: bool,
@@ -1782,13 +1784,18 @@ fn validate_feature_entries(
                 "feature ID {feature_id:?} is duplicated in one transaction"
             )));
         }
-        if let Some(existing) = graph
+        let existing_kind = graph
             .features()
             .find(|feature| feature.id.as_str() == *feature_id)
-        {
+            .map(|feature| feature.kind);
+        let historical = log
+            .entries()
+            .iter()
+            .any(|entry| entry.feature_id == *feature_id);
+        if existing_kind.is_some() || historical {
             let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
                 && allow_existing_sketch_update
-                && existing.kind == "sketch";
+                && existing_kind == Some("sketch".to_string());
             if !allow_existing_bracket_edit && !sketch_update {
                 return Err(BundleError::Invalid(format!(
                     "feature ID {feature_id:?} already exists"

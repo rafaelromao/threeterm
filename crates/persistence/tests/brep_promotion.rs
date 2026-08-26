@@ -393,11 +393,10 @@ fn loading_rejects_a_fifo_substituted_for_a_promoted_brep() {
     std::thread::spawn(move || {
         sender.send(Bundle::at(load_root).open().is_err()).unwrap();
     });
-    assert_eq!(
+    assert!(
         receiver
             .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("FIFO load does not block"),
-        true
+            .expect("FIFO load does not block")
     );
 
     let _ = fs::remove_dir_all(root);

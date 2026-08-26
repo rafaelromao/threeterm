@@ -249,9 +249,9 @@ Reasoning or required follow-up: ______________________________________________
 
 - Two consecutive release candidates run on the same host, container, project
   scale, and Ghostty baseline.
-- Every claimed class has a comparison row containing both candidate results
-  and an explicit same-order-of-magnitude result. A missing class or a failed
-  comparison refuses the target.
+- Every measured class, including every claimed class, has a comparison row
+  containing both candidate results and an explicit same-order-of-magnitude
+  result. A missing class or a failed comparison refuses the target.
 - STL SHA-256 is deterministic across the two runs. Record both hashes, not
   just a statement that they match.
 - STEP and 3MF output comparison is documented. Record whether each format's
@@ -300,9 +300,11 @@ project_create, bracket_create, edit_open, edit_update, edit_preview,
 edit_commit, reload, export, catalog
 ```
 
-Each class has `sample_count: 1` in each release candidate. The two aggregate
-comparison rows report the same order of magnitude and the STL, STEP, and 3MF
-hashes are equal between the two checked-in runs. However, the artifact does
+Each class has `sample_count: 1` in each release candidate. The aggregate
+comparison table's nine rows report the same order of magnitude for all nine
+classes, and the STL, STEP, and 3MF hashes are equal between the two checked-in
+runs.
+ However, the artifact does
 not declare the required hardware/container/Ghostty profile, project-scale
 counts, or a named limitations document; its one sample per class is below the
 `n >= 30` percentile threshold, and it does not provide the required signed

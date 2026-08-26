@@ -21,7 +21,7 @@ fn add_set_and_remove_are_one_revision_bound_transaction_each() {
         .apply_feature_if_revision("add", "box", Some("cube"), initial.revision_hash_hex())
         .expect("add commits");
     assert_eq!(added.log.len(), 1);
-    assert_eq!(added.log.entries()[0].operation, None);
+    assert_eq!(added.log.entries()[0].operation.as_deref(), Some("add"));
     let added_revision = added.revision_hash_hex().to_string();
 
     let set = bundle
@@ -42,7 +42,11 @@ fn add_set_and_remove_are_one_revision_bound_transaction_each() {
         Some("remove")
     );
     assert!(removed.graph.features().next().is_none());
-    assert_eq!(bundle.open().expect("reload succeeds").graph, removed.graph);
+    let readded = bundle
+        .apply_feature_if_revision("add", "box", Some("cube"), removed.revision_hash_hex())
+        .expect("removed feature can be added again");
+    assert_eq!(readded.log.len(), 4);
+    assert_eq!(bundle.open().expect("reload succeeds").graph, readded.graph);
 
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));

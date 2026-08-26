@@ -20,6 +20,7 @@ const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
 const FIT_DIMENSION_KIND_PREFIX: &str = "fit-dimension/1:";
 pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
 const APPLY_SET_KIND_PREFIX: &str = "apply-set/1:";
+const APPLY_ADD_KIND_PREFIX: &str = "apply-add/1:";
 const APPLY_REMOVE_KIND: &str = "apply-remove/1";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
@@ -887,6 +888,7 @@ impl Bundle {
                     graph.set_feature(feature);
                     continue;
                 }
+                Some("add") => {}
                 Some(operation) => {
                     return Err(BundleError::LogBrokenLink {
                         log_index: entry.log_index,
@@ -1141,10 +1143,12 @@ impl Bundle {
             ));
         }
         let encoded_kind = match operation {
-            "add" => kind
-                .filter(|kind| !kind.is_empty())
-                .ok_or_else(|| BundleError::Invalid("add requires a non-empty kind".to_string()))?
-                .to_string(),
+            "add" => format!(
+                "{APPLY_ADD_KIND_PREFIX}{}",
+                kind.filter(|kind| !kind.is_empty()).ok_or_else(|| {
+                    BundleError::Invalid("add requires a non-empty kind".to_string())
+                })?
+            ),
             "set" => format!(
                 "{APPLY_SET_KIND_PREFIX}{}",
                 kind.filter(|kind| !kind.is_empty()).ok_or_else(|| {
@@ -1953,11 +1957,23 @@ fn validate_feature_entries(
             .entries()
             .iter()
             .any(|entry| entry.feature_id == *feature_id);
-        if matches!(operation, Some("set" | "remove")) {
-            if existing_kind.is_none() {
-                return Err(BundleError::Invalid(format!(
-                    "feature ID {feature_id:?} does not exist"
-                )));
+        if let Some(operation) = operation {
+            match operation {
+                "add" => {
+                    if existing_kind.is_some() {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} already exists"
+                        )));
+                    }
+                }
+                "set" | "remove" => {
+                    if existing_kind.is_none() {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} does not exist"
+                        )));
+                    }
+                }
+                _ => unreachable!(),
             }
             continue;
         }
@@ -1977,6 +1993,9 @@ fn validate_feature_entries(
 }
 
 fn apply_kind(kind: &str) -> (Option<&'static str>, &str) {
+    if let Some(kind) = kind.strip_prefix(APPLY_ADD_KIND_PREFIX) {
+        return (Some("add"), kind);
+    }
     if let Some(kind) = kind.strip_prefix(APPLY_SET_KIND_PREFIX) {
         return (Some("set"), kind);
     }

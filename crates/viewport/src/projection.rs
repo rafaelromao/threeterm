@@ -365,9 +365,9 @@ fn draw_solids(
         .fold(None, |bounds: Option<([f64; 3], [f64; 3])>, triangle| {
             let mut bounds = bounds.unwrap_or((triangle.vertices[0], triangle.vertices[0]));
             for vertex in triangle.vertices {
-                for axis in 0..3 {
-                    bounds.0[axis] = bounds.0[axis].min(vertex[axis]);
-                    bounds.1[axis] = bounds.1[axis].max(vertex[axis]);
+                for (axis, coordinate) in vertex.iter().enumerate() {
+                    bounds.0[axis] = bounds.0[axis].min(*coordinate);
+                    bounds.1[axis] = bounds.1[axis].max(*coordinate);
                 }
             }
             Some(bounds)

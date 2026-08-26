@@ -5329,14 +5329,22 @@ fn copy_brep(source: &Path, target: &Path) -> Result<(), String> {
 
 fn read_brep_verified(source: &Path, expected: Option<(usize, &str)>) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0o400000;
+    const O_NONBLOCK: i32 = 0o4000;
     let mut options = fs::OpenOptions::new();
-    options.read(true).custom_flags(0o400000);
+    options.read(true).custom_flags(O_NOFOLLOW | O_NONBLOCK);
     let mut reader = options
         .open(source)
         .map_err(|error| format!("open source BREP {} failed: {error}", source.display()))?;
     let opened_metadata = reader
         .metadata()
         .map_err(|error| format!("stat opened BREP {} failed: {error}", source.display()))?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "source BREP {} is not a regular file",
+            source.display()
+        ));
+    }
     let verified_metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("stat source BREP {} failed: {error}", source.display()))?;
     use std::os::unix::fs::MetadataExt;

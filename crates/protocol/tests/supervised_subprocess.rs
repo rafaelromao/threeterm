@@ -210,6 +210,7 @@ fn worker_that_ignores_cancel_is_force_terminated_after_grace() {
     let child = spawn_ready_worker("read line; sleep 100");
     let host = SubprocessWorkerHost::with_limits(child, LIMITS).expect("transport starts");
     let mut supervisor = Supervisor::new(Duration::from_millis(300), Box::new(host), None);
+    let configured_grace = supervisor.cancellation_grace_for("extrude");
 
     let started = std::time::Instant::now();
     let outcome = supervisor.cancel("req-1", "user pressed stop");
@@ -220,8 +221,8 @@ fn worker_that_ignores_cancel_is_force_terminated_after_grace() {
     assert_eq!(record.exit_kind, ExitKind::ForceAfterGrace);
     assert_eq!(record.exit_signal, Some(9), "SIGKILL after grace");
     assert!(
-        elapsed < Duration::from_secs(2),
-        "forced cancellation must remain bounded; took {elapsed:?}"
+        elapsed < configured_grace + Duration::from_millis(500),
+        "forced cancellation must remain bounded by the configured grace and cleanup allowance; grace={configured_grace:?} elapsed={elapsed:?}"
     );
 }
 

@@ -2413,6 +2413,40 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
+        self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, current, artifact, bytes, provenance| {
+                let feature_id = &artifact.feature_id;
+                let kind = format!("brep:{feature_id}");
+                bundle.append_feature_with_brep_if_revision_and_provenance(
+                    feature_id,
+                    &kind,
+                    &current.manifest.revision_hash,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )
+    }
+
+    fn promote_occt_result_with_append<R, F>(
+        &self,
+        root: &Path,
+        derived: StagedOcctResult<R>,
+        append: F,
+    ) -> Result<(SnapshotView, R, Layer1DerivedResult), HostError>
+    where
+        R: DeserializeOwned + Serialize,
+        F: FnOnce(
+            &Bundle,
+            &LoadedBundle,
+            &Layer1DerivedResult,
+            &[u8],
+            &str,
+        ) -> Result<LoadedBundle, BundleError>,
+    {
         let derived_root = root.join(".derived");
         let stage_root = derived
             .artifact
@@ -2485,16 +2519,8 @@ impl Host {
         })
         .to_string();
         let feature_id = derived.artifact.feature_id.clone();
-        let kind = format!("brep:{feature_id}");
         let bundle = Bundle::at(root);
-        let updated = match bundle.append_feature_with_brep_if_revision_and_provenance(
-            &feature_id,
-            &kind,
-            &current.manifest.revision_hash,
-            &derived.artifact.request_id,
-            &provenance,
-            &bytes,
-        ) {
+        let updated = match append(&bundle, &current, &derived.artifact, &bytes, &provenance) {
             Ok(updated) => updated,
             Err(error) => {
                 let is_stale = matches!(&error, BundleError::Invalid(detail) if detail.starts_with("worker result belongs to revision"));
@@ -2577,35 +2603,6 @@ impl Host {
             threeterm_occt_worker::Operation::Bracket,
             worker,
         )?;
-        let artifact_root = derived
-            .artifact
-            .path
-            .parent()
-            .ok_or_else(|| HostError::DerivedResult {
-                diagnostic: Diagnostic::artifact_promotion_failure("bracket_stage_missing"),
-            })?
-            .to_path_buf();
-        let stage =
-            Stage::open_existing(&artifact_root).map_err(|error| HostError::DerivedResult {
-                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
-            })?;
-        let final_name = derived
-            .artifact
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| HostError::DerivedResult {
-                diagnostic: Diagnostic::artifact_promotion_failure("bracket_artifact_name_missing"),
-            })?;
-        let bytes = stage
-            .read_published(
-                final_name,
-                derived.artifact.byte_count,
-                &derived.artifact.sha256,
-            )
-            .map_err(|error| HostError::DerivedResult {
-                diagnostic: artifact_error_diagnostic(&error),
-            })?;
         let kind = bracket_kind(&request);
         let history_event = loaded
             .history
@@ -2626,41 +2623,23 @@ impl Host {
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let provenance = serde_json::json!({
-            "request_id": derived.artifact.request_id,
-            "operation": derived.artifact.operation,
-            "feature_id": derived.artifact.feature_id,
-            "source_revision_id": derived.artifact.source_revision_id,
-            "worker_fingerprint": derived.artifact.worker_fingerprint,
-            "byte_count": derived.artifact.byte_count,
-            "sha256": derived.artifact.sha256,
-        })
-        .to_string();
-        let snapshot = match Bundle::at(&root)
-            .append_features_with_brep_if_revision_and_history_and_provenance(
-                &entries,
-                &request.feature_id,
-                loaded.revision_hash_hex(),
-                &bytes,
-                &history_event,
-                &request.request_id,
-                &provenance,
-            ) {
-            Ok(updated) => {
-                let snapshot = SnapshotView::from(&updated);
-                self.current.replace(Some(updated));
-                snapshot
-            }
-            Err(error) => {
-                let _ = stage.discard();
-                return Err(error.into());
-            }
-        };
-        let _ = stage.discard();
-        self.layer1_results
-            .borrow_mut()
-            .remove(&derived.artifact.cache_key);
-        let _ = fs::remove_dir(root.join(".derived"));
+        let request_id = request.request_id.clone();
+        let feature_id = request.feature_id.clone();
+        let (snapshot, _, _) = self.promote_occt_result_with_append(
+            &root,
+            derived,
+            move |bundle, current, _artifact, bytes, shared_provenance| {
+                bundle.append_features_with_brep_if_revision_and_history_and_provenance(
+                    &entries,
+                    &feature_id,
+                    current.revision_hash_hex(),
+                    bytes,
+                    &history_event,
+                    &request_id,
+                    shared_provenance,
+                )
+            },
+        )?;
         Ok(snapshot)
     }
 
@@ -4278,51 +4257,23 @@ impl Host {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let prior_view = SnapshotView::from(&loaded);
-
-        let result = match worker
-            .clone()
-            .with_revision_id(prior_view.revision_hash.clone())
-            .extrude_with_cancel(&request, cancel)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                self.current.replace(Some(loaded));
-                return Err(HostError::from(error));
-            }
-        };
-        if !result.is_success() {
-            self.current.replace(Some(loaded));
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id.clone()),
-                detail: format!(
-                    "extrude returned non-ok status: status={} feature_id={}",
-                    result.status, result.feature_id
-                ),
-            });
-        }
-        let feature_id = request.feature_id.clone();
-        let snapshot = match self.commit_brep_feature_verified_at_revision(
+        let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        let derived = self.stage_occt_result_inner::<ExtrudeResult>(
             root,
-            &feature_id,
-            &result.brep_path,
-            &prior_view.revision_hash,
-            result.brep_bytes,
-            &result.brep_sha256,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return Err(error);
-            }
-        };
+            &request,
+            threeterm_occt_worker::Operation::Extrude,
+            worker,
+            Some(cancel),
+            Some(&mut on_progress),
+        )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(ExtrudeCommitView {
-            source_snapshot: prior_view.clone(),
+            source_snapshot,
             snapshot,
-            artifact: artifact_from_committed_result(&prior_view, &result),
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact,
         })
     }
 
@@ -4954,59 +4905,6 @@ fn expected_occt_worker_fingerprint() -> WorkerFingerprint {
         worker_kind: "occt".to_string(),
         worker_schema_version: threeterm_occt_worker::SCHEMA_VERSION.to_string(),
         protocol_schema_version: threeterm_protocol::schema_version().to_string(),
-    }
-}
-
-fn artifact_from_committed_result(
-    source_snapshot: &SnapshotView,
-    result: &ExtrudeResult,
-) -> Layer1DerivedResult {
-    artifact_from_result_fields(
-        source_snapshot,
-        &result.request_id,
-        result.operation,
-        &result.feature_id,
-        &result.brep_path,
-        result.brep_bytes,
-        &result.brep_sha256,
-    )
-}
-
-fn artifact_from_result_fields(
-    source_snapshot: &SnapshotView,
-    request_id: &str,
-    operation: threeterm_occt_worker::Operation,
-    feature_id: &str,
-    path: &Path,
-    byte_count: usize,
-    sha256: &str,
-) -> Layer1DerivedResult {
-    let fingerprint = expected_occt_worker_fingerprint();
-    let cache_key = Layer1CacheKey {
-        source_revision_id: source_snapshot.revision_hash.clone(),
-        worker_fingerprint: fingerprint.clone(),
-        operation: operation.as_str().to_string(),
-        feature_id: feature_id.to_string(),
-        artifact_kind: "brep".to_string(),
-        semantic_input_sha256: String::new(),
-        deterministic_settings_sha256: String::new(),
-    };
-    Layer1DerivedResult {
-        request_id: request_id.to_string(),
-        source_revision_id: source_snapshot.revision_hash.clone(),
-        cache_key,
-        worker_fingerprint: fingerprint,
-        operation: operation.as_str().to_string(),
-        feature_id: feature_id.to_string(),
-        artifact_kind: "brep".to_string(),
-        artifact_name: path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string(),
-        byte_count: byte_count as u64,
-        sha256: sha256.to_string(),
-        path: path.to_path_buf(),
     }
 }
 

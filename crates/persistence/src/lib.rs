@@ -1615,6 +1615,7 @@ fn load_v0_with_migration(
 
     Ok(loaded_with(
         validated,
+        path.to_path_buf(),
         manifest,
         generation,
         transactions,
@@ -1624,13 +1625,14 @@ fn load_v0_with_migration(
 
 fn loaded_with(
     stale: LoadedBundle,
+    canonical_root: PathBuf,
     manifest: Manifest,
     generation: ProjectGeneration,
     transactions: String,
     recovered_from_previous: bool,
 ) -> LoadedBundle {
     LoadedBundle {
-        canonical_root: stale.canonical_root,
+        canonical_root,
         manifest,
         generation,
         transactions,

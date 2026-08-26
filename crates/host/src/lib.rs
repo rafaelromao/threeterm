@@ -363,6 +363,23 @@ pub struct SnapshotView {
     pub recovered_from_previous: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIdentity {
+    pub generation_id: String,
+    pub revision_id: String,
+    pub feature_graph_hash: String,
+    pub revision_hash: String,
+    pub transaction_count: usize,
+    pub terminal_log_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyView {
+    pub operation: String,
+    pub feature_id: String,
+    pub identity: ProjectIdentity,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitDimensionCommitView {
     pub snapshot: SnapshotView,
@@ -376,6 +393,19 @@ impl From<&LoadedBundle> for SnapshotView {
             feature_graph_hash: bundle.feature_graph_hash_hex().to_string(),
             revision_hash: bundle.revision_hash_hex().to_string(),
             recovered_from_previous: bundle.recovered_from_previous,
+        }
+    }
+}
+
+impl From<&LoadedBundle> for ProjectIdentity {
+    fn from(bundle: &LoadedBundle) -> Self {
+        Self {
+            generation_id: bundle.generation.id.clone(),
+            revision_id: bundle.manifest.revision_id.clone(),
+            feature_graph_hash: bundle.feature_graph_hash_hex().to_string(),
+            revision_hash: bundle.revision_hash_hex().to_string(),
+            transaction_count: bundle.log.len(),
+            terminal_log_digest: bundle.log.terminal_digest_hex().to_string(),
         }
     }
 }
@@ -1454,6 +1484,42 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    pub fn identity(&self, root: impl AsRef<Path>) -> Result<ProjectIdentity, HostError> {
+        Ok(ProjectIdentity::from(&Bundle::at(root.as_ref()).open()?))
+    }
+
+    pub fn apply_feature(
+        &self,
+        root: impl AsRef<Path>,
+        operation: &str,
+        feature_id: &str,
+        kind: Option<&str>,
+        expected_revision: &str,
+    ) -> Result<ApplyView, HostError> {
+        let bundle = Bundle::at(root.as_ref());
+        let updated = match bundle.apply_feature_if_revision(
+            operation,
+            feature_id,
+            kind,
+            expected_revision,
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                if let Ok(current) = bundle.open() {
+                    self.current.replace(Some(current));
+                }
+                return Err(error.into());
+            }
+        };
+        let identity = ProjectIdentity::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(ApplyView {
+            operation: operation.to_string(),
+            feature_id: feature_id.to_string(),
+            identity,
+        })
     }
 
     /// Commit a fit relationship using dimensions already present in the

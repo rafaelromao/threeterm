@@ -642,6 +642,28 @@ impl FeatureGraph {
         previous.as_deref() != Some(feature.kind.as_str())
     }
 
+    pub fn contains_feature(&self, feature_id: &str) -> bool {
+        self.features.keys().any(|id| id.as_str() == feature_id)
+    }
+
+    pub fn set_feature(&mut self, feature: Feature) -> bool {
+        self.add_feature(feature)
+    }
+
+    pub fn remove_feature(&mut self, feature_id: &str) -> bool {
+        let Some(id) = self
+            .features
+            .keys()
+            .find(|id| id.as_str() == feature_id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.features.remove(&id);
+        self.sketches.remove(&id);
+        true
+    }
+
     pub fn add_sketch(&mut self, feature: Feature, sketch: SketchPayload) -> Result<bool, String> {
         if sketch.feature_id != feature.id.as_str() {
             return Err("sketch feature ID does not match its graph feature".to_string());
@@ -851,6 +873,21 @@ mod tests {
     #[test]
     fn feature_id_rejects_empty_values() {
         assert_eq!(FeatureId::new(""), Err(DomainError::EmptyId));
+    }
+
+    #[test]
+    fn feature_graph_supports_explicit_set_and_remove_operations() {
+        let mut graph = FeatureGraph::empty();
+        graph.add_feature(Feature::new("box", "cube").expect("feature is valid"));
+        assert!(graph.contains_feature("box"));
+        assert!(graph.set_feature(Feature::new("box", "sphere").expect("feature is valid")));
+        assert_eq!(
+            graph.features().next().expect("feature remains").kind,
+            "sphere"
+        );
+        assert!(graph.remove_feature("box"));
+        assert!(!graph.contains_feature("box"));
+        assert!(!graph.remove_feature("box"));
     }
 
     #[test]

@@ -103,6 +103,74 @@ pub static NEW_PROJECT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static IDENTITY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path"],
+        "properties": { "bundle_path": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
+pub static IDENTITY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "generation_id", "revision_id", "feature_graph_hash", "revision_hash",
+            "transaction_count", "terminal_log_digest", "schema_version"
+        ],
+        "properties": {
+            "generation_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "transaction_count": { "type": "integer", "minimum": 0 },
+            "terminal_log_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static APPLY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "expected_revision", "operation", "feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "operation": { "type": "string", "enum": ["add", "set", "remove"] },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static APPLY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status", "operation", "feature_id", "generation_id", "revision_id",
+            "feature_graph_hash", "revision_hash", "transaction_count",
+            "terminal_log_digest", "schema_version"
+        ],
+        "properties": {
+            "status": { "const": "committed" },
+            "operation": { "type": "string", "enum": ["add", "set", "remove"] },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "generation_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "transaction_count": { "type": "integer", "minimum": 0 },
+            "terminal_log_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static REHEARSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1649,6 +1717,30 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        IDENTITY_COMMAND_ID,
+        CommandSchema {
+            id: IDENTITY_COMMAND_ID,
+            name: "identity",
+            schema_version: "threeterm.command.identity/1",
+            request_schema_version: "threeterm.command.identity.request/1",
+            request_schema: IDENTITY_REQUEST_SCHEMA.clone(),
+            response_schema_version: IDENTITY_RESPONSE_SCHEMA_VERSION,
+            response_schema: IDENTITY_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        APPLY_COMMAND_ID,
+        CommandSchema {
+            id: APPLY_COMMAND_ID,
+            name: "apply",
+            schema_version: "threeterm.command.apply/1",
+            request_schema_version: "threeterm.command.apply.request/1",
+            request_schema: APPLY_REQUEST_SCHEMA.clone(),
+            response_schema_version: APPLY_RESPONSE_SCHEMA_VERSION,
+            response_schema: APPLY_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         REHEARSE_COMMAND_ID,
         CommandSchema {
             id: REHEARSE_COMMAND_ID,
@@ -2038,6 +2130,8 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
 
 pub const LIST_COMMAND_ID: CommandId = CommandId("list");
 pub const NEW_PROJECT_COMMAND_ID: CommandId = CommandId("new-project");
+pub const IDENTITY_COMMAND_ID: CommandId = CommandId("identity");
+pub const APPLY_COMMAND_ID: CommandId = CommandId("apply");
 pub const REHEARSE_COMMAND_ID: CommandId = CommandId("rehearse");
 pub const SAVE_COMMAND_ID: CommandId = CommandId("save");
 pub const LOAD_COMMAND_ID: CommandId = CommandId("load");
@@ -2073,6 +2167,8 @@ pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
 pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
+pub const IDENTITY_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.identity.response/1";
+pub const APPLY_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.apply.response/1";
 pub const REHEARSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.response/2";
 pub const REHEARSE_RUN_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehearse.run.response/1";
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";

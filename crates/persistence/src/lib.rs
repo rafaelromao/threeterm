@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, Feature, FeatureGraph, FitDimension, ProjectGeneration,
-    Revision,
+    ComponentCommand, ComponentGraph, Feature, FeatureGraph, FeatureId, FitDimension,
+    ProjectGeneration, Revision,
     history::{
         HistoryEvent, HistoryOperation, HistoryState, HistoryTimeline, project_feature_timeline,
     },
@@ -19,6 +19,9 @@ const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
 const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
 const FIT_DIMENSION_KIND_PREFIX: &str = "fit-dimension/1:";
 pub const HISTORY_EVENT_KIND_PREFIX: &str = "history-event:";
+const APPLY_SET_KIND_PREFIX: &str = "apply-set/1:";
+const APPLY_ADD_KIND_PREFIX: &str = "apply-add/1:";
+const APPLY_REMOVE_KIND: &str = "apply-remove/1";
 
 /// Classification of a `.threeterm/` bundle's manifest schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +290,8 @@ pub struct LogEntry {
     pub feature_id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brep_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brep_byte_count: Option<u64>,
@@ -301,11 +306,13 @@ pub struct LogEntry {
 
 impl LogEntry {
     fn new(log_index: usize, previous_digest: &str, feature_id: &str, kind: &str) -> Self {
+        let (operation, kind) = apply_kind(kind);
         let mut entry = Self {
             log_index,
             previous_digest: previous_digest.to_string(),
             feature_id: feature_id.to_string(),
             kind: kind.to_string(),
+            operation: operation.map(str::to_string),
             brep_path: None,
             brep_byte_count: None,
             brep_sha256: None,
@@ -862,7 +869,36 @@ impl Bundle {
                     detail: error.to_string(),
                 }
             })?;
-            feature_ids.push(feature.id.clone());
+            match entry.operation.as_deref() {
+                Some("remove") => {
+                    if !graph.remove_feature(&entry.feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: "remove operation targets a missing feature".to_string(),
+                        });
+                    }
+                    feature_ids.retain(|id: &FeatureId| id.as_str() != entry.feature_id);
+                    continue;
+                }
+                Some("set") => {
+                    if !graph.contains_feature(&entry.feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: "set operation targets a missing feature".to_string(),
+                        });
+                    }
+                    graph.set_feature(feature);
+                    continue;
+                }
+                Some("add") => {}
+                Some(operation) => {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: format!("unknown transaction operation: {operation}"),
+                    });
+                }
+                None => {}
+            }
             if let Some(payload) = sketch_payload {
                 graph.add_sketch(feature, payload).map_err(|detail| {
                     BundleError::LogBrokenLink {
@@ -872,6 +908,14 @@ impl Bundle {
                 })?;
             } else {
                 graph.add_feature(feature);
+            }
+            if !feature_ids.iter().any(|id| id.as_str() == entry.feature_id) {
+                feature_ids.push(FeatureId::new(&entry.feature_id).map_err(|error| {
+                    BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: error.to_string(),
+                    }
+                })?);
             }
             if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
                 let command: ComponentCommand =
@@ -1077,6 +1121,62 @@ impl Bundle {
         with_bundle_write_lock(&self.root, || {
             self.append_features_locked(
                 &[(feature_id, kind)],
+                Some(expected_revision),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+    }
+
+    /// Apply one revision-guarded feature mutation as one canonical transaction.
+    /// Validation and publication happen under the bundle lock, so a rejected
+    /// or stale mutation cannot change the selected Project Generation.
+    pub fn apply_feature_if_revision(
+        &self,
+        operation: &str,
+        feature_id: &str,
+        kind: Option<&str>,
+        expected_revision: &str,
+    ) -> Result<LoadedBundle, BundleError> {
+        if !matches!(operation, "add" | "set" | "remove") {
+            return Err(BundleError::Invalid(format!(
+                "unsupported apply operation: {operation}"
+            )));
+        }
+        if feature_id.is_empty() {
+            return Err(BundleError::Invalid(
+                "feature id must not be empty".to_string(),
+            ));
+        }
+        let encoded_kind = match operation {
+            "add" => format!(
+                "{APPLY_ADD_KIND_PREFIX}{}",
+                kind.filter(|kind| !kind.is_empty()).ok_or_else(|| {
+                    BundleError::Invalid("add requires a non-empty kind".to_string())
+                })?
+            ),
+            "set" => format!(
+                "{APPLY_SET_KIND_PREFIX}{}",
+                kind.filter(|kind| !kind.is_empty()).ok_or_else(|| {
+                    BundleError::Invalid("set requires a non-empty kind".to_string())
+                })?
+            ),
+            "remove" => {
+                if kind.is_some() {
+                    return Err(BundleError::Invalid(
+                        "remove does not accept a kind".to_string(),
+                    ));
+                }
+                APPLY_REMOVE_KIND.to_string()
+            }
+            _ => unreachable!(),
+        };
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                &[(feature_id, &encoded_kind)],
                 Some(expected_revision),
                 None,
                 None,
@@ -1554,20 +1654,37 @@ impl Bundle {
                     )
                 })
                 .transpose()?;
+            let (operation, canonical_kind) = apply_kind(kind);
             let feature_kind = if sketch_payload.is_some() {
                 "sketch"
             } else {
-                *kind
+                canonical_kind
             };
             let feature = Feature::new(*feature_id, feature_kind)
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
-            let graph_changed = if let Some(payload) = sketch_payload {
-                loaded
+            let graph_changed = match operation {
+                Some("remove") => {
+                    if !loaded.graph.contains_feature(feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} does not exist"
+                        )));
+                    }
+                    loaded.graph.remove_feature(feature_id)
+                }
+                Some("set") => {
+                    if !loaded.graph.contains_feature(feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} does not exist"
+                        )));
+                    }
+                    loaded.graph.set_feature(feature);
+                    true
+                }
+                _ if let Some(payload) = sketch_payload => loaded
                     .graph
                     .add_sketch(feature, payload)
-                    .map_err(BundleError::Invalid)?
-            } else {
-                loaded.graph.add_feature(feature)
+                    .map_err(BundleError::Invalid)?,
+                _ => loaded.graph.add_feature(feature),
             };
             if graph_changed {
                 if let Some(idempotency_key) = idempotency_key {
@@ -1829,7 +1946,13 @@ fn validate_feature_entries(
 ) -> Result<(), BundleError> {
     let mut ids = std::collections::BTreeSet::new();
     for (feature_id, kind) in entries {
-        Feature::new(*feature_id, *kind)
+        let (operation, canonical_kind) = apply_kind(kind);
+        if operation == Some("remove") && canonical_kind != APPLY_REMOVE_KIND {
+            return Err(BundleError::Invalid(
+                "invalid remove transaction".to_string(),
+            ));
+        }
+        Feature::new(*feature_id, canonical_kind)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
         if !ids.insert(*feature_id) {
             return Err(BundleError::Invalid(format!(
@@ -1844,6 +1967,26 @@ fn validate_feature_entries(
             .entries()
             .iter()
             .any(|entry| entry.feature_id == *feature_id);
+        if let Some(operation) = operation {
+            match operation {
+                "add" => {
+                    if existing_kind.is_some() {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} already exists"
+                        )));
+                    }
+                }
+                "set" | "remove" => {
+                    if existing_kind.is_none() {
+                        return Err(BundleError::Invalid(format!(
+                            "feature ID {feature_id:?} does not exist"
+                        )));
+                    }
+                }
+                _ => unreachable!(),
+            }
+            continue;
+        }
         if existing_kind.is_some() || historical {
             let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
                 && allow_existing_sketch_update
@@ -1857,6 +2000,19 @@ fn validate_feature_entries(
         }
     }
     Ok(())
+}
+
+fn apply_kind(kind: &str) -> (Option<&'static str>, &str) {
+    if let Some(kind) = kind.strip_prefix(APPLY_ADD_KIND_PREFIX) {
+        return (Some("add"), kind);
+    }
+    if let Some(kind) = kind.strip_prefix(APPLY_SET_KIND_PREFIX) {
+        return (Some("set"), kind);
+    }
+    if kind == APPLY_REMOVE_KIND {
+        return (Some("remove"), APPLY_REMOVE_KIND);
+    }
+    (None, kind)
 }
 
 fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {

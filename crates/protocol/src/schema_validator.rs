@@ -16,6 +16,7 @@
 //! - `minLength` enforces a minimum length on string fields.
 //! - `minimum` enforces a lower bound on numeric and integer fields.
 //! - `pattern` enforces a regex on string fields.
+//! - `enum` restricts a value to one of a fixed set of JSON values.
 //!
 //! Anything outside this subset is treated as "no constraint" so the
 //! validator can keep pace with the schema documents as the registry grows.
@@ -44,6 +45,14 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
         && expected != value
     {
         return Err(format!("value {value} does not match const {expected}"));
+    }
+    if let Some(expected) = schema_object.get("enum") {
+        let values = expected
+            .as_array()
+            .ok_or_else(|| format!("schema `enum` must be an array, got {expected}"))?;
+        if !values.iter().any(|candidate| candidate == value) {
+            return Err(format!("value {value} is not one of {expected}"));
+        }
     }
 
     if let Some(expected_type) = schema_object.get("type") {

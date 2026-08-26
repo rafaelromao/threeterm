@@ -13,6 +13,7 @@ members = [
     "crates/lua-bridge",
     "crates/domain",
     "crates/protocol",
+    "crates/rehearsal",
 ]
 
 [workspace.package]

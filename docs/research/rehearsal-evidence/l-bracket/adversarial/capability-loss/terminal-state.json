@@ -1,0 +1,10 @@
+{
+  "alternate_screen_exited": true,
+  "cursor_and_attributes_restored": true,
+  "kitty_controls_disabled": true,
+  "kitty_image_deleted": true,
+  "kitty_transmission_disabled": true,
+  "second_frame_bytes_added": false,
+  "second_frame_rejected_code": "capability_invalidated",
+  "termios_restored": true
+}

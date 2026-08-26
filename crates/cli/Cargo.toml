@@ -19,12 +19,12 @@ threeterm-slvs-worker = { path = "../workers/slvs" }
 threeterm-persistence = { path = "../persistence" }
 threeterm-protocol = { path = "../protocol" }
 threeterm-theme = { path = "../theme" }
+threeterm-tui = { path = "../tui" }
+threeterm-viewport = { path = "../viewport" }
 
 [dev-dependencies]
 threeterm-persistence = { path = "../persistence", features = ["publication-kill-points"] }
 threeterm-slvs-worker = { path = "../workers/slvs" }
-threeterm-viewport = { path = "../viewport" }
-threeterm-tui = { path = "../tui" }
 
 [[bin]]
 name = "threeterm"

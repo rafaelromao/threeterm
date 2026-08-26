@@ -5,9 +5,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use threeterm_domain::ProjectGeneration;
 use threeterm_persistence::bundle::{
-    BundleError, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PublicationFailurePoint,
-    SchemaStatus, V0Manifest, detect_schema, fail_next_publication_at, load, migrate_v0_to_v1,
-    prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+    BundleError, LoadPolicy, LoadedBundle, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
+    PublicationFailurePoint, SchemaStatus, V0Manifest, detect_schema, fail_next_publication_at,
+    load, load_with_policy, migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch,
+    write_fresh, write_v0_fixture,
 };
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -202,6 +203,28 @@ fn detect_schema_classifies_prior_and_unknown() {
     let _ = fs::remove_dir_all(v0_root);
     let _ = fs::remove_dir_all(v1_root);
     let _ = fs::remove_dir_all(bad_root);
+}
+
+#[test]
+fn adversarial_v0_policy_fails_closed_before_creating_a_backup() {
+    let root = unique_temp_dir("reject-v0");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-reject-v0"))
+        .expect("v0 fixture writes");
+    let before = fingerprint(&root);
+    let backup_path = root.with_file_name(format!(
+        "{}{}",
+        root.file_name().unwrap().to_string_lossy(),
+        PRE_MIGRATION_BACKUP_SUFFIX
+    ));
+
+    let error = load_with_policy(&root, LoadPolicy::RejectV0RequiresBackup)
+        .expect_err("adversarial v0 policy must refuse migration");
+
+    assert!(matches!(error, BundleError::SchemaEpochV0RequiresBackup));
+    assert_eq!(fingerprint(&root), before);
+    assert!(!backup_path.exists());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(backup_path);
 }
 
 #[test]

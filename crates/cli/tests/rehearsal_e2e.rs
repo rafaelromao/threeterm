@@ -5,7 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use threeterm_cli::rehearsal::verify_rehearsal_evidence;
+use threeterm_cli::rehearsal::{
+    AdversarialCase, run_adversarial_case, run_all_adversarial_cases, verify_adversarial_evidence,
+    verify_rehearsal_evidence,
+};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{REHEARSE_REQUEST_SCHEMA, REHEARSE_RESPONSE_SCHEMA, find};
@@ -31,6 +34,19 @@ fn run_rehearsal(output_dir: &Path) -> std::process::Output {
         ])
         .output()
         .expect("rehearsal process runs")
+}
+
+fn run_adversarial(output_dir: &Path, case: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .args([
+            "run",
+            "lbracket",
+            &format!("--adversarial={case}"),
+            "--output-dir",
+            output_dir.to_str().expect("output path is UTF-8"),
+        ])
+        .output()
+        .expect("adversarial process runs")
 }
 
 fn files(root: &Path, prefix: &str, output: &mut Vec<String>) {
@@ -324,4 +340,115 @@ fn committed_rehearsal_evidence_has_a_reproducible_sha256_catalog() {
         .join("../../docs/research/rehearsal-evidence/l-bracket");
 
     verify_rehearsal_evidence(&evidence).expect("committed evidence catalog verifies");
+}
+
+#[test]
+fn schema_and_capability_adversarial_cases_preserve_state_and_publish_evidence() {
+    let output_dir = temp_root("adversarial-native-independent");
+    let schema = run_adversarial_case(&output_dir, AdversarialCase::SchemaV0)
+        .expect("v0 adversarial case runs");
+    assert_eq!(
+        schema["report"]["diagnostic"]["code"],
+        "SCHEMA_EPOCH_V0_REQUIRES_BACKUP"
+    );
+    assert!(schema["report"]["canonical_byte_equal"].as_bool().unwrap());
+    assert!(
+        schema["report"]["host_snapshot_preserved"]
+            .as_bool()
+            .unwrap()
+    );
+    let capability = run_adversarial_case(&output_dir, AdversarialCase::CapabilityLoss)
+        .expect("capability adversarial case runs");
+    assert_eq!(
+        capability["report"]["diagnostic"]["code"],
+        "CAPABILITY_LOSS"
+    );
+    assert!(
+        capability["report"]["canonical_byte_equal"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(capability["report"]["lifecycle"], "HeadlessOnly");
+    assert!(
+        capability["report"]["terminal_state"]["alternate_screen_exited"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        capability["report"]["terminal_state"]["kitty_image_deleted"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        !capability["report"]["terminal_state"]["second_frame_bytes_added"]
+            .as_bool()
+            .unwrap()
+    );
+    let error = verify_adversarial_evidence(&output_dir)
+        .expect_err("incomplete adversarial evidence must be rejected");
+    assert_eq!(error.stage, "evidence_verification");
+    assert!(
+        error.detail["message"]
+            .as_str()
+            .unwrap()
+            .contains("all required cases")
+    );
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn all_adversarial_cases_run_in_order_when_the_occt_worker_is_available() {
+    if OcctWorker::locate().is_err() {
+        eprintln!(
+            "adversarial_e2e: no OCCT worker binary found; pinned CI runs this production path"
+        );
+        return;
+    }
+    let output_dir = temp_root("adversarial-all");
+    let report = run_all_adversarial_cases(&output_dir).expect("all adversarial cases run");
+    assert_eq!(
+        report["cases"],
+        serde_json::json!(["mismatch-cache", "schema-v0", "capability-loss"])
+    );
+    verify_adversarial_evidence(&output_dir).expect("complete adversarial evidence verifies");
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn capability_loss_is_demoable_through_the_production_binary() {
+    let output_dir = temp_root("adversarial-cli-capability");
+    let output = run_adversarial(&output_dir, "capability-loss");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(report["report"]["diagnostic"]["code"], "CAPABILITY_LOSS");
+    assert_eq!(report["report"]["next_command_route"], "HeadlessOnly");
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn mismatch_cache_is_demoable_through_the_production_binary_when_occt_is_available() {
+    if OcctWorker::locate().is_err() {
+        eprintln!(
+            "adversarial_cli: no OCCT worker binary found; pinned CI runs this production path"
+        );
+        return;
+    }
+    let output_dir = temp_root("adversarial-cli-mismatch");
+    let output = run_adversarial(&output_dir, "mismatch-cache");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(
+        report["report"]["diagnostic"]["code"],
+        "LAYER_1_FINGERPRINT_MISMATCH"
+    );
+    assert!(report["report"]["canonical_byte_equal"].as_bool().unwrap());
+    let _ = fs::remove_dir_all(output_dir);
 }

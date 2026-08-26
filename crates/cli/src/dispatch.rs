@@ -74,6 +74,11 @@ enum DispatchPlan {
         release_candidate: Option<String>,
         argument_error: Option<String>,
     },
+    Adversarial {
+        case: Option<String>,
+        output_dir: Option<String>,
+        argument_error: Option<String>,
+    },
     Save {
         bundle: String,
         feature_id: String,
@@ -413,6 +418,9 @@ fn plan(args: &[OsString]) -> DispatchPlan {
     if matches!(&plan, DispatchPlan::Unknown { .. }) {
         return plan;
     }
+    if matches!(&plan, DispatchPlan::Adversarial { .. }) {
+        return plan;
+    }
     let name = if args.first().is_some_and(|value| value == "new-project") {
         args.first()
     } else if args.first().is_some_and(|value| value == "--machine") {
@@ -449,6 +457,9 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
                 arg: "new-project".to_string(),
             },
         };
+    }
+    if args.first().is_some_and(|value| value == "run") {
+        return parse_adversarial_run(&args[1..]);
     }
     if args.first().is_none_or(|value| value != "--machine") {
         return DispatchPlan::Unknown {
@@ -511,6 +522,63 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         },
     };
     reject_non_finite(parsed)
+}
+
+fn parse_adversarial_run(args: &[OsString]) -> DispatchPlan {
+    if args.first().is_none_or(|value| value != "lbracket") {
+        return DispatchPlan::Unknown {
+            arg: args.first().map_or_else(
+                || "lbracket".to_string(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+        };
+    }
+    let mut case = None;
+    let mut output_dir = None;
+    let mut argument_error = None;
+    let mut index = 1;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy();
+        if let Some(value) = argument.strip_prefix("--adversarial=") {
+            if case.replace(value.to_string()).is_some() {
+                argument_error = Some(argument.into_owned());
+                break;
+            }
+            index += 1;
+            continue;
+        }
+        let Some(value) = args.get(index + 1) else {
+            argument_error = Some(argument.into_owned());
+            break;
+        };
+        match argument.as_ref() {
+            "--adversarial" => {
+                if case.replace(value.to_string_lossy().into_owned()).is_some() {
+                    argument_error = Some(argument.into_owned());
+                    break;
+                }
+            }
+            "--output-dir" => {
+                if output_dir
+                    .replace(value.to_string_lossy().into_owned())
+                    .is_some()
+                {
+                    argument_error = Some(argument.into_owned());
+                    break;
+                }
+            }
+            _ => {
+                argument_error = Some(argument.into_owned());
+                break;
+            }
+        }
+        index += 2;
+    }
+    DispatchPlan::Adversarial {
+        case,
+        output_dir,
+        argument_error,
+    }
 }
 
 fn parse_rehearse(args: &[OsString]) -> DispatchPlan {
@@ -620,6 +688,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
         | DispatchPlan::Rehearse { .. }
+        | DispatchPlan::Adversarial { .. }
         | DispatchPlan::Save { .. }
         | DispatchPlan::Load { .. }
         | DispatchPlan::BooleanFuse { .. }
@@ -2519,6 +2588,20 @@ where
         };
     }
     let plan = plan(&args);
+    if let DispatchPlan::Adversarial {
+        case,
+        output_dir,
+        argument_error,
+    } = &plan
+    {
+        return emit_adversarial(
+            case.as_deref(),
+            output_dir.as_deref(),
+            argument_error.as_deref(),
+            stdout,
+            stderr,
+        );
+    }
     let DispatchPlan::Unknown { arg } = &plan else {
         return execute_registered(plan, &theme, stdout, stderr);
     };
@@ -2613,6 +2696,10 @@ fn execute_handler(
             release_candidate.as_deref(),
             argument_error.as_deref(),
             stdout,
+            stderr,
+        ),
+        DispatchPlan::Adversarial { .. } => emit_internal_error(
+            "adversarial command was not routed before registration",
             stderr,
         ),
         DispatchPlan::Save {
@@ -3729,6 +3816,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             "output_dir": output_dir.as_deref().unwrap_or_default(),
             "release_candidate": release_candidate.as_deref().unwrap_or_default()
         }),
+        DispatchPlan::Adversarial { .. } => {
+            return Err("adversarial command is not a registered command".to_string());
+        }
         DispatchPlan::Save {
             bundle,
             feature_id,
@@ -4101,6 +4191,40 @@ fn emit_rehearsal(
         );
     }
     match crate::rehearsal::run_l_bracket_rehearsal(output_dir, release_candidate) {
+        Ok(report) => write_success(stdout, &report, stderr),
+        Err(error) => write_rehearsal_failure(&error, stderr),
+    }
+}
+
+fn emit_adversarial(
+    case: Option<&str>,
+    output_dir: Option<&str>,
+    argument_error: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if let Some(argument_error) = argument_error {
+        return write_rehearsal_failure(
+            &threeterm_cli_rehearsal_error(
+                "argument_parse",
+                json!({"message": format!("unknown or duplicate argument {argument_error:?}")}),
+                None,
+            ),
+            stderr,
+        );
+    }
+    let Some(case) = case.and_then(crate::rehearsal::AdversarialCase::parse) else {
+        return write_rehearsal_failure(
+            &threeterm_cli_rehearsal_error(
+                "argument_parse",
+                json!({"message": "--adversarial must be mismatch-cache, schema-v0, or capability-loss"}),
+                None,
+            ),
+            stderr,
+        );
+    };
+    let output_dir = output_dir.unwrap_or(crate::rehearsal::ADVERSARIAL_EVIDENCE_DIR);
+    match crate::rehearsal::run_adversarial_case(output_dir, case) {
         Ok(report) => write_success(stdout, &report, stderr),
         Err(error) => write_rehearsal_failure(&error, stderr),
     }
@@ -5268,6 +5392,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             format!("brep file missing: {}", path.display())
         }
         HostError::BrepIo { detail } => detail.clone(),
+        HostError::Layer1FingerprintMismatch { .. } => "LAYER_1_FINGERPRINT_MISMATCH".to_string(),
         HostError::DraftAlreadyExists { draft_id } => {
             format!(
                 "{{\"kind\":\"draft_already_exists\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?}}}"

@@ -1,0 +1,9 @@
+{
+  "schema_version": "threeterm.persistence/0",
+  "generation_id": "adversarial-v0",
+  "revision_id": "revision-0",
+  "revision_count": 1,
+  "transaction_count": 0,
+  "transaction_bytes": 0,
+  "transaction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

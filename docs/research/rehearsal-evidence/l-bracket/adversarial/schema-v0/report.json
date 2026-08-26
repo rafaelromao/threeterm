@@ -1,0 +1,15 @@
+{
+  "backup_created": false,
+  "canonical_byte_equal": true,
+  "canonical_revision_after": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
+  "canonical_revision_before": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
+  "case": "schema-v0",
+  "diagnostic": {
+    "code": "SCHEMA_EPOCH_V0_REQUIRES_BACKUP",
+    "detail": "schema epoch v0 requires a backup before loading",
+    "recovery": "refused the v0 bundle without changing the canonical snapshot"
+  },
+  "host_snapshot_preserved": true,
+  "schema_version": "threeterm.rehearsal.adversarial/1",
+  "v0_byte_equal": true
+}

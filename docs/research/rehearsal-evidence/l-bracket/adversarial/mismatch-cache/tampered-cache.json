@@ -1,0 +1,14 @@
+{
+  "schema_version": "threeterm.host.layer1-cache/1",
+  "source_revision": "24bd8c53948b3ed2ac7c96aada8105fdbf2439c51e074f41272eb904f2b0780f",
+  "operation": "bracket",
+  "feature_id": "l-bracket",
+  "worker_fingerprint": {
+    "worker_kind": "pcct",
+    "worker_schema_version": "threeterm.workers.occt/1",
+    "protocol_schema_version": "threeterm.protocol/1"
+  },
+  "artifact_name": "l-bracket.brep",
+  "byte_count": 5678,
+  "sha256": "5df01535a5e20a754c26b0d6f004d8079ffbf05bee65260426972883990298a1"
+}

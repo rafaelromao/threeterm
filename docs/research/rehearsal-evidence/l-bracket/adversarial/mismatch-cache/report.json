@@ -1,0 +1,14 @@
+{
+  "canonical_byte_equal": true,
+  "canonical_revision_after": "24bd8c53948b3ed2ac7c96aada8105fdbf2439c51e074f41272eb904f2b0780f",
+  "canonical_revision_before": "24bd8c53948b3ed2ac7c96aada8105fdbf2439c51e074f41272eb904f2b0780f",
+  "case": "mismatch-cache",
+  "diagnostic": {
+    "code": "LAYER_1_FINGERPRINT_MISMATCH",
+    "detail": "LAYER_1_FINGERPRINT_MISMATCH: expected=WorkerFingerprint { worker_kind: \"occt\", worker_schema_version: \"threeterm.workers.occt/1\", protocol_schema_version: \"threeterm.protocol/1\" } found=WorkerFingerprint { worker_kind: \"pcct\", worker_schema_version: \"threeterm.workers.occt/1\", protocol_schema_version: \"threeterm.protocol/1\" }",
+    "recovery": "discarded tampered cache and recomputed through the OCCT worker"
+  },
+  "host_snapshot_preserved": true,
+  "recomputations": 1,
+  "schema_version": "threeterm.rehearsal.adversarial/1"
+}

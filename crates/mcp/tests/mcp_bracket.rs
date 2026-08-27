@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use threeterm_occt_worker::OcctWorker;
+use threeterm_persistence::Bundle;
 
 fn fresh_bundle(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -165,7 +166,8 @@ fn initialize_returns_protocol_version_server_info_and_capabilities() {
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
             "clientInfo": {"name": "fixture", "version": "0"}
         }
     })]);
@@ -175,13 +177,57 @@ fn initialize_returns_protocol_version_server_info_and_capabilities() {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
     let result = &response["result"];
-    assert_eq!(result["protocolVersion"], "2024-11-05");
+    assert_eq!(result["protocolVersion"], "2025-06-18");
     assert_eq!(result["serverInfo"]["name"], "threeterm-mcp");
     assert!(result["serverInfo"]["version"].is_string());
     assert!(
         result["capabilities"]["tools"].is_object(),
         "initialize must declare tools capability"
     );
+}
+
+#[test]
+fn notification_executes_shared_command_without_producing_a_response() {
+    let root = fresh_bundle("notification");
+    Bundle::create(&root).expect("bundle creates");
+    let revision = Bundle::at(&root)
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let responses = run_mcp(&[
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.apply/1",
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "expected_revision": revision,
+                    "operation": "add",
+                    "feature_id": "box",
+                    "kind": "cube"
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "identity",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.identity/1",
+                "arguments": {"bundle_path": root.to_string_lossy()}
+            }
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], "identity");
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["transaction_count"],
+        1
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -276,6 +322,12 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
     let mcp = &mcp_responses[0];
     assert!(mcp["error"].is_null(), "mcp response must not be an error");
     let structured = &mcp["result"]["structuredContent"];
+    assert_eq!(mcp["result"]["content"][0]["type"], "text");
+    assert_eq!(
+        serde_json::from_str::<Value>(mcp["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("text content is JSON"),
+        structured.clone()
+    );
     let mut cli_semantic = cli.clone();
     let mut mcp_semantic = structured.clone();
     cli_semantic
@@ -627,10 +679,9 @@ fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
 
     assert_eq!(responses.len(), 1);
     let response = &responses[0];
-    assert_eq!(
-        response["error"]["code"], -32603,
-        "host failure uses -32603"
-    );
+    assert!(response["error"].is_null());
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(response["result"]["content"][0]["type"], "text");
 
     assert_eq!(
         std::fs::read(root.join("manifest.json")).expect("manifest reads after failure"),

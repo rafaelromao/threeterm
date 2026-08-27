@@ -23,6 +23,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=THREETERM_REQUIRE_IMMUTABLE_WORKERS");
 
     let immutable = env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_some();
+    if immutable {
+        assert!(
+            env::var_os("THREETERM_SLVSBUILD_WORKER").is_none(),
+            "canonical CI forbids overriding the source-built libslvs worker"
+        );
+    }
     if immutable && env::var_os("THREETERM_SKIP_SLVSBUILD").is_some() {
         panic!("canonical CI forbids skipping the immutable libslvs worker build");
     }

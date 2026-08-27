@@ -45,6 +45,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OCCT_INSTALL_DIR");
     println!("cargo:rerun-if-env-changed=THREETERM_REQUIRE_IMMUTABLE_WORKERS");
 
+    if env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_some() {
+        assert!(
+            env::var_os("THREETERM_OCCTBUILD_WORKER").is_none(),
+            "canonical CI forbids overriding the source-built OCCT worker"
+        );
+    }
+
     write_worker_metadata(&manifest_dir, &out_dir, &profile);
     emit_worker_path_rs(&out_dir, &worker_bin);
 

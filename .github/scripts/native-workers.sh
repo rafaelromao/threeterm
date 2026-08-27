@@ -49,6 +49,10 @@ prepare_native_workers() {
         printf '%s\n' 'canonical CI forbids native-worker build skips' >&2
         return 1
     fi
+    if [[ -n "${THREETERM_OCCTBUILD_WORKER:-}" || -n "${THREETERM_SLVSBUILD_WORKER:-}" ]]; then
+        printf '%s\n' 'canonical CI forbids native-worker path overrides' >&2
+        return 1
+    fi
 
     clone_at_commit "${OCCT_SOURCE_REPOSITORY}" "${OCCT_SOURCE_COMMIT}" "${sources}/occt"
     cmake -S "${sources}/occt" -B "${root}/occt-build" \

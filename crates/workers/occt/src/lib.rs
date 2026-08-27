@@ -945,7 +945,16 @@ impl OcctWorker {
             Some(Path::new(output_dir).join(output_filename))
         };
 
-        self.verify_identity()?;
+        if let Err(error) = self.verify_identity() {
+            return Err(match error {
+                WorkerError::Spawn { binary, detail, .. } => WorkerError::Spawn {
+                    binary,
+                    detail,
+                    request_id: Some(request_id.clone()),
+                },
+                other => other,
+            });
+        }
         let host = <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
             schema_version: threeterm_protocol::schema_version(),
@@ -1067,7 +1076,14 @@ impl OcctWorker {
             if let Some(stage) = stage {
                 let _ = stage.discard();
             }
-            return Err(error);
+            return Err(match error {
+                WorkerError::Spawn { binary, detail, .. } => WorkerError::Spawn {
+                    binary,
+                    detail,
+                    request_id: Some(context.request_id.clone()),
+                },
+                other => other,
+            });
         }
         let host = match <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",

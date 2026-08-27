@@ -3937,7 +3937,8 @@ fn execute_registered_with_observer(
     };
     if matches!(
         command,
-        threeterm_protocol::schema::IDENTITY_COMMAND_ID
+        threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+            | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
     ) {
         return match Host::new().execute_domain_command(command, request) {

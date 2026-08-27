@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, IDENTITY_COMMAND_ID};
+use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -29,6 +29,15 @@ fn apply_request(root: &std::path::Path, revision: &str) -> Value {
 
 fn identity_request(root: &std::path::Path) -> Value {
     json!({"bundle_path": root.to_string_lossy()})
+}
+
+fn extrude_request(root: &std::path::Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "extrude",
+        "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+        "height": 2.0
+    })
 }
 
 fn cli_identity(root: &std::path::Path) -> Value {
@@ -305,4 +314,62 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     );
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log_before);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
+    let cli_root = root("extrude-cli");
+    let mcp_root = root("extrude-mcp");
+    let tui_root = root("extrude-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        extrude_request(&cli_root),
+    );
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        extrude_request(&tui_root),
+    );
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/1",
+            "arguments": extrude_request(&mcp_root)
+        }),
+    });
+
+    if threeterm_occt_worker::OcctWorker::locate().is_err() {
+        assert!(
+            !format!("{cli:?}").contains("UnsupportedTool")
+                && !format!("{tui:?}").contains("not handled")
+                && mcp.error.is_none()
+                && mcp
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result["isError"] == true),
+            "adapters must route extrude through the executor"
+        );
+    } else {
+        let cli = cli.expect("CLI extrude executes");
+        let tui = tui.expect("TUI extrude executes");
+        let mcp = mcp.result.expect("MCP extrude executes")["structuredContent"].clone();
+        for result in [&cli, &tui, &mcp] {
+            assert_eq!(result["status"], "ok");
+            assert_eq!(result["operation"], "extrude");
+            assert_eq!(result["feature_id"], "extrude");
+        }
+        assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+        assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+    }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
 }

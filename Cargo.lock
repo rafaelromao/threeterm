@@ -560,6 +560,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "threeterm-domain",
+ "threeterm-protocol",
 ]
 
 [[package]]

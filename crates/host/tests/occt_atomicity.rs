@@ -25,9 +25,11 @@ use threeterm_occt_worker::{
     MirrorRequest, Operation, ShellRequest,
 };
 use threeterm_persistence::{
-    Bundle, MANIFEST_FILENAME, PublicationFailurePoint, TRANSACTIONS_LOG_FILENAME,
+    Bundle, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION, ExtrudeDeterministicInputs,
+    MANIFEST_FILENAME, PublicationFailurePoint, TRANSACTIONS_LOG_FILENAME,
     fail_next_publication_at,
 };
+use threeterm_protocol::artifact::sha256_hex;
 
 fn temp_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -186,6 +188,198 @@ fn extrude_commits_brep_into_a_new_revision() {
     assert_eq!(view.snapshot, reloaded);
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("replay", "box-seed", "box");
+    let request =
+        rectangle_extrude_request("replay").with_output_path(root.join("stage"), "unused.brep");
+    let committed = Host::new()
+        .extrude(&root, request, &worker)
+        .expect("extrude commits");
+    let original_brep = fs::read(&committed.result.brep_path).expect("committed BREP reads");
+    Host::new()
+        .load_with_extrude_replay(&root)
+        .expect("intact extrude loads without replay");
+    let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    let loaded = Bundle::at(&root)
+        .open()
+        .expect("canonical generation opens");
+    let entry = loaded
+        .log
+        .entries()
+        .last()
+        .expect("extrude transaction exists");
+    let intent = entry.intent.as_ref().expect("extrude intent persists");
+    assert_eq!(intent.command, "extrude");
+    assert_eq!(intent.operation, "additive");
+    assert_eq!(intent.affected_semantic_ids, ["replay-box-1"]);
+    assert_eq!(
+        intent.source_revision,
+        committed.source_snapshot.revision_hash
+    );
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.worker_requirements.worker_kind, "occt");
+
+    fs::remove_file(&committed.result.brep_path).expect("promoted BREP removes");
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+    Host::new()
+        .load(&root)
+        .expect("canonical project loads without BREP");
+
+    let replayed = Host::new()
+        .reload_and_recompute_extrudes(&root, &worker)
+        .expect("extrude recomputes");
+    assert_eq!(
+        replayed.snapshot.revision_hash,
+        committed.snapshot.revision_hash
+    );
+    assert_eq!(replayed.recomputed, 1);
+    assert_eq!(replayed.geometry_fingerprints, [sha256_hex(&original_brep)]);
+    assert_eq!(
+        fs::read(&committed.result.brep_path).expect("replayed BREP reads"),
+        original_brep
+    );
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).expect("manifest rereads"),
+        manifest
+    );
+    assert_eq!(
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log rereads"),
+        log
+    );
+    assert!(
+        !Host::new()
+            .load(&root)
+            .expect("replayed project reloads")
+            .recovered_from_previous
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_load_path_replays_missing_extrude_results() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("production-replay", "box-seed", "box");
+    let committed = Host::new()
+        .extrude(
+            &root,
+            rectangle_extrude_request("production-replay"),
+            &worker,
+        )
+        .expect("extrude commits");
+    let expected = fs::read(&committed.result.brep_path).expect("committed BREP reads");
+    fs::remove_file(&committed.result.brep_path).expect("promoted BREP removes");
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+
+    let loaded = Host::new()
+        .load_with_extrude_replay(&root)
+        .expect("production reload replays extrude");
+
+    assert_eq!(loaded.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(fs::read(&committed.result.brep_path).unwrap(), expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn replay_reconstructs_persisted_extrude_inputs_through_a_worker_boundary() {
+    let root = temp_root("replay-fake-worker");
+    let worker_root = temp_root("replay-fake-worker-bin");
+    fs::create_dir_all(&worker_root).expect("worker directory creates");
+    let script = worker_root.join("occt-worker.sh");
+    let bytes = b"replayable-brep";
+    let digest = sha256_hex(bytes);
+    fs::write(
+        &script,
+        format!(
+            r##"#!/bin/sh
+printf '%s\n' '{{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"fake"}}'
+IFS= read -r request
+request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+source_revision_id=$(printf '%s\n' "$request" | sed -n 's/.*"source_revision_id":"\([^"]*\)".*/\1/p')
+output_dir=$(printf '%s\n' "$request" | sed -n 's/.*"output_dir":"\([^"]*\)".*/\1/p')
+output_filename=$(printf '%s\n' "$request" | sed -n 's/.*"output_filename":"\([^"]*\)".*/\1/p')
+feature_id=$(printf '%s\n' "$request" | sed -n 's/.*"feature_id":"\([^"]*\)".*/\1/p')
+printf '%s' 'replayable-brep' > "$output_dir/$output_filename"
+printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$output_filename" "$feature_id"
+"##,
+            digest = digest,
+            bytes_len = bytes.len(),
+        ),
+    )
+    .expect("worker script writes");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+        .expect("worker script becomes executable");
+
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .append_feature("box-seed", "box")
+        .expect("seed appends")
+        .revision_hash_hex()
+        .to_string();
+    let intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        request_id: "replay-request".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["replay-solid".to_string()],
+        source_revision,
+        worker_requirements: threeterm_protocol::artifact::WorkerFingerprint {
+            worker_kind: "occt".to_string(),
+            worker_schema_version: "threeterm.workers.occt/1".to_string(),
+            protocol_schema_version: "threeterm.protocol/1".to_string(),
+        },
+    };
+    let committed = bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "replay-solid",
+            "brep:replay-solid",
+            intent.source_revision.as_str(),
+            &intent.request_id,
+            "{}",
+            &intent,
+            bytes,
+        )
+        .expect("canonical extrude appends");
+    let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    fs::remove_file(root.join("brep/replay-solid.brep")).expect("derived BREP removes");
+
+    let replayed = Host::new()
+        .reload_and_recompute_extrudes(
+            &root,
+            &threeterm_occt_worker::OcctWorker::with_binary_path(script),
+        )
+        .expect("canonical extrude replays");
+    assert_eq!(replayed.recomputed, 1);
+    assert_eq!(
+        replayed.snapshot.revision_hash,
+        committed.revision_hash_hex()
+    );
+    assert_eq!(replayed.geometry_fingerprints, [digest]);
+    assert_eq!(
+        fs::read(root.join("brep/replay-solid.brep")).unwrap(),
+        bytes
+    );
+    assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
+    assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(worker_root);
 }
 
 #[test]

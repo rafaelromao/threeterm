@@ -23,14 +23,18 @@ use threeterm_occt_worker::{
     OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{
-    Bundle, BundleError, LoadPolicy, LoadedBundle, load, load_with_policy, previous_generation_path,
+    Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, LoadPolicy, LoadedBundle, load, load_with_policy,
+    previous_generation_path,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, CommandId, IDENTITY_COMMAND_ID, find};
+use threeterm_protocol::schema::{
+    APPLY_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID, find,
+};
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
 use threeterm_viewport::{SceneSolid, SceneTriangle, ViewportScene};
@@ -448,6 +452,7 @@ pub struct ExtrudeDerivedResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StagedOcctResult<R> {
     pub source_snapshot: SnapshotView,
+    pub request: serde_json::Value,
     pub result: R,
     pub artifact: Layer1DerivedResult,
 }
@@ -629,6 +634,14 @@ pub struct ReplayVerification {
     pub deterministic: bool,
     pub fingerprint: String,
     pub mismatch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtrudeReplayView {
+    pub snapshot: SnapshotView,
+    pub recomputed: usize,
+    pub feature_ids: Vec<String>,
+    pub geometry_fingerprints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1525,6 +1538,68 @@ impl Host {
                             .response_schema_version,
                     }))
                 }
+                EXTRUDE_COMMAND_ID => {
+                    let profile: Vec<[f64; 2]> =
+                        serde_json::from_value(request.get("profile").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing profile".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid extrude profile: {error}"),
+                        })?;
+                    let height = request
+                        .get("height")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "missing extrude height".to_string(),
+                        })?;
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let view = self.extrude(
+                        string_field("bundle_path")?,
+                        ExtrudeRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            profile.into_iter().map(|[x, y]| (x, y)).collect(),
+                            height,
+                        )
+                        .with_feature_id(string_field("feature_id")?),
+                        &worker,
+                    )?;
+                    Ok(serde_json::json!({
+                        "status": view.result.status,
+                        "operation": "extrude",
+                        "feature_id": view.result.feature_id,
+                        "request_id": view.result.request_id,
+                        "source_snapshot": {
+                            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+                            "revision_hash": view.source_snapshot.revision_hash,
+                        },
+                        "feature_graph_hash": view.snapshot.feature_graph_hash,
+                        "revision_hash": view.snapshot.revision_hash,
+                        "authoritative": true,
+                        "artifact_kind": "brep",
+                        "artifact_name": format!("{}.brep", view.result.feature_id),
+                        "brep_path": view.result.brep_path,
+                        "brep_sha256": view.result.brep_sha256,
+                        "brep_bytes": view.result.brep_bytes,
+                        "worker_fingerprint": view.worker_fingerprint,
+                        "derived_result": {
+                            "request_id": view.artifact.request_id,
+                            "operation": view.artifact.operation,
+                            "feature_id": view.artifact.feature_id,
+                            "source_revision_id": view.source_snapshot.revision_hash,
+                            "worker_fingerprint": view.artifact.worker_fingerprint,
+                            "artifact_kind": view.artifact.artifact_kind,
+                            "artifact_name": view.artifact.artifact_name,
+                            "byte_count": view.artifact.byte_count,
+                            "sha256": view.artifact.sha256,
+                        },
+                        "schema_version": find(command).expect("extrude is registered").response_schema_version,
+                    }))
+                }
                 APPLY_COMMAND_ID => {
                     let operation = string_field("operation")?;
                     let feature_id = string_field("feature_id")?;
@@ -1909,6 +1984,155 @@ impl Host {
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
+    }
+
+    /// Open a bundle through the production reload path, replaying canonical
+    /// extrude intent when its disposable results are missing.
+    pub fn load_with_extrude_replay(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        let view = self.load(root)?;
+        let loaded = Bundle::at(root).open()?;
+        let replay_needed = loaded
+            .log
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.intent.as_ref())
+            .any(|intent| {
+                intent.affected_semantic_ids.iter().any(|feature_id| {
+                    !bundle_root(root)
+                        .join(BREP_SUBDIR)
+                        .join(format!("{feature_id}.brep"))
+                        .is_file()
+                })
+            });
+        if !replay_needed {
+            return Ok(view);
+        }
+        let worker = OcctWorker::locate().map_err(HostError::from)?;
+        Ok(self.reload_and_recompute_extrudes(root, &worker)?.snapshot)
+    }
+
+    /// Reload canonical extrude intents and rebuild their disposable BREP
+    /// results. Replay never appends a transaction or changes the revision.
+    pub fn reload_and_recompute_extrudes(
+        &self,
+        root: impl AsRef<Path>,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeReplayView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        let intents = loaded
+            .log
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.intent.clone())
+            .collect::<Vec<_>>();
+        if intents.len() > 1 {
+            return Err(HostError::Validation {
+                detail: "replay supports one canonical additive extrude transaction".to_string(),
+            });
+        }
+        let mut feature_ids = Vec::with_capacity(intents.len());
+        let mut geometry_fingerprints = Vec::with_capacity(intents.len());
+        for intent in intents {
+            let expected_worker = expected_occt_worker_fingerprint();
+            if intent.worker_requirements != expected_worker {
+                return Err(HostError::WorkerUnavailable {
+                    detail: format!(
+                        "incompatible extrude worker requirements: expected {expected_worker:?}, found {:?}",
+                        intent.worker_requirements
+                    ),
+                });
+            }
+            let feature_id = intent
+                .affected_semantic_ids
+                .first()
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "extrude intent has no affected feature".to_string(),
+                })?;
+            if !loaded.graph.contains_feature(&feature_id) {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "extrude replay feature is not in the Revision Snapshot: {feature_id}"
+                    ),
+                });
+            }
+            let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create extrude replay stage failed: {error}"),
+                }
+            })?;
+            let stage_root = stage.root().to_path_buf();
+            let request = ExtrudeRequest::new(
+                intent.request_id.clone(),
+                intent
+                    .deterministic_inputs
+                    .profile
+                    .iter()
+                    .map(|[x, y]| (*x, *y))
+                    .collect(),
+                intent.deterministic_inputs.height,
+            )
+            .with_output_path(&stage_root, "replay.brep")
+            .with_feature_id(&feature_id);
+            let result = worker
+                .clone()
+                .with_revision_id(intent.source_revision)
+                .extrude(&request)
+                .map_err(HostError::from);
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = stage.discard();
+                    return Err(error);
+                }
+            };
+            let bytes = match read_brep_verified(
+                &result.brep_path,
+                Some((result.brep_bytes, &result.brep_sha256)),
+            ) {
+                Ok(bytes) => bytes,
+                Err(detail) => {
+                    let _ = stage.discard();
+                    return Err(HostError::BrepIo { detail });
+                }
+            };
+            let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                &feature_id,
+                &source_snapshot.revision_hash,
+                &bytes,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = stage.discard();
+                    return Err(error.into());
+                }
+            };
+            let _ = stage.discard();
+            feature_ids.push(feature_id);
+            geometry_fingerprints.push(sha256_path(&path).map_err(|error| HostError::BrepIo {
+                detail: format!("hash replayed BREP failed: {error}"),
+            })?);
+        }
+        let reloaded = Bundle::at(root).open()?;
+        let snapshot = SnapshotView::from(&reloaded);
+        if snapshot.revision_hash != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "extrude replay changed the canonical revision".to_string(),
+            });
+        }
+        self.current.replace(Some(reloaded));
+        Ok(ExtrudeReplayView {
+            snapshot,
+            recomputed: feature_ids.len(),
+            feature_ids,
+            geometry_fingerprints,
+        })
     }
 
     /// Load a canonical bundle and validate its optional non-authoritative
@@ -2589,6 +2813,7 @@ impl Host {
             serde_json::to_value(request).map_err(|error| HostError::Validation {
                 detail: format!("{operation:?} request serialization failed: {error}"),
             })?;
+        let canonical_request = request_value.clone();
         let request_id = request_value["request_id"]
             .as_str()
             .ok_or_else(|| HostError::Validation {
@@ -2698,6 +2923,7 @@ impl Host {
             .map_err(|diagnostic| HostError::DerivedResult { diagnostic })?;
         Ok(StagedOcctResult {
             source_snapshot,
+            request: canonical_request,
             result: typed_result,
             artifact,
         })
@@ -2761,17 +2987,35 @@ impl Host {
         self.promote_occt_result_with_append(
             root,
             derived,
-            |bundle, current, artifact, bytes, provenance| {
+            |bundle, current, derived, artifact, bytes, provenance| {
                 let feature_id = &artifact.feature_id;
                 let kind = format!("brep:{feature_id}");
-                bundle.append_new_feature_with_brep_if_revision_and_provenance(
-                    feature_id,
-                    &kind,
-                    &current.manifest.revision_hash,
-                    &artifact.request_id,
-                    provenance,
-                    bytes,
-                )
+                if artifact.operation == "extrude" {
+                    let intent = canonical_extrude_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &intent,
+                        bytes,
+                    )
+                } else {
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        bytes,
+                    )
+                }
             },
         )
     }
@@ -2787,6 +3031,7 @@ impl Host {
         F: FnOnce(
             &Bundle,
             &LoadedBundle,
+            &StagedOcctResult<R>,
             &Layer1DerivedResult,
             &[u8],
             &str,
@@ -2864,8 +3109,24 @@ impl Host {
         })
         .to_string();
         let feature_id = derived.artifact.feature_id.clone();
+        if let Err(error) = stage.discard() {
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
+            });
+        }
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
+        let _ = fs::remove_dir(&derived_root);
         let bundle = Bundle::at(root);
-        let updated = match append(&bundle, &current, &derived.artifact, &bytes, &provenance) {
+        let updated = match append(
+            &bundle,
+            &current,
+            &derived,
+            &derived.artifact,
+            &bytes,
+            &provenance,
+        ) {
             Ok(updated) => updated,
             Err(error) => {
                 let is_stale = matches!(&error, BundleError::Invalid(detail) if detail.starts_with("worker result belongs to revision"));
@@ -2881,14 +3142,12 @@ impl Host {
                         &diagnostic,
                     );
                     self.current.replace(Some(reconciled));
-                    let _ = stage.discard();
                     self.layer1_results
                         .borrow_mut()
                         .remove(&derived.artifact.cache_key);
                     let _ = fs::remove_dir(&derived_root);
                     return Err(HostError::DerivedResult { diagnostic });
                 }
-                let _ = stage.discard();
                 self.layer1_results
                     .borrow_mut()
                     .remove(&derived.artifact.cache_key);
@@ -2901,10 +3160,6 @@ impl Host {
         };
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
-        self.layer1_results
-            .borrow_mut()
-            .remove(&derived.artifact.cache_key);
-        let _ = stage.discard();
         let mut artifact = derived.artifact;
         artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
         let mut value =
@@ -2974,7 +3229,7 @@ impl Host {
         let (snapshot, result, artifact) = self.promote_occt_result_with_append(
             &root,
             derived,
-            move |bundle, current, _artifact, bytes, shared_provenance| {
+            move |bundle, current, _derived, _artifact, bytes, shared_provenance| {
                 bundle.append_features_with_brep_if_revision_and_history_and_provenance(
                     &entries,
                     &feature_id,
@@ -5388,6 +5643,39 @@ fn extrude_artifact_request(
         semantic_input_sha256: sha256_hex(&semantic_input),
         deterministic_settings_sha256: sha256_hex(b"threeterm.extrude.derived-settings/1"),
     })
+}
+
+fn canonical_extrude_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalExtrudeIntent, HostError> {
+    let profile = serde_json::from_value(request["profile"].clone()).map_err(|error| {
+        HostError::Validation {
+            detail: format!("canonical extrude profile is invalid: {error}"),
+        }
+    })?;
+    let height = request["height"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical extrude height is missing or invalid".to_string(),
+        })?;
+    let intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        request_id: artifact.request_id.clone(),
+        deterministic_inputs: ExtrudeDeterministicInputs { profile, height },
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
 }
 
 fn occt_artifact_request(

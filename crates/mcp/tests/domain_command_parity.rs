@@ -81,6 +81,29 @@ fn cli_apply(root: &std::path::Path, revision: &str) -> Value {
     serde_json::from_slice(&stdout).expect("CLI returns JSON")
 }
 
+fn cli_missing_kind(root: &std::path::Path, revision: &str) -> Value {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let path = root.to_string_lossy().into_owned();
+    let args = [
+        "--machine",
+        "apply",
+        path.as_str(),
+        "--expected-revision",
+        revision,
+        "--operation",
+        "add",
+        "--feature-id",
+        "box",
+    ]
+    .into_iter()
+    .map(OsString::from);
+    let status = threeterm_cli::dispatch::dispatch(args, &mut stdout, &mut stderr);
+    assert_ne!(status, 0, "CLI accepts a semantically invalid request");
+    assert!(stdout.is_empty());
+    serde_json::from_slice(&stderr).expect("CLI returns a structured diagnostic")
+}
+
 fn mcp_identity(root: &std::path::Path) -> Value {
     let server = McpServer::new();
     let response = server.handle_request(&JsonRpcRequest {
@@ -128,6 +151,7 @@ fn cli_mcp_and_tui_apply_the_same_versioned_request() {
 
     let initial = Bundle::at(&cli_root).open().expect("CLI fixture opens");
     let revision = initial.revision_hash_hex().to_string();
+    let initial_terminal_digest = initial.log.terminal_digest_hex().to_string();
     let cli_identity_result = cli_identity(&cli_root);
     let mcp_identity_result = mcp_identity(&mcp_root);
     let tui_host = threeterm_host::Host::new();
@@ -154,6 +178,14 @@ fn cli_mcp_and_tui_apply_the_same_versioned_request() {
     for path in [&cli_root, &mcp_root, &tui_root] {
         let loaded = Bundle::at(path).open().expect("applied bundle reloads");
         assert_eq!(loaded.log.len(), 1);
+        assert_eq!(loaded.generation.id, cli_result["generation_id"]);
+        assert_eq!(loaded.manifest.revision_id, cli_result["revision_id"]);
+        assert_eq!(loaded.log.len(), cli_result["transaction_count"]);
+        assert_eq!(loaded.log.entries()[0].log_index, 0);
+        assert_eq!(
+            loaded.log.entries()[0].previous_digest,
+            initial_terminal_digest
+        );
         assert_eq!(loaded.log.entries()[0].operation.as_deref(), Some("add"));
         assert_eq!(loaded.log.entries()[0].feature_id, "box");
         assert_eq!(loaded.log.entries()[0].kind, "cube");
@@ -195,7 +227,7 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     )
     .expect_err("missing kind is rejected");
     assert!(matches!(
-        tui_error,
+        &tui_error,
         threeterm_protocol::command_execution::ExecutionError::Handler(
             threeterm_host::HostError::Validation { .. }
         )
@@ -242,6 +274,17 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     let semantic_error = semantic.error.expect("semantic error");
     assert_eq!(semantic_error.code, -32603);
     assert!(semantic_error.message.contains("requires kind"));
+    let cli_error = cli_missing_kind(&root, identity["revision_hash"].as_str().unwrap());
+    assert_eq!(cli_error["code"], "invalid_request");
+    assert!(cli_error["arg"].as_str().unwrap().contains("requires kind"));
+    if let threeterm_protocol::command_execution::ExecutionError::Handler(
+        threeterm_host::HostError::Validation { detail },
+    ) = tui_error
+    {
+        assert!(detail.contains("requires kind"));
+    } else {
+        panic!("TUI diagnostic classification changed");
+    }
     assert_eq!(
         fs::read(root.join("manifest.json")).unwrap(),
         manifest_before

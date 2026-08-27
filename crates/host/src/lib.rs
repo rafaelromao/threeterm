@@ -3080,6 +3080,14 @@ impl Host {
         })
         .to_string();
         let feature_id = derived.artifact.feature_id.clone();
+        if let Err(error) = stage.discard() {
+            return Err(HostError::DerivedResult {
+                diagnostic: Diagnostic::artifact_promotion_failure(&error.to_string()),
+            });
+        }
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
         let _ = fs::remove_dir(&derived_root);
         let bundle = Bundle::at(root);
         let updated = match append(
@@ -3105,14 +3113,12 @@ impl Host {
                         &diagnostic,
                     );
                     self.current.replace(Some(reconciled));
-                    let _ = stage.discard();
                     self.layer1_results
                         .borrow_mut()
                         .remove(&derived.artifact.cache_key);
                     let _ = fs::remove_dir(&derived_root);
                     return Err(HostError::DerivedResult { diagnostic });
                 }
-                let _ = stage.discard();
                 self.layer1_results
                     .borrow_mut()
                     .remove(&derived.artifact.cache_key);
@@ -3125,10 +3131,6 @@ impl Host {
         };
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
-        self.layer1_results
-            .borrow_mut()
-            .remove(&derived.artifact.cache_key);
-        let _ = stage.discard();
         let mut artifact = derived.artifact;
         artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
         let mut value =

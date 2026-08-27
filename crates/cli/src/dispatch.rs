@@ -11,8 +11,8 @@ use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanFuseRequest, BracketRequest, ChamferRequest, CircularPatternRequest, DraftRequest,
-    ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
-    OcctWorker, Operation, RevolveRequest, ShellRequest, new_request_id,
+    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, OcctWorker,
+    Operation, RevolveRequest, ShellRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
@@ -20,7 +20,7 @@ use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
     COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
     MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
     find_by_name, iter,
@@ -2851,19 +2851,13 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Extrude {
-            bundle,
-            feature_id,
-            height,
-            ..
-        } => emit_extrude(
-            &bundle,
-            &feature_id,
-            profile_from_request(request),
-            height,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Extrude { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, EXTRUDE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::FitDimension {
             bundle,
             expected_revision,
@@ -3224,7 +3218,10 @@ pub fn dispatch_registered_command(
     command: CommandId,
     request: Value,
 ) -> Result<Value, DispatchError> {
-    if matches!(command, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+    if matches!(
+        command,
+        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID
+    ) {
         return host
             .execute_domain_command(command, request)
             .map_err(DispatchError::from);
@@ -4579,34 +4576,6 @@ fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
         .expect("registered loft schema guarantees profile triples")
 }
 
-fn emit_extrude(
-    bundle: &str,
-    feature_id: &str,
-    profile: Vec<(f64, f64)>,
-    height: f64,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let request = ExtrudeRequest::new(threeterm_occt_worker::new_request_id(), profile, height)
-        .with_feature_id(feature_id);
-    let host = Host::new();
-    match host.stage_extrude(bundle, request, &worker) {
-        Ok(view) => match host.promote_extrude_derived(bundle, view) {
-            Ok(view) => write_extrude_view(&view, EXTRUDE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-            Err(error) => emit_host_error(&error, stderr),
-        },
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
 fn emit_boolean_fuse(
     bundle: &str,
     feature_id: &str,
@@ -5233,46 +5202,6 @@ fn write_load_snapshot(
             "feature_graph_hash": feature_graph_hash,
             "revision_hash": revision_hash,
             "recovered_from_previous": recovered_from_previous,
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_extrude_view(
-    view: &threeterm_host::ExtrudeCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Extrude.as_str(),
-            "feature_id": view.result.feature_id,
-            "request_id": view.result.request_id,
-            "source_snapshot": {
-                "feature_graph_hash": view.source_snapshot.feature_graph_hash,
-                "revision_hash": view.source_snapshot.revision_hash,
-            },
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "authoritative": true,
-            "artifact_kind": "brep",
-            "artifact_name": format!("{}.brep", view.result.feature_id),
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "worker_fingerprint": {
-                "worker_kind": view.worker_fingerprint.worker_kind,
-                "worker_schema_version": view.worker_fingerprint.worker_schema_version,
-                "protocol_schema_version": view.worker_fingerprint.protocol_schema_version,
-            },
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
             "schema_version": schema_version,
         }),
         stderr,

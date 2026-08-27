@@ -229,6 +229,77 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
     );
     assert!(root.join("brep/box-rect.brep").exists());
     assert!(!root.join(".derived").exists());
+    let before_host = Host::new();
+    before_host.load(&root).expect("pre-replay host loads");
+    let before_scene = before_host
+        .presentation_viewport_scene()
+        .expect("pre-replay viewport scene builds");
+    let before_export_dir = temp_root("pre-replay-export");
+    fs::create_dir_all(&before_export_dir).expect("pre-replay export directory creates");
+    before_host
+        .export(
+            &root,
+            "box-rect",
+            &["stl".to_string()],
+            &before_export_dir,
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("pre-replay export succeeds");
+    let before_export =
+        fs::read(before_export_dir.join("box-rect.stl")).expect("pre-replay export reads");
+
+    let replay_manifest = fs::read(root.join("manifest.json")).expect("replay manifest reads");
+    let replay_log = fs::read(root.join("transactions.log")).expect("replay log reads");
+    for entry in fs::read_dir(root.join("brep")).expect("BREP directory reads") {
+        fs::remove_file(entry.expect("BREP entry reads").path()).expect("BREP removes");
+    }
+    let unloaded = Host::new()
+        .load(&root)
+        .expect("project loads without Derived Results");
+    assert_eq!(unloaded.revision_hash, parsed["revision_hash"]);
+    let worker = OcctWorker::locate().expect("OCCT worker locates for replay");
+    let replay_host = Host::new();
+    let replayed = replay_host
+        .reload_and_recompute_extrudes(&root, &worker)
+        .expect("canonical extrudes replay");
+    assert_eq!(replayed.recomputed, 2);
+    assert_eq!(replayed.snapshot.revision_hash, parsed["revision_hash"]);
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        replay_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), replay_log);
+    assert!(root.join("brep/prior-box.brep").is_file());
+    assert!(root.join("brep/box-rect.brep").is_file());
+    assert_eq!(
+        replay_host
+            .presentation_viewport_scene()
+            .expect("post-replay viewport scene builds"),
+        before_scene
+    );
+    let after_export_dir = temp_root("post-replay-export");
+    fs::create_dir_all(&after_export_dir).expect("post-replay export directory creates");
+    replay_host
+        .export(
+            &root,
+            "box-rect",
+            &["stl".to_string()],
+            &after_export_dir,
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("post-replay export succeeds");
+    assert_eq!(
+        fs::read(after_export_dir.join("box-rect.stl")).expect("post-replay export reads"),
+        before_export
+    );
 
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(before_export_dir);
+    let _ = fs::remove_dir_all(after_export_dir);
 }

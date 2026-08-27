@@ -3,8 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_domain::history::HistoryState;
 use threeterm_persistence::{
-    Bundle, BundleError, PublicationFailurePoint, fail_next_publication_at,
+    Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, PublicationFailurePoint, fail_next_publication_at,
 };
+use threeterm_protocol::artifact::WorkerFingerprint;
 
 fn temp_root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -60,6 +62,53 @@ fn revision_guarded_brep_promotion_publishes_log_and_bytes_together() {
         b"new-brep"
     );
     assert_ne!(before, b"new-brep");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn extrude_promotion_persists_versioned_deterministic_intent() {
+    let root = temp_root("intent");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        request_id: "request-1".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["extrude-1".to_string()],
+        source_revision: source_revision.clone(),
+        worker_requirements: WorkerFingerprint {
+            worker_kind: "occt".to_string(),
+            worker_schema_version: "threeterm.workers.occt/1".to_string(),
+            protocol_schema_version: "threeterm.protocol/1".to_string(),
+        },
+    };
+    let committed = bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "extrude-1",
+            "brep:extrude-1",
+            &source_revision,
+            "request-1",
+            "{}",
+            &intent,
+            b"brep",
+        )
+        .expect("extrude intent publishes");
+    let entry = committed.log.entries().first().expect("transaction exists");
+    assert_eq!(entry.intent.as_ref(), Some(&intent));
+    assert_eq!(
+        Bundle::at(&root).open().unwrap().log.entries()[0].intent,
+        Some(intent)
+    );
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -300,6 +349,43 @@ fn loading_rejects_tampered_promoted_brep_bytes() {
         bundle.open().is_err(),
         "tampered BREP must fail closed on load"
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn missing_promoted_brep_is_a_rebuildable_derived_result() {
+    let root = temp_root("missing-derived");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let initial = bundle
+        .append_feature_with_brep_if_revision(
+            "extrude-1",
+            "brep:extrude-1",
+            "f3a236968b5fed4bedf5074a239c053d246bb284861660b8570173e7d622dee7",
+            b"replayable-brep",
+        )
+        .expect("promotion succeeds");
+    let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(root.join("transactions.log")).expect("log reads");
+    fs::remove_file(root.join("brep/extrude-1.brep")).expect("promoted BREP removes");
+
+    let loaded = bundle
+        .open()
+        .expect("canonical generation loads without BREP");
+    assert_eq!(loaded.revision_hash_hex(), initial.revision_hash_hex());
+    let path = bundle
+        .restore_derived_brep_if_revision(
+            "extrude-1",
+            initial.revision_hash_hex(),
+            b"replayable-brep",
+        )
+        .expect("derived BREP restores atomically");
+    assert_eq!(
+        fs::read(path).expect("restored BREP reads"),
+        b"replayable-brep"
+    );
+    assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
 
     let _ = fs::remove_dir_all(root);
 }

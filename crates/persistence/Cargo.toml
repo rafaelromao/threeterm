@@ -15,6 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 threeterm-domain = { path = "../domain" }
+threeterm-protocol = { path = "../protocol" }
 
 [lints]
 workspace = true

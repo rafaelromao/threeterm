@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+mod launch;
+
 use std::path::Path;
 
 use serde_json::Value;
@@ -17,6 +19,11 @@ use threeterm_viewport::{
     CameraState, CapabilityProbeResult, FrameAcknowledgement, ProtocolNeutralViewport,
     RenderCoordinator, Renderer, SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode,
     ViewportRequest, ViewportScene,
+};
+
+pub use launch::{
+    EXIT_CAPABILITY_FAILURE, EXIT_LAUNCH_FAILURE, InteractiveTerminal, LaunchError, LaunchOutcome,
+    launch,
 };
 
 pub fn schema_version() -> &'static str {
@@ -2376,6 +2383,22 @@ impl<R: Renderer> TuiViewportSession<R> {
         })
     }
 
+    pub fn render_current(&mut self) -> Result<SubmitOutcome, ViewportDiagnostic> {
+        self.scene.selected_id = self.tui.state().selected_target;
+        let generation = self.tui.state().presentation_generation;
+        let frame = ProtocolNeutralViewport::project(
+            &self.scene,
+            ViewportRequest::new(
+                self.scene.revision.clone(),
+                generation,
+                self.width,
+                self.height,
+                self.camera,
+            ),
+        )?;
+        self.coordinator.submit(frame)
+    }
+
     pub fn process_terminal_input(
         &mut self,
         bytes: &[u8],
@@ -2403,23 +2426,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             ArrowKey::Left => self.camera.rotated(-5, 0),
             ArrowKey::Right => self.camera.rotated(5, 0),
         };
-        self.scene.selected_id = self.tui.state().selected_target;
-        let generation = self.tui.state().presentation_generation;
-        let frame = ProtocolNeutralViewport::project(
-            &self.scene,
-            ViewportRequest::new(
-                self.scene.revision.clone(),
-                generation,
-                self.width,
-                self.height,
-                self.camera,
-            ),
-        )
-        .map_err(TuiViewportError::Viewport)?;
-        let submission = self
-            .coordinator
-            .submit(frame)
-            .map_err(TuiViewportError::Viewport)?;
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
         Ok(ViewportInputOutcome {
             rendered,
             submission,

@@ -3,10 +3,12 @@ use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::flag;
 use threeterm_host::Host;
 use threeterm_tui::{
     EXIT_CAPABILITY_FAILURE, EXIT_LAUNCH_FAILURE, InteractiveTerminal, LaunchError, launch,
@@ -20,18 +22,24 @@ struct ProcessTerminal {
     original_stty: Option<Vec<u8>>,
     cells: (u32, u32),
     event_buffer: Vec<u8>,
+    termination_requested: Arc<AtomicBool>,
 }
 
 impl ProcessTerminal {
-    fn new() -> Self {
+    fn new() -> io::Result<Self> {
         let cells = terminal_cells();
-        Self {
+        let termination_requested = Arc::new(AtomicBool::new(false));
+        for signal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+            flag::register(signal, Arc::clone(&termination_requested)).map_err(io::Error::other)?;
+        }
+        Ok(Self {
             input: io::stdin(),
             output: io::stdout(),
             original_stty: None,
             cells,
             event_buffer: Vec::new(),
-        }
+            termination_requested,
+        })
     }
 
     fn environment(&self) -> TerminalEnvironment {
@@ -100,6 +108,9 @@ impl CapabilityProbeIo for ProcessTerminal {
 impl InteractiveTerminal for ProcessTerminal {
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         loop {
+            if self.termination_requested.load(Ordering::Relaxed) {
+                return Ok(vec![3]);
+            }
             if let Some(length) = next_event_length(&self.event_buffer) {
                 return Ok(self.event_buffer.drain(..length).collect());
             }
@@ -234,23 +245,20 @@ fn main() -> ExitCode {
         return report(usage_error());
     }
     let root = PathBuf::from(root);
-    let mut terminal = ProcessTerminal::new();
+    let mut terminal = match ProcessTerminal::new() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            return report(LaunchError::Runtime(format!(
+                "signal setup failed: {error}"
+            )));
+        }
+    };
     let environment = terminal.environment();
     let host = Host::new();
-    match launch(&host, root, &mut terminal, environment, probe_nonce()) {
+    match launch(&host, root, &mut terminal, environment) {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => report(error),
     }
-}
-
-fn probe_nonce() -> u64 {
-    static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
-    let clock = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let sequence = NEXT_NONCE.fetch_add(1, Ordering::Relaxed);
-    (clock ^ u64::from(std::process::id()) ^ sequence).max(1)
 }
 
 fn report(error: LaunchError) -> ExitCode {

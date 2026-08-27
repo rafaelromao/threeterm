@@ -8,11 +8,12 @@ use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 #[derive(Debug, Default)]
 struct ScriptedTerminal {
     writes: Vec<u8>,
-    probe_response: Vec<u8>,
+    probe_response: Option<Vec<u8>>,
     events: Vec<Vec<u8>>,
     events_read: usize,
     prepare_fails: bool,
     restore_fails: bool,
+    ambiguous_probe: bool,
 }
 
 impl Write for ScriptedTerminal {
@@ -28,8 +29,31 @@ impl Write for ScriptedTerminal {
 
 impl CapabilityProbeIo for ScriptedTerminal {
     fn read_probe_response(&mut self, _max_bytes: usize) -> io::Result<Vec<u8>> {
-        Ok(std::mem::take(&mut self.probe_response))
+        let mut response = self
+            .probe_response
+            .take()
+            .unwrap_or_else(|| valid_probe_response(probe_nonce_from_writes(&self.writes)));
+        if self.ambiguous_probe {
+            let nonce = probe_nonce_from_writes(&self.writes);
+            response.extend_from_slice(format!("\x1b_Gi={nonce};OK\x1b\\").as_bytes());
+        }
+        Ok(response)
     }
+}
+
+fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
+    let Some(start) = writes.windows(2).position(|window| window == b"i=") else {
+        return 1;
+    };
+    let digits = writes[start + 2..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .copied()
+        .collect::<Vec<_>>();
+    std::str::from_utf8(&digits)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
 }
 
 impl InteractiveTerminal for ScriptedTerminal {
@@ -105,7 +129,7 @@ fn production_launch_refuses_unattached_terminal_before_event_loop() {
     let before = host.current().expect("canonical snapshot exists");
     let mut terminal = ScriptedTerminal::default();
 
-    let error = launch(&host, &root, &mut terminal, unattached_environment(), 7)
+    let error = launch(&host, &root, &mut terminal, unattached_environment())
         .expect_err("unattached terminal cannot start Interactive Modeling");
     assert!(matches!(error, LaunchError::Capability(_)));
     let envelope: Value = serde_json::from_str(&error.to_json()).expect("diagnostic is JSON");
@@ -139,12 +163,12 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
     let mut terminal = ScriptedTerminal {
-        probe_response: valid_probe_response(7),
+        probe_response: None,
         events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
         ..Default::default()
     };
 
-    let result = launch(&host, &root, &mut terminal, official_environment(), 7)
+    let result = launch(&host, &root, &mut terminal, official_environment())
         .expect("positive probe starts the production TUI");
     assert!(result.event_loop_entered);
     assert!(
@@ -194,15 +218,12 @@ fn production_launch_rejects_ambiguous_probe_acknowledgement() {
     let host = Host::new();
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
-    let nonce = 7;
-    let mut response = valid_probe_response(nonce);
-    response.extend_from_slice(format!("\x1b_Gi={nonce};OK\x1b\\").as_bytes());
     let mut terminal = ScriptedTerminal {
-        probe_response: response,
+        ambiguous_probe: true,
         ..Default::default()
     };
 
-    let error = launch(&host, &root, &mut terminal, official_environment(), nonce)
+    let error = launch(&host, &root, &mut terminal, official_environment())
         .expect_err("duplicate probe acknowledgement is ambiguous");
     assert!(matches!(error, LaunchError::Capability(_)));
     let diagnostic: Value = serde_json::from_str(&error.to_json()).expect("diagnostic is JSON");
@@ -224,7 +245,6 @@ fn production_launch_retains_restore_failure_with_original_diagnostic() {
         "/tmp/threeterm-production-launch-restore-failure",
         &mut terminal,
         unattached_environment(),
-        7,
     )
     .expect_err("capability refusal with failed restore is still an error");
     assert!(matches!(error, LaunchError::Cleanup { .. }));
@@ -248,7 +268,6 @@ fn production_launch_restores_after_terminal_setup_failure() {
         "/tmp/threeterm-production-launch-setup-failure",
         &mut terminal,
         official_environment(),
-        7,
     )
     .expect_err("terminal setup failure refuses launch");
     assert!(matches!(error, LaunchError::Runtime(_)));

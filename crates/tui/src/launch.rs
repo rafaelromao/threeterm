@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -128,7 +130,6 @@ pub fn launch<W: InteractiveTerminal>(
     root: impl AsRef<Path>,
     terminal: &mut W,
     environment: TerminalEnvironment,
-    nonce: u64,
 ) -> Result<LaunchOutcome, LaunchError> {
     let prepared = environment.foreground_tty;
     if prepared && let Err(error) = terminal.prepare() {
@@ -138,7 +139,7 @@ pub fn launch<W: InteractiveTerminal>(
         ));
     }
 
-    let probe = match CapabilityProbe::new(nonce).probe(terminal, environment) {
+    let probe = match CapabilityProbe::new(fresh_probe_nonce()).probe(terminal, environment) {
         Ok(probe) => probe,
         Err(error) => {
             return Err(with_restore_error(
@@ -178,6 +179,15 @@ pub fn launch<W: InteractiveTerminal>(
     Ok(LaunchOutcome {
         event_loop_entered: true,
     })
+}
+
+fn fresh_probe_nonce() -> u64 {
+    static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    (clock ^ NEXT_NONCE.fetch_add(1, Ordering::Relaxed)).max(1)
 }
 
 fn with_restore_error(source: LaunchError, restore: io::Result<()>) -> LaunchError {

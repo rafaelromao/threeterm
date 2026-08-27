@@ -35,7 +35,7 @@ fi
 # manager; mutable system OCCT/libslvs packages are never accepted.
 if command -v pacman >/dev/null 2>&1; then
     echo "==> Installing native-worker build tooling via pacman"
-    pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 libx11
+    pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 fontconfig libx11
 fi
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then

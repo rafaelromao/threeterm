@@ -2,11 +2,14 @@
 
 use std::path::Path;
 
+use serde_json::Value;
 use threeterm_domain::{
     FeatureGraph,
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
-use threeterm_host::{HistoryCommitView, Host, stale_last_valid_geometry_for_export};
+use threeterm_host::{HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export};
+use threeterm_protocol::command_execution::ExecutionError;
+use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -18,6 +21,17 @@ use threeterm_viewport::{
 
 pub fn schema_version() -> &'static str {
     "threeterm.tui/1"
+}
+
+/// Thin TUI-harness adapter for the shared semantic command boundary.
+/// Interactive state remains presentation-only; canonical commands execute
+/// through the host-owned versioned request and response contract.
+pub fn execute_domain_command(
+    host: &Host,
+    command: CommandId,
+    request: Value,
+) -> Result<Value, ExecutionError<HostError>> {
+    host.execute_domain_command(command, request)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

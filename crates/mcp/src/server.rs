@@ -35,9 +35,11 @@ use threeterm_cli::dispatch::{
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema, iter,
+    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema,
+    IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -209,6 +211,10 @@ impl McpServer {
             }
         };
 
+        if matches!(schema_entry.id, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+            return self.handle_domain_command(request, schema_entry.id, arguments);
+        }
+
         if let Err(reason) = validate(&schema_entry.request_schema, &arguments) {
             return JsonRpcResponse::error(
                 request.id.clone(),
@@ -280,6 +286,43 @@ impl McpServer {
                     format!("host dispatch failed: {error}"),
                 ),
             },
+        }
+    }
+
+    fn handle_domain_command(
+        &self,
+        request: &JsonRpcRequest,
+        command: threeterm_protocol::schema::CommandId,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        match Host::new().execute_domain_command(command, arguments) {
+            Ok(value) => JsonRpcResponse::success(
+                request.id.clone(),
+                json!({
+                    "content": [{"type": "json", "data": value.clone()}],
+                    "structuredContent": value,
+                }),
+            ),
+            Err(ExecutionError::InvalidRequest(reason)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                format!("tools/call arguments failed request-schema validation: {reason}"),
+            ),
+            Err(ExecutionError::Handler(error)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INTERNAL,
+                format!("domain command failed: {error}"),
+            ),
+            Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INTERNAL,
+                format!("domain command response failed response-schema validation: {reason}"),
+            ),
+            Err(ExecutionError::UnknownCommand(command)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_METHOD_NOT_FOUND,
+                format!("command not found: {}", command.0),
+            ),
         }
     }
 

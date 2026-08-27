@@ -3224,6 +3224,11 @@ pub fn dispatch_registered_command(
     command: CommandId,
     request: Value,
 ) -> Result<Value, DispatchError> {
+    if matches!(command, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+        return host
+            .execute_domain_command(command, request)
+            .map_err(DispatchError::from);
+    }
     let schema = find(command).ok_or(DispatchError::UnknownCommand(command))?;
     let result = execute(command, request, |request| {
         let string_field = |name: &str| {
@@ -3846,6 +3851,20 @@ pub enum DispatchError {
     },
 }
 
+impl From<ExecutionError<HostError>> for DispatchError {
+    fn from(error: ExecutionError<HostError>) -> Self {
+        match error {
+            ExecutionError::UnknownCommand(command) => Self::UnknownCommand(command),
+            ExecutionError::InvalidRequest(detail) => Self::Validation(detail),
+            ExecutionError::Handler(HostError::Validation { detail }) => Self::Validation(detail),
+            ExecutionError::Handler(error) => Self::Host(error),
+            ExecutionError::InvalidResponse(detail) => {
+                Self::Validation(format!("response violates registered schema: {detail}"))
+            }
+        }
+    }
+}
+
 impl From<HostError> for DispatchError {
     fn from(error: HostError) -> Self {
         Self::Host(error)
@@ -3919,6 +3938,16 @@ fn execute_registered_with_observer(
         Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
+    if matches!(
+        command,
+        threeterm_protocol::schema::IDENTITY_COMMAND_ID
+            | threeterm_protocol::schema::APPLY_COMMAND_ID
+    ) {
+        return match Host::new().execute_domain_command(command, request) {
+            Ok(response) => write_success(stdout, &response, stderr),
+            Err(error) => emit_dispatch_error(&DispatchError::from(error), stderr),
+        };
+    }
     let result = execute(command, request, |request| {
         let mut handler_stdout = Vec::new();
         let mut handler_stderr = Vec::new();

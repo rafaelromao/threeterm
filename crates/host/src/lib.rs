@@ -3080,6 +3080,7 @@ impl Host {
         })
         .to_string();
         let feature_id = derived.artifact.feature_id.clone();
+        let _ = fs::remove_dir(&derived_root);
         let bundle = Bundle::at(root);
         let updated = match append(
             &bundle,
@@ -3128,7 +3129,6 @@ impl Host {
             .borrow_mut()
             .remove(&derived.artifact.cache_key);
         let _ = stage.discard();
-        let _ = fs::remove_dir(&derived_root);
         let mut artifact = derived.artifact;
         artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
         let mut value =

@@ -11,6 +11,7 @@ struct ScriptedTerminal {
     probe_response: Option<Vec<u8>>,
     events: Vec<Vec<u8>>,
     events_read: usize,
+    replayed_probe_input: Vec<u8>,
     prepare_fails: bool,
     restore_fails: bool,
     ambiguous_probe: bool,
@@ -57,6 +58,10 @@ fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
 }
 
 impl InteractiveTerminal for ScriptedTerminal {
+    fn replay_probe_input(&mut self, bytes: &[u8]) {
+        self.replayed_probe_input.extend_from_slice(bytes);
+    }
+
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         self.events_read += 1;
         Ok(self.events.pop().unwrap_or_default())
@@ -171,6 +176,10 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
     let result = launch(&host, &root, &mut terminal, official_environment())
         .expect("positive probe starts the production TUI");
     assert!(result.event_loop_entered);
+    assert!(
+        terminal.replayed_probe_input.starts_with(b"x"),
+        "the leading user input survives probe acknowledgement filtering"
+    );
     assert!(
         terminal
             .writes

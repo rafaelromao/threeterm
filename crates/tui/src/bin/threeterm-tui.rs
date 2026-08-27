@@ -106,6 +106,15 @@ impl CapabilityProbeIo for ProcessTerminal {
 }
 
 impl InteractiveTerminal for ProcessTerminal {
+    fn replay_probe_input(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut replay = bytes.to_vec();
+        replay.append(&mut self.event_buffer);
+        self.event_buffer = replay;
+    }
+
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         loop {
             if self.termination_requested.load(Ordering::Relaxed) {

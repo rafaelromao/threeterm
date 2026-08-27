@@ -24,6 +24,8 @@ pub trait InteractiveTerminal: CapabilityProbeIo + Write {
 
     fn viewport_size(&self) -> (u32, u32);
 
+    fn replay_probe_input(&mut self, _bytes: &[u8]) {}
+
     fn prepare(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -175,6 +177,7 @@ pub fn launch<W: InteractiveTerminal>(
             terminal.restore(),
         ));
     }
+    terminal.replay_probe_input(&probe.unrelated_input);
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(host, width, height, placement, terminal, &probe);
     let launch_result = with_restore_result(launch_result, terminal.restore());

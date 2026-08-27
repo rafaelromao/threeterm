@@ -961,7 +961,7 @@ fn extract_id(value: &Value) -> Value {
 }
 
 fn is_valid_request_id(value: &Value) -> bool {
-    value.is_null() || value.is_string() || value.is_number()
+    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
 fn split_newlines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -1259,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_null_id_is_not_a_notification() {
+    fn null_id_is_rejected_as_an_invalid_request() {
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"tools/list\"}\n";
         let mut output = Vec::new();
         McpServer::new()
@@ -1268,7 +1268,20 @@ mod tests {
 
         let response: Value = serde_json::from_slice(&output).expect("response is JSON");
         assert!(response["id"].is_null());
-        assert!(response["result"]["tools"].is_array());
+        assert_eq!(response["error"]["code"], ERROR_INVALID_REQUEST);
+    }
+
+    #[test]
+    fn fractional_id_is_rejected_as_an_invalid_request() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1.5,\"method\":\"tools/list\"}\n";
+        let mut output = Vec::new();
+        McpServer::new()
+            .run(&mut input.as_slice(), &mut output)
+            .expect("run succeeds");
+
+        let response: Value = serde_json::from_slice(&output).expect("response is JSON");
+        assert_eq!(response["error"]["code"], ERROR_INVALID_REQUEST);
+        assert!(response["id"].is_null());
     }
 
     #[test]

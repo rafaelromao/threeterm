@@ -15,6 +15,7 @@ use crate::{TuiViewportSession, decode_arrow_key};
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
 pub const EXIT_CAPABILITY_FAILURE: i32 = 10;
 pub const EXIT_LAUNCH_FAILURE: i32 = 11;
+const INTERACTIVE_MODELING_ROUTE: &str = "interactive_modeling_unavailable";
 
 pub trait InteractiveTerminal: CapabilityProbeIo + Write {
     fn read_event(&mut self) -> io::Result<Vec<u8>>;
@@ -87,7 +88,7 @@ impl LaunchError {
                 detail: detail.clone(),
                 source_revision: "unknown".to_string(),
                 viewport_diagnostic: None,
-                route: "headless_automation",
+                route: INTERACTIVE_MODELING_ROUTE,
                 recovery: "repair or create the requested Project Generation before launching Interactive Modeling".to_string(),
             },
             Self::Viewport(viewport) => LaunchDiagnostic {
@@ -96,7 +97,7 @@ impl LaunchError {
                 detail: viewport.detail.clone(),
                 source_revision: viewport.source_revision.clone(),
                 viewport_diagnostic: Some(viewport),
-                route: "headless_automation",
+                route: INTERACTIVE_MODELING_ROUTE,
                 recovery: viewport.recovery.clone(),
             },
             Self::Runtime(detail) => LaunchDiagnostic {
@@ -105,7 +106,7 @@ impl LaunchError {
                 detail: detail.clone(),
                 source_revision: "unknown".to_string(),
                 viewport_diagnostic: None,
-                route: "headless_automation",
+                route: INTERACTIVE_MODELING_ROUTE,
                 recovery: "restore the terminal and retry Interactive Modeling from the official attachment".to_string(),
             },
             Self::Cleanup { .. } => unreachable!("cleanup diagnostics are handled above"),
@@ -130,10 +131,11 @@ pub fn launch<W: InteractiveTerminal>(
     nonce: u64,
 ) -> Result<LaunchOutcome, LaunchError> {
     let prepared = environment.foreground_tty;
-    if prepared {
-        terminal
-            .prepare()
-            .map_err(|error| LaunchError::Runtime(format!("terminal setup failed: {error}")))?;
+    if prepared && let Err(error) = terminal.prepare() {
+        return Err(with_restore_error(
+            LaunchError::Runtime(format!("terminal setup failed: {error}")),
+            terminal.restore(),
+        ));
     }
 
     let probe = match CapabilityProbe::new(nonce).probe(terminal, environment) {

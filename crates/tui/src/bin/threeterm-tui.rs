@@ -105,7 +105,10 @@ impl InteractiveTerminal for ProcessTerminal {
             }
             let bytes = self.read_available(64 * 1024)?;
             if bytes.is_empty() {
-                return Ok(bytes);
+                if self.event_buffer.is_empty() {
+                    return Ok(bytes);
+                }
+                continue;
             }
             self.event_buffer.extend(bytes);
         }

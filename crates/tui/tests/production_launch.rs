@@ -11,6 +11,7 @@ struct ScriptedTerminal {
     probe_response: Vec<u8>,
     events: Vec<Vec<u8>>,
     events_read: usize,
+    prepare_fails: bool,
     restore_fails: bool,
 }
 
@@ -39,6 +40,14 @@ impl InteractiveTerminal for ScriptedTerminal {
 
     fn viewport_size(&self) -> (u32, u32) {
         (64, 48)
+    }
+
+    fn prepare(&mut self) -> io::Result<()> {
+        if self.prepare_fails {
+            Err(io::Error::other("injected setup failure"))
+        } else {
+            Ok(())
+        }
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -160,6 +169,12 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
 fn production_binary_refuses_without_terminal_capability_evidence() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_threeterm-tui"))
         .arg("/tmp/threeterm-production-launch-missing")
+        .stdin(std::process::Stdio::null())
+        .env_remove("TERM")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("TMUX")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("SSH_TTY")
         .output()
         .expect("production TUI binary runs");
     assert_eq!(output.status.code(), Some(10));
@@ -219,4 +234,23 @@ fn production_launch_retains_restore_failure_with_original_diagnostic() {
         diagnostic["cleanup_error"],
         "terminal restore failed: injected restore failure"
     );
+}
+
+#[test]
+fn production_launch_restores_after_terminal_setup_failure() {
+    let mut terminal = ScriptedTerminal {
+        prepare_fails: true,
+        ..Default::default()
+    };
+
+    let error = launch(
+        &Host::new(),
+        "/tmp/threeterm-production-launch-setup-failure",
+        &mut terminal,
+        official_environment(),
+        7,
+    )
+    .expect_err("terminal setup failure refuses launch");
+    assert!(matches!(error, LaunchError::Runtime(_)));
+    assert_eq!(terminal.events_read, 0);
 }

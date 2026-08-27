@@ -252,11 +252,10 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         log
     );
     assert!(
-        Host::new()
+        !Host::new()
             .load(&root)
             .expect("replayed project reloads")
             .recovered_from_previous
-            == false
     );
 
     let _ = fs::remove_dir_all(root);

@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_viewport::{
-    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, TerminalEnvironment,
+    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
     ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
 };
 
@@ -138,6 +138,10 @@ pub fn launch<W: InteractiveTerminal>(
             terminal.restore(),
         ));
     }
+    let placement = KittyPlacement {
+        columns: environment.width,
+        rows: environment.height,
+    };
 
     let probe = match CapabilityProbe::new(fresh_probe_nonce()).probe(terminal, environment) {
         Ok(probe) => probe,
@@ -172,7 +176,7 @@ pub fn launch<W: InteractiveTerminal>(
         ));
     }
     let (width, height) = terminal.viewport_size();
-    let launch_result = run_session(host, width, height, terminal, &probe);
+    let launch_result = run_session(host, width, height, placement, terminal, &probe);
     let launch_result = with_restore_result(launch_result, terminal.restore());
     launch_result?;
 
@@ -222,6 +226,7 @@ fn run_session<W: InteractiveTerminal>(
     host: &Host,
     width: u32,
     height: u32,
+    placement: KittyPlacement,
     terminal: &mut W,
     probe: &CapabilityProbeResult,
 ) -> Result<(), LaunchError> {
@@ -229,7 +234,7 @@ fn run_session<W: InteractiveTerminal>(
         host,
         width,
         height,
-        threeterm_viewport::GhosttyRenderer::new(terminal),
+        threeterm_viewport::GhosttyRenderer::new(terminal).with_placement(placement),
         probe,
     );
     let launch_result = match session_result {

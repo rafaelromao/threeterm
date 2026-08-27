@@ -178,6 +178,13 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| { window == b"a=T,t=d" })
     );
     assert!(
+        terminal
+            .writes
+            .windows(b"c=80,r=24".len())
+            .any(|window| window == b"c=80,r=24"),
+        "production frame uses the detected terminal cell placement"
+    );
+    assert!(
         !terminal
             .writes
             .windows(b"xterm".len())

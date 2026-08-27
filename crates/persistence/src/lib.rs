@@ -2224,13 +2224,15 @@ fn apply_kind(kind: &str) -> (Option<&'static str>, &str) {
 
 fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {
     let brep_root = root.join("brep");
-    if !brep_root.exists() {
-        return Ok(());
-    }
-    if !brep_root.is_dir() {
-        return Err(BundleError::Invalid(
-            "promoted BREP directory is not a directory".to_string(),
-        ));
+    match fs::symlink_metadata(&brep_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BundleError::Invalid(error.to_string())),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(BundleError::Invalid(
+                "promoted BREP directory is not a regular directory".to_string(),
+            ));
+        }
+        Ok(_) => {}
     }
     let mut latest = std::collections::BTreeMap::new();
     for entry in log.entries() {

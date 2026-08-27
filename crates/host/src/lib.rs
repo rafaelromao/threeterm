@@ -1586,6 +1586,17 @@ impl Host {
                         "brep_sha256": view.result.brep_sha256,
                         "brep_bytes": view.result.brep_bytes,
                         "worker_fingerprint": view.worker_fingerprint,
+                        "derived_result": {
+                            "request_id": view.artifact.request_id,
+                            "operation": view.artifact.operation,
+                            "feature_id": view.artifact.feature_id,
+                            "source_revision_id": view.source_snapshot.revision_hash,
+                            "worker_fingerprint": view.artifact.worker_fingerprint,
+                            "artifact_kind": view.artifact.artifact_kind,
+                            "artifact_name": view.artifact.artifact_name,
+                            "byte_count": view.artifact.byte_count,
+                            "sha256": view.artifact.sha256,
+                        },
                         "schema_version": find(command).expect("extrude is registered").response_schema_version,
                     }))
                 }
@@ -2022,14 +2033,12 @@ impl Host {
                     ),
                 });
             }
-            let stage = std::env::temp_dir().join(format!(
-                "threeterm-extrude-replay-{}-{}",
-                std::process::id(),
-                TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-            ));
-            fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-                detail: format!("create extrude replay stage failed: {error}"),
+            let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create extrude replay stage failed: {error}"),
+                }
             })?;
+            let stage_root = stage.root().to_path_buf();
             let request = ExtrudeRequest::new(
                 intent.request_id.clone(),
                 intent
@@ -2040,7 +2049,7 @@ impl Host {
                     .collect(),
                 intent.deterministic_inputs.height,
             )
-            .with_output_path(&stage, "replay.brep")
+            .with_output_path(&stage_root, "replay.brep")
             .with_feature_id(&feature_id);
             let result = worker
                 .clone()
@@ -2050,7 +2059,7 @@ impl Host {
             let result = match result {
                 Ok(result) => result,
                 Err(error) => {
-                    let _ = fs::remove_dir_all(&stage);
+                    let _ = stage.discard();
                     return Err(error);
                 }
             };
@@ -2060,7 +2069,7 @@ impl Host {
             ) {
                 Ok(bytes) => bytes,
                 Err(detail) => {
-                    let _ = fs::remove_dir_all(&stage);
+                    let _ = stage.discard();
                     return Err(HostError::BrepIo { detail });
                 }
             };
@@ -2071,11 +2080,11 @@ impl Host {
             ) {
                 Ok(path) => path,
                 Err(error) => {
-                    let _ = fs::remove_dir_all(&stage);
+                    let _ = stage.discard();
                     return Err(error.into());
                 }
             };
-            let _ = fs::remove_dir_all(&stage);
+            let _ = stage.discard();
             feature_ids.push(feature_id);
             geometry_fingerprints.push(sha256_path(&path).map_err(|error| HostError::BrepIo {
                 detail: format!("hash replayed BREP failed: {error}"),

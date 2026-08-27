@@ -71,6 +71,8 @@ ACCEPTANCE_OCCT_WORKER="$(selected_worker_path occt)"
 ACCEPTANCE_SLVS_WORKER="$(selected_worker_path slvs)"
 export THREETERM_OCCT_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_OCCT_WORKER}" | cut -d' ' -f1)"
 export THREETERM_SLVS_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_SLVS_WORKER}" | cut -d' ' -f1)"
+verify_native_worker_execution "${ACCEPTANCE_OCCT_WORKER}" occt
+verify_native_worker_execution "${ACCEPTANCE_SLVS_WORKER}" slvs
 
 echo "==> cargo check --workspace"
 cargo check --workspace
@@ -83,7 +85,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
 # Native-worker tests are serialized to avoid resource contention, matching CI.
-THREETERM_REQUIRE_REAL_WORKER=1 cargo test --workspace --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test --workspace --jobs 1 -- --test-threads=1 2>&1 \
+    | tee "${CARGO_TARGET_DIR}/native-worker-test.log"
+test -s "${CARGO_TARGET_DIR}/native-worker-test.log"
 
 finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}"
 

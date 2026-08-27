@@ -97,8 +97,15 @@ pub enum WorkerError {
         expected: String,
         actual: String,
     },
+    RuntimeDependencyMismatch {
+        binary: PathBuf,
+        detail: String,
+    },
     /// The worker exited with a non-zero status.
-    NonZeroExit { code: Option<i32>, stderr: String },
+    NonZeroExit {
+        code: Option<i32>,
+        stderr: String,
+    },
     /// A non-zero worker exit with a safely recovered active request ID.
     NonZeroExitWithContext {
         request_id: String,
@@ -106,7 +113,10 @@ pub enum WorkerError {
         stderr: String,
     },
     /// The worker exited due to a signal.
-    Signalled { signal: i32, stderr: String },
+    Signalled {
+        signal: i32,
+        stderr: String,
+    },
     /// A signal-bearing worker exit with a safely recovered active request ID.
     SignalledWithContext {
         request_id: String,
@@ -115,10 +125,15 @@ pub enum WorkerError {
     },
     /// The worker emitted output that is not valid JSON or not a parseable
     /// envelope.
-    Malformed { detail: String },
+    Malformed {
+        detail: String,
+    },
     /// A malformed result after the active request identity was safely
     /// extracted.
-    MalformedWithContext { request_id: String, detail: String },
+    MalformedWithContext {
+        request_id: String,
+        detail: String,
+    },
     /// The worker emitted a JSON diagnostic instead of a response.
     Diagnostic(OcctDiagnostic),
     /// A worker diagnostic with a safely recovered active request ID.
@@ -143,7 +158,9 @@ pub enum WorkerError {
     /// record that does not map to a typed failure: the record's stage,
     /// elapsed time, last progress, and stderr tail are preserved so
     /// callers retain the diagnostic context.
-    Supervised { record: Box<TerminationRecord> },
+    Supervised {
+        record: Box<TerminationRecord>,
+    },
 }
 
 impl std::fmt::Display for WorkerError {
@@ -164,6 +181,11 @@ impl std::fmt::Display for WorkerError {
             } => write!(
                 formatter,
                 "worker identity mismatch for {worker_kind} at {}: expected_sha256={expected} actual_sha256={actual}",
+                binary.display()
+            ),
+            Self::RuntimeDependencyMismatch { binary, detail } => write!(
+                formatter,
+                "worker runtime dependency mismatch at {}: {detail}",
                 binary.display()
             ),
             Self::NonZeroExit { code, stderr } => {
@@ -421,6 +443,9 @@ impl OcctWorker {
                 expected: expected.clone(),
                 actual,
             });
+        }
+        if self.expected_binary_sha256.is_some() {
+            verify_runtime_library_prefix(&self.binary_path)?;
         }
         Ok(BinaryFingerprint {
             worker_kind: "occt".to_string(),
@@ -1402,6 +1427,52 @@ pub fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
     std::io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_runtime_library_prefix(binary: &Path) -> Result<(), WorkerError> {
+    let Some(prefix) = env::var_os("THREETERM_OCCT_LIB_DIR").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let output = Command::new("ldd").arg(binary).output().map_err(|error| {
+        WorkerError::RuntimeDependencyMismatch {
+            binary: binary.to_path_buf(),
+            detail: format!("ldd failed: {error}"),
+        }
+    })?;
+    if !output.status.success() {
+        return Err(WorkerError::RuntimeDependencyMismatch {
+            binary: binary.to_path_buf(),
+            detail: "ldd could not resolve the worker dependencies".to_string(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if !name.starts_with("libT") {
+            continue;
+        }
+        let Some(arrow) = fields.next() else {
+            continue;
+        };
+        let Some(path) = (arrow == "=>").then(|| fields.next()).flatten() else {
+            continue;
+        };
+        let path = Path::new(path);
+        if !path.starts_with(&prefix) {
+            return Err(WorkerError::RuntimeDependencyMismatch {
+                binary: binary.to_path_buf(),
+                detail: format!(
+                    "{name} resolved outside {}: {}",
+                    prefix.display(),
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Production `WorkerProcess` wiring: spawns the OCCT binary in its own

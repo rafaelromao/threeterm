@@ -41,6 +41,10 @@ pub enum WorkerError {
         expected: String,
         actual: String,
     },
+    RuntimeDependencyMismatch {
+        binary: PathBuf,
+        detail: String,
+    },
     Malformed {
         detail: String,
     },
@@ -64,6 +68,11 @@ impl std::fmt::Display for WorkerError {
             } => write!(
                 f,
                 "worker identity mismatch at {}: expected_sha256={expected} actual_sha256={actual}",
+                binary.display()
+            ),
+            Self::RuntimeDependencyMismatch { binary, detail } => write!(
+                f,
+                "worker runtime dependency mismatch at {}: {detail}",
                 binary.display()
             ),
             Self::Malformed { detail } => write!(f, "malformed libslvs worker response: {detail}"),
@@ -173,6 +182,9 @@ impl SlvsWorker {
                 expected: expected.clone(),
                 actual,
             });
+        }
+        if self.expected_binary_sha256.is_some() {
+            verify_runtime_library_prefix(&self.binary_path)?;
         }
         Ok(BinaryFingerprint {
             worker_kind: "slvs".to_string(),
@@ -294,6 +306,52 @@ pub fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
     std::io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_runtime_library_prefix(binary: &Path) -> Result<(), WorkerError> {
+    let Some(prefix) = env::var_os("THREETERM_SLVS_LIB_DIR").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let output = Command::new("ldd").arg(binary).output().map_err(|error| {
+        WorkerError::RuntimeDependencyMismatch {
+            binary: binary.to_path_buf(),
+            detail: format!("ldd failed: {error}"),
+        }
+    })?;
+    if !output.status.success() {
+        return Err(WorkerError::RuntimeDependencyMismatch {
+            binary: binary.to_path_buf(),
+            detail: "ldd could not resolve the worker dependencies".to_string(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if !name.starts_with("libslvs") {
+            continue;
+        }
+        let Some(arrow) = fields.next() else {
+            continue;
+        };
+        let Some(path) = (arrow == "=>").then(|| fields.next()).flatten() else {
+            continue;
+        };
+        let path = Path::new(path);
+        if !path.starts_with(&prefix) {
+            return Err(WorkerError::RuntimeDependencyMismatch {
+                binary: binary.to_path_buf(),
+                detail: format!(
+                    "{name} resolved outside {}: {}",
+                    prefix.display(),
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

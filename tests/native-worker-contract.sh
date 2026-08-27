@@ -21,7 +21,6 @@ jq -e '
   (.container_image | startswith("docker.io/archlinux@sha256:")) and
   .workers.occt.source_commit == "c5f20409c52bf8f658314d205a0e5d6f0be0969c" and
   .workers.libslvs.source_commit == "27b6a080c8b669421bd4d444650c3b8eddec5687" and
-  .workers.occt.executed and .workers.libslvs.executed and
   (.workers.occt.executable.sha256 | length == 64) and
   (.workers.libslvs.executable.sha256 | length == 64)
 ' "${CARGO_TARGET_DIR}/native-worker-manifest.json" >/dev/null

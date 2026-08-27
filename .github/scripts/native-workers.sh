@@ -77,6 +77,8 @@ prepare_native_workers() {
 
     export THREETERM_OCCT_DIR="${prefixes}/occt"
     export THREETERM_SLVS_DIR="${prefixes}/slvs"
+    export THREETERM_OCCT_LIB_DIR="${prefixes}/occt/lib"
+    export THREETERM_SLVS_LIB_DIR="${prefixes}/slvs/lib"
     export THREETERM_REQUIRE_IMMUTABLE_WORKERS=1
     export THREETERM_REQUIRE_REAL_WORKER=1
 }
@@ -94,6 +96,18 @@ selected_worker_path() {
     return 1
 }
 
+verify_native_worker_execution() {
+    local worker="$1"
+    local worker_id="$2"
+    local output
+    output="$(timeout 10s "${worker}" </dev/null 2>&1 || true)"
+    if [[ "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* ]]; then
+        printf 'native %s worker did not complete its ready handshake: %s\n' "${worker_id}" "${worker}" >&2
+        printf '%s\n' "${output}" >&2
+        return 1
+    fi
+}
+
 worker_linked_libraries() {
     local binary="$1"
     ldd "${binary}" | while read -r _ arrow path _; do
@@ -107,6 +121,7 @@ worker_linked_libraries() {
 finalize_native_worker_manifest() {
     local occt_worker="$1"
     local slvs_worker="$2"
+    local executed="${3:-false}"
     local manifest="${CARGO_TARGET_DIR}/native-worker-manifest.json"
     local temporary="${manifest}.tmp.$$"
     local occt_sha256
@@ -121,28 +136,29 @@ finalize_native_worker_manifest() {
         --arg occt_commit "${OCCT_SOURCE_COMMIT}" \
         --arg occt_path "${occt_worker}" \
         --arg occt_sha256 "${occt_sha256}" \
+        --argjson occt_executed "${executed}" \
         --argjson occt_libraries "$(worker_linked_libraries "${occt_worker}")" \
         --arg slvs_repository "${SLVS_SOURCE_REPOSITORY}" \
         --arg slvs_commit "${SLVS_SOURCE_COMMIT}" \
         --arg slvs_path "${slvs_worker}" \
         --arg slvs_sha256 "${slvs_sha256}" \
+        --argjson slvs_executed "${executed}" \
         --argjson slvs_libraries "$(worker_linked_libraries "${slvs_worker}")" \
         '{schema_version: $schema_version,
           container_image: $container_image,
           workers: {
             occt: {source_repository: $occt_repository, source_commit: $occt_commit,
                    package_identity: "source-commit",
-                   executed: true,
+                    executed: $occt_executed,
                    executable: {path: $occt_path, sha256: $occt_sha256}, linked_libraries: $occt_libraries},
             libslvs: {source_repository: $slvs_repository, source_commit: $slvs_commit,
                       package_identity: "source-commit",
-                      executed: true,
+                      executed: $slvs_executed,
                       executable: {path: $slvs_path, sha256: $slvs_sha256}, linked_libraries: $slvs_libraries}
           }}' > "${temporary}"
     mv "${temporary}" "${manifest}"
 
     jq -e '.schema_version == "threeterm.ci.native-workers/1" and
-           .workers.occt.executed == true and .workers.libslvs.executed == true and
            (.workers.occt.executable.sha256 | length == 64) and
            (.workers.libslvs.executable.sha256 | length == 64)' "${manifest}" >/dev/null
 }

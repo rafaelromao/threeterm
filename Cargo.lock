@@ -591,6 +591,8 @@ version = "0.1.0"
 name = "threeterm-tui"
 version = "0.1.0"
 dependencies = [
+ "nix",
+ "serde",
  "serde_json",
  "threeterm-domain",
  "threeterm-host",

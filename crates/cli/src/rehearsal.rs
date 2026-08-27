@@ -1656,6 +1656,7 @@ impl CapabilityProbeIo for FailedProbe {
 
 fn valid_capability_result() -> threeterm_viewport::CapabilityProbeResult {
     threeterm_viewport::CapabilityProbeResult {
+        probe_nonce: 1,
         capabilities: TerminalCapabilityVector {
             state: CapabilityState::Valid,
             direct_ghostty: true,

@@ -262,6 +262,33 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
 }
 
 #[test]
+fn production_load_path_replays_missing_extrude_results() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("production-replay", "box-seed", "box");
+    let committed = Host::new()
+        .extrude(
+            &root,
+            rectangle_extrude_request("production-replay"),
+            &worker,
+        )
+        .expect("extrude commits");
+    let expected = fs::read(&committed.result.brep_path).expect("committed BREP reads");
+    fs::remove_file(&committed.result.brep_path).expect("promoted BREP removes");
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+
+    let loaded = Host::new()
+        .load_with_extrude_replay(&root)
+        .expect("production reload replays extrude");
+
+    assert_eq!(loaded.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(fs::read(&committed.result.brep_path).unwrap(), expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn replay_reconstructs_persisted_extrude_inputs_through_a_worker_boundary() {
     let root = temp_root("replay-fake-worker");
     let worker_root = temp_root("replay-fake-worker-bin");

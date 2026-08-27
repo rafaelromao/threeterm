@@ -1986,6 +1986,27 @@ impl Host {
         Ok(view)
     }
 
+    /// Open a bundle through the production reload path, replaying canonical
+    /// extrude intent when its disposable results are missing.
+    pub fn load_with_extrude_replay(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<SnapshotView, HostError> {
+        let root = root.as_ref();
+        let view = self.load(root)?;
+        let loaded = Bundle::at(root).open()?;
+        if !loaded
+            .log
+            .entries()
+            .iter()
+            .any(|entry| entry.intent.is_some())
+        {
+            return Ok(view);
+        }
+        let worker = OcctWorker::locate().map_err(HostError::from)?;
+        Ok(self.reload_and_recompute_extrudes(root, &worker)?.snapshot)
+    }
+
     /// Reload canonical extrude intents and rebuild their disposable BREP
     /// results. Replay never appends a transaction or changes the revision.
     pub fn reload_and_recompute_extrudes(

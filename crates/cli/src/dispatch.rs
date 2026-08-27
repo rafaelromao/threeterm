@@ -4486,7 +4486,7 @@ fn emit_save(
 }
 
 fn emit_load(bundle: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    match Host::new().load(bundle) {
+    match Host::new().load_with_extrude_replay(bundle) {
         Ok(view) => write_load_snapshot(
             &view.feature_graph_hash,
             &view.revision_hash,

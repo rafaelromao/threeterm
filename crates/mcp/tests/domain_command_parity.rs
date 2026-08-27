@@ -337,6 +337,7 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
     );
     let mcp = McpServer::new().handle_request(&JsonRpcRequest {
         id: json!(1),
+        is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.extrude/1",
@@ -348,7 +349,11 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
         assert!(
             !format!("{cli:?}").contains("UnsupportedTool")
                 && !format!("{tui:?}").contains("not handled")
-                && mcp.error.as_ref().is_some_and(|error| error.code == -32603),
+                && mcp.error.is_none()
+                && mcp
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result["isError"] == true),
             "adapters must route extrude through the executor"
         );
     } else {

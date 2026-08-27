@@ -3128,6 +3128,7 @@ impl Host {
             .borrow_mut()
             .remove(&derived.artifact.cache_key);
         let _ = stage.discard();
+        let _ = fs::remove_dir(&derived_root);
         let mut artifact = derived.artifact;
         artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
         let mut value =

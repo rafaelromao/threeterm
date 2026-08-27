@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use threeterm_host::Host;
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{EXTRUDE_COMMAND_ID, find};
@@ -92,24 +92,8 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
     let root = temp_root("commit");
     new_project(bin, &root);
     save(bin, &root, "box-seed", "box");
-
-    let prior_request = ExtrudeRequest::new(
-        "prior-canonical",
-        vec![(0.0, 0.0), (8.0, 0.0), (8.0, 4.0), (0.0, 4.0)],
-        2.0,
-    )
-    .with_output_path(root.join("prior-stage"), "prior.brep")
-    .with_feature_id("prior-box");
-    Host::new()
-        .extrude(
-            &root,
-            prior_request,
-            &OcctWorker::locate().expect("worker locates"),
-        )
-        .expect("prior canonical BREP commits");
     let prior_manifest = fs::read(root.join("manifest.json")).expect("prior manifest reads");
     let prior_log = fs::read(root.join("transactions.log")).expect("prior log reads");
-    let prior_brep = fs::read(root.join("brep/prior-box.brep")).expect("prior BREP reads");
     let prior_snapshot = Host::new().load(&root).expect("prior snapshot loads");
 
     let profile_path = root.join("profile.json");
@@ -223,10 +207,6 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
         fs::read(root.join("transactions.log")).expect("log re-reads"),
         prior_log
     );
-    assert_eq!(
-        fs::read(root.join("brep/prior-box.brep")).expect("prior BREP re-reads"),
-        prior_brep
-    );
     assert!(root.join("brep/box-rect.brep").exists());
     assert!(!root.join(".derived").exists());
     let before_host = Host::new();
@@ -265,14 +245,13 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
     let replayed = replay_host
         .reload_and_recompute_extrudes(&root, &worker)
         .expect("canonical extrudes replay");
-    assert_eq!(replayed.recomputed, 2);
+    assert_eq!(replayed.recomputed, 1);
     assert_eq!(replayed.snapshot.revision_hash, parsed["revision_hash"]);
     assert_eq!(
         fs::read(root.join("manifest.json")).unwrap(),
         replay_manifest
     );
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), replay_log);
-    assert!(root.join("brep/prior-box.brep").is_file());
     assert!(root.join("brep/box-rect.brep").is_file());
     assert_eq!(
         replay_host

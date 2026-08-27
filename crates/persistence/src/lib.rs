@@ -950,6 +950,13 @@ impl Bundle {
                         log_index: entry.log_index,
                         detail: error.to_string(),
                     })?;
+                if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: "canonical extrude intent request ID does not match transaction provenance"
+                            .to_string(),
+                    });
+                }
                 if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
                     return Err(BundleError::LogBrokenLink {
                         log_index: entry.log_index,
@@ -1774,6 +1781,12 @@ impl Bundle {
             if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
                 return Err(BundleError::Invalid(
                     "canonical extrude intent does not match its transaction".to_string(),
+                ));
+            }
+            if idempotency_key != Some(intent.request_id.as_str()) {
+                return Err(BundleError::Invalid(
+                    "canonical extrude intent request ID does not match transaction provenance"
+                        .to_string(),
                 ));
             }
             if intent.source_revision != loaded.revision_hash_hex() {

@@ -1991,6 +1991,11 @@ impl Host {
             .iter()
             .filter_map(|entry| entry.intent.clone())
             .collect::<Vec<_>>();
+        if intents.len() > 1 {
+            return Err(HostError::Validation {
+                detail: "replay supports one canonical additive extrude transaction".to_string(),
+            });
+        }
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
         for intent in intents {
@@ -2010,6 +2015,13 @@ impl Host {
                 .ok_or_else(|| HostError::Validation {
                     detail: "extrude intent has no affected feature".to_string(),
                 })?;
+            if !loaded.graph.contains_feature(&feature_id) {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "extrude replay feature is not in the Revision Snapshot: {feature_id}"
+                    ),
+                });
+            }
             let stage = std::env::temp_dir().join(format!(
                 "threeterm-extrude-replay-{}-{}",
                 std::process::id(),

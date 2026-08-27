@@ -223,8 +223,17 @@ fn run_session<W: InteractiveTerminal>(
     let launch_result = match session_result {
         Ok(mut session) => {
             let result = run_event_loop(&mut session);
+            let cleanup = session.cleanup();
             drop(session);
-            result
+            match (result, cleanup) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Ok(()), Err(error)) => Err(LaunchError::Viewport(error)),
+                (Err(error), Ok(())) => Err(error),
+                (Err(error), Err(cleanup)) => Err(LaunchError::Cleanup {
+                    source: Box::new(error),
+                    detail: cleanup.to_string(),
+                }),
+            }
         }
         Err(error) => return Err(LaunchError::Viewport(error)),
     };
@@ -260,7 +269,6 @@ fn run_event_loop<W: InteractiveTerminal>(
             continue;
         }
         if bytes == b"q" || bytes == b"\x03" {
-            session.cleanup().map_err(LaunchError::Viewport)?;
             return Ok(());
         }
         if let Some((image_id, _)) = acknowledgement(&bytes) {

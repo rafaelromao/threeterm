@@ -19,6 +19,7 @@ struct ProcessTerminal {
     output: io::Stdout,
     original_stty: Option<Vec<u8>>,
     cells: (u32, u32),
+    event_buffer: Vec<u8>,
 }
 
 impl ProcessTerminal {
@@ -29,6 +30,7 @@ impl ProcessTerminal {
             output: io::stdout(),
             original_stty: None,
             cells,
+            event_buffer: Vec::new(),
         }
     }
 
@@ -97,7 +99,16 @@ impl CapabilityProbeIo for ProcessTerminal {
 
 impl InteractiveTerminal for ProcessTerminal {
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
-        self.read_available(64 * 1024)
+        loop {
+            if let Some(length) = next_event_length(&self.event_buffer) {
+                return Ok(self.event_buffer.drain(..length).collect());
+            }
+            let bytes = self.read_available(64 * 1024)?;
+            if bytes.is_empty() {
+                return Ok(bytes);
+            }
+            self.event_buffer.extend(bytes);
+        }
     }
 
     fn viewport_size(&self) -> (u32, u32) {
@@ -116,16 +127,22 @@ impl InteractiveTerminal for ProcessTerminal {
         if !original.status.success() {
             return Err(io::Error::other("stty -g failed"));
         }
+        self.original_stty = Some(original.stdout);
         let raw = std::process::Command::new("stty")
             .args(["raw", "-echo"])
             .stderr(Stdio::null())
-            .status()
-            .map_err(io::Error::other)?;
-        if !raw.success() {
-            return Err(io::Error::other("stty raw -echo failed"));
+            .status();
+        match raw {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => {
+                let _ = self.restore();
+                Err(io::Error::other("stty raw -echo failed"))
+            }
+            Err(error) => {
+                let _ = self.restore();
+                Err(io::Error::other(error))
+            }
         }
-        self.original_stty = Some(original.stdout);
-        Ok(())
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -142,14 +159,37 @@ impl InteractiveTerminal for ProcessTerminal {
         let restored = std::process::Command::new("stty")
             .arg(original_text.trim())
             .stderr(Stdio::null())
-            .status()
-            .map_err(io::Error::other)?;
-        if !restored.success() {
-            self.original_stty = Some(original);
-            return Err(io::Error::other("stty restore failed"));
+            .status();
+        match restored {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => {
+                self.original_stty = Some(original);
+                Err(io::Error::other("stty restore failed"))
+            }
+            Err(error) => {
+                self.original_stty = Some(original);
+                Err(io::Error::other(error))
+            }
         }
-        Ok(())
     }
+}
+
+fn next_event_length(bytes: &[u8]) -> Option<usize> {
+    const ACK_PREFIX: &[u8] = b"\x1b_Gi=";
+    const ACK_SUFFIX: &[u8] = b";OK\x1b\\";
+    if bytes.starts_with(ACK_PREFIX) {
+        let suffix = bytes[ACK_PREFIX.len()..]
+            .windows(ACK_SUFFIX.len())
+            .position(|window| window == ACK_SUFFIX)?;
+        return Some(ACK_PREFIX.len() + suffix + ACK_SUFFIX.len());
+    }
+    if bytes.starts_with(b"q") || bytes.starts_with(b"\x03") {
+        return Some(1);
+    }
+    if bytes.len() >= 3 && bytes[0] == b'\x1b' && bytes[1] == b'[' {
+        return Some(3);
+    }
+    (!bytes.is_empty()).then_some(1)
 }
 
 impl Drop for ProcessTerminal {
@@ -159,7 +199,10 @@ impl Drop for ProcessTerminal {
 }
 
 fn terminal_cells() -> (u32, u32) {
-    let output = std::process::Command::new("stty").arg("size").output();
+    let output = std::process::Command::new("stty")
+        .arg("size")
+        .stderr(Stdio::null())
+        .output();
     let Ok(output) = output else {
         return (0, 0);
     };

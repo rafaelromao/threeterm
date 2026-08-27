@@ -8,6 +8,11 @@ fn production_occt_worker_builds_a_real_l_bracket_from_dimensions() {
     let worker = match OcctWorker::locate() {
         Ok(worker) => worker,
         Err(error) => {
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+                panic!(
+                    "{{\"code\":\"worker_unavailable\",\"worker\":\"occt\",\"detail\":\"{error}\"}}"
+                );
+            }
             eprintln!("bracket_integration: OCCT worker unavailable: {error}");
             return;
         }

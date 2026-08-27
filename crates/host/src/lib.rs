@@ -2503,6 +2503,7 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
+        worker.verify_identity().map_err(HostError::from)?;
         let source_snapshot = self.load(root)?;
         let mut request_value =
             serde_json::to_value(request).map_err(|error| HostError::Validation {
@@ -3650,6 +3651,7 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeDerivedResult, HostError> {
         let root = root.as_ref();
+        worker.verify_identity().map_err(HostError::from)?;
         let source_snapshot = self.load(root)?;
 
         let mut binding = extrude_artifact_request(&request, &source_snapshot)?;

@@ -71,9 +71,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
 # Native-worker tests are serialized to avoid resource contention, matching CI.
-cargo test --workspace --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test --workspace --jobs 1 -- --test-threads=1
 
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh
+
+echo "==> native-worker evidence contract test"
+bash tests/native-worker-contract.sh
 
 echo "==> Acceptance contract satisfied"

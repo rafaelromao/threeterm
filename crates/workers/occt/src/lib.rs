@@ -90,6 +90,13 @@ pub enum WorkerError {
         /// The active request ID when spawning was attempted for a request.
         request_id: Option<String>,
     },
+    /// The selected executable is not the approved immutable worker.
+    IdentityMismatch {
+        binary: PathBuf,
+        worker_kind: String,
+        expected: String,
+        actual: String,
+    },
     /// The worker exited with a non-zero status.
     NonZeroExit { code: Option<i32>, stderr: String },
     /// A non-zero worker exit with a safely recovered active request ID.
@@ -149,6 +156,16 @@ impl std::fmt::Display for WorkerError {
                     binary.display()
                 )
             }
+            Self::IdentityMismatch {
+                binary,
+                worker_kind,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "worker identity mismatch for {worker_kind} at {}: expected_sha256={expected} actual_sha256={actual}",
+                binary.display()
+            ),
             Self::NonZeroExit { code, stderr } => {
                 write!(formatter, "worker exited with code {code:?}: {stderr}")
             }
@@ -239,7 +256,21 @@ pub struct OcctWorker {
     revision_id: Option<String>,
     /// Expected worker identity negotiated during the protocol handshake.
     expected_worker_id: Option<String>,
+    expected_binary_sha256: Option<String>,
 }
+
+/// Immutable source and executable identity recorded by the canonical CI
+/// manifest for the binary that is actually selected for execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryFingerprint {
+    pub worker_kind: String,
+    pub source_repository: String,
+    pub source_commit: String,
+    pub binary_sha256: String,
+}
+
+pub const SOURCE_REPOSITORY: &str = "https://github.com/Open-Cascade-SAS/OCCT";
+pub const SOURCE_COMMIT: &str = "c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 
 /// A completed staged extrude whose artifact remains owned by the Host for
 /// independent validation. The worker boundary parses the typed completion,
@@ -275,12 +306,16 @@ impl OcctWorker {
     pub fn locate() -> Result<Self, WorkerError> {
         let built = PathBuf::from(BUILT_WORKER_PATH.trim());
         if built.is_file() {
-            return Ok(Self::with_binary_path(built).with_expected_worker_id("occt"));
+            return Ok(Self::with_binary_path(built)
+                .with_expected_worker_id("occt")
+                .with_expected_binary_sha256_from_env());
         }
         if let Some(path) = env::var_os("THREETERM_OCCTBUILD_WORKER") {
             let candidate = PathBuf::from(path);
             if candidate.is_file() {
-                return Ok(Self::with_binary_path(candidate).with_expected_worker_id("occt"));
+                return Ok(Self::with_binary_path(candidate)
+                    .with_expected_worker_id("occt")
+                    .with_expected_binary_sha256_from_env());
             }
         }
         let target_root = env::var_os("CARGO_TARGET_DIR")
@@ -294,7 +329,9 @@ impl OcctWorker {
         for profile in ["debug", "release"] {
             let candidate = target_root.join(profile).join("bin/threeterm-occt-worker");
             if candidate.is_file() {
-                return Ok(Self::with_binary_path(candidate).with_expected_worker_id("occt"));
+                return Ok(Self::with_binary_path(candidate)
+                    .with_expected_worker_id("occt")
+                    .with_expected_binary_sha256_from_env());
             }
         }
         Err(WorkerError::Spawn {
@@ -312,6 +349,7 @@ impl OcctWorker {
                 .with_operation("boolean_pattern", BOOLEAN_PATTERN_CANCELLATION_GRACE),
             revision_id: None,
             expected_worker_id: None,
+            expected_binary_sha256: None,
         }
     }
 
@@ -341,6 +379,55 @@ impl OcctWorker {
     pub fn with_expected_worker_id(mut self, worker_id: impl Into<String>) -> Self {
         self.expected_worker_id = Some(worker_id.into());
         self
+    }
+
+    pub fn with_expected_binary_sha256(mut self, digest: impl Into<String>) -> Self {
+        self.expected_binary_sha256 = Some(digest.into());
+        self
+    }
+
+    fn with_expected_binary_sha256_from_env(mut self) -> Self {
+        self.expected_binary_sha256 = env::var("THREETERM_OCCT_WORKER_SHA256").ok();
+        self
+    }
+
+    /// Verify the regular executable selected by this worker before it is
+    /// allowed to enter the disposable process lifecycle.
+    pub fn verify_identity(&self) -> Result<BinaryFingerprint, WorkerError> {
+        let metadata =
+            std::fs::symlink_metadata(&self.binary_path).map_err(|error| WorkerError::Spawn {
+                binary: self.binary_path.clone(),
+                detail: format!("worker binary cannot be inspected: {error}"),
+                request_id: None,
+            })?;
+        if !metadata.file_type().is_file() {
+            return Err(WorkerError::Spawn {
+                binary: self.binary_path.clone(),
+                detail: "worker binary is not a regular file".to_string(),
+                request_id: None,
+            });
+        }
+        let actual = sha256_file(&self.binary_path).map_err(|error| WorkerError::Spawn {
+            binary: self.binary_path.clone(),
+            detail: format!("worker binary hash failed: {error}"),
+            request_id: None,
+        })?;
+        if let Some(expected) = &self.expected_binary_sha256
+            && expected != &actual
+        {
+            return Err(WorkerError::IdentityMismatch {
+                binary: self.binary_path.clone(),
+                worker_kind: "occt".to_string(),
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        Ok(BinaryFingerprint {
+            worker_kind: "occt".to_string(),
+            source_repository: SOURCE_REPOSITORY.to_string(),
+            source_commit: SOURCE_COMMIT.to_string(),
+            binary_sha256: actual,
+        })
     }
 
     pub fn binary_path(&self) -> &Path {
@@ -858,6 +945,7 @@ impl OcctWorker {
             Some(Path::new(output_dir).join(output_filename))
         };
 
+        self.verify_identity()?;
         let host = <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
             schema_version: threeterm_protocol::schema_version(),
@@ -975,6 +1063,12 @@ impl OcctWorker {
         stage: Option<Stage>,
         on_progress: &mut dyn FnMut(&Progress),
     ) -> Result<(SupervisorOutcome, Option<Stage>), WorkerError> {
+        if let Err(error) = self.verify_identity() {
+            if let Some(stage) = stage {
+                let _ = stage.discard();
+            }
+            return Err(error);
+        }
         let host = match <Self as WorkerProcess>::spawn(WorkerConfig {
             worker_id: "occt",
             schema_version: threeterm_protocol::schema_version(),
@@ -1644,6 +1738,22 @@ mod tests {
         assert_eq!(value["code"], "request_malformed");
         assert_eq!(value["arg"], "empty profile");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn binary_identity_rejects_a_substituted_worker_before_spawn() {
+        let worker_path =
+            std::env::temp_dir().join(format!("threeterm-occt-identity-{}", new_request_id()));
+        fs::write(&worker_path, b"not the approved worker").expect("worker fixture writes");
+        let worker = OcctWorker::with_binary_path(worker_path.clone())
+            .with_expected_binary_sha256("0".repeat(64));
+
+        let error = worker
+            .verify_identity()
+            .expect_err("substituted worker must fail closed");
+
+        assert!(matches!(error, WorkerError::IdentityMismatch { .. }));
+        let _ = fs::remove_file(worker_path);
     }
 
     #[test]

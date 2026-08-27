@@ -8,12 +8,9 @@ Upstream
 - License: LGPL-2.1 (with the OCCT static-linking exception)
 
 Vendored files
-- This slice does not vendor OCCT sources; it links against the system
-  OCCT install (Archlinux community `opencascade` package on the CI
-  container; `THREETERM_OCCT_DIR` override for any prebuilt tree). The
-  Archlinux package version recorded at slice time is what the CI
-  install resolves to. Vendoring is gated behind `THREETERM_OCCT_VENDOR=1`
-  and not used in the default build.
+- Local builds may link against a development prefix. Canonical CI checks out
+  this exact commit into an isolated prefix and links only against that prefix;
+  no mutable system OCCT package is accepted by the CI contract.
 
 ThreeTerm additions (NOT derived from upstream)
 - src-cpp/worker_main.cpp — ThreeTerm-only worker binary that exchanges
@@ -32,8 +29,8 @@ ThreeTerm additions (NOT derived from upstream)
   subprocess per request.
 
 Build
-- Prerequisites: g++ (or any C++17 compiler), the system OCCT 7.x
-  development package (Archlinux: `pacman -Syu opencascade`).
+- Prerequisites: g++ (or any C++17 compiler) and an OCCT 7.x development
+  prefix. Canonical CI builds that prefix from the pinned source commit.
 - `cargo build -p threeterm-occt-worker` runs build.rs which:
     1. searches for the system OCCT install (env var first, then the
        default include / lib search paths);

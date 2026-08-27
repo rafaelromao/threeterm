@@ -46,5 +46,13 @@ jobs:
               -v "${PWD}:/workspace" \
               -v "${HOME}/.cargo:/root/.cargo" \
               -w /workspace \
-              docker.io/archlinux:latest \
+              docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash /workspace/.github/scripts/ci.sh
+
+      - name: Upload native-worker execution manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-worker-manifest
+          path: target/native-worker-manifest.json
+          if-no-files-found: error

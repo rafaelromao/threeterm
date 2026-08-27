@@ -3,6 +3,8 @@ use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use threeterm_host::Host;
@@ -130,13 +132,20 @@ impl InteractiveTerminal for ProcessTerminal {
         let Some(original) = self.original_stty.take() else {
             return Ok(());
         };
-        let original = String::from_utf8(original).map_err(io::Error::other)?;
+        let original_text = match String::from_utf8(original.clone()) {
+            Ok(text) => text,
+            Err(error) => {
+                self.original_stty = Some(error.into_bytes());
+                return Err(io::Error::other("stty state is not UTF-8"));
+            }
+        };
         let restored = std::process::Command::new("stty")
-            .arg(original.trim())
+            .arg(original_text.trim())
             .stderr(Stdio::null())
             .status()
             .map_err(io::Error::other)?;
         if !restored.success() {
+            self.original_stty = Some(original);
             return Err(io::Error::other("stty restore failed"));
         }
         Ok(())
@@ -189,7 +198,13 @@ fn main() -> ExitCode {
 }
 
 fn probe_nonce() -> u64 {
-    std::process::id().into()
+    static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let sequence = NEXT_NONCE.fetch_add(1, Ordering::Relaxed);
+    (clock ^ u64::from(std::process::id()) ^ sequence).max(1)
 }
 
 fn report(error: LaunchError) -> ExitCode {

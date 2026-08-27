@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_viewport::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, TerminalEnvironment,
@@ -40,6 +41,7 @@ pub enum LaunchError {
     Project(String),
     Viewport(ViewportDiagnostic),
     Runtime(String),
+    Cleanup { source: Box<Self>, detail: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -58,10 +60,17 @@ impl LaunchError {
         match self {
             Self::Capability(_) => EXIT_CAPABILITY_FAILURE,
             Self::Project(_) | Self::Viewport(_) | Self::Runtime(_) => EXIT_LAUNCH_FAILURE,
+            Self::Cleanup { source, .. } => source.exit_code(),
         }
     }
 
     pub fn to_json(&self) -> String {
+        if let Self::Cleanup { source, detail } = self {
+            let mut envelope: Value =
+                serde_json::from_str(&source.to_json()).expect("launch diagnostic is JSON");
+            envelope["cleanup_error"] = Value::String(detail.clone());
+            return serde_json::to_string(&envelope).expect("launch diagnostic is serializable");
+        }
         let diagnostic = match self {
             Self::Capability(viewport) => LaunchDiagnostic {
                 schema_version: LAUNCH_SCHEMA_VERSION,
@@ -99,6 +108,7 @@ impl LaunchError {
                 route: "headless_automation",
                 recovery: "restore the terminal and retry Interactive Modeling from the official attachment".to_string(),
             },
+            Self::Cleanup { .. } => unreachable!("cleanup diagnostics are handled above"),
         };
         serde_json::to_string(&diagnostic).expect("launch diagnostic is serializable")
     }
@@ -129,8 +139,10 @@ pub fn launch<W: InteractiveTerminal>(
     let probe = match CapabilityProbe::new(nonce).probe(terminal, environment) {
         Ok(probe) => probe,
         Err(error) => {
-            let _ = terminal.restore();
-            return Err(LaunchError::Capability(error));
+            return Err(with_restore_error(
+                LaunchError::Capability(error),
+                terminal.restore(),
+            ));
         }
     };
     if !probe.capabilities.supports_interactive() {
@@ -144,27 +156,54 @@ pub fn launch<W: InteractiveTerminal>(
             "complete a fresh direct-Ghostty capability probe before starting Interactive Modeling",
         )
         .with_evidence(probe.response_evidence.clone());
-        let _ = terminal.restore();
-        return Err(LaunchError::Capability(diagnostic));
+        return Err(with_restore_error(
+            LaunchError::Capability(diagnostic),
+            terminal.restore(),
+        ));
     }
 
     if let Err(error) = host.load(root) {
-        let _ = terminal.restore();
-        return Err(LaunchError::Project(error.to_string()));
+        return Err(with_restore_error(
+            LaunchError::Project(error.to_string()),
+            terminal.restore(),
+        ));
     }
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(host, width, height, terminal, &probe);
-    let restored = terminal.restore();
-    if let Err(error) = restored {
-        return Err(LaunchError::Runtime(format!(
-            "terminal restore failed: {error}"
-        )));
-    }
+    let launch_result = with_restore_result(launch_result, terminal.restore());
     launch_result?;
 
     Ok(LaunchOutcome {
         event_loop_entered: true,
     })
+}
+
+fn with_restore_error(source: LaunchError, restore: io::Result<()>) -> LaunchError {
+    match restore {
+        Ok(()) => source,
+        Err(error) => LaunchError::Cleanup {
+            source: Box::new(source),
+            detail: format!("terminal restore failed: {error}"),
+        },
+    }
+}
+
+fn with_restore_result(
+    result: Result<(), LaunchError>,
+    restore: io::Result<()>,
+) -> Result<(), LaunchError> {
+    match restore {
+        Ok(()) => result,
+        Err(error) => match result {
+            Ok(()) => Err(LaunchError::Runtime(format!(
+                "terminal restore failed: {error}"
+            ))),
+            Err(source) => Err(LaunchError::Cleanup {
+                source: Box::new(source),
+                detail: format!("terminal restore failed: {error}"),
+            }),
+        },
+    }
 }
 
 fn run_session<W: InteractiveTerminal>(

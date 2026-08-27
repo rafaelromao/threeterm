@@ -11,6 +11,7 @@ struct ScriptedTerminal {
     probe_response: Vec<u8>,
     events: Vec<Vec<u8>>,
     events_read: usize,
+    restore_fails: bool,
 }
 
 impl Write for ScriptedTerminal {
@@ -38,6 +39,14 @@ impl InteractiveTerminal for ScriptedTerminal {
 
     fn viewport_size(&self) -> (u32, u32) {
         (64, 48)
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restore_fails {
+            Err(io::Error::other("injected restore failure"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -186,4 +195,28 @@ fn production_launch_rejects_ambiguous_probe_acknowledgement() {
     assert_eq!(terminal.events_read, 0);
 
     std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_retains_restore_failure_with_original_diagnostic() {
+    let mut terminal = ScriptedTerminal {
+        restore_fails: true,
+        ..Default::default()
+    };
+
+    let error = launch(
+        &Host::new(),
+        "/tmp/threeterm-production-launch-restore-failure",
+        &mut terminal,
+        unattached_environment(),
+        7,
+    )
+    .expect_err("capability refusal with failed restore is still an error");
+    assert!(matches!(error, LaunchError::Cleanup { .. }));
+    let diagnostic: Value = serde_json::from_str(&error.to_json()).expect("diagnostic is JSON");
+    assert_eq!(diagnostic["code"], "capability_denied");
+    assert_eq!(
+        diagnostic["cleanup_error"],
+        "terminal restore failed: injected restore failure"
+    );
 }

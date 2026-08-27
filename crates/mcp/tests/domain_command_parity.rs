@@ -108,6 +108,7 @@ fn mcp_identity(root: &std::path::Path) -> Value {
     let server = McpServer::new();
     let response = server.handle_request(&JsonRpcRequest {
         id: json!(1),
+        is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.identity/1",
@@ -126,6 +127,7 @@ fn mcp_apply(root: &std::path::Path, revision: &str) -> Value {
     let server = McpServer::new();
     let response = server.handle_request(&JsonRpcRequest {
         id: json!(1),
+        is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.apply/1",
@@ -246,6 +248,7 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     let server = McpServer::new();
     let invalid = server.handle_request(&JsonRpcRequest {
         id: json!(2),
+        is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.apply/1",
@@ -260,6 +263,7 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     assert_eq!(invalid.error.expect("schema error").code, -32602);
     let semantic = server.handle_request(&JsonRpcRequest {
         id: json!(3),
+        is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.apply/1",
@@ -271,9 +275,19 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
             }
         }),
     });
-    let semantic_error = semantic.error.expect("semantic error");
-    assert_eq!(semantic_error.code, -32603);
-    assert!(semantic_error.message.contains("requires kind"));
+    assert!(semantic.error.is_none());
+    let semantic_result = semantic.result.expect("semantic failure is a tool result");
+    assert_eq!(semantic_result["isError"], true);
+    assert_eq!(
+        semantic_result["content"][0]["type"], "text",
+        "semantic failures use MCP text content"
+    );
+    assert!(
+        semantic_result["content"][0]["text"]
+            .as_str()
+            .expect("semantic error content is text")
+            .contains("requires kind")
+    );
     let cli_error = cli_missing_kind(&root, identity["revision_hash"].as_str().unwrap());
     assert_eq!(cli_error["code"], "invalid_request");
     assert!(cli_error["arg"].as_str().unwrap().contains("requires kind"));

@@ -28,7 +28,9 @@ use threeterm_persistence::{
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
 };
+use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
+use threeterm_protocol::schema::{APPLY_COMMAND_ID, CommandId, IDENTITY_COMMAND_ID, find};
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
 use threeterm_viewport::{SceneSolid, SceneTriangle, ViewportScene};
@@ -1488,6 +1490,85 @@ impl Host {
 
     pub fn identity(&self, root: impl AsRef<Path>) -> Result<ProjectIdentity, HostError> {
         Ok(ProjectIdentity::from(&Bundle::at(root.as_ref()).open()?))
+    }
+
+    /// Execute the migrated versioned domain commands behind one semantic
+    /// boundary. Transport adapters may frame or render the result, but they
+    /// do not validate or implement these commands independently.
+    pub fn execute_domain_command(
+        &self,
+        command: CommandId,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ExecutionError<HostError>> {
+        execute(command, request, |request| {
+            let string_field = |name: &str| {
+                request
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!("missing string field {name:?}"),
+                    })
+            };
+
+            match command {
+                IDENTITY_COMMAND_ID => {
+                    let identity = self.identity(string_field("bundle_path")?)?;
+                    Ok(serde_json::json!({
+                        "generation_id": identity.generation_id,
+                        "revision_id": identity.revision_id,
+                        "feature_graph_hash": identity.feature_graph_hash,
+                        "revision_hash": identity.revision_hash,
+                        "transaction_count": identity.transaction_count,
+                        "terminal_log_digest": identity.terminal_log_digest,
+                        "schema_version": find(command)
+                            .expect("identity is registered")
+                            .response_schema_version,
+                    }))
+                }
+                APPLY_COMMAND_ID => {
+                    let operation = string_field("operation")?;
+                    let feature_id = string_field("feature_id")?;
+                    let kind = request.get("kind").and_then(serde_json::Value::as_str);
+                    if matches!(operation, "add" | "set") && kind.is_none() {
+                        return Err(HostError::Validation {
+                            detail: format!("{operation} requires kind"),
+                        });
+                    }
+                    if operation == "remove" && kind.is_some() {
+                        return Err(HostError::Validation {
+                            detail: "remove does not accept kind".to_string(),
+                        });
+                    }
+                    let view = self.apply_feature(
+                        string_field("bundle_path")?,
+                        operation,
+                        feature_id,
+                        kind,
+                        string_field("expected_revision")?,
+                    )?;
+                    Ok(serde_json::json!({
+                        "status": "committed",
+                        "operation": view.operation,
+                        "feature_id": view.feature_id,
+                        "generation_id": view.identity.generation_id,
+                        "revision_id": view.identity.revision_id,
+                        "feature_graph_hash": view.identity.feature_graph_hash,
+                        "revision_hash": view.identity.revision_hash,
+                        "transaction_count": view.identity.transaction_count,
+                        "terminal_log_digest": view.identity.terminal_log_digest,
+                        "schema_version": find(command)
+                            .expect("apply is registered")
+                            .response_schema_version,
+                    }))
+                }
+                _ => Err(HostError::Validation {
+                    detail: format!(
+                        "command {} is not handled by the domain executor",
+                        command.0
+                    ),
+                }),
+            }
+        })
     }
 
     pub fn apply_feature(

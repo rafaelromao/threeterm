@@ -539,6 +539,7 @@ dependencies = [
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-tui",
 ]
 
 [[package]]
@@ -590,10 +591,12 @@ version = "0.1.0"
 name = "threeterm-tui"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "threeterm-domain",
  "threeterm-host",
  "threeterm-occt-worker",
  "threeterm-persistence",
+ "threeterm-protocol",
  "threeterm-theme",
  "threeterm-viewport",
 ]

@@ -1995,12 +1995,20 @@ impl Host {
         let root = root.as_ref();
         let view = self.load(root)?;
         let loaded = Bundle::at(root).open()?;
-        if !loaded
+        let replay_needed = loaded
             .log
             .entries()
             .iter()
-            .any(|entry| entry.intent.is_some())
-        {
+            .filter_map(|entry| entry.intent.as_ref())
+            .any(|intent| {
+                intent.affected_semantic_ids.iter().any(|feature_id| {
+                    !bundle_root(root)
+                        .join(BREP_SUBDIR)
+                        .join(format!("{feature_id}.brep"))
+                        .is_file()
+                })
+            });
+        if !replay_needed {
             return Ok(view);
         }
         let worker = OcctWorker::locate().map_err(HostError::from)?;

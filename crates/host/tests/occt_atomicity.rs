@@ -202,6 +202,9 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .extrude(&root, request, &worker)
         .expect("extrude commits");
     let original_brep = fs::read(&committed.result.brep_path).expect("committed BREP reads");
+    Host::new()
+        .load_with_extrude_replay(&root)
+        .expect("intact extrude loads without replay");
     let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
     let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
     let loaded = Bundle::at(&root)

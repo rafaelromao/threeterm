@@ -10,6 +10,7 @@ struct ScriptedTerminal {
     writes: Vec<u8>,
     probe_response: Option<Vec<u8>>,
     events: Vec<Vec<u8>>,
+    queued_events: Vec<Vec<u8>>,
     events_read: usize,
     replayed_probe_input: Vec<u8>,
     prepare_fails: bool,
@@ -60,11 +61,18 @@ fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
 impl InteractiveTerminal for ScriptedTerminal {
     fn replay_probe_input(&mut self, bytes: &[u8]) {
         self.replayed_probe_input.extend_from_slice(bytes);
+        if !bytes.is_empty() {
+            self.queued_events.push(bytes.to_vec());
+        }
     }
 
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         self.events_read += 1;
-        Ok(self.events.pop().unwrap_or_default())
+        Ok(self
+            .queued_events
+            .pop()
+            .or_else(|| self.events.pop())
+            .unwrap_or_default())
     }
 
     fn viewport_size(&self) -> (u32, u32) {
@@ -200,7 +208,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 2);
+    assert_eq!(terminal.events_read, 3);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

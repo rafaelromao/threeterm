@@ -177,7 +177,6 @@ pub fn launch<W: InteractiveTerminal>(
             terminal.restore(),
         ));
     }
-    terminal.replay_probe_input(&probe.unrelated_input);
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(host, width, height, placement, terminal, &probe);
     let launch_result = with_restore_result(launch_result, terminal.restore());
@@ -242,7 +241,7 @@ fn run_session<W: InteractiveTerminal>(
     );
     let launch_result = match session_result {
         Ok(mut session) => {
-            let result = run_event_loop(&mut session);
+            let result = run_event_loop(&mut session, &probe.unrelated_input);
             let cleanup = session.cleanup();
             drop(session);
             match (result, cleanup) {
@@ -263,6 +262,7 @@ fn run_session<W: InteractiveTerminal>(
 
 fn run_event_loop<W: InteractiveTerminal>(
     session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
+    replayed_probe_input: &[u8],
 ) -> Result<(), LaunchError> {
     let initial = session
         .render_current()
@@ -277,6 +277,11 @@ fn run_event_loop<W: InteractiveTerminal>(
             ))
         })?;
     acknowledge_frame(session, initial.frame_token)?;
+    session
+        .coordinator_mut()
+        .renderer_mut()
+        .writer_mut()
+        .replay_probe_input(replayed_probe_input);
 
     loop {
         let bytes = session

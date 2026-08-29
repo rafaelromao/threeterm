@@ -4,14 +4,14 @@ mod launch;
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use threeterm_domain::{
     FeatureGraph,
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
 use threeterm_host::{HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export};
 use threeterm_protocol::command_execution::ExecutionError;
-use threeterm_protocol::schema::CommandId;
+use threeterm_protocol::schema::{CommandId, REATTACH_EDGE_COMMAND_ID};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -55,6 +55,29 @@ pub fn reattachment_acknowledgement(response: &Value) -> String {
         Some(outcome) => format!("edge reattachment {outcome}"),
         None => "edge reattachment invalid response".to_string(),
     }
+}
+
+/// Execute the selected-edge action from the interactive state through the
+/// same command seam used by headless adapters.
+pub fn execute_selected_edge_reattachment(
+    host: &Host,
+    bundle_path: &Path,
+    expected_revision: &str,
+    edit_feature_id: &str,
+    edit_kind: &str,
+    reference: Value,
+) -> Result<Value, ExecutionError<HostError>> {
+    execute_domain_command(
+        host,
+        REATTACH_EDGE_COMMAND_ID,
+        json!({
+            "bundle_path": bundle_path.to_string_lossy(),
+            "expected_revision": expected_revision,
+            "edit_feature_id": edit_feature_id,
+            "edit_kind": edit_kind,
+            "reference": reference,
+        }),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

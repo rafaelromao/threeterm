@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
+use threeterm_protocol::schema::{
+    APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
+};
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -37,6 +39,33 @@ fn extrude_request(root: &std::path::Path) -> Value {
         "feature_id": "extrude",
         "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
         "height": 2.0
+    })
+}
+
+fn edge_reference() -> Value {
+    json!({
+        "semantic_id": "edge-source",
+        "provenance": {
+            "source_feature_id": "feature-before",
+            "source_revision_id": "revision-before",
+            "source_edge_id": "edge-source"
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": [10.0, 2.0, 0.0],
+            "tangent": [1.0, 0.0, 0.0],
+            "length": 20.0
+        }
+    })
+}
+
+fn edge_request(root: &std::path::Path, revision: &str) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "expected_revision": revision,
+        "edit_feature_id": "fillet-after-edge",
+        "edit_kind": "fillet",
+        "reference": edge_reference()
     })
 }
 
@@ -369,6 +398,54 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
         assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
     }
 
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
+    let cli_root = root("edge-cli");
+    let mcp_root = root("edge-mcp");
+    let tui_root = root("edge-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+    }
+    let revision = Bundle::at(&cli_root)
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        REATTACH_EDGE_COMMAND_ID,
+        edge_request(&cli_root, &revision),
+    )
+    .expect("CLI edge command executes");
+    let tui = threeterm_tui::execute_selected_edge_reattachment(
+        &threeterm_host::Host::new(),
+        &tui_root,
+        &revision,
+        "fillet-after-edge",
+        "fillet",
+        edge_reference(),
+    )
+    .expect("TUI edge command executes");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.reattach-edge/1",
+            "arguments": edge_request(&mcp_root, &revision)
+        }),
+    });
+    let mcp = mcp.result.expect("MCP edge command executes")["structuredContent"].clone();
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["outcome"], "resolved");
+        assert_eq!(result["selected_edge_id"], "edge-source-reattached");
+        assert_eq!(result["committed"], true);
+    }
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);

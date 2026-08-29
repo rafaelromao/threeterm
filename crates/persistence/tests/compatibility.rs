@@ -68,7 +68,7 @@ fn unsupported_feature_kind_is_rejected_at_the_canonical_boundary() {
 
     assert!(matches!(
         Bundle::at(&path).append_feature("feature-1", "future-solid"),
-        Err(BundleError::Invalid(detail)) if detail.contains("future-solid")
+        Err(BundleError::FeatureKindUnknown { kind, .. }) if kind == "future-solid"
     ));
 
     let _ = fs::remove_dir_all(path);

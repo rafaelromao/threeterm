@@ -74,7 +74,10 @@ fn invalid_and_stale_apply_leave_canonical_bytes_unchanged() {
         Some("other"),
         committed.revision_hash_hex(),
     );
-    assert!(matches!(duplicate, Err(BundleError::Invalid(_))));
+    assert!(matches!(
+        duplicate,
+        Err(BundleError::FeatureKindUnknown { kind, .. }) if kind == "other"
+    ));
     let stale =
         bundle.apply_feature_if_revision("remove", "box", None, initial.revision_hash_hex());
     assert!(matches!(stale, Err(BundleError::Invalid(_))));

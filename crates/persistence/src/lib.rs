@@ -1042,7 +1042,9 @@ impl Bundle {
     fn open_sealed(&self, recovered_from_previous: bool) -> Result<LoadedBundle, BundleError> {
         let manifest_bytes = read_required(&self.manifest_path(), BundleError::ManifestMissing)?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(|error| {
-            if let Some(identity) = missing_identity_in(&error.to_string()) {
+            if let Some(field) = unknown_field_in(&error.to_string()) {
+                BundleError::ManifestFieldUnknown { kind: "v1", field }
+            } else if let Some(identity) = missing_identity_in(&error.to_string()) {
                 BundleError::CompatibilityIdentityMissing { identity }
             } else {
                 BundleError::Invalid(error.to_string())
@@ -2363,11 +2365,7 @@ fn validate_feature_entries(
 ) -> Result<(), BundleError> {
     let mut ids = std::collections::BTreeSet::new();
     for (feature_id, kind) in entries {
-        if let Err(error @ BundleError::FeatureKindUnknown { .. }) =
-            validate_canonical_kind(None, kind)
-        {
-            return Err(BundleError::Invalid(error.to_string()));
-        }
+        validate_canonical_kind(None, kind)?;
         let (operation, canonical_kind) = apply_kind(kind);
         if operation == Some("remove") && canonical_kind != APPLY_REMOVE_KIND {
             return Err(BundleError::Invalid(
@@ -2486,30 +2484,18 @@ fn validate_canonical_kind(
     encoded_kind: &str,
 ) -> Result<(), BundleError> {
     if let Some(payload) = encoded_kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
-        serde_json::from_str::<HistoryEvent>(payload).map_err(|error| {
-            BundleError::LogBrokenLink {
-                log_index: log_index.unwrap_or_default(),
-                detail: format!("invalid history event: {error}"),
-            }
-        })?;
+        serde_json::from_str::<HistoryEvent>(payload)
+            .map_err(|error| canonical_payload_error(log_index, "history event", error))?;
         return Ok(());
     }
     if let Some(payload) = encoded_kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
-        serde_json::from_str::<FitDimension>(payload).map_err(|error| {
-            BundleError::LogBrokenLink {
-                log_index: log_index.unwrap_or_default(),
-                detail: format!("invalid fit dimension: {error}"),
-            }
-        })?;
+        serde_json::from_str::<FitDimension>(payload)
+            .map_err(|error| canonical_payload_error(log_index, "fit dimension", error))?;
         return Ok(());
     }
     if let Some(payload) = encoded_kind.strip_prefix(SKETCH_COMMAND_KIND_PREFIX) {
-        serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(|error| {
-            BundleError::LogBrokenLink {
-                log_index: log_index.unwrap_or_default(),
-                detail: format!("invalid sketch payload: {error}"),
-            }
-        })?;
+        serde_json::from_str::<threeterm_domain::SketchPayload>(payload)
+            .map_err(|error| canonical_payload_error(log_index, "sketch payload", error))?;
         return Ok(());
     }
     if let Some(payload) = encoded_kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
@@ -2536,6 +2522,21 @@ fn validate_canonical_kind(
         });
     }
     Ok(())
+}
+
+fn canonical_payload_error(
+    log_index: Option<usize>,
+    kind: &str,
+    error: serde_json::Error,
+) -> BundleError {
+    if let Some(field) = unknown_field_in(&error.to_string()) {
+        BundleError::CanonicalFieldUnknown { log_index, field }
+    } else {
+        BundleError::LogBrokenLink {
+            log_index: log_index.unwrap_or_default(),
+            detail: format!("invalid {kind}: {error}"),
+        }
+    }
 }
 
 fn is_supported_feature_kind(kind: &str) -> bool {

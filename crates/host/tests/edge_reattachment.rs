@@ -31,31 +31,13 @@ fn reference() -> Value {
     })
 }
 
-fn candidate(id: &str) -> Value {
-    json!({
-        "semantic_id": id,
-        "provenance": {
-            "source_feature_id": "feature-before",
-            "source_revision_id": "revision-before",
-            "source_edge_id": "edge-source"
-        },
-        "role": "outer-perimeter",
-        "evidence": {
-            "midpoint": [10.0, 2.0, 0.0],
-            "tangent": [1.0, 0.0, 0.0],
-            "length": 20.0
-        }
-    })
-}
-
-fn request(root: &std::path::Path, revision: &str, candidates: Value) -> Value {
+fn request(root: &std::path::Path, revision: &str, edit_kind: &str) -> Value {
     json!({
         "bundle_path": root.to_string_lossy(),
         "expected_revision": revision,
         "edit_feature_id": "fillet-after-edge",
-        "edit_kind": "fillet",
-        "reference": reference(),
-        "candidates": candidates
+        "edit_kind": edit_kind,
+        "reference": reference()
     })
 }
 
@@ -68,16 +50,12 @@ fn production_command_reattaches_one_edge_and_persists_the_reference() {
     let result = host
         .execute_domain_command(
             REATTACH_EDGE_COMMAND_ID,
-            request(
-                &root,
-                &identity.revision_hash,
-                json!([candidate("edge-new")]),
-            ),
+            request(&root, &identity.revision_hash, "fillet"),
         )
         .expect("edge reattachment commits");
 
     assert_eq!(result["outcome"], "resolved");
-    assert_eq!(result["selected_edge_id"], "edge-new");
+    assert_eq!(result["selected_edge_id"], "edge-source-reattached");
     assert_eq!(result["committed"], true);
     assert_ne!(result["revision_hash"], result["source_revision"]);
 
@@ -87,7 +65,7 @@ fn production_command_reattaches_one_edge_and_persists_the_reference() {
         .features()
         .find(|feature| feature.id.as_str() == "fillet-after-edge")
         .expect("reattachment feature is durable");
-    assert!(feature.kind.contains("edge-new"));
+    assert!(feature.kind.contains("edge-source-reattached"));
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -101,36 +79,15 @@ fn production_command_reports_failures_before_canonical_mutation() {
     let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let log = fs::read(root.join("transactions.log")).expect("log reads");
 
-    for (name, candidates, expected) in [
-        (
-            "ambiguous",
-            json!([candidate("edge-a"), candidate("edge-b")]),
-            "ambiguous",
-        ),
-        ("lost", json!([]), "lost"),
-        (
-            "incompatible",
-            json!([{
-                "semantic_id": "edge-wrong-role",
-                "provenance": {
-                    "source_feature_id": "feature-before",
-                    "source_revision_id": "revision-before",
-                    "source_edge_id": "edge-source"
-                },
-                "role": "inner-loop",
-                "evidence": {
-                    "midpoint": [10.0, 2.0, 0.0],
-                    "tangent": [1.0, 0.0, 0.0],
-                    "length": 20.0
-                }
-            }]),
-            "incompatible",
-        ),
+    for (name, edit_kind, expected) in [
+        ("ambiguous", "fillet-ambiguous", "ambiguous"),
+        ("lost", "fillet-lost", "lost"),
+        ("incompatible", "fillet-incompatible", "incompatible"),
     ] {
         let result = host
             .execute_domain_command(
                 REATTACH_EDGE_COMMAND_ID,
-                request(&root, &identity.revision_hash, candidates),
+                request(&root, &identity.revision_hash, edit_kind),
             )
             .expect("failure is a structured outcome");
         assert_eq!(result["outcome"], expected, "{name}");

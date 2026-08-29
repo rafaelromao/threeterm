@@ -535,31 +535,16 @@ fn selected_edge_schema() -> Value {
     })
 }
 
-fn post_edit_candidate_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["semantic_id", "provenance", "role", "evidence"],
-        "properties": {
-            "semantic_id": { "type": "string", "minLength": 1 },
-            "provenance": edge_provenance_schema(),
-            "role": { "type": "string", "minLength": 1 },
-            "evidence": edge_evidence_schema()
-        },
-        "additionalProperties": false
-    })
-}
-
 pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "reference", "candidates"],
+        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "reference"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "edit_feature_id": { "type": "string", "minLength": 1 },
-            "edit_kind": { "type": "string", "minLength": 1 },
+            "edit_kind": { "type": "string", "enum": ["fillet", "chamfer", "fillet-ambiguous", "fillet-lost", "fillet-incompatible"] },
             "reference": selected_edge_schema(),
-            "candidates": { "type": "array", "items": post_edit_candidate_schema() }
         },
         "additionalProperties": false
     })

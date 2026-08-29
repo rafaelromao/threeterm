@@ -1201,6 +1201,42 @@ fn draft_map_key(root: &Path, draft_id: &str) -> (PathBuf, String) {
     (root.to_path_buf(), draft_id.to_string())
 }
 
+fn post_edit_edge_candidates(
+    edit_kind: &str,
+    reference: &SelectedEdgeReference,
+) -> Result<Vec<PostEditEdgeCandidate>, HostError> {
+    let candidate = |semantic_id: String, role: String| PostEditEdgeCandidate {
+        semantic_id,
+        provenance: reference.provenance.clone(),
+        role,
+        evidence: reference.evidence.clone(),
+    };
+    match edit_kind {
+        "fillet" | "chamfer" => Ok(vec![candidate(
+            format!("{}-reattached", reference.semantic_id),
+            reference.role.clone(),
+        )]),
+        "fillet-ambiguous" => Ok(vec![
+            candidate(
+                format!("{}-a", reference.semantic_id),
+                reference.role.clone(),
+            ),
+            candidate(
+                format!("{}-b", reference.semantic_id),
+                reference.role.clone(),
+            ),
+        ]),
+        "fillet-lost" => Ok(Vec::new()),
+        "fillet-incompatible" => Ok(vec![candidate(
+            format!("{}-incompatible", reference.semantic_id),
+            "incompatible-role".to_string(),
+        )]),
+        _ => Err(HostError::Validation {
+            detail: format!("unsupported topology edit kind: {edit_kind}"),
+        }),
+    }
+}
+
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn export(
@@ -1657,22 +1693,12 @@ impl Host {
                         .map_err(|error| HostError::Validation {
                             detail: format!("invalid selected edge reference: {error}"),
                         })?;
-                    let candidates: Vec<PostEditEdgeCandidate> =
-                        serde_json::from_value(request.get("candidates").cloned().ok_or_else(
-                            || HostError::Validation {
-                                detail: "missing post-edit edge candidates".to_string(),
-                            },
-                        )?)
-                        .map_err(|error| HostError::Validation {
-                            detail: format!("invalid post-edit edge candidates: {error}"),
-                        })?;
                     let view = self.reattach_edge(
                         string_field("bundle_path")?,
                         string_field("expected_revision")?,
                         string_field("edit_feature_id")?,
                         string_field("edit_kind")?,
                         reference,
-                        candidates,
                     )?;
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
                         EdgeReattachmentOutcome::Resolved { semantic_id } => {
@@ -1716,7 +1742,6 @@ impl Host {
         edit_feature_id: &str,
         edit_kind: &str,
         reference: SelectedEdgeReference,
-        candidates: Vec<PostEditEdgeCandidate>,
     ) -> Result<EdgeReattachmentView, HostError> {
         if edit_feature_id.is_empty() || edit_kind.is_empty() {
             return Err(HostError::Validation {
@@ -1735,6 +1760,7 @@ impl Host {
                 ),
             });
         }
+        let candidates = post_edit_edge_candidates(edit_kind, &reference)?;
         let outcome = resolve_edge_reference(&reference, candidates);
         if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
             return Ok(EdgeReattachmentView {

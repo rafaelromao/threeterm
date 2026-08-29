@@ -1,12 +1,17 @@
 #![allow(clippy::result_large_err)]
 
+mod launch;
+
 use std::path::Path;
 
+use serde_json::Value;
 use threeterm_domain::{
     FeatureGraph,
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
-use threeterm_host::{HistoryCommitView, Host, stale_last_valid_geometry_for_export};
+use threeterm_host::{HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export};
+use threeterm_protocol::command_execution::ExecutionError;
+use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -16,8 +21,24 @@ use threeterm_viewport::{
     ViewportRequest, ViewportScene,
 };
 
+pub use launch::{
+    EXIT_CAPABILITY_FAILURE, EXIT_LAUNCH_FAILURE, InteractiveTerminal, LaunchError, LaunchOutcome,
+    launch,
+};
+
 pub fn schema_version() -> &'static str {
     "threeterm.tui/1"
+}
+
+/// Thin TUI-harness adapter for the shared semantic command boundary.
+/// Interactive state remains presentation-only; canonical commands execute
+/// through the host-owned versioned request and response contract.
+pub fn execute_domain_command(
+    host: &Host,
+    command: CommandId,
+    request: Value,
+) -> Result<Value, ExecutionError<HostError>> {
+    host.execute_domain_command(command, request)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2362,6 +2383,22 @@ impl<R: Renderer> TuiViewportSession<R> {
         })
     }
 
+    pub fn render_current(&mut self) -> Result<SubmitOutcome, ViewportDiagnostic> {
+        self.scene.selected_id = self.tui.state().selected_target;
+        let generation = self.tui.state().presentation_generation;
+        let frame = ProtocolNeutralViewport::project(
+            &self.scene,
+            ViewportRequest::new(
+                self.scene.revision.clone(),
+                generation,
+                self.width,
+                self.height,
+                self.camera,
+            ),
+        )?;
+        self.coordinator.submit(frame)
+    }
+
     pub fn process_terminal_input(
         &mut self,
         bytes: &[u8],
@@ -2389,23 +2426,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             ArrowKey::Left => self.camera.rotated(-5, 0),
             ArrowKey::Right => self.camera.rotated(5, 0),
         };
-        self.scene.selected_id = self.tui.state().selected_target;
-        let generation = self.tui.state().presentation_generation;
-        let frame = ProtocolNeutralViewport::project(
-            &self.scene,
-            ViewportRequest::new(
-                self.scene.revision.clone(),
-                generation,
-                self.width,
-                self.height,
-                self.camera,
-            ),
-        )
-        .map_err(TuiViewportError::Viewport)?;
-        let submission = self
-            .coordinator
-            .submit(frame)
-            .map_err(TuiViewportError::Viewport)?;
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
         Ok(ViewportInputOutcome {
             rendered,
             submission,

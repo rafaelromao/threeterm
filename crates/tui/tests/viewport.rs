@@ -79,6 +79,7 @@ fn valid_capabilities() -> TerminalCapabilityVector {
 
 fn probe_result() -> CapabilityProbeResult {
     CapabilityProbeResult {
+        probe_nonce: 1,
         capabilities: valid_capabilities(),
         unrelated_input: Vec::new(),
         response_evidence: "test".to_string(),

@@ -126,6 +126,7 @@ impl TerminalCapabilityVector {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityProbeResult {
+    pub probe_nonce: u64,
     pub capabilities: TerminalCapabilityVector,
     pub unrelated_input: Vec<u8>,
     pub response_evidence: String,
@@ -222,6 +223,36 @@ impl CapabilityProbe {
                 "discard the response and retry the direct probe",
             ));
         }
+        let acknowledgement_ids = parse_acknowledgements(&response).map_err(|_| {
+            diagnostic(
+                ViewportDiagnosticCode::CapabilityMalformed,
+                "probe response contained malformed or ambiguous Kitty acknowledgements",
+                "capability-probe",
+                "discard the response and retry the direct probe",
+            )
+        })?;
+        if !acknowledgement_ids.is_empty()
+            && (acknowledgement_ids.iter().any(|image_id| {
+                *image_id != submission.identity.image_id
+                    && *image_id != replacement.identity.image_id
+            }) || acknowledgement_ids
+                .iter()
+                .filter(|image_id| **image_id == submission.identity.image_id)
+                .count()
+                > 1
+                || acknowledgement_ids
+                    .iter()
+                    .filter(|image_id| **image_id == replacement.identity.image_id)
+                    .count()
+                    > 1)
+        {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::CapabilityMalformed,
+                "probe response contained stale, duplicate, or conflicting Kitty acknowledgements",
+                "capability-probe",
+                "discard the response and retry the direct probe",
+            ));
+        }
         let Some((first_ack_start, first_ack_end)) =
             locate_ack(&response, submission.identity.image_id)
         else {
@@ -284,6 +315,7 @@ impl CapabilityProbe {
             .map(|(_, byte)| *byte)
             .collect();
         Ok(CapabilityProbeResult {
+            probe_nonce: self.nonce,
             capabilities: TerminalCapabilityVector {
                 state: CapabilityState::Valid,
                 direct_ghostty: environment.identifies_direct_ghostty() && kitty_acknowledgements,
@@ -450,6 +482,33 @@ fn locate_ack(bytes: &[u8], expected_image_id: u64) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+fn parse_acknowledgements(bytes: &[u8]) -> Result<Vec<u64>, ()> {
+    const PREFIX: &[u8] = b"\x1b_Gi=";
+    const SUFFIX: &[u8] = b";OK\x1b\\";
+    let mut cursor = 0;
+    let mut image_ids = Vec::new();
+    while cursor < bytes.len() {
+        let Some(offset) = bytes[cursor..]
+            .windows(PREFIX.len())
+            .position(|window| window == PREFIX)
+        else {
+            break;
+        };
+        let start = cursor + offset;
+        let Some(suffix_offset) = bytes[start + PREFIX.len()..]
+            .windows(SUFFIX.len())
+            .position(|window| window == SUFFIX)
+        else {
+            return Err(());
+        };
+        let suffix_start = start + PREFIX.len() + suffix_offset;
+        let end = suffix_start + SUFFIX.len();
+        image_ids.push(parse_ack(&bytes[start..end]).map_err(|_| ())?);
+        cursor = end;
+    }
+    Ok(image_ids)
 }
 
 fn count_occurrences(bytes: &[u8], needle: &[u8]) -> usize {

@@ -95,6 +95,7 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
 /// Harness-only environment variable; it is not part of the end-user CLI contract.
 #[doc(hidden)]
 pub const PUBLICATION_KILL_POINT_ENV: &str = "THREETERM_PUBLICATION_KILL_POINT";
@@ -283,7 +284,76 @@ impl Manifest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtrudeDeterministicInputs {
+    pub profile: Vec<[f64; 2]>,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalExtrudeIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: ExtrudeDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalExtrudeIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION
+            || self.command != "extrude"
+            || self.operation != "additive"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical extrude intent identity is invalid".to_string(),
+            ));
+        }
+        if self.deterministic_inputs.profile.len() < 3
+            || !self.deterministic_inputs.height.is_finite()
+            || self.deterministic_inputs.height <= 0.0
+            || self
+                .deterministic_inputs
+                .profile
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(BundleError::Invalid(
+                "canonical extrude deterministic inputs are invalid".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical extrude semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical extrude worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     pub log_index: usize,
     pub previous_digest: String,
@@ -301,6 +371,8 @@ pub struct LogEntry {
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<CanonicalExtrudeIntent>,
     pub terminal_digest: String,
 }
 
@@ -318,6 +390,7 @@ impl LogEntry {
             brep_sha256: None,
             idempotency_key: None,
             idempotency_payload: None,
+            intent: None,
             terminal_digest: String::new(),
         };
         entry.terminal_digest = entry.recomputed_digest();
@@ -339,6 +412,12 @@ impl LogEntry {
         self
     }
 
+    fn with_intent(mut self, intent: &CanonicalExtrudeIntent) -> Self {
+        self.intent = Some(intent.clone());
+        self.terminal_digest = self.recomputed_digest();
+        self
+    }
+
     fn recomputed_digest(&self) -> String {
         let mut copy = self.clone();
         copy.terminal_digest.clear();
@@ -346,7 +425,7 @@ impl LogEntry {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TransactionLog {
     entries: Vec<LogEntry>,
 }
@@ -399,6 +478,7 @@ impl TransactionLog {
         brep_bytes: &[u8],
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
+        intent: Option<&CanonicalExtrudeIntent>,
     ) {
         let previous = self.terminal_digest_hex().to_string();
         let entry =
@@ -407,7 +487,10 @@ impl TransactionLog {
             Some(key) => entry.with_idempotency_key(key, idempotency_payload),
             None => entry,
         };
-        self.entries.push(entry);
+        self.entries.push(match intent {
+            Some(intent) => entry.with_intent(intent),
+            None => entry,
+        });
     }
 
     pub fn terminal_digest_hex(&self) -> &str {
@@ -776,6 +859,49 @@ impl Bundle {
         with_bundle_write_lock(&self.root, || self.open_locked())
     }
 
+    /// Restore a validated worker result as a Derived Result without changing
+    /// the Canonical Transaction Log or manifest revision.
+    pub fn restore_derived_brep_if_revision(
+        &self,
+        feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+    ) -> Result<PathBuf, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            if loaded.revision_hash_hex() != expected_revision {
+                return Err(BundleError::Invalid(
+                    "derived result restore raced with a canonical revision".to_string(),
+                ));
+            }
+            let entry = loaded
+                .log
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.feature_id == feature_id && entry.brep_sha256.is_some())
+                .ok_or_else(|| {
+                    BundleError::Invalid(
+                        "derived result restore has no authenticated BREP provenance".to_string(),
+                    )
+                })?;
+            if entry.brep_byte_count != Some(brep_bytes.len() as u64)
+                || entry.brep_sha256.as_deref() != Some(hash(brep_bytes).as_str())
+            {
+                return Err(BundleError::Invalid(
+                    "replayed BREP does not match authenticated geometry".to_string(),
+                ));
+            }
+            let brep_root = self.root.join("brep");
+            fs::create_dir_all(&brep_root)?;
+            let path = brep_root.join(format!("{feature_id}.brep"));
+            atomic_write(&path, brep_bytes, None)?;
+            sync_directory(&brep_root, PublicationFailurePoint::BrepDirectorySync)?;
+            self.open_locked()?;
+            Ok(path)
+        })
+    }
+
     /// The locked body of `open`. Callers must already hold the per-root
     /// write lock; `append_features_locked`, `load_unlocked`, and the
     /// migration staging validation call it from inside the lock.
@@ -817,6 +943,29 @@ impl Bundle {
         let mut history_events = Vec::new();
         let mut feature_ids = Vec::new();
         for entry in log.entries() {
+            if let Some(intent) = &entry.intent {
+                intent
+                    .validate(&entry.feature_id)
+                    .map_err(|error| BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: error.to_string(),
+                    })?;
+                if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: "canonical extrude intent request ID does not match transaction provenance"
+                            .to_string(),
+                    });
+                }
+                if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail:
+                            "canonical extrude intent source revision does not match the log prefix"
+                                .to_string(),
+                    });
+                }
+            }
             if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
                 let event: HistoryEvent =
                     serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
@@ -1001,6 +1150,7 @@ impl Bundle {
                 false,
                 true,
                 false,
+                None,
             )
         })
     }
@@ -1047,6 +1197,7 @@ impl Bundle {
                 false,
                 false,
                 false,
+                None,
             )
         })
     }
@@ -1261,6 +1412,38 @@ impl Bundle {
                 true,
                 false,
                 false,
+                None,
+            )
+        })
+    }
+
+    /// Publish one verified extrude BREP together with its canonical command
+    /// intent. The intent and artifact provenance share the same generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        intent: &CanonicalExtrudeIntent,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+                false,
+                false,
+                Some(intent),
             )
         })
     }
@@ -1287,6 +1470,7 @@ impl Bundle {
                 true,
                 false,
                 false,
+                None,
             )
         })
     }
@@ -1458,6 +1642,7 @@ impl Bundle {
                 false,
                 false,
                 true,
+                None,
             )
         })
     }
@@ -1536,6 +1721,7 @@ impl Bundle {
             false,
             false,
             false,
+            None,
         )
     }
 
@@ -1553,6 +1739,7 @@ impl Bundle {
         reject_existing_brep: bool,
         allow_existing_sketch_update: bool,
         allow_existing_bracket_edit: bool,
+        intent: Option<&CanonicalExtrudeIntent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1589,6 +1776,25 @@ impl Bundle {
                 "worker result belongs to revision {expected_revision:?}, but current revision is {:?}",
                 loaded.revision_hash_hex()
             )));
+        }
+        if let Some(intent) = intent {
+            if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
+                return Err(BundleError::Invalid(
+                    "canonical extrude intent does not match its transaction".to_string(),
+                ));
+            }
+            if idempotency_key != Some(intent.request_id.as_str()) {
+                return Err(BundleError::Invalid(
+                    "canonical extrude intent request ID does not match transaction provenance"
+                        .to_string(),
+                ));
+            }
+            if intent.source_revision != loaded.revision_hash_hex() {
+                return Err(BundleError::Invalid(
+                    "canonical extrude intent source revision does not match the transaction source"
+                        .to_string(),
+                ));
+            }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
             && idempotency_key.is_some()
@@ -1697,6 +1903,7 @@ impl Bundle {
                             brep_bytes,
                             Some(idempotency_key),
                             idempotency_payload,
+                            intent,
                         );
                     } else {
                         loaded.log.append_feature_with_idempotency(
@@ -1711,7 +1918,7 @@ impl Bundle {
                 {
                     loaded
                         .log
-                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None);
+                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None, intent);
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }
@@ -2016,6 +2223,17 @@ fn apply_kind(kind: &str) -> (Option<&'static str>, &str) {
 }
 
 fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {
+    let brep_root = root.join("brep");
+    match fs::symlink_metadata(&brep_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BundleError::Invalid(error.to_string())),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(BundleError::Invalid(
+                "promoted BREP directory is not a regular directory".to_string(),
+            ));
+        }
+        Ok(_) => {}
+    }
     let mut latest = std::collections::BTreeMap::new();
     for entry in log.entries() {
         if entry.brep_path.is_some()
@@ -2054,6 +2272,12 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
         let file_name = Path::new(path)
             .file_name()
             .expect("validated BREP path has a file name");
+        if matches!(fs::symlink_metadata(brep_root.join(file_name)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            // Promoted BREP is a disposable Derived Result. Its authenticated
+            // provenance remains available for replay when the file is absent.
+            continue;
+        }
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         const O_DIRECTORY: i32 = 0o200000;
@@ -2062,7 +2286,7 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(O_DIRECTORY | O_NOFOLLOW)
-            .open(root.join("brep"))
+            .open(&brep_root)
             .map_err(|error| {
                 BundleError::Invalid(format!(
                     "promoted BREP directory could not be read: {error}"

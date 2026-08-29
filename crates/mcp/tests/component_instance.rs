@@ -142,7 +142,9 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
         "threeterm.command.transform-component-instance/1",
         json!({"bundle_path":root.to_string_lossy(),"instance_id":"missing","transform":[0.0,0.0,90.0]}),
     );
-    assert_eq!(invalid["error"]["code"], -32603);
+    assert!(invalid["error"].is_null());
+    assert_eq!(invalid["result"]["isError"], true);
+    assert_eq!(invalid["result"]["content"][0]["type"], "text");
     assert_eq!(
         std::fs::read(root.join("manifest.json")).expect("manifest reads"),
         manifest_before

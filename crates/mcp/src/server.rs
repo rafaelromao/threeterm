@@ -35,13 +35,16 @@ use threeterm_cli::dispatch::{
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema, iter,
+    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema,
+    IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
 pub const JSONRPC_VERSION: &str = "2.0";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub const ERROR_INVALID_REQUEST: i32 = -32600;
 pub const ERROR_METHOD_NOT_FOUND: i32 = -32601;
@@ -58,8 +61,8 @@ pub struct ToolDescriptor {
     pub description: &'static str,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
-    #[serde(rename = "outputSchema")]
-    pub output_schema: Value,
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 impl ToolDescriptor {
@@ -68,7 +71,8 @@ impl ToolDescriptor {
             name: schema.schema_version.to_string(),
             description: "ThreeTerm versioned domain command (see threeterm_protocol::schema).",
             input_schema: schema.request_schema.clone(),
-            output_schema: schema.response_schema.clone(),
+            output_schema: (schema.response_schema["type"] == "object")
+                .then(|| schema.response_schema.clone()),
         }
     }
 }
@@ -79,6 +83,7 @@ impl ToolDescriptor {
 #[derive(Debug, Clone)]
 pub struct JsonRpcRequest {
     pub id: Value,
+    pub is_notification: bool,
     pub method: String,
     pub params: Value,
 }
@@ -166,10 +171,54 @@ impl McpServer {
     }
 
     fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
+        let params = match request.params.as_object() {
+            Some(params) => params,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    ERROR_INVALID_PARAMS,
+                    "initialize params must be an object".to_string(),
+                );
+            }
+        };
+        if params
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                "initialize params.protocolVersion must be a string".to_string(),
+            );
+        }
+        if !params.get("capabilities").is_some_and(Value::is_object) {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                "initialize params.capabilities must be an object".to_string(),
+            );
+        }
+        let Some(client_info) = params.get("clientInfo").and_then(Value::as_object) else {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                "initialize params.clientInfo must be an object".to_string(),
+            );
+        };
+        if !client_info.get("name").is_some_and(Value::is_string)
+            || !client_info.get("version").is_some_and(Value::is_string)
+        {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                "initialize params.clientInfo requires string name and version".to_string(),
+            );
+        }
         JsonRpcResponse::success(
             request.id.clone(),
             json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {
                     "name": "threeterm-mcp",
                     "version": crate::schema_version(),
@@ -209,6 +258,10 @@ impl McpServer {
             }
         };
 
+        if matches!(schema_entry.id, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+            return self.handle_domain_command(request, schema_entry.id, arguments);
+        }
+
         if let Err(reason) = validate(&schema_entry.request_schema, &arguments) {
             return JsonRpcResponse::error(
                 request.id.clone(),
@@ -247,13 +300,7 @@ impl McpServer {
                         ),
                     );
                 }
-                let envelope = json!({
-                    "content": [{
-                        "type": "json",
-                        "data": value.clone(),
-                    }],
-                    "structuredContent": value,
-                });
+                let envelope = tool_result(value, false);
                 JsonRpcResponse::success(request.id.clone(), envelope)
             }
             Err(error) => match error {
@@ -264,22 +311,45 @@ impl McpServer {
                 ),
                 DispatchError::Host(error) if schema_entry.id == BRACKET_EDIT_COMMAND_ID => {
                     let value = bracket_edit_failure_response(&arguments, &error);
-                    JsonRpcResponse::success(
-                        request.id.clone(),
-                        json!({
-                            "content": [{"type": "json", "data": value.clone()}],
-                            "structuredContent": value,
-                        }),
-                    )
+                    JsonRpcResponse::success(request.id.clone(), tool_result(value, true))
                 }
                 DispatchError::Host(_)
                 | DispatchError::Validation(_)
-                | DispatchError::UnknownCommand(_) => JsonRpcResponse::error(
+                | DispatchError::UnknownCommand(_) => JsonRpcResponse::success(
                     request.id.clone(),
-                    ERROR_INTERNAL,
-                    format!("host dispatch failed: {error}"),
+                    tool_execution_error(format!("host dispatch failed: {error}")),
                 ),
             },
+        }
+    }
+
+    fn handle_domain_command(
+        &self,
+        request: &JsonRpcRequest,
+        command: threeterm_protocol::schema::CommandId,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        match Host::new().execute_domain_command(command, arguments) {
+            Ok(value) => JsonRpcResponse::success(request.id.clone(), tool_result(value, false)),
+            Err(ExecutionError::InvalidRequest(reason)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INVALID_PARAMS,
+                format!("tools/call arguments failed request-schema validation: {reason}"),
+            ),
+            Err(ExecutionError::Handler(error)) => JsonRpcResponse::success(
+                request.id.clone(),
+                tool_execution_error(format!("domain command failed: {error}")),
+            ),
+            Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_INTERNAL,
+                format!("domain command response failed response-schema validation: {reason}"),
+            ),
+            Err(ExecutionError::UnknownCommand(command)) => JsonRpcResponse::error(
+                request.id.clone(),
+                ERROR_METHOD_NOT_FOUND,
+                format!("command not found: {}", command.0),
+            ),
         }
     }
 
@@ -556,7 +626,9 @@ impl McpServer {
                     }
                 };
                 let response = self.handle_request(&request);
-                write_envelope(writer, &response)?;
+                if !request.is_notification {
+                    write_envelope(writer, &response)?;
+                }
                 handled += 1;
             }
         }
@@ -717,6 +789,27 @@ fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value 
     response
 }
 
+fn tool_result(value: Value, is_error: bool) -> Value {
+    let text = serde_json::to_string(&value).expect("JSON values serialize");
+    let mut result = json!({
+        "content": [{"type": "text", "text": text}],
+    });
+    if value.is_object() {
+        result["structuredContent"] = value;
+    }
+    if is_error {
+        result["isError"] = Value::Bool(true);
+    }
+    result
+}
+
+fn tool_execution_error(message: String) -> Value {
+    json!({
+        "content": [{"type": "text", "text": message}],
+        "isError": true,
+    })
+}
+
 fn bracket_edit_response(
     phase: &str,
     draft_id: &str,
@@ -832,6 +925,17 @@ fn parse_request(value: &Value) -> Result<JsonRpcRequest, String> {
             "request jsonrpc must be {JSONRPC_VERSION:?}, got {jsonrpc:?}"
         ));
     }
+    if let Some(id) = object.get("id")
+        && !is_valid_request_id(id)
+    {
+        return Err("request id must be a string, number, or null".to_string());
+    }
+    if let Some(params) = object.get("params")
+        && !params.is_object()
+        && !params.is_array()
+    {
+        return Err("request params must be an object or array".to_string());
+    }
     let method = object
         .get("method")
         .and_then(Value::as_str)
@@ -839,15 +943,25 @@ fn parse_request(value: &Value) -> Result<JsonRpcRequest, String> {
         .to_string();
     let id = object.get("id").cloned().unwrap_or(Value::Null);
     let params = object.get("params").cloned().unwrap_or(Value::Null);
-    Ok(JsonRpcRequest { id, method, params })
+    Ok(JsonRpcRequest {
+        id,
+        is_notification: object.get("id").is_none(),
+        method,
+        params,
+    })
 }
 
 fn extract_id(value: &Value) -> Value {
     value
         .as_object()
         .and_then(|object| object.get("id"))
+        .filter(|id| is_valid_request_id(id))
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+fn is_valid_request_id(value: &Value) -> bool {
+    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
 fn split_newlines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -927,7 +1041,7 @@ mod tests {
             .find(|tool| tool.name == "threeterm.command.bracket/1")
             .expect("bracket is advertised");
         assert!(bracket.input_schema.is_object());
-        assert!(bracket.output_schema.is_object());
+        assert!(bracket.output_schema.as_ref().is_some_and(Value::is_object));
         assert_eq!(
             bracket.input_schema["required"],
             json!([
@@ -946,6 +1060,7 @@ mod tests {
         let server = McpServer::new();
         let request = JsonRpcRequest {
             id: Value::Number(1.into()),
+            is_notification: false,
             method: "tools/list".to_string(),
             params: Value::Null,
         };
@@ -964,6 +1079,7 @@ mod tests {
         let server = McpServer::new();
         let request = JsonRpcRequest {
             id: Value::Number(1.into()),
+            is_notification: false,
             method: "tools/call".to_string(),
             params: json!({
                 "name": "threeterm.command.bracket-edit/1",
@@ -1000,6 +1116,7 @@ mod tests {
         let server = McpServer::new();
         let request = JsonRpcRequest {
             id: Value::Number(1.into()),
+            is_notification: false,
             method: "tools/not-a-method".to_string(),
             params: Value::Null,
         };
@@ -1014,6 +1131,7 @@ mod tests {
         let server = McpServer::new();
         let request = JsonRpcRequest {
             id: Value::Number(1.into()),
+            is_notification: false,
             method: "tools/call".to_string(),
             params: json!({
                 "name": "threeterm.command.does-not-exist/1",
@@ -1030,6 +1148,7 @@ mod tests {
         let server = McpServer::new();
         let request = JsonRpcRequest {
             id: Value::Number(7.into()),
+            is_notification: false,
             method: "tools/call".to_string(),
             params: json!({
                 "name": "threeterm.command.bracket/1",
@@ -1078,9 +1197,129 @@ mod tests {
 
     #[test]
     fn build_envelope_round_trips_through_parse_request() {
-        let value = build_envelope(Value::Number(1.into()), "tools/list", Value::Null);
+        let value = build_envelope(Value::Number(1.into()), "tools/list", json!({}));
         let request = parse_request(&value).expect("build_envelope parses");
         assert_eq!(request.method, "tools/list");
         assert_eq!(request.id, Value::Number(1.into()));
+        assert!(!request.is_notification);
+    }
+
+    #[test]
+    fn run_does_not_write_responses_for_notifications() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}\n";
+        let mut output = Vec::new();
+        let server = McpServer::new();
+        let handled = server
+            .run(&mut input.as_slice(), &mut output)
+            .expect("run succeeds");
+
+        assert_eq!(handled, 2);
+        let responses: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("response is JSON"))
+            .collect();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 7);
+    }
+
+    #[test]
+    fn initialize_rejects_missing_required_client_parameters() {
+        let server = McpServer::new();
+        let response = server.handle_request(&JsonRpcRequest {
+            id: Value::Number(1.into()),
+            is_notification: false,
+            method: "initialize".to_string(),
+            params: json!({}),
+        });
+
+        assert_eq!(
+            response.error.expect("invalid initialize is an error").code,
+            ERROR_INVALID_PARAMS
+        );
+    }
+
+    #[test]
+    fn initialize_selects_the_server_protocol_version_when_client_requests_another_version() {
+        let response = McpServer::new().handle_request(&JsonRpcRequest {
+            id: Value::Number(1.into()),
+            is_notification: false,
+            method: "initialize".to_string(),
+            params: json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "fixture", "version": "0"}
+            }),
+        });
+
+        assert_eq!(
+            response.result.expect("version negotiation succeeds")["protocolVersion"],
+            MCP_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn null_id_is_rejected_as_an_invalid_request() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"tools/list\"}\n";
+        let mut output = Vec::new();
+        McpServer::new()
+            .run(&mut input.as_slice(), &mut output)
+            .expect("run succeeds");
+
+        let response: Value = serde_json::from_slice(&output).expect("response is JSON");
+        assert!(response["id"].is_null());
+        assert_eq!(response["error"]["code"], ERROR_INVALID_REQUEST);
+    }
+
+    #[test]
+    fn fractional_id_is_rejected_as_an_invalid_request() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1.5,\"method\":\"tools/list\"}\n";
+        let mut output = Vec::new();
+        McpServer::new()
+            .run(&mut input.as_slice(), &mut output)
+            .expect("run succeeds");
+
+        let response: Value = serde_json::from_slice(&output).expect("response is JSON");
+        assert_eq!(response["error"]["code"], ERROR_INVALID_REQUEST);
+        assert!(response["id"].is_null());
+    }
+
+    #[test]
+    fn invalid_id_type_returns_an_invalid_request_with_null_id() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"tools/list\"}\n";
+        let mut output = Vec::new();
+        McpServer::new()
+            .run(&mut input.as_slice(), &mut output)
+            .expect("run succeeds");
+
+        let response: Value = serde_json::from_slice(&output).expect("response is JSON");
+        assert_eq!(response["error"]["code"], ERROR_INVALID_REQUEST);
+        assert!(response["id"].is_null());
+    }
+
+    #[test]
+    fn tool_results_use_text_content_for_structured_domain_values() {
+        let root = std::env::temp_dir().join(format!("threeterm-mcp-content-{}", new_request_id()));
+        Bundle::create(&root).expect("bundle creates");
+        let response = McpServer::new().handle_request(&JsonRpcRequest {
+            id: Value::Number(1.into()),
+            is_notification: false,
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "threeterm.command.identity/1",
+                "arguments": {"bundle_path": root.to_string_lossy()}
+            }),
+        });
+
+        let result = response.result.expect("identity is a tool result");
+        assert_eq!(result["content"][0]["type"], "text");
+        let content: Value = serde_json::from_str(
+            result["content"][0]["text"]
+                .as_str()
+                .expect("text content is a string"),
+        )
+        .expect("text content contains JSON");
+        assert_eq!(content, result["structuredContent"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

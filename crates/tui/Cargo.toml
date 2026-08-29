@@ -8,8 +8,13 @@ publish.workspace = true
 description = "Keyboard-first TUI adapter for the ThreeTerm domain command API."
 
 [dependencies]
+nix = { version = "0.31", features = ["poll"] }
+signal-hook = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
 threeterm-host = { path = "../host" }
 threeterm-domain = { path = "../domain" }
+threeterm-protocol = { path = "../protocol" }
 threeterm-theme = { path = "../theme" }
 threeterm-viewport = { path = "../viewport" }
 

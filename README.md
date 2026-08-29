@@ -17,7 +17,7 @@ owns its own per-crate `schema_version()` constant under the spec's
 | `crates/host`                 | `threeterm-host`           | Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries. |
 | `crates/workers/occt`         | `threeterm-occt-worker`    | Rust skeleton crate for the disposable OCCT geometry worker boundary. C++ worker code lives outside the workspace. |
 | `crates/workers/slvs`         | `threeterm-slvs-worker`    | Rust skeleton crate for the disposable `libslvs` sketch-solver worker boundary. C++ worker code lives outside the workspace. |
-| `crates/tui`                  | `threeterm-tui`            | Keyboard-first TUI adapter for the versioned domain command API. |
+| `crates/tui`                  | `threeterm-tui`            | Production direct-Ghostty Interactive Modeling executable and keyboard-first adapter for the versioned domain command API. |
 | `crates/cli`                  | `threeterm-cli`            | Headless Automation CLI adapter for the versioned domain command API. |
 | `crates/mcp`                  | `threeterm-mcp`            | MCP adapter exposing the versioned domain command API as agent tools. |
 | `crates/viewport`             | `threeterm-viewport`       | Protocol-Neutral Viewport renderer and projection boundary. |

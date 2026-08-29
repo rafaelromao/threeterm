@@ -502,6 +502,9 @@ pub struct FilletRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Persistent-reference context for topology-changing edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
 }
 
 impl FilletRequest {
@@ -515,6 +518,7 @@ impl FilletRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            selected_edge: None,
         }
     }
 
@@ -530,6 +534,11 @@ impl FilletRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
         self
     }
 
@@ -568,6 +577,29 @@ impl FilletRequest {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedEdgeContext {
+    pub semantic_id: String,
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeCandidateEvidence {
+    pub semantic_id: String,
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+    pub role: String,
+    pub midpoint: [f64; 3],
+    pub tangent: [f64; 3],
+    pub length: f64,
 }
 
 /// Chamfer request: apply a constant-distance chamfer to every edge of
@@ -680,6 +712,8 @@ pub struct FilletResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 
 impl FilletResult {
@@ -2174,6 +2208,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "fillet-1".to_string(),
+            edge_candidates: Vec::new(),
         };
         assert!(result.is_success());
 

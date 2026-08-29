@@ -544,6 +544,8 @@ pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "edit_feature_id": { "type": "string", "minLength": 1 },
             "edit_kind": { "type": "string", "enum": ["fillet", "chamfer", "fillet-ambiguous", "fillet-lost", "fillet-incompatible"] },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "radius": { "type": "number", "exclusiveMinimum": 0 },
             "reference": selected_edge_schema(),
         },
         "additionalProperties": false

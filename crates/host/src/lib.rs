@@ -19,10 +19,11 @@ use threeterm_domain::{
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
-    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
+    ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult,
+    LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
+    ShellRequest, ShellResult, WorkerError,
 };
 use threeterm_persistence::{
     Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -1237,6 +1238,26 @@ fn post_edit_edge_candidates(
     }
 }
 
+fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeCandidate> {
+    result
+        .iter()
+        .map(|candidate| PostEditEdgeCandidate {
+            semantic_id: candidate.semantic_id.clone(),
+            provenance: threeterm_domain::EdgeProvenance {
+                source_feature_id: candidate.source_feature_id.clone(),
+                source_revision_id: candidate.source_revision_id.clone(),
+                source_edge_id: candidate.source_edge_id.clone(),
+            },
+            role: candidate.role.clone(),
+            evidence: threeterm_domain::EdgeGeometricEvidence {
+                midpoint: candidate.midpoint,
+                tangent: candidate.tangent,
+                length: candidate.length,
+            },
+        })
+        .collect()
+}
+
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn export(
@@ -1693,13 +1714,49 @@ impl Host {
                         .map_err(|error| HostError::Validation {
                             detail: format!("invalid selected edge reference: {error}"),
                         })?;
-                    let view = self.reattach_edge(
-                        string_field("bundle_path")?,
-                        string_field("expected_revision")?,
-                        string_field("edit_feature_id")?,
-                        string_field("edit_kind")?,
-                        reference,
-                    )?;
+                    let bundle_path = string_field("bundle_path")?;
+                    let expected_revision = string_field("expected_revision")?;
+                    let edit_feature_id = string_field("edit_feature_id")?;
+                    let edit_kind = string_field("edit_kind")?;
+                    let view = if let Some(base_feature_id) = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        if edit_kind != "fillet" {
+                            return Err(HostError::Validation {
+                                detail: "worker-backed edge reattachment currently requires fillet"
+                                    .to_string(),
+                            });
+                        }
+                        let radius = request
+                            .get("radius")
+                            .and_then(serde_json::Value::as_f64)
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "worker-backed edge reattachment requires radius"
+                                    .to_string(),
+                            })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        self.reattach_edge_with_fillet(
+                            bundle_path,
+                            expected_revision,
+                            base_feature_id,
+                            edit_feature_id,
+                            radius,
+                            reference,
+                            &worker,
+                        )?
+                    } else {
+                        self.reattach_edge(
+                            bundle_path,
+                            expected_revision,
+                            edit_feature_id,
+                            edit_kind,
+                            reference,
+                        )?
+                    };
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
                         EdgeReattachmentOutcome::Resolved { semantic_id } => {
                             ("resolved", Some(semantic_id), Vec::new())
@@ -1794,6 +1851,97 @@ impl Host {
             };
         let snapshot = SnapshotView::from(&updated);
         self.current.replace(Some(updated));
+        Ok(EdgeReattachmentView {
+            outcome,
+            source_snapshot,
+            snapshot,
+            edit_feature_id: edit_feature_id.to_string(),
+            committed: true,
+        })
+    }
+
+    /// Run a real OCCT fillet, resolve the selected edge against evidence
+    /// returned by that worker, and publish neither result nor reference until
+    /// resolution and the source-revision guard have both succeeded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_edge_with_fillet(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        base_feature_id: &str,
+        edit_feature_id: &str,
+        radius: f64,
+        reference: SelectedEdgeReference,
+        worker: &OcctWorker,
+    ) -> Result<EdgeReattachmentView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        if source_snapshot.revision_hash != expected_revision {
+            return Err(HostError::Validation {
+                detail: "edge edit source revision does not match current revision".to_string(),
+            });
+        }
+        let request = FilletRequest::new(
+            threeterm_occt_worker::new_request_id(),
+            bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{base_feature_id}.brep")),
+            radius,
+        )
+        .with_output_path(root.join("stage"), format!("{edit_feature_id}.brep"))
+        .with_feature_id(edit_feature_id)
+        .with_selected_edge(SelectedEdgeContext {
+            semantic_id: reference.semantic_id.clone(),
+            source_feature_id: reference.provenance.source_feature_id.clone(),
+            source_revision_id: reference.provenance.source_revision_id.clone(),
+            source_edge_id: reference.provenance.source_edge_id.clone(),
+            role: reference.role.clone(),
+        });
+        let derived = self.stage_occt_result::<FilletResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Fillet,
+            worker,
+        )?;
+        let candidates = domain_edge_candidates(&derived.result.edge_candidates);
+        let outcome = resolve_edge_reference(&reference, candidates);
+        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            if let Some(stage_root) = derived.artifact.path.parent() {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Ok(EdgeReattachmentView {
+                outcome,
+                source_snapshot: source_snapshot.clone(),
+                snapshot: source_snapshot,
+                edit_feature_id: edit_feature_id.to_string(),
+                committed: false,
+            });
+        }
+        let selected_edge_id = match &outcome {
+            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
+            _ => unreachable!(),
+        };
+        let reference_payload = serde_json::json!({
+            "schema": "threeterm.reattach-edge/1",
+            "selected_edge_id": selected_edge_id,
+            "reference": reference,
+        })
+        .to_string();
+        let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, _current, _derived, artifact, bytes, provenance| {
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                    &artifact.feature_id,
+                    &reference_payload,
+                    expected_revision,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )?;
         Ok(EdgeReattachmentView {
             outcome,
             source_snapshot,
@@ -2970,6 +3118,19 @@ impl Host {
             serde_json::to_value(request).map_err(|error| HostError::Validation {
                 detail: format!("{operation:?} request serialization failed: {error}"),
             })?;
+        if let Some(selected_edge) = request_value.get("selected_edge").cloned() {
+            for (target, source) in [
+                ("selected_edge_id", "semantic_id"),
+                ("source_feature_id", "source_feature_id"),
+                ("source_revision_id", "source_revision_id"),
+                ("source_edge_id", "source_edge_id"),
+                ("selected_role", "role"),
+            ] {
+                if let Some(value) = selected_edge.get(source) {
+                    request_value[target] = value.clone();
+                }
+            }
+        }
         let canonical_request = request_value.clone();
         let request_id = request_value["request_id"]
             .as_str()

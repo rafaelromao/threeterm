@@ -47,6 +47,7 @@
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1344,6 +1345,49 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
+void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
+                            const JsonParser::Value& request) {
+    if (get_string(request, "selected_edge_id").empty()) return;
+    const std::string source_feature_id = get_string(request, "source_feature_id");
+    const std::string source_revision_id = get_string(request, "source_revision_id");
+    const std::string source_edge_id = get_string(request, "source_edge_id");
+    const std::string role = get_string(request, "selected_role");
+    bool first = true;
+    out << ",\"edge_candidates\":[";
+    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+        TopoDS_Vertex first_vertex;
+        TopoDS_Vertex last_vertex;
+        TopExp::Vertices(edge, first_vertex, last_vertex);
+        const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+        const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+        gp_Vec tangent(first_point, last_point);
+        if (tangent.SquareMagnitude() <= std::numeric_limits<double>::epsilon()) {
+            tangent = gp_Vec(0.0, 0.0, 1.0);
+        }
+        const gp_Pnt midpoint(
+            (first_point.X() + last_point.X()) / 2.0,
+            (first_point.Y() + last_point.Y()) / 2.0,
+            (first_point.Z() + last_point.Z()) / 2.0);
+        std::ostringstream identity;
+        identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
+                 << properties.Mass();
+        if (!first) out << ',';
+        first = false;
+        out << "{\"semantic_id\":\"edge-" << sha256_hex(identity.str()) << "\","
+            << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
+            << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
+            << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
+            << "\"role\":\"" << json_escape(role) << "\","
+            << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
+            << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"
+            << "\"length\":" << properties.Mass() << "}";
+    }
+    out << ']';
+}
+
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
     std::string request_id = get_string(request, "request_id");
     std::string feature_id = get_string(request, "feature_id");
@@ -1419,8 +1463,9 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
             << "\"brep_sha256\":\"" << json_escape(sha) << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
-            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
-            << "}";
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\"";
+        append_edge_candidates(out, result, request);
+        out << "}";
         g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {

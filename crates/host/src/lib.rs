@@ -1944,18 +1944,37 @@ impl Host {
         let loaded = bundle.open()?;
         let (first, second) = bundle.replay_history_states()?;
         let first_fingerprint = first.fingerprint();
-        let first_model = canonical_model_fingerprint(&loaded);
+        let has_geometry_intent = loaded
+            .log
+            .entries()
+            .iter()
+            .any(|entry| entry.intent.is_some());
+        let recomputed = if has_geometry_intent {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            Some(self.reload_and_recompute_extrudes(root.as_ref(), &worker)?)
+        } else {
+            None
+        };
+        let first_model = recomputed.as_ref().map_or_else(
+            || canonical_model_fingerprint(&loaded),
+            |replayed| replayed.model_state_fingerprint.clone(),
+        );
         let second_loaded = bundle.open()?;
         let mut mismatch = if first == second
             && first == loaded.history
             && loaded.graph == second_loaded.graph
             && loaded.components == second_loaded.components
+            && first_model == canonical_model_fingerprint(&second_loaded)
         {
             None
         } else {
             Some("canonical model replay differs from canonical state".to_string())
         };
-        let geometry_fingerprints = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
+        let geometry_fingerprints = if let Some(replayed) = recomputed {
+            (replayed.geometry_fingerprints, None)
+        } else {
+            authenticated_geometry_fingerprints(root.as_ref(), &loaded)?
+        };
         if mismatch.is_none() && geometry_fingerprints.1.is_some() {
             mismatch = geometry_fingerprints.1;
         }

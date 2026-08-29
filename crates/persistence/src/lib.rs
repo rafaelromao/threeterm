@@ -3374,11 +3374,6 @@ pub fn read_v0(path: &Path) -> Result<V0Bundle, BundleError> {
             manifest.revision_count
         )));
     }
-    if manifest.transaction_count != 0 {
-        return Err(BundleError::Invalid(
-            "v0 reader supports only empty canonical transaction logs".to_string(),
-        ));
-    }
     let transactions = String::from_utf8(fs::read(path.join("canonical/transactions.ndjson"))?)
         .map_err(|_| BundleError::Invalid("v0 transactions are not UTF-8".into()))?;
     if manifest.transaction_bytes != transactions.len()
@@ -3388,7 +3383,35 @@ pub fn read_v0(path: &Path) -> Result<V0Bundle, BundleError> {
             "v0 canonical transaction log integrity mismatch".into(),
         ));
     }
-    let generation = ProjectGeneration::with_id(manifest.generation_id.clone());
+    let log = TransactionLog::decode_and_verify(transactions.as_bytes())?;
+    if manifest.transaction_count != log.len() {
+        return Err(BundleError::Invalid(format!(
+            "v0 transaction count mismatch: manifest={}, actual={}",
+            manifest.transaction_count,
+            log.len()
+        )));
+    }
+    let mut feature_ids: Vec<FeatureId> = Vec::new();
+    for entry in log.entries() {
+        if entry.operation.as_deref() == Some("remove") {
+            feature_ids.retain(|feature_id| feature_id.as_str() != entry.feature_id);
+        } else if !feature_ids
+            .iter()
+            .any(|feature_id| feature_id.as_str() == entry.feature_id)
+        {
+            feature_ids.push(
+                FeatureId::new(&entry.feature_id)
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?,
+            );
+        }
+    }
+    let generation = ProjectGeneration {
+        id: manifest.generation_id.clone(),
+        revisions: vec![Revision {
+            id: manifest.revision_id.clone(),
+            features: feature_ids,
+        }],
+    };
     if generation.revisions[0].id != manifest.revision_id {
         return Err(BundleError::Invalid("v0 revision identity mismatch".into()));
     }
@@ -3453,7 +3476,6 @@ pub fn write_v0_fixture(
 /// current epoch.
 pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
     debug_assert!(source.generation.revisions.len() == 1);
-    debug_assert!(source.transactions.is_empty());
     let generation = ProjectGeneration {
         id: source.manifest.generation_id.clone(),
         revisions: vec![Revision {

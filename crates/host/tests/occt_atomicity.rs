@@ -303,7 +303,7 @@ fn replay_reconstructs_persisted_extrude_inputs_through_a_worker_boundary() {
         &script,
         format!(
             r##"#!/bin/sh
-printf '%s\n' '{{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"fake"}}'
+printf '%s\n' '{{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}}'
 IFS= read -r request
 request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
 source_revision_id=$(printf '%s\n' "$request" | sed -n 's/.*"source_revision_id":"\([^"]*\)".*/\1/p')

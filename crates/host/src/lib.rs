@@ -633,12 +633,15 @@ pub struct HistoryTimelineView {
 pub struct ReplayVerification {
     pub deterministic: bool,
     pub fingerprint: String,
+    pub model_state_fingerprint: String,
+    pub geometry_fingerprints: Vec<String>,
     pub mismatch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtrudeReplayView {
     pub snapshot: SnapshotView,
+    pub model_state_fingerprint: String,
     pub recomputed: usize,
     pub feature_ids: Vec<String>,
     pub geometry_fingerprints: Vec<String>,
@@ -1941,14 +1944,26 @@ impl Host {
         let loaded = bundle.open()?;
         let (first, second) = bundle.replay_history_states()?;
         let first_fingerprint = first.fingerprint();
-        let mismatch = if first == second && first == loaded.history {
+        let first_model = canonical_model_fingerprint(&loaded);
+        let second_loaded = bundle.open()?;
+        let mut mismatch = if first == second
+            && first == loaded.history
+            && loaded.graph == second_loaded.graph
+            && loaded.components == second_loaded.components
+        {
             None
         } else {
-            Some("history replay fingerprints differ from canonical state".to_string())
+            Some("canonical model replay differs from canonical state".to_string())
         };
+        let geometry_fingerprints = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
+        if mismatch.is_none() && geometry_fingerprints.1.is_some() {
+            mismatch = geometry_fingerprints.1;
+        }
         Ok(ReplayVerification {
             deterministic: mismatch.is_none(),
             fingerprint: first_fingerprint,
+            model_state_fingerprint: first_model,
+            geometry_fingerprints: geometry_fingerprints.0,
             mismatch,
         })
     }
@@ -2025,6 +2040,7 @@ impl Host {
         let root = root.as_ref();
         let loaded = Bundle::at(root).open()?;
         let source_snapshot = SnapshotView::from(&loaded);
+        let source_model_state = canonical_model_fingerprint(&loaded);
         let intents = loaded
             .log
             .entries()
@@ -2082,6 +2098,7 @@ impl Host {
             .with_feature_id(&feature_id);
             let result = worker
                 .clone()
+                .with_expected_worker_id("occt")
                 .with_revision_id(intent.source_revision)
                 .extrude(&request)
                 .map_err(HostError::from);
@@ -2121,14 +2138,17 @@ impl Host {
         }
         let reloaded = Bundle::at(root).open()?;
         let snapshot = SnapshotView::from(&reloaded);
-        if snapshot.revision_hash != source_snapshot.revision_hash {
+        if snapshot.revision_hash != source_snapshot.revision_hash
+            || canonical_model_fingerprint(&reloaded) != source_model_state
+        {
             return Err(HostError::Validation {
-                detail: "extrude replay changed the canonical revision".to_string(),
+                detail: "extrude replay changed the canonical model state".to_string(),
             });
         }
         self.current.replace(Some(reloaded));
         Ok(ExtrudeReplayView {
             snapshot,
+            model_state_fingerprint: source_model_state,
             recomputed: feature_ids.len(),
             feature_ids,
             geometry_fingerprints,
@@ -5406,6 +5426,52 @@ fn valid_feature_path_component(value: &str) -> bool {
 
 fn committed_brep_path(root: &Path, feature_id: &str) -> PathBuf {
     root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"))
+}
+
+fn canonical_model_fingerprint(bundle: &LoadedBundle) -> String {
+    let bytes = serde_json::to_vec(&(
+        &bundle.graph,
+        &bundle.components,
+        &bundle.history,
+        &bundle.generation.revisions,
+    ))
+    .expect("canonical model state serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn authenticated_geometry_fingerprints(
+    root: &Path,
+    bundle: &LoadedBundle,
+) -> Result<(Vec<String>, Option<String>), HostError> {
+    let mut latest = std::collections::BTreeMap::new();
+    for entry in bundle.log.entries() {
+        if entry.brep_sha256.is_some() {
+            latest.insert(entry.feature_id.as_str(), entry);
+        }
+    }
+    let mut fingerprints = Vec::with_capacity(latest.len());
+    for (feature_id, entry) in latest {
+        let path = committed_brep_path(root, feature_id);
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok((
+                fingerprints,
+                Some(format!(
+                    "geometry result is missing for canonical feature {feature_id}"
+                )),
+            ));
+        };
+        let actual = format!("{:x}", Sha256::digest(bytes));
+        if entry.brep_sha256.as_deref() != Some(actual.as_str()) {
+            return Ok((
+                fingerprints,
+                Some(format!(
+                    "geometry result differs for canonical feature {feature_id}"
+                )),
+            ));
+        }
+        fingerprints.push(actual);
+    }
+    Ok((fingerprints, None))
 }
 
 fn sha256_path(path: &Path) -> Result<String, std::io::Error> {

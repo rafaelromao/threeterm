@@ -161,6 +161,37 @@ fn migration_is_deterministic_across_invocations() {
 }
 
 #[test]
+fn migration_does_not_promote_prior_derived_results() {
+    let root = unique_temp_dir("derived-results");
+    write_v0_fixture(&root, ProjectGeneration::with_id("generation-derived"))
+        .expect("v0 fixture writes");
+    fs::create_dir_all(root.join("brep")).expect("brep directory creates");
+    fs::write(root.join("brep/old.brep"), b"stale worker output").expect("brep writes");
+    fs::create_dir_all(root.join("cache")).expect("cache directory creates");
+    fs::write(root.join("cache/old.cache"), b"stale cache").expect("cache writes");
+
+    let backup = root.with_file_name(format!(
+        "{}{PRE_MIGRATION_BACKUP_SUFFIX}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    load(&root).expect("v0 migrates");
+
+    assert!(!root.join("brep").exists());
+    assert!(!root.join("cache").exists());
+    assert_eq!(
+        fs::read(backup.join("brep/old.brep")).unwrap(),
+        b"stale worker output"
+    );
+    assert_eq!(
+        fs::read(backup.join("cache/old.cache")).unwrap(),
+        b"stale cache"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(backup);
+}
+
+#[test]
 fn repeat_migration_idempotent_for_a_clean_v0_source() {
     let root = unique_temp_dir("repeat");
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-repeat")).expect("v0 writes");

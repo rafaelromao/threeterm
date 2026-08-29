@@ -3439,6 +3439,8 @@ pub fn dispatch_registered_command(
             return Ok(json!({
                 "deterministic": verification.deterministic,
                 "fingerprint": verification.fingerprint,
+                "model_state_fingerprint": verification.model_state_fingerprint,
+                "geometry_fingerprints": verification.geometry_fingerprints,
                 "mismatch": verification.mismatch.unwrap_or_default(),
                 "schema_version": schema.response_schema_version,
             }));

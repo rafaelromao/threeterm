@@ -3393,6 +3393,12 @@ pub fn read_v0(path: &Path) -> Result<V0Bundle, BundleError> {
     }
     let mut feature_ids: Vec<FeatureId> = Vec::new();
     for entry in log.entries() {
+        if entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
+            || entry.kind.starts_with(COMPONENT_COMMAND_KIND_PREFIX)
+            || entry.kind.starts_with(FIT_DIMENSION_KIND_PREFIX)
+        {
+            continue;
+        }
         if entry.operation.as_deref() == Some("remove") {
             feature_ids.retain(|feature_id| feature_id.as_str() != entry.feature_id);
         } else if !feature_ids

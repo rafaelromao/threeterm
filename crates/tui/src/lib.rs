@@ -80,6 +80,12 @@ pub fn execute_selected_edge_reattachment(
     )
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeReattachmentInteraction {
+    pub response: Value,
+    pub acknowledgement: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleState {
     Probing,
@@ -762,6 +768,30 @@ impl TuiSession {
                 source: threeterm_theme::PaletteSource::Default,
             },
         }
+    }
+
+    pub fn reattach_selected_edge(
+        &self,
+        host: &Host,
+        bundle_path: &Path,
+        expected_revision: &str,
+        edit_feature_id: &str,
+        edit_kind: &str,
+        reference: Value,
+    ) -> Result<EdgeReattachmentInteraction, ExecutionError<HostError>> {
+        let response = execute_selected_edge_reattachment(
+            host,
+            bundle_path,
+            expected_revision,
+            edit_feature_id,
+            edit_kind,
+            reference,
+        )?;
+        let acknowledgement = reattachment_acknowledgement(&response);
+        Ok(EdgeReattachmentInteraction {
+            response,
+            acknowledgement,
+        })
     }
 
     pub fn new_with_theme(

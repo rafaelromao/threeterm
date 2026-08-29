@@ -495,6 +495,94 @@ pub static CHAMFER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+fn edge_evidence_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["midpoint", "tangent", "length"],
+        "properties": {
+            "midpoint": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "tangent": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "length": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn edge_provenance_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["source_feature_id", "source_revision_id", "source_edge_id"],
+        "properties": {
+            "source_feature_id": { "type": "string", "minLength": 1 },
+            "source_revision_id": { "type": "string", "minLength": 1 },
+            "source_edge_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn selected_edge_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["semantic_id", "provenance", "role", "evidence"],
+        "properties": {
+            "semantic_id": { "type": "string", "minLength": 1 },
+            "provenance": edge_provenance_schema(),
+            "role": { "type": "string", "minLength": 1 },
+            "evidence": edge_evidence_schema()
+        },
+        "additionalProperties": false
+    })
+}
+
+fn post_edit_candidate_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["semantic_id", "provenance", "role", "evidence"],
+        "properties": {
+            "semantic_id": { "type": "string", "minLength": 1 },
+            "provenance": edge_provenance_schema(),
+            "role": { "type": "string", "minLength": 1 },
+            "evidence": edge_evidence_schema()
+        },
+        "additionalProperties": false
+    })
+}
+
+pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "reference", "candidates"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "edit_feature_id": { "type": "string", "minLength": 1 },
+            "edit_kind": { "type": "string", "minLength": 1 },
+            "reference": selected_edge_schema(),
+            "candidates": { "type": "array", "items": post_edit_candidate_schema() }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REATTACH_EDGE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["outcome", "selected_edge_id", "candidate_edge_ids", "committed", "edit_feature_id", "source_revision", "revision_hash", "schema_version"],
+        "properties": {
+            "outcome": { "enum": ["resolved", "ambiguous", "lost", "incompatible"] },
+            "selected_edge_id": { "type": "string" },
+            "candidate_edge_ids": { "type": "array", "items": { "type": "string" } },
+            "committed": { "type": "boolean" },
+            "edit_feature_id": { "type": "string", "minLength": 1 },
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string", "const": "threeterm.command.reattach-edge.response/1" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -2018,6 +2106,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        REATTACH_EDGE_COMMAND_ID,
+        CommandSchema {
+            id: REATTACH_EDGE_COMMAND_ID,
+            name: "reattach-edge",
+            schema_version: "threeterm.command.reattach-edge/1",
+            request_schema_version: "threeterm.command.reattach-edge.request/1",
+            request_schema: REATTACH_EDGE_REQUEST_SCHEMA.clone(),
+            response_schema_version: REATTACH_EDGE_RESPONSE_SCHEMA_VERSION,
+            response_schema: REATTACH_EDGE_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         HOLE_COMMAND_ID,
         CommandSchema {
             id: HOLE_COMMAND_ID,
@@ -2156,6 +2256,7 @@ pub const FIT_DIMENSION_COMMAND_ID: CommandId = CommandId("fit-dimension");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
 pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
+pub const REATTACH_EDGE_COMMAND_ID: CommandId = CommandId("reattach-edge");
 pub const HOLE_COMMAND_ID: CommandId = CommandId("hole");
 pub const REVOLVE_COMMAND_ID: CommandId = CommandId("revolve");
 pub const MIRROR_COMMAND_ID: CommandId = CommandId("mirror");
@@ -2180,6 +2281,8 @@ pub const FIT_DIMENSION_RESPONSE_SCHEMA_VERSION: &str =
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
 pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";
+pub const REATTACH_EDGE_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.reattach-edge.response/1";
 pub const HOLE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.hole.response/1";
 pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.response/1";
 pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";

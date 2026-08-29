@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, FeatureGraph, FitDimension,
-    SketchConstraint as DomainSketchConstraint, SketchDiagnostic as DomainSketchDiagnostic,
-    SketchEntity as DomainSketchEntity, SketchPayload, SolvedCoordinate as DomainSolvedCoordinate,
+    ComponentCommand, ComponentGraph, EdgeReattachmentOutcome, FeatureGraph, FitDimension,
+    PostEditEdgeCandidate, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
+    SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
+    SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
+    resolve_edge_reference,
 };
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
@@ -390,6 +392,15 @@ pub struct ApplyView {
 pub struct FitDimensionCommitView {
     pub snapshot: SnapshotView,
     pub fit: FitDimension,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeReattachmentView {
+    pub outcome: EdgeReattachmentOutcome,
+    pub source_snapshot: SnapshotView,
+    pub snapshot: SnapshotView,
+    pub edit_feature_id: String,
+    pub committed: bool,
 }
 
 impl From<&LoadedBundle> for SnapshotView {
@@ -1636,6 +1647,56 @@ impl Host {
                             .response_schema_version,
                     }))
                 }
+                threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID => {
+                    let reference: SelectedEdgeReference =
+                        serde_json::from_value(request.get("reference").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing selected edge reference".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid selected edge reference: {error}"),
+                        })?;
+                    let candidates: Vec<PostEditEdgeCandidate> =
+                        serde_json::from_value(request.get("candidates").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing post-edit edge candidates".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid post-edit edge candidates: {error}"),
+                        })?;
+                    let view = self.reattach_edge(
+                        string_field("bundle_path")?,
+                        string_field("expected_revision")?,
+                        string_field("edit_feature_id")?,
+                        string_field("edit_kind")?,
+                        reference,
+                        candidates,
+                    )?;
+                    let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
+                        EdgeReattachmentOutcome::Resolved { semantic_id } => {
+                            ("resolved", Some(semantic_id), Vec::new())
+                        }
+                        EdgeReattachmentOutcome::Ambiguous { candidate_ids } => {
+                            ("ambiguous", None, candidate_ids)
+                        }
+                        EdgeReattachmentOutcome::Lost => ("lost", None, Vec::new()),
+                        EdgeReattachmentOutcome::Incompatible { candidate_ids } => {
+                            ("incompatible", None, candidate_ids)
+                        }
+                    };
+                    Ok(serde_json::json!({
+                        "outcome": outcome,
+                        "selected_edge_id": selected_edge_id.unwrap_or_default(),
+                        "candidate_edge_ids": candidate_edge_ids,
+                        "committed": view.committed,
+                        "edit_feature_id": view.edit_feature_id,
+                        "source_revision": view.source_snapshot.revision_hash,
+                        "revision_hash": view.snapshot.revision_hash,
+                        "schema_version": find(command).expect("reattach-edge is registered").response_schema_version,
+                    }))
+                }
                 _ => Err(HostError::Validation {
                     detail: format!(
                         "command {} is not handled by the domain executor",
@@ -1643,6 +1704,76 @@ impl Host {
                     ),
                 }),
             }
+        })
+    }
+
+    /// Resolve one selected edge against an edit evaluator's explicit
+    /// post-edit evidence before publishing the edit as canonical state.
+    pub fn reattach_edge(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        edit_feature_id: &str,
+        edit_kind: &str,
+        reference: SelectedEdgeReference,
+        candidates: Vec<PostEditEdgeCandidate>,
+    ) -> Result<EdgeReattachmentView, HostError> {
+        if edit_feature_id.is_empty() || edit_kind.is_empty() {
+            return Err(HostError::Validation {
+                detail: "edge edit feature and kind must not be empty".to_string(),
+            });
+        }
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        if loaded.revision_hash_hex() != expected_revision {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "edge edit source revision {expected_revision:?} does not match current revision {:?}",
+                    loaded.revision_hash_hex()
+                ),
+            });
+        }
+        let outcome = resolve_edge_reference(&reference, candidates);
+        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            return Ok(EdgeReattachmentView {
+                outcome,
+                source_snapshot: source_snapshot.clone(),
+                snapshot: source_snapshot,
+                edit_feature_id: edit_feature_id.to_string(),
+                committed: false,
+            });
+        }
+        let selected_edge_id = match &outcome {
+            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id,
+            _ => unreachable!(),
+        };
+        let kind = serde_json::json!({
+            "schema": "threeterm.reattach-edge/1",
+            "edit_kind": edit_kind,
+            "selected_edge_id": selected_edge_id,
+            "reference": reference,
+        })
+        .to_string();
+        let updated =
+            match bundle.append_feature_if_revision(edit_feature_id, &kind, expected_revision) {
+                Ok(updated) => updated,
+                Err(error) => {
+                    if let Ok(current) = bundle.open() {
+                        self.current.replace(Some(current));
+                    }
+                    return Err(error.into());
+                }
+            };
+        let snapshot = SnapshotView::from(&updated);
+        self.current.replace(Some(updated));
+        Ok(EdgeReattachmentView {
+            outcome,
+            source_snapshot,
+            snapshot,
+            edit_feature_id: edit_feature_id.to_string(),
+            committed: true,
         })
     }
 

@@ -41,6 +41,22 @@ pub fn execute_domain_command(
     host.execute_domain_command(command, request)
 }
 
+/// Turn the structured edge outcome into a non-color acknowledgement for the
+/// interactive overlay without changing its semantic meaning.
+pub fn reattachment_acknowledgement(response: &Value) -> String {
+    match response.get("outcome").and_then(Value::as_str) {
+        Some("resolved") => format!(
+            "edge reattached: {}",
+            response
+                .get("selected_edge_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        Some(outcome) => format!("edge reattachment {outcome}"),
+        None => "edge reattachment invalid response".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleState {
     Probing,

@@ -34,9 +34,32 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "33c7d691f0c5411f2d882cf0de5744408cae78230341e916f68e064207c43d42",
+        "91e4cf15422983ef30de274d19bbc2b02531a881db817e560af6cdc2c21ef332",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
+    );
+}
+
+#[test]
+fn registry_contains_the_semantic_edge_reattachment_contract() {
+    let edge = find(threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID)
+        .expect("reattach-edge is registered");
+    assert_eq!(edge.name, "reattach-edge");
+    assert_eq!(
+        edge.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "expected_revision",
+            "edit_feature_id",
+            "edit_kind",
+            "reference",
+            "candidates"
+        ])
+    );
+    assert_eq!(edge.request_schema["additionalProperties"], false);
+    assert_eq!(
+        edge.response_schema["properties"]["outcome"]["enum"],
+        serde_json::json!(["resolved", "ambiguous", "lost", "incompatible"])
     );
 }
 

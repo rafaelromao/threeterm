@@ -21,9 +21,9 @@ use threeterm_protocol::schema::{
     COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
     EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
-    find_by_name, iter,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
@@ -3220,7 +3220,7 @@ pub fn dispatch_registered_command(
 ) -> Result<Value, DispatchError> {
     if matches!(
         command,
-        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID
+        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID | REATTACH_EDGE_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)
@@ -5758,7 +5758,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 36);
+        assert_eq!(commands.len(), 37);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

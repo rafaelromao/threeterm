@@ -1949,6 +1949,8 @@ impl Host {
             .entries()
             .iter()
             .any(|entry| entry.intent.is_some());
+        let expected_geometry = canonical_geometry_fingerprints(&loaded);
+        let authenticated_geometry = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
         let recomputed = if has_geometry_intent {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             Some(self.reload_and_recompute_extrudes(root.as_ref(), &worker)?)
@@ -1977,6 +1979,15 @@ impl Host {
         };
         if mismatch.is_none() && geometry_fingerprints.1.is_some() {
             mismatch = geometry_fingerprints.1;
+        }
+        if mismatch.is_none() && geometry_fingerprints.0 != expected_geometry {
+            mismatch = Some("recomputed geometry differs from canonical provenance".to_string());
+        }
+        if mismatch.is_none()
+            && !has_geometry_intent
+            && authenticated_geometry.0 != expected_geometry
+        {
+            mismatch = Some("authenticated geometry differs from canonical provenance".to_string());
         }
         Ok(ReplayVerification {
             deterministic: mismatch.is_none(),
@@ -2128,6 +2139,15 @@ impl Host {
                     return Err(error);
                 }
             };
+            if result.schema_version != expected_worker.worker_schema_version {
+                let _ = stage.discard();
+                return Err(HostError::WorkerUnavailable {
+                    detail: format!(
+                        "incompatible extrude worker schema: expected {:?}, found {:?}",
+                        expected_worker.worker_schema_version, result.schema_version
+                    ),
+                });
+            }
             let bytes = match read_brep_verified(
                 &result.brep_path,
                 Some((result.brep_bytes, &result.brep_sha256)),
@@ -5456,6 +5476,16 @@ fn canonical_model_fingerprint(bundle: &LoadedBundle) -> String {
     ))
     .expect("canonical model state serializes");
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn canonical_geometry_fingerprints(bundle: &LoadedBundle) -> Vec<String> {
+    let mut latest = std::collections::BTreeMap::new();
+    for entry in bundle.log.entries() {
+        if let Some(digest) = &entry.brep_sha256 {
+            latest.insert(entry.feature_id.as_str(), digest.clone());
+        }
+    }
+    latest.into_values().collect()
 }
 
 fn authenticated_geometry_fingerprints(

@@ -3476,6 +3476,9 @@ pub fn write_v0_fixture(
 /// current epoch.
 pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
     debug_assert!(source.generation.revisions.len() == 1);
+    let log = TransactionLog::decode_and_verify(source.transactions.as_bytes())
+        .expect("authenticated v0 canonical log replays");
+    let graph = migration_graph(&log).expect("authenticated v0 graph replays");
     let generation = ProjectGeneration {
         id: source.manifest.generation_id.clone(),
         revisions: vec![Revision {
@@ -3505,12 +3508,78 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
         slvs_worker: slvs_worker_identity(),
         slvs_solver_version: slvs_solver_identity(),
     };
-    let empty_graph = FeatureGraph::empty();
-    manifest.feature_graph_hash = empty_graph.graph_hash_hex();
-    manifest.revision_hash = empty_graph.revision_hash_hex(&manifest.terminal_log_digest);
+    manifest.terminal_log_digest = log.terminal_digest_hex().to_string();
+    manifest.feature_graph_hash = graph.graph_hash_hex();
+    manifest.revision_hash = graph.revision_hash_hex(&manifest.terminal_log_digest);
     manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
     manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
     (manifest, generation)
+}
+
+fn migration_graph(log: &TransactionLog) -> Result<FeatureGraph, BundleError> {
+    let mut graph = FeatureGraph::empty();
+    for entry in log.entries() {
+        if entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
+            || entry.kind.starts_with(COMPONENT_COMMAND_KIND_PREFIX)
+            || entry.kind.starts_with(FIT_DIMENSION_KIND_PREFIX)
+        {
+            if let Some(payload) = entry.kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
+                let fit: FitDimension = serde_json::from_str(payload).map_err(|error| {
+                    BundleError::Invalid(format!("invalid fit dimension: {error}"))
+                })?;
+                graph.add_fit_dimension(fit).map_err(BundleError::Invalid)?;
+            }
+            continue;
+        }
+        let sketch_payload = entry
+            .kind
+            .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
+            .map(|payload| {
+                serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(|error| {
+                    BundleError::Invalid(format!("invalid sketch payload: {error}"))
+                })
+            })
+            .transpose()?;
+        let feature_kind = if sketch_payload.is_some() {
+            "sketch"
+        } else {
+            &entry.kind
+        };
+        let feature = Feature::new(&entry.feature_id, feature_kind)
+            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+        match entry.operation.as_deref() {
+            Some("remove") => {
+                if !graph.remove_feature(&entry.feature_id) {
+                    return Err(BundleError::Invalid(
+                        "remove operation targets a missing feature".into(),
+                    ));
+                }
+            }
+            Some("set") => {
+                if !graph.contains_feature(&entry.feature_id) {
+                    return Err(BundleError::Invalid(
+                        "set operation targets a missing feature".into(),
+                    ));
+                }
+                graph.set_feature(feature);
+            }
+            Some("add") | None => {
+                if let Some(payload) = sketch_payload {
+                    graph
+                        .add_sketch(feature, payload)
+                        .map_err(BundleError::Invalid)?;
+                } else {
+                    graph.add_feature(feature);
+                }
+            }
+            Some(operation) => {
+                return Err(BundleError::Invalid(format!(
+                    "unknown transaction operation: {operation}"
+                )));
+            }
+        }
+    }
+    Ok(graph)
 }
 
 fn staging_path(path: &Path) -> PathBuf {

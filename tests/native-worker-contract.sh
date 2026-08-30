@@ -26,3 +26,29 @@ jq -e '
 ' "${CARGO_TARGET_DIR}/native-worker-manifest.json" >/dev/null
 
 printf '%s\n' 'native-worker contract satisfied'
+
+# The pinned source checkout must materialize its declared submodules. This
+# local fixture keeps the contract test network-free while covering the same
+# checkout path used by CI.
+SOURCE_FIXTURE="${WORK}/source"
+SUBMODULE_FIXTURE="${WORK}/submodule"
+SUBMODULE_WORK="${WORK}/submodule-work"
+CHECKOUT_FIXTURE="${WORK}/checkout"
+git init --quiet --bare "${SUBMODULE_FIXTURE}"
+git init --quiet "${SOURCE_FIXTURE}"
+git -C "${SOURCE_FIXTURE}" config user.email ci@example.invalid
+git -C "${SOURCE_FIXTURE}" config user.name ci
+git init --quiet "${SUBMODULE_WORK}"
+git -C "${SUBMODULE_WORK}" config user.email ci@example.invalid
+git -C "${SUBMODULE_WORK}" config user.name ci
+printf '%s\n' 'submodule materialized' > "${SUBMODULE_WORK}/CMakeLists.txt"
+git -C "${SUBMODULE_WORK}" add CMakeLists.txt
+git -C "${SUBMODULE_WORK}" commit --quiet -m submodule
+git -C "${SUBMODULE_WORK}" push --quiet "${SUBMODULE_FIXTURE}" HEAD:main
+git -c protocol.file.allow=always -C "${SOURCE_FIXTURE}" submodule add --quiet "${SUBMODULE_FIXTURE}" extlib/mimalloc
+git -C "${SOURCE_FIXTURE}" commit --quiet -m source
+SOURCE_COMMIT="$(git -C "${SOURCE_FIXTURE}" rev-parse HEAD)"
+GIT_ALLOW_PROTOCOL=file clone_at_commit "${SOURCE_FIXTURE}" "${SOURCE_COMMIT}" "${CHECKOUT_FIXTURE}"
+test -f "${CHECKOUT_FIXTURE}/extlib/mimalloc/CMakeLists.txt"
+
+printf '%s\n' 'native-worker source checkout contract satisfied'

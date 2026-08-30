@@ -28,6 +28,9 @@ clone_at_commit() {
         git -C "${destination}" fetch --force --depth 1 origin "${commit}"
     fi
     git -C "${destination}" checkout --detach --force "${commit}"
+    # SolveSpace keeps required build dependencies in git submodules. Restore
+    # them from the checked-out commit rather than relying on mutable packages.
+    git -C "${destination}" submodule update --init --recursive
     local actual
     actual="$(git -C "${destination}" rev-parse HEAD)"
     if [[ "${actual}" != "${commit}" ]]; then

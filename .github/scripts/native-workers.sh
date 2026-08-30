@@ -82,6 +82,7 @@ prepare_native_workers() {
     export THREETERM_SLVS_DIR="${prefixes}/slvs"
     export THREETERM_OCCT_LIB_DIR="${prefixes}/occt/lib"
     export THREETERM_SLVS_LIB_DIR="${prefixes}/slvs/lib"
+    export LD_LIBRARY_PATH="${prefixes}/occt/lib:${prefixes}/slvs/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export THREETERM_REQUIRE_IMMUTABLE_WORKERS=1
     export THREETERM_REQUIRE_REAL_WORKER=1
 }

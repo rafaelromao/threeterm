@@ -59,6 +59,7 @@ pub fn reattachment_acknowledgement(response: &Value) -> String {
 
 /// Execute the selected-edge action from the interactive state through the
 /// same command seam used by headless adapters.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_selected_edge_reattachment(
     host: &Host,
     bundle_path: &Path,
@@ -774,6 +775,7 @@ impl TuiSession {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn reattach_selected_edge(
         &self,
         host: &Host,

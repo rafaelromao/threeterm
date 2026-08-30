@@ -104,19 +104,18 @@ fn production_command_reports_failures_before_canonical_mutation() {
     let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let log = fs::read(root.join("transactions.log")).expect("log reads");
 
-    for (name, mut selected, expected) in [("lost", reference(&revision), "lost")] {
-        selected["evidence"]["midpoint"] = json!([99.0, 99.0, 99.0]);
-        let result = host
-            .execute_domain_command(
-                REATTACH_EDGE_COMMAND_ID,
-                request(&root, &revision, selected),
-            )
-            .expect("failure is a structured outcome");
-        assert_eq!(result["outcome"], expected, "{name}");
-        assert_eq!(result["committed"], false, "{name}");
-        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
-        assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
-    }
+    let mut selected = reference(&revision);
+    selected["evidence"]["midpoint"] = json!([99.0, 99.0, 99.0]);
+    let result = host
+        .execute_domain_command(
+            REATTACH_EDGE_COMMAND_ID,
+            request(&root, &revision, selected),
+        )
+        .expect("failure is a structured outcome");
+    assert_eq!(result["outcome"], "lost");
+    assert_eq!(result["committed"], false);
+    assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
 
     let _ = fs::remove_dir_all(&root);
 }

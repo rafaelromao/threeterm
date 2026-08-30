@@ -105,8 +105,11 @@ verify_native_worker_execution() {
     local worker_id="$2"
     local output
     local status=0
-    output="$(timeout 10s "${worker}" </dev/null 2>&1)" || status=$?
-    if [[ "${status}" -ne 0 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* ]]; then
+    # Native workers advertise readiness before reading one bounded request.
+    # Send a newline-terminated probe so the framing check, rather than EOF,
+    # determines the expected harmless failure without mutating a workspace.
+    output="$(printf '%s\n' '{}' | timeout 10s "${worker}" 2>&1)" || status=$?
+    if [[ "${status}" -ne 2 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* || "${output}" != *"\"code\":\"request_malformed\""* ]]; then
         printf 'native %s worker did not complete its ready handshake: %s (status=%s)\n' \
             "${worker_id}" "${worker}" "${status}" >&2
         printf '%s\n' "${output}" >&2

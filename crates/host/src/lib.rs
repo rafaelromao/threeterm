@@ -1701,7 +1701,7 @@ impl Host {
                     let view = self.reattach_edge_with_fillet(
                         bundle_path,
                         expected_revision,
-                        &base_feature_id,
+                        base_feature_id,
                         edit_feature_id,
                         radius,
                         reference,

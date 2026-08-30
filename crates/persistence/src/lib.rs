@@ -2621,8 +2621,8 @@ fn verify_brep_provenance(
     for entry in log.entries() {
         if graph.contains_feature(&entry.feature_id)
             && (entry.brep_path.is_some()
-            || entry.brep_byte_count.is_some()
-            || entry.brep_sha256.is_some())
+                || entry.brep_byte_count.is_some()
+                || entry.brep_sha256.is_some())
         {
             latest.insert(entry.feature_id.as_str(), entry);
         }

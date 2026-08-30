@@ -86,7 +86,11 @@ fn unsupported_versioned_operation_is_rejected_before_publication() {
             if version == "apply-add/2"
     ));
     assert_eq!(
-        Bundle::at(&path).open().expect("bundle remains loadable").log.len(),
+        Bundle::at(&path)
+            .open()
+            .expect("bundle remains loadable")
+            .log
+            .len(),
         0
     );
 

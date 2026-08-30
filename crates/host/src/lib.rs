@@ -3148,7 +3148,7 @@ impl Host {
                 Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
             ));
         };
-        if result != typed_result {
+        if !json_values_match_worker_result(result, typed_result) {
             return Err(discard_stage(
                 stage,
                 Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
@@ -6118,6 +6118,39 @@ struct WorkerStageCleanup<'a> {
     path: &'a Path,
 }
 
+fn json_values_match_worker_result(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| json_values_match_worker_result(value, other))
+                })
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(value, other)| json_values_match_worker_result(value, other))
+        }
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            left == right
+                || match (left.as_i64(), left.as_u64(), right.as_i64(), right.as_u64()) {
+                    (Some(left), _, Some(right), _) => left == right,
+                    (_, Some(left), _, Some(right)) => left == right,
+                    (Some(left), _, _, Some(right)) => left >= 0 && left as u64 == right,
+                    (_, Some(left), Some(right), _) => right >= 0 && left == right as u64,
+                    _ => left
+                        .as_f64()
+                        .is_some_and(|left| right.as_f64().is_some_and(|right| left == right)),
+                }
+        }
+        (left, right) => left == right,
+    }
+}
+
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
@@ -6148,6 +6181,18 @@ mod tests {
                 .expect("clock is after epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn worker_result_comparison_accepts_equivalent_float_and_integer_numbers() {
+        assert!(json_values_match_worker_result(
+            &serde_json::json!({"edge_candidates": [{"length": 4}]}),
+            &serde_json::json!({"edge_candidates": [{"length": 4.0}]}),
+        ));
+        assert!(!json_values_match_worker_result(
+            &serde_json::json!({"edge_candidates": [{"length": 4}]}),
+            &serde_json::json!({"edge_candidates": [{"length": 5.0}]}),
+        ));
     }
 
     #[test]

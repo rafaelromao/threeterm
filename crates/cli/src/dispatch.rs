@@ -3877,9 +3877,7 @@ impl DispatchError {
                 HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
                 HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
                 HostError::Validation { detail } => format!("host_validation: {detail}"),
-                HostError::Persistence(error) => {
-                    format!("{}: {}", error.diagnostic_detail(), error)
-                }
+                HostError::Persistence(error) => error.diagnostic_detail().to_string(),
                 other => other.to_string(),
             },
             Self::Validation(detail) => format!("dispatch_validation: {detail}"),
@@ -5567,7 +5565,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         .expect("stale geometry diagnostic serializes"),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
-        HostError::Persistence(error) => format!("{}: {}", error.diagnostic_detail(), error),
+        HostError::Persistence(error) => error.diagnostic_detail().to_string(),
         HostError::WorkerFailure { request_id, detail } => request_id
             .as_deref()
             .map(|request_id| format!("request_id={request_id}; {detail}"))

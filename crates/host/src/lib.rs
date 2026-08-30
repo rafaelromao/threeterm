@@ -1950,7 +1950,6 @@ impl Host {
             .iter()
             .any(|entry| entry.intent.is_some());
         let expected_geometry = canonical_geometry_fingerprints(&loaded);
-        let authenticated_geometry = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
         let recomputed = if has_geometry_intent {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             Some(self.reload_and_recompute_extrudes(root.as_ref(), &worker)?)
@@ -1972,28 +1971,40 @@ impl Host {
         } else {
             Some("canonical model replay differs from canonical state".to_string())
         };
-        let geometry_fingerprints = if let Some(replayed) = recomputed {
-            (replayed.geometry_fingerprints, None)
+        let (geometry_fingerprints, geometry_mismatch) = if let Some(replayed) = recomputed {
+            // Intent-backed BREP files are disposable. Recompute them before
+            // checking the authenticated files, otherwise a missing result
+            // would prevent the very replay that is meant to restore it.
+            let authenticated = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
+            let mismatch = authenticated.1.or_else(|| {
+                (authenticated.0 != expected_geometry)
+                    .then_some("recomputed geometry differs from canonical provenance".to_string())
+            });
+            (
+                authenticated.0,
+                mismatch.or_else(|| {
+                    (replayed.geometry_fingerprints != expected_geometry).then_some(
+                        "recomputed geometry differs from canonical provenance".to_string(),
+                    )
+                }),
+            )
         } else {
-            authenticated_geometry_fingerprints(root.as_ref(), &loaded)?
+            let authenticated = authenticated_geometry_fingerprints(root.as_ref(), &loaded)?;
+            let mismatch = authenticated.1.or_else(|| {
+                (authenticated.0 != expected_geometry).then_some(
+                    "authenticated geometry differs from canonical provenance".to_string(),
+                )
+            });
+            (authenticated.0, mismatch)
         };
-        if mismatch.is_none() && geometry_fingerprints.1.is_some() {
-            mismatch = geometry_fingerprints.1;
-        }
-        if mismatch.is_none() && geometry_fingerprints.0 != expected_geometry {
-            mismatch = Some("recomputed geometry differs from canonical provenance".to_string());
-        }
-        if mismatch.is_none()
-            && !has_geometry_intent
-            && authenticated_geometry.0 != expected_geometry
-        {
-            mismatch = Some("authenticated geometry differs from canonical provenance".to_string());
+        if mismatch.is_none() {
+            mismatch = geometry_mismatch;
         }
         Ok(ReplayVerification {
             deterministic: mismatch.is_none(),
             fingerprint: first_fingerprint,
             model_state_fingerprint: first_model,
-            geometry_fingerprints: geometry_fingerprints.0,
+            geometry_fingerprints,
             mismatch,
         })
     }
@@ -2077,11 +2088,6 @@ impl Host {
             .iter()
             .filter_map(|entry| entry.intent.clone())
             .collect::<Vec<_>>();
-        if intents.len() > 1 {
-            return Err(HostError::Validation {
-                detail: "replay supports one canonical additive extrude transaction".to_string(),
-            });
-        }
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
         for intent in intents {
@@ -2126,10 +2132,14 @@ impl Host {
             )
             .with_output_path(&stage_root, "replay.brep")
             .with_feature_id(&feature_id);
+            let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
+            binding.source_revision_id = intent.source_revision.clone();
+            binding.staging_name = "replay.brep".to_string();
+            let request = request.with_artifact_request(binding);
             let result = worker
                 .clone()
                 .with_expected_worker_id("occt")
-                .with_revision_id(intent.source_revision)
+                .with_revision_id(intent.source_revision.clone())
                 .extrude(&request)
                 .map_err(HostError::from);
             let result = match result {
@@ -2158,6 +2168,15 @@ impl Host {
                     return Err(HostError::BrepIo { detail });
                 }
             };
+            if result.source_revision_id.as_deref() != Some(intent.source_revision.as_str()) {
+                let _ = stage.discard();
+                return Err(HostError::WorkerUnavailable {
+                    detail: format!(
+                        "incompatible extrude source revision: expected {:?}, found {:?}",
+                        intent.source_revision, result.source_revision_id
+                    ),
+                });
+            }
             let path = match Bundle::at(root).restore_derived_brep_if_revision(
                 &feature_id,
                 &source_snapshot.revision_hash,
@@ -5481,7 +5500,9 @@ fn canonical_model_fingerprint(bundle: &LoadedBundle) -> String {
 fn canonical_geometry_fingerprints(bundle: &LoadedBundle) -> Vec<String> {
     let mut latest = std::collections::BTreeMap::new();
     for entry in bundle.log.entries() {
-        if let Some(digest) = &entry.brep_sha256 {
+        if bundle.graph.contains_feature(&entry.feature_id)
+            && let Some(digest) = &entry.brep_sha256
+        {
             latest.insert(entry.feature_id.as_str(), digest.clone());
         }
     }
@@ -5494,7 +5515,7 @@ fn authenticated_geometry_fingerprints(
 ) -> Result<(Vec<String>, Option<String>), HostError> {
     let mut latest = std::collections::BTreeMap::new();
     for entry in bundle.log.entries() {
-        if entry.brep_sha256.is_some() {
+        if bundle.graph.contains_feature(&entry.feature_id) && entry.brep_sha256.is_some() {
             latest.insert(entry.feature_id.as_str(), entry);
         }
     }

@@ -1221,7 +1221,7 @@ impl Bundle {
         {
             return Err(BundleError::LogDigestMismatch);
         }
-        verify_brep_provenance(&self.root, &log)?;
+        verify_brep_provenance(&self.root, &log, &graph)?;
 
         let generation = ProjectGeneration {
             id: manifest.generation_id.clone(),
@@ -2444,6 +2444,12 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
             operation: operation.to_string(),
         });
     }
+    if let Some(version) = unsupported_operation_version(&entry.kind) {
+        return Err(BundleError::CanonicalVersionUnsupported {
+            log_index: Some(entry.log_index),
+            version,
+        });
+    }
     let (encoded_operation, _) = apply_kind(&entry.kind);
     let operation_matches_canonical_kind = match (entry.operation.as_deref(), encoded_operation) {
         (None, None) | (Some("add" | "set"), None) | (Some("remove"), Some("remove")) => true,
@@ -2466,6 +2472,12 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                 version: intent.schema_version.clone(),
             });
         }
+        if intent.command != "extrude" || intent.operation != "additive" {
+            return Err(BundleError::CanonicalOperationUnknown {
+                log_index: Some(entry.log_index),
+                operation: format!("{}:{}", intent.command, intent.operation),
+            });
+        }
         if intent.worker_requirements != occt_worker_identity() {
             return Err(BundleError::CompatibilityIdentityMismatch {
                 identity: "canonical_extrude_worker",
@@ -2483,9 +2495,18 @@ fn validate_canonical_kind(
     log_index: Option<usize>,
     encoded_kind: &str,
 ) -> Result<(), BundleError> {
+    if let Some(version) = unsupported_operation_version(encoded_kind) {
+        return Err(BundleError::CanonicalVersionUnsupported { log_index, version });
+    }
     if let Some(payload) = encoded_kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
-        serde_json::from_str::<HistoryEvent>(payload)
+        let event: HistoryEvent = serde_json::from_str(payload)
             .map_err(|error| canonical_payload_error(log_index, "history event", error))?;
+        if event.schema_version != threeterm_domain::history::HISTORY_EVENT_SCHEMA {
+            return Err(BundleError::CanonicalVersionUnsupported {
+                log_index,
+                version: event.schema_version,
+            });
+        }
         return Ok(());
     }
     if let Some(payload) = encoded_kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
@@ -2539,6 +2560,19 @@ fn canonical_payload_error(
     }
 }
 
+fn unsupported_operation_version(encoded_kind: &str) -> Option<String> {
+    for prefix in ["apply-add/", "apply-set/", "apply-remove/"] {
+        let Some(rest) = encoded_kind.strip_prefix(prefix) else {
+            continue;
+        };
+        let version = rest.split(':').next().unwrap_or(rest);
+        if version != "1" {
+            return Some(format!("{prefix}{version}"));
+        }
+    }
+    None
+}
+
 fn is_supported_feature_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -2567,7 +2601,11 @@ fn is_supported_feature_kind(kind: &str) -> bool {
         || kind.starts_with("sketch-segment:")
 }
 
-fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), BundleError> {
+fn verify_brep_provenance(
+    root: &Path,
+    log: &TransactionLog,
+    graph: &FeatureGraph,
+) -> Result<(), BundleError> {
     let brep_root = root.join("brep");
     match fs::symlink_metadata(&brep_root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2581,9 +2619,10 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
     }
     let mut latest = std::collections::BTreeMap::new();
     for entry in log.entries() {
-        if entry.brep_path.is_some()
+        if graph.contains_feature(&entry.feature_id)
+            && (entry.brep_path.is_some()
             || entry.brep_byte_count.is_some()
-            || entry.brep_sha256.is_some()
+            || entry.brep_sha256.is_some())
         {
             latest.insert(entry.feature_id.as_str(), entry);
         }
@@ -2657,6 +2696,13 @@ fn verify_brep_provenance(root: &Path, log: &TransactionLog) -> Result<(), Bundl
                 entry.feature_id
             ))
         })?;
+        use std::os::unix::fs::FileTypeExt;
+        if metadata.file_type().is_fifo() {
+            return Err(BundleError::Invalid(format!(
+                "promoted BREP for {} is not a regular file",
+                entry.feature_id
+            )));
+        }
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(BundleError::Invalid(format!(
                 "promoted BREP for {} is not a regular file",
@@ -3546,14 +3592,15 @@ fn migration_graph(log: &TransactionLog) -> Result<FeatureGraph, BundleError> {
                 })
             })
             .transpose()?;
+        let (operation, canonical_kind) = apply_kind(&entry.kind);
         let feature_kind = if sketch_payload.is_some() {
             "sketch"
         } else {
-            &entry.kind
+            canonical_kind
         };
         let feature = Feature::new(&entry.feature_id, feature_kind)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        match entry.operation.as_deref() {
+        match operation {
             Some("remove") => {
                 if !graph.remove_feature(&entry.feature_id) {
                     return Err(BundleError::Invalid(

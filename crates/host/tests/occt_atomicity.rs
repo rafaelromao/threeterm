@@ -233,6 +233,15 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .load(&root)
         .expect("canonical project loads without BREP");
 
+    let verification = Host::new()
+        .verify_history_replay(&root)
+        .expect("replay verification recomputes missing extrude geometry");
+    assert!(verification.deterministic);
+    assert_eq!(
+        verification.geometry_fingerprints,
+        [sha256_hex(&original_brep)]
+    );
+
     let replayed = Host::new()
         .reload_and_recompute_extrudes(&root, &worker)
         .expect("extrude recomputes");

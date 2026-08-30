@@ -75,6 +75,25 @@ fn unsupported_feature_kind_is_rejected_at_the_canonical_boundary() {
 }
 
 #[test]
+fn unsupported_versioned_operation_is_rejected_before_publication() {
+    let path = root("operation-version");
+    let _ = fs::remove_dir_all(&path);
+    write_fresh(&path, ProjectGeneration::with_id("compatibility")).expect("bundle writes");
+
+    assert!(matches!(
+        Bundle::at(&path).append_feature("feature-1", "apply-add/2:box"),
+        Err(BundleError::CanonicalVersionUnsupported { version, .. })
+            if version == "apply-add/2"
+    ));
+    assert_eq!(
+        Bundle::at(&path).open().expect("bundle remains loadable").log.len(),
+        0
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn unknown_canonical_transaction_field_fails_closed_with_its_log_index() {
     let path = root("transaction-field");
     let _ = fs::remove_dir_all(&path);

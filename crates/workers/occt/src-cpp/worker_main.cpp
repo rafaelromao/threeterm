@@ -1540,7 +1540,7 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
                     edge_candidates.push_back(TopoDS::Edge(iterator.Value()));
                 }
             }
-            if (edge_candidates.empty() && !fillet.IsDeleted(selected_source_edge)) {
+            if (edge_candidates.empty()) {
                 for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More();
                      explorer.Next()) {
                     const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());

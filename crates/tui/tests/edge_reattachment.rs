@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use threeterm_host::Host;
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_tui::{TuiSession, reattachment_acknowledgement};
 
@@ -14,19 +15,19 @@ fn root() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("threeterm-tui-edge-reattachment-{suffix}"))
 }
 
-fn reference() -> serde_json::Value {
+fn reference(revision: &str) -> serde_json::Value {
     json!({
         "semantic_id": "edge-source",
         "provenance": {
-            "source_feature_id": "feature-before",
-            "source_revision_id": "revision-before",
+            "source_feature_id": "base",
+            "source_revision_id": revision,
             "source_edge_id": "edge-source"
         },
         "role": "outer-perimeter",
         "evidence": {
-            "midpoint": [10.0, 2.0, 0.0],
+            "midpoint": [2.0, 0.0, 0.0],
             "tangent": [1.0, 0.0, 0.0],
-            "length": 20.0
+            "length": 4.0
         }
     })
 }
@@ -51,8 +52,23 @@ fn interactive_overlay_acknowledges_each_structured_reattachment_outcome() {
 #[test]
 fn selected_edge_action_uses_the_shared_executor_and_returns_acknowledgement() {
     let root = root();
+    let Ok(worker) = OcctWorker::locate() else {
+        return;
+    };
     Bundle::create(&root).expect("bundle creates");
     let host = Host::new();
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "tui-edge-base",
+            vec![(0.0, 0.0), (4.0, 0.0), (0.0, 4.0)],
+            2.0,
+        )
+        .with_output_path(root.join("stage"), "base.brep")
+        .with_feature_id("base"),
+        &worker,
+    )
+    .expect("base solid commits");
     let identity = host.identity(&root).expect("identity loads");
     let session = TuiSession::new([], identity.revision_hash.clone());
     let result = session
@@ -62,13 +78,12 @@ fn selected_edge_action_uses_the_shared_executor_and_returns_acknowledgement() {
             &identity.revision_hash,
             "fillet-after-edge",
             "fillet",
-            reference(),
+            "base",
+            0.25,
+            reference(&identity.revision_hash),
         )
         .expect("selected edge executes");
     assert_eq!(result.response["outcome"], "resolved");
-    assert_eq!(
-        result.acknowledgement,
-        "edge reattached: edge-source-reattached"
-    );
+    assert!(result.acknowledgement.starts_with("edge reattached: edge-"));
     let _ = fs::remove_dir_all(root);
 }

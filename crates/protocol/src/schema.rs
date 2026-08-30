@@ -538,12 +538,12 @@ fn selected_edge_schema() -> Value {
 pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "reference"],
+        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "base_feature_id", "radius", "reference"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "edit_feature_id": { "type": "string", "minLength": 1 },
-            "edit_kind": { "type": "string", "enum": ["fillet", "chamfer", "fillet-ambiguous", "fillet-lost", "fillet-incompatible"] },
+            "edit_kind": { "const": "fillet" },
             "base_feature_id": { "type": "string", "minLength": 1 },
             "radius": { "type": "number", "exclusiveMinimum": 0 },
             "reference": selected_edge_schema(),

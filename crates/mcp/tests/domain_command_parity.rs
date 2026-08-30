@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
@@ -42,19 +43,19 @@ fn extrude_request(root: &std::path::Path) -> Value {
     })
 }
 
-fn edge_reference() -> Value {
+fn edge_reference(revision: &str) -> Value {
     json!({
         "semantic_id": "edge-source",
         "provenance": {
-            "source_feature_id": "feature-before",
-            "source_revision_id": "revision-before",
+            "source_feature_id": "base",
+            "source_revision_id": revision,
             "source_edge_id": "edge-source"
         },
         "role": "outer-perimeter",
         "evidence": {
-            "midpoint": [10.0, 2.0, 0.0],
+            "midpoint": [2.0, 0.0, 0.0],
             "tangent": [1.0, 0.0, 0.0],
-            "length": 20.0
+            "length": 4.0
         }
     })
 }
@@ -65,8 +66,29 @@ fn edge_request(root: &std::path::Path, revision: &str) -> Value {
         "expected_revision": revision,
         "edit_feature_id": "fillet-after-edge",
         "edit_kind": "fillet",
-        "reference": edge_reference()
+        "base_feature_id": "base",
+        "radius": 0.25,
+        "reference": edge_reference(revision)
     })
+}
+
+fn setup_edge_root(root: &std::path::Path, label: &str) -> Option<String> {
+    let worker = OcctWorker::locate().ok()?;
+    Bundle::create(root).expect("bundle creates");
+    let host = threeterm_host::Host::new();
+    host.extrude(
+        root,
+        ExtrudeRequest::new(
+            format!("edge-{label}"),
+            vec![(0.0, 0.0), (4.0, 0.0), (0.0, 4.0)],
+            2.0,
+        )
+        .with_output_path(root.join("stage"), "base.brep")
+        .with_feature_id("base"),
+        &worker,
+    )
+    .expect("base solid commits");
+    Some(host.identity(root).expect("identity loads").revision_hash)
 }
 
 fn cli_identity(root: &std::path::Path) -> Value {
@@ -408,14 +430,17 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let cli_root = root("edge-cli");
     let mcp_root = root("edge-mcp");
     let tui_root = root("edge-tui");
-    for path in [&cli_root, &mcp_root, &tui_root] {
-        Bundle::create(path).expect("bundle creates");
-    }
-    let revision = Bundle::at(&cli_root)
-        .open()
-        .expect("bundle opens")
-        .revision_hash_hex()
-        .to_string();
+    let Some(revision) = setup_edge_root(&cli_root, "cli") else {
+        return;
+    };
+    let Some(tui_revision) = setup_edge_root(&tui_root, "tui") else {
+        return;
+    };
+    let Some(mcp_revision) = setup_edge_root(&mcp_root, "mcp") else {
+        return;
+    };
+    assert_eq!(revision, tui_revision);
+    assert_eq!(revision, mcp_revision);
     let cli = threeterm_cli::dispatch::dispatch_registered_command(
         &threeterm_host::Host::new(),
         REATTACH_EDGE_COMMAND_ID,
@@ -428,7 +453,9 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
         &revision,
         "fillet-after-edge",
         "fillet",
-        edge_reference(),
+        "base",
+        0.25,
+        edge_reference(&revision),
     )
     .expect("TUI edge command executes");
     let mcp = McpServer::new().handle_request(&JsonRpcRequest {
@@ -443,7 +470,12 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let mcp = mcp.result.expect("MCP edge command executes")["structuredContent"].clone();
     for result in [&cli, &tui, &mcp] {
         assert_eq!(result["outcome"], "resolved");
-        assert_eq!(result["selected_edge_id"], "edge-source-reattached");
+        assert!(
+            result["selected_edge_id"]
+                .as_str()
+                .expect("selected edge id")
+                .starts_with("edge-")
+        );
         assert_eq!(result["committed"], true);
     }
     let _ = fs::remove_dir_all(cli_root);

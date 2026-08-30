@@ -1347,11 +1347,15 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
 
 void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
                             const JsonParser::Value& request) {
-    if (get_string(request, "selected_edge_id").empty()) return;
-    const std::string source_feature_id = get_string(request, "source_feature_id");
-    const std::string source_revision_id = get_string(request, "source_revision_id");
-    const std::string source_edge_id = get_string(request, "source_edge_id");
-    const std::string role = get_string(request, "selected_role");
+    const auto* selected = find_field(request, "selected_edge");
+    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) return;
+    const std::string source_feature_id = get_string(*selected, "source_feature_id");
+    const std::string source_revision_id = get_string(*selected, "source_revision_id");
+    const std::string source_edge_id = get_string(*selected, "source_edge_id");
+    const std::string role = get_string(*selected, "role");
+    const auto selected_midpoint = get_vec3(*selected, "midpoint");
+    const auto selected_tangent = get_vec3(*selected, "tangent");
+    const double selected_length = get_number(*selected, "length");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
@@ -1371,6 +1375,23 @@ void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
             (first_point.X() + last_point.X()) / 2.0,
             (first_point.Y() + last_point.Y()) / 2.0,
             (first_point.Z() + last_point.Z()) / 2.0);
+        const auto midpoint_distance = std::sqrt(
+            std::pow(midpoint.X() - selected_midpoint[0], 2.0) +
+            std::pow(midpoint.Y() - selected_midpoint[1], 2.0) +
+            std::pow(midpoint.Z() - selected_midpoint[2], 2.0));
+        const auto tangent_length = tangent.Magnitude();
+        const auto selected_tangent_length = std::sqrt(
+            std::pow(selected_tangent[0], 2.0) +
+            std::pow(selected_tangent[1], 2.0) +
+            std::pow(selected_tangent[2], 2.0));
+        const auto tangent_dot =
+            (tangent.X() * selected_tangent[0] + tangent.Y() * selected_tangent[1] +
+             tangent.Z() * selected_tangent[2]) /
+            (tangent_length * selected_tangent_length);
+        if (midpoint_distance > 1e-6 || std::abs(properties.Mass() - selected_length) > 1e-6 ||
+            1.0 - std::abs(tangent_dot) > 1e-6) {
+            continue;
+        }
         std::ostringstream identity;
         identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
                  << properties.Mass();
@@ -1386,6 +1407,46 @@ void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
             << "\"length\":" << properties.Mass() << "}";
     }
     out << ']';
+}
+
+TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
+                                    const JsonParser::Value& request) {
+    const auto* selected = find_field(request, "selected_edge");
+    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) return {};
+    const auto midpoint = get_vec3(*selected, "midpoint");
+    const auto tangent = get_vec3(*selected, "tangent");
+    const double length = get_number(*selected, "length");
+    const double tangent_length = std::sqrt(
+        tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
+    if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
+
+    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+        TopoDS_Vertex first_vertex;
+        TopoDS_Vertex last_vertex;
+        TopExp::Vertices(edge, first_vertex, last_vertex);
+        const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+        const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+        gp_Vec edge_tangent(first_point, last_point);
+        const gp_Pnt edge_midpoint(
+            (first_point.X() + last_point.X()) / 2.0,
+            (first_point.Y() + last_point.Y()) / 2.0,
+            (first_point.Z() + last_point.Z()) / 2.0);
+        const double midpoint_distance = edge_midpoint.Distance(
+            gp_Pnt(midpoint[0], midpoint[1], midpoint[2]));
+        const double edge_tangent_length = edge_tangent.Magnitude();
+        const double tangent_dot =
+            (edge_tangent.X() * tangent[0] + edge_tangent.Y() * tangent[1] +
+             edge_tangent.Z() * tangent[2]) /
+            (edge_tangent_length * tangent_length);
+        if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
+            1.0 - std::abs(tangent_dot) <= 1e-6) {
+            return edge;
+        }
+    }
+    return {};
 }
 
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
@@ -1423,9 +1484,11 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
+        const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request);
         BRepFilletAPI_MakeFillet fillet(base);
         for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
             TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+            if (!selected_source_edge.IsNull() && edge.IsSame(selected_source_edge)) continue;
             fillet.Add(radius, edge);
         }
         fillet.Build();

@@ -587,6 +587,12 @@ pub struct SelectedEdgeContext {
     pub source_revision_id: String,
     pub source_edge_id: String,
     pub role: String,
+    #[serde(default)]
+    pub midpoint: [f64; 3],
+    #[serde(default)]
+    pub tangent: [f64; 3],
+    #[serde(default)]
+    pub length: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

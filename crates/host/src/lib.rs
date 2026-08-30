@@ -1202,42 +1202,6 @@ fn draft_map_key(root: &Path, draft_id: &str) -> (PathBuf, String) {
     (root.to_path_buf(), draft_id.to_string())
 }
 
-fn post_edit_edge_candidates(
-    edit_kind: &str,
-    reference: &SelectedEdgeReference,
-) -> Result<Vec<PostEditEdgeCandidate>, HostError> {
-    let candidate = |semantic_id: String, role: String| PostEditEdgeCandidate {
-        semantic_id,
-        provenance: reference.provenance.clone(),
-        role,
-        evidence: reference.evidence.clone(),
-    };
-    match edit_kind {
-        "fillet" | "chamfer" => Ok(vec![candidate(
-            format!("{}-reattached", reference.semantic_id),
-            reference.role.clone(),
-        )]),
-        "fillet-ambiguous" => Ok(vec![
-            candidate(
-                format!("{}-a", reference.semantic_id),
-                reference.role.clone(),
-            ),
-            candidate(
-                format!("{}-b", reference.semantic_id),
-                reference.role.clone(),
-            ),
-        ]),
-        "fillet-lost" => Ok(Vec::new()),
-        "fillet-incompatible" => Ok(vec![candidate(
-            format!("{}-incompatible", reference.semantic_id),
-            "incompatible-role".to_string(),
-        )]),
-        _ => Err(HostError::Validation {
-            detail: format!("unsupported topology edit kind: {edit_kind}"),
-        }),
-    }
-}
-
 fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeCandidate> {
     result
         .iter()
@@ -1718,45 +1682,31 @@ impl Host {
                     let expected_revision = string_field("expected_revision")?;
                     let edit_feature_id = string_field("edit_feature_id")?;
                     let edit_kind = string_field("edit_kind")?;
-                    let view = if let Some(base_feature_id) = request
-                        .get("base_feature_id")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        if edit_kind != "fillet" {
-                            return Err(HostError::Validation {
-                                detail: "worker-backed edge reattachment currently requires fillet"
-                                    .to_string(),
-                            });
-                        }
-                        let radius = request
-                            .get("radius")
-                            .and_then(serde_json::Value::as_f64)
-                            .ok_or_else(|| HostError::Validation {
-                                detail: "worker-backed edge reattachment requires radius"
-                                    .to_string(),
-                            })?;
-                        let worker =
-                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-                                detail: error.to_string(),
-                            })?;
-                        self.reattach_edge_with_fillet(
-                            bundle_path,
-                            expected_revision,
-                            base_feature_id,
-                            edit_feature_id,
-                            radius,
-                            reference,
-                            &worker,
-                        )?
-                    } else {
-                        self.reattach_edge(
-                            bundle_path,
-                            expected_revision,
-                            edit_feature_id,
-                            edit_kind,
-                            reference,
-                        )?
-                    };
+                    if edit_kind != "fillet" {
+                        return Err(HostError::Validation {
+                            detail: "edge reattachment currently requires fillet".to_string(),
+                        });
+                    }
+                    let base_feature_id = string_field("base_feature_id")?;
+                    let radius = request
+                        .get("radius")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "edge reattachment requires radius".to_string(),
+                        })?;
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let view = self.reattach_edge_with_fillet(
+                        bundle_path,
+                        expected_revision,
+                        &base_feature_id,
+                        edit_feature_id,
+                        radius,
+                        reference,
+                        &worker,
+                    )?;
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
                         EdgeReattachmentOutcome::Resolved { semantic_id } => {
                             ("resolved", Some(semantic_id), Vec::new())
@@ -1787,76 +1737,6 @@ impl Host {
                     ),
                 }),
             }
-        })
-    }
-
-    /// Resolve one selected edge against an edit evaluator's explicit
-    /// post-edit evidence before publishing the edit as canonical state.
-    pub fn reattach_edge(
-        &self,
-        root: impl AsRef<Path>,
-        expected_revision: &str,
-        edit_feature_id: &str,
-        edit_kind: &str,
-        reference: SelectedEdgeReference,
-    ) -> Result<EdgeReattachmentView, HostError> {
-        if edit_feature_id.is_empty() || edit_kind.is_empty() {
-            return Err(HostError::Validation {
-                detail: "edge edit feature and kind must not be empty".to_string(),
-            });
-        }
-        let root = root.as_ref();
-        let bundle = Bundle::at(root);
-        let loaded = bundle.open()?;
-        let source_snapshot = SnapshotView::from(&loaded);
-        if loaded.revision_hash_hex() != expected_revision {
-            return Err(HostError::Validation {
-                detail: format!(
-                    "edge edit source revision {expected_revision:?} does not match current revision {:?}",
-                    loaded.revision_hash_hex()
-                ),
-            });
-        }
-        let candidates = post_edit_edge_candidates(edit_kind, &reference)?;
-        let outcome = resolve_edge_reference(&reference, candidates);
-        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
-            return Ok(EdgeReattachmentView {
-                outcome,
-                source_snapshot: source_snapshot.clone(),
-                snapshot: source_snapshot,
-                edit_feature_id: edit_feature_id.to_string(),
-                committed: false,
-            });
-        }
-        let selected_edge_id = match &outcome {
-            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id,
-            _ => unreachable!(),
-        };
-        let kind = serde_json::json!({
-            "schema": "threeterm.reattach-edge/1",
-            "edit_kind": edit_kind,
-            "selected_edge_id": selected_edge_id,
-            "reference": reference,
-        })
-        .to_string();
-        let updated =
-            match bundle.append_feature_if_revision(edit_feature_id, &kind, expected_revision) {
-                Ok(updated) => updated,
-                Err(error) => {
-                    if let Ok(current) = bundle.open() {
-                        self.current.replace(Some(current));
-                    }
-                    return Err(error.into());
-                }
-            };
-        let snapshot = SnapshotView::from(&updated);
-        self.current.replace(Some(updated));
-        Ok(EdgeReattachmentView {
-            outcome,
-            source_snapshot,
-            snapshot,
-            edit_feature_id: edit_feature_id.to_string(),
-            committed: true,
         })
     }
 
@@ -1897,6 +1777,9 @@ impl Host {
             source_revision_id: reference.provenance.source_revision_id.clone(),
             source_edge_id: reference.provenance.source_edge_id.clone(),
             role: reference.role.clone(),
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
         });
         let derived = self.stage_occt_result::<FilletResult>(
             root,

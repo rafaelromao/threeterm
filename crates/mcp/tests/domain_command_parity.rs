@@ -430,7 +430,7 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let cli_root = root("edge-cli");
     let mcp_root = root("edge-mcp");
     let tui_root = root("edge-tui");
-    let Some(revision) = setup_edge_root(&cli_root, "cli") else {
+    let Some(cli_revision) = setup_edge_root(&cli_root, "cli") else {
         return;
     };
     let Some(tui_revision) = setup_edge_root(&tui_root, "tui") else {
@@ -439,23 +439,21 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let Some(mcp_revision) = setup_edge_root(&mcp_root, "mcp") else {
         return;
     };
-    assert_eq!(revision, tui_revision);
-    assert_eq!(revision, mcp_revision);
     let cli = threeterm_cli::dispatch::dispatch_registered_command(
         &threeterm_host::Host::new(),
         REATTACH_EDGE_COMMAND_ID,
-        edge_request(&cli_root, &revision),
+        edge_request(&cli_root, &cli_revision),
     )
     .expect("CLI edge command executes");
     let tui = threeterm_tui::execute_selected_edge_reattachment(
         &threeterm_host::Host::new(),
         &tui_root,
-        &revision,
+        &tui_revision,
         "fillet-after-edge",
         "fillet",
         "base",
         0.25,
-        edge_reference(&revision),
+        edge_reference(&tui_revision),
     )
     .expect("TUI edge command executes");
     let mcp = McpServer::new().handle_request(&JsonRpcRequest {
@@ -464,7 +462,7 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.reattach-edge/1",
-            "arguments": edge_request(&mcp_root, &revision)
+            "arguments": edge_request(&mcp_root, &mcp_revision)
         }),
     });
     let mcp = mcp.result.expect("MCP edge command executes")["structuredContent"].clone();

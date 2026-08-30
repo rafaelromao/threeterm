@@ -718,7 +718,7 @@ pub struct FilletResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 

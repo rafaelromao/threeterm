@@ -1983,9 +1983,11 @@ impl Host {
             (
                 authenticated.0,
                 mismatch.or_else(|| {
-                    (replayed.geometry_fingerprints != expected_geometry).then_some(
-                        "recomputed geometry differs from canonical provenance".to_string(),
-                    )
+                    (geometry_fingerprint_map(
+                        &replayed.feature_ids,
+                        &replayed.geometry_fingerprints,
+                    ) != geometry_fingerprint_map_from_loaded(&loaded))
+                    .then_some("recomputed geometry differs from canonical provenance".to_string())
                 }),
             )
         } else {
@@ -5507,6 +5509,31 @@ fn canonical_geometry_fingerprints(bundle: &LoadedBundle) -> Vec<String> {
         }
     }
     latest.into_values().collect()
+}
+
+fn geometry_fingerprint_map_from_loaded(
+    bundle: &LoadedBundle,
+) -> std::collections::BTreeMap<String, String> {
+    let mut fingerprints = std::collections::BTreeMap::new();
+    for entry in bundle.log.entries() {
+        if bundle.graph.contains_feature(&entry.feature_id)
+            && let Some(digest) = &entry.brep_sha256
+        {
+            fingerprints.insert(entry.feature_id.clone(), digest.clone());
+        }
+    }
+    fingerprints
+}
+
+fn geometry_fingerprint_map(
+    feature_ids: &[String],
+    fingerprints: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    feature_ids
+        .iter()
+        .cloned()
+        .zip(fingerprints.iter().cloned())
+        .collect()
 }
 
 fn authenticated_geometry_fingerprints(

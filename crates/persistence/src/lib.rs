@@ -2520,6 +2520,31 @@ fn validate_canonical_kind(
         return Ok(());
     }
     if let Some(payload) = encoded_kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
+        let operation = serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .and_then(|object| object.get("operation"))
+                    .and_then(|operation| operation.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(operation) = operation.as_deref()
+            && !matches!(
+                operation,
+                "define"
+                    | "capture"
+                    | "create-instance"
+                    | "transform-instance"
+                    | "make-independent"
+                    | "edit-parameter"
+            )
+        {
+            return Err(BundleError::CanonicalOperationUnknown {
+                log_index,
+                operation: operation.to_string(),
+            });
+        }
         serde_json::from_str::<ComponentCommand>(payload).map_err(|error| {
             if let Some(field) = unknown_field_in(&error.to_string()) {
                 BundleError::CanonicalFieldUnknown { log_index, field }
@@ -2561,7 +2586,12 @@ fn canonical_payload_error(
 }
 
 fn unsupported_operation_version(encoded_kind: &str) -> Option<String> {
-    for prefix in ["apply-add/", "apply-set/", "apply-remove/"] {
+    for prefix in [
+        "apply-add/",
+        "apply-set/",
+        "apply-remove/",
+        "fit-dimension/",
+    ] {
         let Some(rest) = encoded_kind.strip_prefix(prefix) else {
             continue;
         };
@@ -2595,10 +2625,47 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "shell"
             | "draft"
             | "loft"
-    ) || kind.starts_with("brep:")
-        || kind.starts_with("bracket:")
-        || kind.starts_with("plate-")
-        || kind.starts_with("sketch-segment:")
+    ) || is_supported_brep_kind(kind)
+        || is_supported_bracket_kind(kind)
+        || matches!(kind, "plate-vertical" | "plate-horizontal")
+        || is_supported_sketch_segment_kind(kind)
+}
+
+fn is_supported_brep_kind(kind: &str) -> bool {
+    let Some(feature_id) = kind.strip_prefix("brep:") else {
+        return false;
+    };
+    !feature_id.is_empty()
+        && feature_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_supported_sketch_segment_kind(kind: &str) -> bool {
+    let Some(coordinates) = kind.strip_prefix("sketch-segment:") else {
+        return false;
+    };
+    let values = coordinates
+        .split(',')
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>();
+    values.is_ok_and(|values| values.len() == 4 && values.into_iter().all(f64::is_finite))
+}
+
+fn is_supported_bracket_kind(kind: &str) -> bool {
+    let Some(parameters) = kind.strip_prefix("bracket:") else {
+        return false;
+    };
+    let mut keys = std::collections::BTreeSet::new();
+    !parameters.is_empty()
+        && parameters.split(';').all(|parameter| {
+            let Some((key, value)) = parameter.split_once('=') else {
+                return false;
+            };
+            matches!(key, "length" | "width" | "height" | "thickness")
+                && keys.insert(key)
+                && value.parse::<f64>().is_ok_and(f64::is_finite)
+        })
 }
 
 fn verify_brep_provenance(

@@ -75,6 +75,57 @@ fn unsupported_feature_kind_is_rejected_at_the_canonical_boundary() {
 }
 
 #[test]
+fn unsupported_dynamic_feature_encoding_is_rejected_at_the_canonical_boundary() {
+    let path = root("dynamic-feature-kind");
+    let _ = fs::remove_dir_all(&path);
+    write_fresh(&path, ProjectGeneration::with_id("compatibility")).expect("bundle writes");
+
+    assert!(matches!(
+        Bundle::at(&path).append_feature("bracket", "bracket:future=1"),
+        Err(BundleError::FeatureKindUnknown { kind, .. }) if kind == "bracket:future=1"
+    ));
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn malformed_dynamic_feature_encodings_are_rejected_at_the_canonical_boundary() {
+    for (label, kind) in [
+        ("empty-brep", "brep:"),
+        ("unknown-plate", "plate-future"),
+        ("malformed-sketch-segment", "sketch-segment:not-geometry"),
+    ] {
+        let path = root(label);
+        let _ = fs::remove_dir_all(&path);
+        write_fresh(&path, ProjectGeneration::with_id("compatibility")).expect("bundle writes");
+
+        assert!(matches!(
+            Bundle::at(&path).append_feature("feature-1", kind),
+            Err(BundleError::FeatureKindUnknown { kind: found, .. }) if found == kind
+        ));
+
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
+fn unknown_component_operation_is_a_structured_canonical_diagnostic() {
+    let path = root("component-operation");
+    let _ = fs::remove_dir_all(&path);
+    write_fresh(&path, ProjectGeneration::with_id("compatibility")).expect("bundle writes");
+
+    assert!(matches!(
+        Bundle::at(&path).append_feature(
+            "component-transaction-0",
+            r#"component-command:{"operation":"future"}"#,
+        ),
+        Err(BundleError::CanonicalOperationUnknown { operation, .. }) if operation == "future"
+    ));
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn unsupported_versioned_operation_is_rejected_before_publication() {
     let path = root("operation-version");
     let _ = fs::remove_dir_all(&path);

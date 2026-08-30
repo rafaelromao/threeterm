@@ -103,9 +103,11 @@ verify_native_worker_execution() {
     local worker="$1"
     local worker_id="$2"
     local output
-    output="$(timeout 10s "${worker}" </dev/null 2>&1 || true)"
-    if [[ "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* ]]; then
-        printf 'native %s worker did not complete its ready handshake: %s\n' "${worker_id}" "${worker}" >&2
+    local status=0
+    output="$(timeout 10s "${worker}" </dev/null 2>&1)" || status=$?
+    if [[ "${status}" -ne 0 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* ]]; then
+        printf 'native %s worker did not complete its ready handshake: %s (status=%s)\n' \
+            "${worker_id}" "${worker}" "${status}" >&2
         printf '%s\n' "${output}" >&2
         return 1
     fi

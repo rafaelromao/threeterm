@@ -52,3 +52,10 @@ GIT_ALLOW_PROTOCOL=file clone_at_commit "${SOURCE_FIXTURE}" "${SOURCE_COMMIT}" "
 test -f "${CHECKOUT_FIXTURE}/extlib/mimalloc/CMakeLists.txt"
 
 printf '%s\n' 'native-worker source checkout contract satisfied'
+
+if verify_native_worker_execution /bin/false occt; then
+    printf '%s\n' 'worker readiness must require a successful exit status' >&2
+    exit 1
+fi
+
+printf '%s\n' 'native-worker readiness contract satisfied'

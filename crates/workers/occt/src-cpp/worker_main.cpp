@@ -71,6 +71,7 @@
 #include <Geom_Plane.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopoDS_Face.hxx>
 
 #include <cmath>
@@ -1345,7 +1346,7 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
-void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
+void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Edge>& edges,
                             const JsonParser::Value& request) {
     const auto* selected = find_field(request, "selected_edge");
     if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) {
@@ -1356,13 +1357,9 @@ void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
     const std::string source_revision_id = get_string(*selected, "source_revision_id");
     const std::string source_edge_id = get_string(*selected, "source_edge_id");
     const std::string role = get_string(*selected, "role");
-    const auto selected_midpoint = get_vec3(*selected, "midpoint");
-    const auto selected_tangent = get_vec3(*selected, "tangent");
-    const double selected_length = get_number(*selected, "length");
     bool first = true;
     out << ",\"edge_candidates\":[";
-    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+    for (const TopoDS_Edge& edge : edges) {
         GProp_GProps properties;
         BRepGProp::LinearProperties(edge, properties);
         TopoDS_Vertex first_vertex;
@@ -1378,23 +1375,6 @@ void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
             (first_point.X() + last_point.X()) / 2.0,
             (first_point.Y() + last_point.Y()) / 2.0,
             (first_point.Z() + last_point.Z()) / 2.0);
-        const auto midpoint_distance = std::sqrt(
-            std::pow(midpoint.X() - selected_midpoint[0], 2.0) +
-            std::pow(midpoint.Y() - selected_midpoint[1], 2.0) +
-            std::pow(midpoint.Z() - selected_midpoint[2], 2.0));
-        const auto tangent_length = tangent.Magnitude();
-        const auto selected_tangent_length = std::sqrt(
-            std::pow(selected_tangent[0], 2.0) +
-            std::pow(selected_tangent[1], 2.0) +
-            std::pow(selected_tangent[2], 2.0));
-        const auto tangent_dot =
-            (tangent.X() * selected_tangent[0] + tangent.Y() * selected_tangent[1] +
-             tangent.Z() * selected_tangent[2]) /
-            (tangent_length * selected_tangent_length);
-        if (midpoint_distance > 1e-6 || std::abs(properties.Mass() - selected_length) > 1e-6 ||
-            1.0 - std::abs(tangent_dot) > 1e-6) {
-            continue;
-        }
         std::ostringstream identity;
         identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
                  << properties.Mass();
@@ -1544,6 +1524,34 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             status = "brep_invalid";
         }
 
+        std::vector<TopoDS_Edge> edge_candidates;
+        if (!selected_source_edge.IsNull()) {
+            const TopTools_ListOfShape& modified = fillet.Modified(selected_source_edge);
+            for (TopTools_ListIteratorOfListOfShape iterator(modified); iterator.More();
+                 iterator.Next()) {
+                if (iterator.Value().ShapeType() == TopAbs_EDGE) {
+                    edge_candidates.push_back(TopoDS::Edge(iterator.Value()));
+                }
+            }
+            const TopTools_ListOfShape& generated = fillet.Generated(selected_source_edge);
+            for (TopTools_ListIteratorOfListOfShape iterator(generated); iterator.More();
+                 iterator.Next()) {
+                if (iterator.Value().ShapeType() == TopAbs_EDGE) {
+                    edge_candidates.push_back(TopoDS::Edge(iterator.Value()));
+                }
+            }
+            if (edge_candidates.empty() && !fillet.IsDeleted(selected_source_edge)) {
+                for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More();
+                     explorer.Next()) {
+                    const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+                    if (edge.IsSame(selected_source_edge)) {
+                        edge_candidates.push_back(edge);
+                        break;
+                    }
+                }
+            }
+        }
+
         std::ostringstream out;
         out << "{"
             << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
@@ -1554,7 +1562,7 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             << "\"brep_sha256\":\"" << json_escape(sha) << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\"";
-        append_edge_candidates(out, result, request);
+        append_edge_candidates(out, edge_candidates, request);
         out << "}";
         g_result_json = out.str();
         return status == "ok";

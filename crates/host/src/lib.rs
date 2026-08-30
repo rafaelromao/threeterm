@@ -1762,6 +1762,21 @@ impl Host {
                 detail: "edge edit source revision does not match current revision".to_string(),
             });
         }
+        if reference.provenance.source_feature_id != base_feature_id {
+            return Err(HostError::Validation {
+                detail: "edge reference source feature does not match edit base feature"
+                    .to_string(),
+            });
+        }
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "edge reference source revision does not match current revision"
+                    .to_string(),
+            });
+        }
+        let mut worker_reference = reference.clone();
+        worker_reference.provenance.source_feature_id = base_feature_id.to_string();
+        worker_reference.provenance.source_revision_id = source_snapshot.revision_hash.clone();
         let request = FilletRequest::new(
             threeterm_occt_worker::new_request_id(),
             bundle_root(root)
@@ -1772,14 +1787,14 @@ impl Host {
         .with_output_path(root.join("stage"), format!("{edit_feature_id}.brep"))
         .with_feature_id(edit_feature_id)
         .with_selected_edge(SelectedEdgeContext {
-            semantic_id: reference.semantic_id.clone(),
-            source_feature_id: reference.provenance.source_feature_id.clone(),
-            source_revision_id: reference.provenance.source_revision_id.clone(),
-            source_edge_id: reference.provenance.source_edge_id.clone(),
-            role: reference.role.clone(),
-            midpoint: reference.evidence.midpoint,
-            tangent: reference.evidence.tangent,
-            length: reference.evidence.length,
+            semantic_id: worker_reference.semantic_id.clone(),
+            source_feature_id: worker_reference.provenance.source_feature_id.clone(),
+            source_revision_id: worker_reference.provenance.source_revision_id.clone(),
+            source_edge_id: worker_reference.provenance.source_edge_id.clone(),
+            role: worker_reference.role.clone(),
+            midpoint: worker_reference.evidence.midpoint,
+            tangent: worker_reference.evidence.tangent,
+            length: worker_reference.evidence.length,
         });
         let derived = self.stage_occt_result::<FilletResult>(
             root,
@@ -1788,7 +1803,7 @@ impl Host {
             worker,
         )?;
         let candidates = domain_edge_candidates(&derived.result.edge_candidates);
-        let outcome = resolve_edge_reference(&reference, candidates);
+        let outcome = resolve_edge_reference(&worker_reference, candidates);
         if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
             if let Some(stage_root) = derived.artifact.path.parent() {
                 let _ = fs::remove_dir_all(stage_root);

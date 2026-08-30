@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID;
 
 fn root(label: &str) -> std::path::PathBuf {
@@ -103,6 +104,26 @@ fn production_command_reports_failures_before_canonical_mutation() {
     let host = Host::new();
     let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let log = fs::read(root.join("transactions.log")).expect("log reads");
+
+    for (field, value) in [
+        ("source_feature_id", json!("other-base")),
+        ("source_revision_id", json!("other-revision")),
+    ] {
+        let mut inconsistent = reference(&revision);
+        inconsistent["provenance"][field] = value;
+        let error = host
+            .execute_domain_command(
+                REATTACH_EDGE_COMMAND_ID,
+                request(&root, &revision, inconsistent),
+            )
+            .expect_err("inconsistent provenance is rejected before staging");
+        assert!(matches!(
+            error,
+            ExecutionError::Handler(threeterm_host::HostError::Validation { .. })
+        ));
+        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+        assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
+    }
 
     let mut selected = reference(&revision);
     selected["evidence"]["midpoint"] = json!([99.0, 99.0, 99.0]);

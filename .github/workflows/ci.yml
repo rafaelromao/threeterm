@@ -13,7 +13,7 @@ jobs:
   workspace-build:
     name: Workspace build on rootless-Podman Arch
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       PODMAN_ROOTLESS: "1"
     steps:

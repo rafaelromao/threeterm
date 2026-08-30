@@ -1348,7 +1348,10 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
 void append_edge_candidates(std::ostringstream& out, const TopoDS_Shape& shape,
                             const JsonParser::Value& request) {
     const auto* selected = find_field(request, "selected_edge");
-    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) return;
+    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) {
+        out << ",\"edge_candidates\":[]";
+        return;
+    }
     const std::string source_feature_id = get_string(*selected, "source_feature_id");
     const std::string source_revision_id = get_string(*selected, "source_revision_id");
     const std::string source_edge_id = get_string(*selected, "source_edge_id");

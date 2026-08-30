@@ -3659,7 +3659,8 @@ fn migration_graph(log: &TransactionLog) -> Result<FeatureGraph, BundleError> {
                 })
             })
             .transpose()?;
-        let (operation, canonical_kind) = apply_kind(&entry.kind);
+        let (encoded_operation, canonical_kind) = apply_kind(&entry.kind);
+        let operation = entry.operation.as_deref().or(encoded_operation);
         let feature_kind = if sketch_payload.is_some() {
             "sketch"
         } else {
@@ -4300,6 +4301,26 @@ mod tests {
         assert_eq!(first_generation.revisions[0].id, v0.manifest.revision_id);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_replays_explicit_operations_on_legacy_plain_kinds() {
+        let add = LogEntry::new(0, EMPTY_LOG_DIGEST_HEX, "feature-1", "box");
+        let mut add = add;
+        add.operation = Some("add".to_string());
+        add.terminal_digest = add.recomputed_digest();
+        let mut set = LogEntry::new(1, &add.terminal_digest, "feature-1", "sphere");
+        set.operation = Some("set".to_string());
+        set.terminal_digest = set.recomputed_digest();
+        let log = TransactionLog {
+            entries: vec![add, set],
+        };
+
+        let graph = migration_graph(&log).expect("legacy operations replay");
+        assert_eq!(
+            graph.features().next().expect("feature exists").kind,
+            "sphere"
+        );
     }
 
     #[test]

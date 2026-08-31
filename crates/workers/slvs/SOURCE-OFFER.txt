@@ -19,6 +19,6 @@ the immutable revision recorded in manifest.json, in
 source/threeterm-source.tar. The worker source and build files are also
 available unpacked under source/crates/workers/slvs.
 
-The GNU General Public License,
-version 3, and the complete license text in LICENSE-GPL-3.0.txt govern this
-distribution.
+The GNU General Public License, version 3, governs this distribution. The
+complete license text is LICENSE-GPL-3.0.txt in the source tree and
+LICENSES/GPL-3.0-only.txt in a staged artifact.

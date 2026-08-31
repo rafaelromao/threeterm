@@ -61,10 +61,8 @@ fail() {
 }
 
 verify_release_artifact() {
-    local manifest="${THREETERM_RELEASE_ARTIFACT_MANIFEST:-}"
-    local artifact_root="${THREETERM_RELEASE_ARTIFACT_ROOT:-}"
-    [[ -n "$manifest" && -n "$artifact_root" ]] \
-        || fail 'release artifact manifest and root must be supplied'
+    local artifact_root="${THREETERM_RELEASE_ARTIFACT_ROOT:-${ROOT}/target/libslvs-artifact}"
+    local manifest="${THREETERM_RELEASE_ARTIFACT_MANIFEST:-${artifact_root}/manifest.json}"
     [[ -f "$LICENSING_SCRIPT" ]] || fail "licensing verifier not found: ${LICENSING_SCRIPT}"
     # shellcheck source=/dev/null
     source "$LICENSING_SCRIPT"

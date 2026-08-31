@@ -28,3 +28,14 @@ if verify_libslvs_artifact "${tampered}/manifest.json" "${tampered}"; then
 fi
 
 printf '%s\n' 'libslvs artifact rejection contract satisfied'
+
+symlinked="${WORK}/symlinked"
+cp -a "${artifact}" "${symlinked}"
+rm "${symlinked}/NOTICE"
+ln -s "${artifact}/NOTICE" "${symlinked}/NOTICE"
+if verify_libslvs_artifact "${symlinked}/manifest.json" "${symlinked}"; then
+    printf '%s\n' 'artifact verifier accepted symlinked NOTICE' >&2
+    exit 1
+fi
+
+printf '%s\n' 'libslvs artifact symlink rejection contract satisfied'

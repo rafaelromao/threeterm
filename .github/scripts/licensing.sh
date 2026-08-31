@@ -4,9 +4,11 @@
 set -euo pipefail
 
 LIBSLVS_POLICY_RELATIVE="licenses/libslvs.json"
+LICENSING_FAILED=0
 
 licensing_fail() {
     printf 'licensing:%s: %s\n' "$1" "$2" >&2
+    LICENSING_FAILED=1
     return 1
 }
 
@@ -15,7 +17,7 @@ licensing_require_file() {
     local relative="$2"
     [[ -n "$relative" && "$relative" != /* && "$relative" != *..* ]] \
         || licensing_fail path "unsafe licensing path: ${relative}"
-    [[ -f "${root}/${relative}" ]] \
+    [[ -f "${root}/${relative}" && ! -L "${root}/${relative}" ]] \
         || licensing_fail missing-file "required licensing file is missing: ${relative}"
 }
 
@@ -24,6 +26,7 @@ licensing_sha256() {
 }
 
 verify_libslvs_source() {
+    LICENSING_FAILED=0
     local root="$1"
     local policy="${root}/${LIBSLVS_POLICY_RELATIVE}"
     [[ -f "$policy" ]] || licensing_fail missing-policy "policy is missing: ${LIBSLVS_POLICY_RELATIVE}"
@@ -46,7 +49,8 @@ verify_libslvs_source() {
     [[ "$worker_schema" == threeterm.workers.slvs/1 ]] || licensing_fail worker-schema "unexpected worker schema: ${worker_schema}"
     [[ "$source_repository" == https://github.com/solvespace/solvespace ]] \
         || licensing_fail source-repository "unexpected SolveSpace source repository"
-    [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || licensing_fail source-commit "source commit is not a full SHA"
+    [[ "$source_commit" == 27b6a080c8b669421bd4d444650c3b8eddec5687 ]] \
+        || licensing_fail source-commit "source commit is not the approved SolveSpace revision"
     [[ "$source_url" == "${source_repository}/tree/${source_commit}" ]] \
         || licensing_fail source-url "source URL must identify the pinned commit"
 
@@ -56,27 +60,31 @@ verify_libslvs_source() {
     [[ "$(wc -l < "${root}/${license_text}")" -ge 300 ]] \
         || licensing_fail license-text "GPLv3 license text is incomplete"
     grep -Fq 'GNU GENERAL PUBLIC LICENSE' "${root}/${license_text}" \
-        || licensing_fail license-text "GPLv3 heading is missing"
+        || { licensing_fail license-text "GPLv3 heading is missing"; return 1; }
     grep -Fq 'END OF TERMS AND CONDITIONS' "${root}/${license_text}" \
-        || licensing_fail license-text "GPLv3 terms are incomplete"
+        || { licensing_fail license-text "GPLv3 terms are incomplete"; return 1; }
 
     grep -Fq "$basis" "${root}/${notice}" \
-        || licensing_fail notice "NOTICE does not name ${basis}"
+        || { licensing_fail notice "NOTICE does not name ${basis}"; return 1; }
     grep -Fq "$source_commit" "${root}/${notice}" \
-        || licensing_fail notice "NOTICE does not name the pinned source commit"
+        || { licensing_fail notice "NOTICE does not name the pinned source commit"; return 1; }
     grep -Fq "$source_url" "${root}/${notice}" \
-        || licensing_fail notice "NOTICE does not name the immutable source URL"
+        || { licensing_fail notice "NOTICE does not name the immutable source URL"; return 1; }
     grep -Fq 'SOURCE-OFFER.txt' "${root}/${notice}" \
-        || licensing_fail notice "NOTICE does not identify the source offer"
+        || { licensing_fail notice "NOTICE does not identify the source offer"; return 1; }
 
     grep -Fq 'valid for at least three years' "${root}/${source_offer}" \
-        || licensing_fail source-offer "source offer has no three-year validity"
+        || { licensing_fail source-offer "source offer has no three-year validity"; return 1; }
     grep -Fq 'Corresponding Source' "${root}/${source_offer}" \
-        || licensing_fail source-offer "source offer does not promise Corresponding Source"
+        || { licensing_fail source-offer "source offer does not promise Corresponding Source"; return 1; }
     grep -Fq 'at no charge' "${root}/${source_offer}" \
-        || licensing_fail source-offer "source offer has no no-charge delivery term"
+        || { licensing_fail source-offer "source offer has no no-charge delivery term"; return 1; }
     grep -Fq "$source_url" "${root}/${source_offer}" \
-        || licensing_fail source-offer "source offer does not identify the pinned source"
+        || { licensing_fail source-offer "source offer does not identify the pinned source"; return 1; }
+    grep -Fq 'https://github.com/rafaelromao/threeterm' "${root}/${source_offer}" \
+        || { licensing_fail source-offer "source offer does not identify the ThreeTerm source"; return 1; }
+    grep -Fq 'source/crates/workers/slvs' "${root}/${source_offer}" \
+        || { licensing_fail source-offer "source offer does not identify the bundled worker source"; return 1; }
     grep -Fq 'https://github.com/rafaelromao/threeterm' "${root}/${source_offer}" \
         || licensing_fail source-offer "source offer does not identify the ThreeTerm source"
 
@@ -121,6 +129,7 @@ verify_libslvs_source() {
         "${root}/crates/workers/slvs/src/lib.rs" \
         || licensing_fail worker-source "worker runtime source commit does not agree with policy"
 
+    if (( LICENSING_FAILED )); then return 1; fi
     printf '%s\n' 'libslvs licensing source verified'
 }
 
@@ -140,6 +149,16 @@ stage_libslvs_artifact() {
         "${artifact_root}/LICENSES/GPL-3.0-only.txt"
     cp "${source_root}/crates/workers/slvs/NOTICE" "${artifact_root}/NOTICE"
     cp "${source_root}/crates/workers/slvs/SOURCE-OFFER.txt" "${artifact_root}/SOURCE-OFFER.txt"
+    mkdir -p "${artifact_root}/source/crates/workers/slvs/src" \
+        "${artifact_root}/source/crates/workers/slvs/src-cpp"
+    cp "${source_root}/crates/workers/slvs/Cargo.toml" \
+        "${artifact_root}/source/crates/workers/slvs/Cargo.toml"
+    cp "${source_root}/crates/workers/slvs/build.rs" \
+        "${artifact_root}/source/crates/workers/slvs/build.rs"
+    cp "${source_root}/crates/workers/slvs/src/lib.rs" \
+        "${artifact_root}/source/crates/workers/slvs/src/lib.rs"
+    cp "${source_root}/crates/workers/slvs/src-cpp/worker_main.cpp" \
+        "${artifact_root}/source/crates/workers/slvs/src-cpp/worker_main.cpp"
 
     local manifest="${artifact_root}/manifest.json"
     local temporary="${manifest}.tmp.$$"
@@ -149,6 +168,10 @@ stage_libslvs_artifact() {
         LICENSES/GPL-3.0-only.txt
         NOTICE
         SOURCE-OFFER.txt
+        source/crates/workers/slvs/Cargo.toml
+        source/crates/workers/slvs/build.rs
+        source/crates/workers/slvs/src/lib.rs
+        source/crates/workers/slvs/src-cpp/worker_main.cpp
     )
     local files='[]' path digest
     for path in "${file_paths[@]}"; do
@@ -192,6 +215,7 @@ stage_libslvs_artifact() {
 }
 
 verify_libslvs_artifact() {
+    LICENSING_FAILED=0
     local manifest="$1"
     local root="${2:-$(dirname "$manifest")}"
     [[ -f "$manifest" ]] || licensing_fail missing-manifest "artifact manifest is missing: ${manifest}"
@@ -228,9 +252,18 @@ verify_libslvs_artifact() {
 
     local count path digest actual
     count="$(jq '.files | length' "$manifest")"
-    [[ "$count" == 5 ]] || licensing_fail manifest "artifact manifest must list five required files"
-    [[ "$(jq -c '[.files[].path]' "$manifest")" == \
-        '["bin/threeterm-slvs-worker","licenses/libslvs.json","LICENSES/GPL-3.0-only.txt","NOTICE","SOURCE-OFFER.txt"]' ]] \
+    [[ "$count" == 9 ]] || licensing_fail manifest "artifact manifest must list nine required files"
+    jq -e '.files | map(.path) == [
+        "bin/threeterm-slvs-worker",
+        "licenses/libslvs.json",
+        "LICENSES/GPL-3.0-only.txt",
+        "NOTICE",
+        "SOURCE-OFFER.txt",
+        "source/crates/workers/slvs/Cargo.toml",
+        "source/crates/workers/slvs/build.rs",
+        "source/crates/workers/slvs/src/lib.rs",
+        "source/crates/workers/slvs/src-cpp/worker_main.cpp"
+    ]' "$manifest" >/dev/null \
         || licensing_fail manifest "artifact manifest file list is incomplete or inconsistent"
     while IFS=$'\t' read -r path digest; do
         if ! licensing_require_file "$root" "$path"; then
@@ -251,8 +284,13 @@ verify_libslvs_artifact() {
     if ! licensing_require_file "$root" "$policy"; then return 1; fi
     [[ "$(licensing_sha256 "${root}/${policy}")" == "$policy_digest" ]] \
         || { licensing_fail digest "artifact policy digest is inconsistent"; return 1; }
-    [[ "$(jq -er '.basis' "${root}/${policy}")" == "$basis" ]] \
-        || licensing_fail basis "artifact policy disagrees with manifest"
+    [[ "$(jq -er '.basis' "${root}/${policy}")" == "$basis" \
+        && "$(jq -er '.worker_id' "${root}/${policy}")" == "$worker_id" \
+        && "$(jq -er '.worker_schema_version' "${root}/${policy}")" == "$worker_schema" \
+        && "$(jq -er '.source_repository' "${root}/${policy}")" == "$source_repository" \
+        && "$(jq -er '.source_commit' "${root}/${policy}")" == "$source_commit" \
+        && "$(jq -er '.source_url' "${root}/${policy}")" == "$source_url" ]] \
+        || { licensing_fail basis "artifact policy disagrees with manifest"; return 1; }
     text="$(jq -er '.licensing.license_text.path' "$manifest")"
     text_digest="$(jq -er '.licensing.license_text.sha256' "$manifest")" \
         || licensing_fail license-text "artifact license text digest is missing"
@@ -272,13 +310,32 @@ verify_libslvs_artifact() {
     [[ "$text" == LICENSES/GPL-3.0-only.txt && "$notice" == NOTICE && "$offer" == SOURCE-OFFER.txt ]] \
         || { licensing_fail manifest "artifact licensing paths are inconsistent"; return 1; }
     grep -Fq 'GNU GENERAL PUBLIC LICENSE' "${root}/${text}" \
-        || licensing_fail license-text "artifact GPLv3 text is incomplete"
+        || { licensing_fail license-text "artifact GPLv3 text is incomplete"; return 1; }
     [[ "$(wc -l < "${root}/${text}")" -ge 300 ]] \
-        || licensing_fail license-text "artifact GPLv3 text is incomplete"
+        || { licensing_fail license-text "artifact GPLv3 text is incomplete"; return 1; }
+    grep -Fq 'END OF TERMS AND CONDITIONS' "${root}/${text}" \
+        || { licensing_fail license-text "artifact GPLv3 terms are incomplete"; return 1; }
+    grep -Fq "$basis" "${root}/${notice}" \
+        || { licensing_fail notice "artifact NOTICE does not name the license basis"; return 1; }
+    grep -Fq "$source_commit" "${root}/${notice}" \
+        || { licensing_fail notice "artifact NOTICE does not name the pinned source"; return 1; }
+    grep -Fq "$source_url" "${root}/${notice}" \
+        || { licensing_fail notice "artifact NOTICE does not name the immutable source URL"; return 1; }
     grep -Fq 'SOURCE-OFFER.txt' "${root}/${notice}" \
-        || licensing_fail notice "artifact NOTICE is incomplete"
+        || { licensing_fail notice "artifact NOTICE is incomplete"; return 1; }
     grep -Fq 'valid for at least three years' "${root}/${offer}" \
-        || licensing_fail source-offer "artifact source offer is incomplete"
+        || { licensing_fail source-offer "artifact source offer is incomplete"; return 1; }
+    grep -Fq 'Corresponding Source' "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits Corresponding Source"; return 1; }
+    grep -Fq 'at no charge' "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits no-charge delivery"; return 1; }
+    grep -Fq "$source_url" "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits the pinned source"; return 1; }
+    grep -Fq 'https://github.com/rafaelromao/threeterm' "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits the ThreeTerm source"; return 1; }
+    grep -Fq 'source/crates/workers/slvs' "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits the bundled source"; return 1; }
+    if (( LICENSING_FAILED )); then return 1; fi
     printf '%s\n' 'libslvs licensing artifact verified'
 }
 

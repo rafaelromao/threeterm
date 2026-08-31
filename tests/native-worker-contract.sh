@@ -45,6 +45,7 @@ printf '%s\n' 'submodule materialized' > "${SUBMODULE_WORK}/CMakeLists.txt"
 git -C "${SUBMODULE_WORK}" add CMakeLists.txt
 git -C "${SUBMODULE_WORK}" commit --quiet -m submodule
 git -C "${SUBMODULE_WORK}" push --quiet "${SUBMODULE_FIXTURE}" HEAD:main
+git -C "${SUBMODULE_FIXTURE}" symbolic-ref HEAD refs/heads/main
 git -c protocol.file.allow=always -C "${SOURCE_FIXTURE}" submodule add --quiet "${SUBMODULE_FIXTURE}" extlib/mimalloc
 git -C "${SOURCE_FIXTURE}" commit --quiet -m source
 SOURCE_COMMIT="$(git -C "${SOURCE_FIXTURE}" rev-parse HEAD)"

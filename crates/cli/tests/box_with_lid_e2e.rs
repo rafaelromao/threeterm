@@ -98,6 +98,7 @@ fn extrude(bin: &str, bundle: &Path, feature_id: &str, profile: &Path, height: &
 }
 
 #[test]
+#[ignore = "slow: composes real OCCT and libslvs workflows"]
 fn box_with_lid_runs_project_sketch_fit_extrude_viewport_export_reload() {
     if OcctWorker::locate().is_err() || SlvsWorker::locate().is_err() {
         eprintln!("box_with_lid_e2e: real OCCT and libslvs workers are required");

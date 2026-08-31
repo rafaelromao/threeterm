@@ -109,6 +109,23 @@ fn timing_comparison_failure_is_structured_and_does_not_publish_a_catalog() {
 }
 
 #[test]
+fn timing_comparison_accepts_complete_release_candidate_reports() {
+    let comparisons = threeterm_cli::rehearsal::compare_rehearsal_runs(
+        &[synthetic_timing_run(1.0), synthetic_timing_run(2.0)],
+        temp_root("comparison-success"),
+    )
+    .expect("same-order timing reports compare");
+
+    assert_eq!(comparisons.len(), 9);
+    assert!(
+        comparisons
+            .iter()
+            .all(|comparison| comparison["same_order_of_magnitude"] == true)
+    );
+}
+
+#[test]
+#[ignore = "slow: runs two complete release-candidate rehearsals"]
 fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
     if OcctWorker::locate().is_err() {
         eprintln!("rehearsal_e2e: no OCCT worker binary found; CI runs this production path");
@@ -288,6 +305,7 @@ fn rehearsal_runs_two_release_candidates_and_compares_every_timing_class() {
 }
 
 #[test]
+#[ignore = "slow: validates rehearsal export recovery after two release candidates"]
 fn failed_export_reports_a_structured_diagnostic_and_keeps_the_project_reloadable() {
     if OcctWorker::locate().is_err() {
         eprintln!("rehearsal_e2e: no OCCT worker binary found; CI runs this production path");
@@ -400,6 +418,7 @@ fn schema_and_capability_adversarial_cases_preserve_state_and_publish_evidence()
 }
 
 #[test]
+#[ignore = "slow: runs every native-dependent adversarial case"]
 fn all_adversarial_cases_run_in_order_when_the_occt_worker_is_available() {
     if !require_occt_for_canonical_test() {
         return;
@@ -433,6 +452,7 @@ fn capability_loss_is_demoable_through_the_production_binary() {
 }
 
 #[test]
+#[ignore = "slow: creates a native mismatch-cache adversarial fixture"]
 fn mismatch_cache_is_demoable_through_the_production_binary_when_occt_is_available() {
     if OcctWorker::locate().is_err() {
         if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {

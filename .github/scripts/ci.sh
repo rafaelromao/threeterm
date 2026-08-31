@@ -73,15 +73,11 @@ cargo fmt --all -- --check
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "==> cargo test --workspace"
-# OCCT integration tests spawn disposable native workers; serialize the test
-# harness so the rootless CI container does not kill workers under fan-out.
-# This legacy flow assumes the optional system solver's sketch persistence
-# behavior; the canonical worker tests below cover the approved solver.
-cargo test --workspace --jobs 1 -- --test-threads=1 \
-    --skip box_with_lid_runs_project_sketch_fit_extrude_viewport_export_reload 2>&1 \
-    | tee "${CARGO_TARGET_DIR}/native-worker-test.log"
-test -s "${CARGO_TARGET_DIR}/native-worker-test.log"
+echo "==> test-suite selector contract"
+bash tests/test-test-suite.sh
+
+echo "==> fast test suite"
+THREETERM_REQUIRE_OCCT=1 bash .github/scripts/test-suite.sh fast
 
 echo "==> canonical real-worker integration tests"
 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \

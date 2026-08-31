@@ -5,7 +5,7 @@
 #   3. cargo check --workspace succeeds.
 #   4. cargo fmt --all -- --check passes.
 #   5. cargo clippy --workspace --all-targets -- -D warnings passes.
-#   6. serialized cargo test --workspace passes.
+#   6. the fast serialized test suite passes.
 #   7. the unsigned trademark and namespace release gate is refused, while a
 #      complete fixture is accepted by the gate verifier.
 #
@@ -83,12 +83,11 @@ cargo fmt --all -- --check
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "==> cargo test --workspace"
-# Native-worker tests are serialized to avoid resource contention, matching CI.
-cargo test --workspace --jobs 1 -- --test-threads=1 \
-    --skip box_with_lid_runs_project_sketch_fit_extrude_viewport_export_reload 2>&1 \
-    | tee "${CARGO_TARGET_DIR}/native-worker-test.log"
-test -s "${CARGO_TARGET_DIR}/native-worker-test.log"
+echo "==> test-suite selector contract"
+bash tests/test-test-suite.sh
+
+echo "==> fast test suite"
+bash .github/scripts/test-suite.sh fast
 
 echo "==> canonical real-worker integration tests"
 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \

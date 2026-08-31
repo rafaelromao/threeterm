@@ -5565,17 +5565,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         .expect("stale geometry diagnostic serializes"),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),
         HostError::BundlePathNotDirectory { .. } => "bundle_path_not_directory".to_string(),
-        HostError::Persistence(error) => match error {
-            threeterm_persistence::BundleError::ManifestFieldUnknown { .. }
-            | threeterm_persistence::BundleError::CompatibilityIdentityMismatch { .. }
-            | threeterm_persistence::BundleError::CompatibilityIdentityMissing { .. }
-            | threeterm_persistence::BundleError::CanonicalFieldUnknown { .. }
-            | threeterm_persistence::BundleError::CanonicalOperationUnknown { .. }
-            | threeterm_persistence::BundleError::FeatureKindUnknown { .. }
-            | threeterm_persistence::BundleError::CanonicalVersionUnsupported { .. }
-            | threeterm_persistence::BundleError::LogBrokenLink { .. } => error.to_string(),
-            _ => error.diagnostic_detail().to_string(),
-        },
+        HostError::Persistence(error) => error.diagnostic_detail().to_string(),
         HostError::WorkerFailure { request_id, detail } => request_id
             .as_deref()
             .map(|request_id| format!("request_id={request_id}; {detail}"))
@@ -5672,7 +5662,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
         HostError::DerivedResult { diagnostic } => diagnostic.arg.clone(),
     };
-    let (diagnostic, exit) = match error {
+    let (mut diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
         }
@@ -5694,8 +5684,30 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             EXIT_INTEGRITY_FAILURE,
         ),
     };
+    if let HostError::Persistence(error) = error
+        && persistence_error_has_structured_detail(error)
+    {
+        diagnostic.detail = Some(error.to_string());
+    }
     write_diagnostic(stderr, &diagnostic);
     exit
+}
+
+fn persistence_error_has_structured_detail(error: &threeterm_persistence::BundleError) -> bool {
+    match error {
+        threeterm_persistence::BundleError::ManifestFieldUnknown { .. }
+        | threeterm_persistence::BundleError::CompatibilityIdentityMismatch { .. }
+        | threeterm_persistence::BundleError::CompatibilityIdentityMissing { .. }
+        | threeterm_persistence::BundleError::CanonicalFieldUnknown { .. }
+        | threeterm_persistence::BundleError::CanonicalOperationUnknown { .. }
+        | threeterm_persistence::BundleError::FeatureKindUnknown { .. }
+        | threeterm_persistence::BundleError::CanonicalVersionUnsupported { .. }
+        | threeterm_persistence::BundleError::LogBrokenLink { .. } => true,
+        threeterm_persistence::BundleError::Migration { source } => {
+            persistence_error_has_structured_detail(source)
+        }
+        _ => false,
+    }
 }
 
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {

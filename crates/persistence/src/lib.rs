@@ -71,9 +71,9 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, LoadPolicy,
-        LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
-        PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
+        Bundle, BundleError, CanonicalState, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX,
+        LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION,
+        Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
         PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
         V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
         migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
@@ -619,6 +619,17 @@ pub struct LoadedBundle {
     pub recovered_from_previous: bool,
 }
 
+/// Canonical model state reconstructed solely from an authenticated transaction
+/// log. Derived artifacts and manifest hashes are deliberately not included.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanonicalState {
+    pub graph: FeatureGraph,
+    pub components: ComponentGraph,
+    pub history: HistoryState,
+    pub history_events: Vec<HistoryEvent>,
+    pub feature_ids: Vec<FeatureId>,
+}
+
 impl LoadedBundle {
     pub fn feature_graph_hash_hex(&self) -> &str {
         &self.manifest.feature_graph_hash
@@ -1068,149 +1079,13 @@ impl Bundle {
             return Err(BundleError::LogDigestMismatch);
         }
 
-        let mut graph = FeatureGraph::empty();
-        let mut components = ComponentGraph::default();
-        let mut history = HistoryState::default();
-        let mut history_events = Vec::new();
-        let mut feature_ids = Vec::new();
-        for entry in log.entries() {
-            if let Some(intent) = &entry.intent {
-                intent
-                    .validate(&entry.feature_id)
-                    .map_err(|error| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: error.to_string(),
-                    })?;
-                if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
-                    return Err(BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: "canonical extrude intent request ID does not match transaction provenance"
-                            .to_string(),
-                    });
-                }
-                if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
-                    return Err(BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail:
-                            "canonical extrude intent source revision does not match the log prefix"
-                                .to_string(),
-                    });
-                }
-            }
-            if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
-                let event: HistoryEvent =
-                    serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: format!("invalid history event: {error}"),
-                    })?;
-                history
-                    .apply_event(&event)
-                    .map_err(|error| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: error.to_string(),
-                    })?;
-                history_events.push(event);
-                continue;
-            }
-            if let Some(payload) = entry.kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
-                let fit: FitDimension =
-                    serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: format!("invalid fit dimension: {error}"),
-                    })?;
-                graph
-                    .add_fit_dimension(fit)
-                    .map_err(|detail| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail,
-                    })?;
-                continue;
-            }
-            let sketch_payload = entry
-                .kind
-                .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
-                .map(|payload| {
-                    serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(
-                        |error| BundleError::LogBrokenLink {
-                            log_index: entry.log_index,
-                            detail: format!("invalid sketch payload: {error}"),
-                        },
-                    )
-                })
-                .transpose()?;
-            let feature_kind = if sketch_payload.is_some() {
-                "sketch"
-            } else {
-                &entry.kind
-            };
-            let feature = Feature::new(&entry.feature_id, feature_kind).map_err(|error| {
-                BundleError::LogBrokenLink {
-                    log_index: entry.log_index,
-                    detail: error.to_string(),
-                }
-            })?;
-            match entry.operation.as_deref() {
-                Some("remove") => {
-                    if !graph.remove_feature(&entry.feature_id) {
-                        return Err(BundleError::LogBrokenLink {
-                            log_index: entry.log_index,
-                            detail: "remove operation targets a missing feature".to_string(),
-                        });
-                    }
-                    feature_ids.retain(|id: &FeatureId| id.as_str() != entry.feature_id);
-                    continue;
-                }
-                Some("set") => {
-                    if !graph.contains_feature(&entry.feature_id) {
-                        return Err(BundleError::LogBrokenLink {
-                            log_index: entry.log_index,
-                            detail: "set operation targets a missing feature".to_string(),
-                        });
-                    }
-                    graph.set_feature(feature);
-                    continue;
-                }
-                Some("add") => {}
-                Some(operation) => {
-                    return Err(BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: format!("unknown transaction operation: {operation}"),
-                    });
-                }
-                None => {}
-            }
-            if let Some(payload) = sketch_payload {
-                graph.add_sketch(feature, payload).map_err(|detail| {
-                    BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail,
-                    }
-                })?;
-            } else {
-                graph.add_feature(feature);
-            }
-            if !feature_ids.iter().any(|id| id.as_str() == entry.feature_id) {
-                feature_ids.push(FeatureId::new(&entry.feature_id).map_err(|error| {
-                    BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: error.to_string(),
-                    }
-                })?);
-            }
-            if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
-                let command: ComponentCommand =
-                    serde_json::from_str(command).map_err(|error| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail: format!("invalid component command: {error}"),
-                    })?;
-                components
-                    .apply(&command)
-                    .map_err(|detail| BundleError::LogBrokenLink {
-                        log_index: entry.log_index,
-                        detail,
-                    })?;
-            }
-        }
+        let CanonicalState {
+            graph,
+            components,
+            history,
+            history_events,
+            feature_ids,
+        } = replay_canonical_state(&log)?;
         if manifest.transaction_count != log.len()
             || manifest.transaction_bytes != transaction_bytes.len()
             || manifest.transaction_sha256 != hash(&transaction_bytes)
@@ -2356,6 +2231,162 @@ fn validate_compatibility_identities(manifest: &Manifest) -> Result<(), BundleEr
     Ok(())
 }
 
+/// Reconstruct the canonical model from the authenticated transaction stream.
+/// This boundary intentionally does not read manifest hashes or Derived Results.
+pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, BundleError> {
+    let mut graph = FeatureGraph::empty();
+    let mut components = ComponentGraph::default();
+    let mut history = HistoryState::default();
+    let mut history_events = Vec::new();
+    let mut feature_ids = Vec::new();
+    for entry in log.entries() {
+        if let Some(intent) = &entry.intent {
+            intent
+                .validate(&entry.feature_id)
+                .map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: error.to_string(),
+                })?;
+            if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail:
+                        "canonical extrude intent request ID does not match transaction provenance"
+                            .to_string(),
+                });
+            }
+            if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail:
+                        "canonical extrude intent source revision does not match the log prefix"
+                            .to_string(),
+                });
+            }
+        }
+        if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
+            let event: HistoryEvent =
+                serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!("invalid history event: {error}"),
+                })?;
+            history
+                .apply_event(&event)
+                .map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: error.to_string(),
+                })?;
+            history_events.push(event);
+            continue;
+        }
+        if let Some(payload) = entry.kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
+            let fit: FitDimension =
+                serde_json::from_str(payload).map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!("invalid fit dimension: {error}"),
+                })?;
+            graph
+                .add_fit_dimension(fit)
+                .map_err(|detail| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail,
+                })?;
+            continue;
+        }
+        let sketch_payload = entry
+            .kind
+            .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
+            .map(|payload| {
+                serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(|error| {
+                    BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: format!("invalid sketch payload: {error}"),
+                    }
+                })
+            })
+            .transpose()?;
+        let feature_kind = if sketch_payload.is_some() {
+            "sketch"
+        } else {
+            &entry.kind
+        };
+        let feature = Feature::new(&entry.feature_id, feature_kind).map_err(|error| {
+            BundleError::LogBrokenLink {
+                log_index: entry.log_index,
+                detail: error.to_string(),
+            }
+        })?;
+        match entry.operation.as_deref() {
+            Some("remove") => {
+                if !graph.remove_feature(&entry.feature_id) {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: "remove operation targets a missing feature".to_string(),
+                    });
+                }
+                feature_ids.retain(|id: &FeatureId| id.as_str() != entry.feature_id);
+                continue;
+            }
+            Some("set") => {
+                if !graph.contains_feature(&entry.feature_id) {
+                    return Err(BundleError::LogBrokenLink {
+                        log_index: entry.log_index,
+                        detail: "set operation targets a missing feature".to_string(),
+                    });
+                }
+                graph.set_feature(feature);
+                continue;
+            }
+            Some("add") => {}
+            Some(operation) => {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!("unknown transaction operation: {operation}"),
+                });
+            }
+            None => {}
+        }
+        if let Some(payload) = sketch_payload {
+            graph
+                .add_sketch(feature, payload)
+                .map_err(|detail| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail,
+                })?;
+        } else {
+            graph.add_feature(feature);
+        }
+        if !feature_ids.iter().any(|id| id.as_str() == entry.feature_id) {
+            feature_ids.push(FeatureId::new(&entry.feature_id).map_err(|error| {
+                BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: error.to_string(),
+                }
+            })?);
+        }
+        if let Some(command) = entry.kind.strip_prefix(COMPONENT_COMMAND_KIND_PREFIX) {
+            let command: ComponentCommand =
+                serde_json::from_str(command).map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!("invalid component command: {error}"),
+                })?;
+            components
+                .apply(&command)
+                .map_err(|detail| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail,
+                })?;
+        }
+    }
+    Ok(CanonicalState {
+        graph,
+        components,
+        history,
+        history_events,
+        feature_ids,
+    })
+}
+
 fn validate_feature_entries(
     graph: &FeatureGraph,
     log: &TransactionLog,
@@ -2444,6 +2475,17 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
             operation: operation.to_string(),
         });
     }
+    if entry.operation.is_some()
+        && (entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
+            || entry.kind.starts_with(FIT_DIMENSION_KIND_PREFIX)
+            || entry.kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
+            || entry.kind.starts_with(COMPONENT_COMMAND_KIND_PREFIX))
+    {
+        return Err(BundleError::CanonicalOperationUnknown {
+            log_index: Some(entry.log_index),
+            operation: entry.operation.clone().unwrap_or_default(),
+        });
+    }
     if let Some(version) = unsupported_operation_version(&entry.kind) {
         return Err(BundleError::CanonicalVersionUnsupported {
             log_index: Some(entry.log_index),
@@ -2452,7 +2494,9 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
     }
     let (encoded_operation, _) = apply_kind(&entry.kind);
     let operation_matches_canonical_kind = match (entry.operation.as_deref(), encoded_operation) {
-        (None, None) | (Some("add" | "set"), None) | (Some("remove"), Some("remove")) => true,
+        (None, None)
+        | (Some("add" | "set" | "remove"), None)
+        | (Some("remove"), Some("remove")) => true,
         _ => false,
     };
     if !operation_matches_canonical_kind {
@@ -2559,7 +2603,13 @@ fn validate_canonical_kind(
     }
     let (operation, kind) = apply_kind(encoded_kind);
     if operation == Some("remove") {
-        return Ok(());
+        if encoded_kind == APPLY_REMOVE_KIND {
+            return Ok(());
+        }
+        return Err(BundleError::FeatureKindUnknown {
+            log_index,
+            kind: encoded_kind.to_string(),
+        });
     }
     if !is_supported_feature_kind(kind) {
         return Err(BundleError::FeatureKindUnknown {
@@ -2804,7 +2854,9 @@ fn load_v0_with_migration(
     let v0 = read_v0(path).map_err(|error| BundleError::Migration {
         source: Box::new(error),
     })?;
-    let (manifest, generation) = migrate_v0_to_v1(&v0);
+    let (manifest, generation) = migrate_v0_to_v1(&v0).map_err(|error| BundleError::Migration {
+        source: Box::new(error),
+    })?;
     let transactions = v0.transactions.clone();
 
     let backup_path = backup_path_for(path);
@@ -3051,10 +3103,7 @@ fn publish_sealed_backup(source: &Path, backup: &Path) -> std::io::Result<bool> 
         let authentic_source_copy = !metadata.file_type().is_symlink()
             && metadata.is_dir()
             && match (read_v0(backup), read_v0(source)) {
-                (Ok(backup_v0), Ok(source_v0)) => {
-                    backup_v0.manifest.generation_id == source_v0.manifest.generation_id
-                        && backup_v0.manifest.revision_id == source_v0.manifest.revision_id
-                }
+                (Ok(backup_v0), Ok(source_v0)) => backup_v0 == source_v0,
                 _ => false,
             };
         if authentic_source_copy {
@@ -3504,31 +3553,12 @@ pub fn read_v0(path: &Path) -> Result<V0Bundle, BundleError> {
             log.len()
         )));
     }
-    let mut feature_ids: Vec<FeatureId> = Vec::new();
-    for entry in log.entries() {
-        if entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
-            || entry.kind.starts_with(COMPONENT_COMMAND_KIND_PREFIX)
-            || entry.kind.starts_with(FIT_DIMENSION_KIND_PREFIX)
-        {
-            continue;
-        }
-        if entry.operation.as_deref() == Some("remove") {
-            feature_ids.retain(|feature_id| feature_id.as_str() != entry.feature_id);
-        } else if !feature_ids
-            .iter()
-            .any(|feature_id| feature_id.as_str() == entry.feature_id)
-        {
-            feature_ids.push(
-                FeatureId::new(&entry.feature_id)
-                    .map_err(|error| BundleError::Invalid(error.to_string()))?,
-            );
-        }
-    }
+    let state = replay_canonical_state(&log)?;
     let generation = ProjectGeneration {
         id: manifest.generation_id.clone(),
         revisions: vec![Revision {
             id: manifest.revision_id.clone(),
-            features: feature_ids,
+            features: state.feature_ids,
         }],
     };
     if generation.revisions[0].id != manifest.revision_id {
@@ -3593,16 +3623,15 @@ pub fn write_v0_fixture(
 /// feature graph in this slice is empty (one feature) and the v1 manifest's
 /// canonical-root hash is the only stable project-graph identifier in the
 /// current epoch.
-pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
+pub fn migrate_v0_to_v1(source: &V0Bundle) -> Result<(Manifest, ProjectGeneration), BundleError> {
     debug_assert!(source.generation.revisions.len() == 1);
-    let log = TransactionLog::decode_and_verify(source.transactions.as_bytes())
-        .expect("authenticated v0 canonical log replays");
-    let graph = migration_graph(&log).expect("authenticated v0 graph replays");
+    let log = TransactionLog::decode_and_verify(source.transactions.as_bytes())?;
+    let state = replay_canonical_state(&log)?;
     let generation = ProjectGeneration {
         id: source.manifest.generation_id.clone(),
         revisions: vec![Revision {
             id: source.manifest.revision_id.clone(),
-            features: source.generation.revisions[0].features.clone(),
+            features: state.feature_ids.clone(),
         }],
     };
     let mut manifest = Manifest {
@@ -3628,79 +3657,11 @@ pub fn migrate_v0_to_v1(source: &V0Bundle) -> (Manifest, ProjectGeneration) {
         slvs_solver_version: slvs_solver_identity(),
     };
     manifest.terminal_log_digest = log.terminal_digest_hex().to_string();
-    manifest.feature_graph_hash = graph.graph_hash_hex();
-    manifest.revision_hash = graph.revision_hash_hex(&manifest.terminal_log_digest);
+    manifest.feature_graph_hash = state.graph.graph_hash_hex();
+    manifest.revision_hash = state.graph.revision_hash_hex(&manifest.terminal_log_digest);
     manifest.canonical_root_sha256 = hash(&canonical_manifest_bytes(&manifest));
     manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
-    (manifest, generation)
-}
-
-fn migration_graph(log: &TransactionLog) -> Result<FeatureGraph, BundleError> {
-    let mut graph = FeatureGraph::empty();
-    for entry in log.entries() {
-        if entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
-            || entry.kind.starts_with(COMPONENT_COMMAND_KIND_PREFIX)
-            || entry.kind.starts_with(FIT_DIMENSION_KIND_PREFIX)
-        {
-            if let Some(payload) = entry.kind.strip_prefix(FIT_DIMENSION_KIND_PREFIX) {
-                let fit: FitDimension = serde_json::from_str(payload).map_err(|error| {
-                    BundleError::Invalid(format!("invalid fit dimension: {error}"))
-                })?;
-                graph.add_fit_dimension(fit).map_err(BundleError::Invalid)?;
-            }
-            continue;
-        }
-        let sketch_payload = entry
-            .kind
-            .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
-            .map(|payload| {
-                serde_json::from_str::<threeterm_domain::SketchPayload>(payload).map_err(|error| {
-                    BundleError::Invalid(format!("invalid sketch payload: {error}"))
-                })
-            })
-            .transpose()?;
-        let (encoded_operation, canonical_kind) = apply_kind(&entry.kind);
-        let operation = entry.operation.as_deref().or(encoded_operation);
-        let feature_kind = if sketch_payload.is_some() {
-            "sketch"
-        } else {
-            canonical_kind
-        };
-        let feature = Feature::new(&entry.feature_id, feature_kind)
-            .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        match operation {
-            Some("remove") => {
-                if !graph.remove_feature(&entry.feature_id) {
-                    return Err(BundleError::Invalid(
-                        "remove operation targets a missing feature".into(),
-                    ));
-                }
-            }
-            Some("set") => {
-                if !graph.contains_feature(&entry.feature_id) {
-                    return Err(BundleError::Invalid(
-                        "set operation targets a missing feature".into(),
-                    ));
-                }
-                graph.set_feature(feature);
-            }
-            Some("add") | None => {
-                if let Some(payload) = sketch_payload {
-                    graph
-                        .add_sketch(feature, payload)
-                        .map_err(BundleError::Invalid)?;
-                } else {
-                    graph.add_feature(feature);
-                }
-            }
-            Some(operation) => {
-                return Err(BundleError::Invalid(format!(
-                    "unknown transaction operation: {operation}"
-                )));
-            }
-        }
-    }
-    Ok(graph)
+    Ok((manifest, generation))
 }
 
 fn staging_path(path: &Path) -> PathBuf {
@@ -4287,8 +4248,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         write_v0_fixture(&root, ProjectGeneration::with_id("generation-mig")).expect("v0 writes");
         let v0 = read_v0(&root).expect("v0 reads");
-        let (first_manifest, first_generation) = migrate_v0_to_v1(&v0);
-        let (second_manifest, second_generation) = migrate_v0_to_v1(&v0);
+        let (first_manifest, first_generation) =
+            migrate_v0_to_v1(&v0).expect("first migration succeeds");
+        let (second_manifest, second_generation) =
+            migrate_v0_to_v1(&v0).expect("second migration succeeds");
 
         assert_eq!(
             first_manifest.canonical_root_sha256,
@@ -4316,11 +4279,60 @@ mod tests {
             entries: vec![add, set],
         };
 
-        let graph = migration_graph(&log).expect("legacy operations replay");
+        let graph = replay_canonical_state(&log)
+            .expect("legacy operations replay")
+            .graph;
         assert_eq!(
             graph.features().next().expect("feature exists").kind,
             "sphere"
         );
+    }
+
+    #[test]
+    fn migration_preserves_component_commands_in_the_replayed_graph() {
+        let command = ComponentCommand::Define {
+            definition: threeterm_domain::ComponentDefinition {
+                id: "definition-1".to_string(),
+                selected_feature_ids: vec!["feature-1".to_string()],
+                descriptor: threeterm_domain::LBracketDescriptor {
+                    feature_id: "feature-1".to_string(),
+                    length: 60.0,
+                    width: 30.0,
+                    height: 40.0,
+                    thickness: 3.0,
+                },
+            },
+        };
+        let kind = format!(
+            "{COMPONENT_COMMAND_KIND_PREFIX}{}",
+            serde_json::to_string(&command).expect("component command serializes")
+        );
+        let entry = LogEntry::new(0, EMPTY_LOG_DIGEST_HEX, "component-transaction-0", &kind);
+        let log = TransactionLog {
+            entries: vec![entry],
+        };
+        let transactions = String::from_utf8(log.encode()).expect("log is UTF-8");
+        let source = V0Bundle {
+            manifest: V0Manifest {
+                schema_version: prior_schema_epoch().to_string(),
+                generation_id: "generation-component".to_string(),
+                revision_id: "revision-component".to_string(),
+                revision_count: 1,
+                transaction_count: log.len(),
+                transaction_bytes: transactions.len(),
+                transaction_sha256: hash(transactions.as_bytes()),
+            },
+            transactions,
+            generation: ProjectGeneration {
+                id: "generation-component".to_string(),
+                revisions: vec![Revision::empty()],
+            },
+        };
+
+        let (manifest, generation) = migrate_v0_to_v1(&source).expect("migration succeeds");
+        let state = replay_canonical_state(&log).expect("canonical replay succeeds");
+        assert_eq!(manifest.feature_graph_hash, state.graph.graph_hash_hex());
+        assert_eq!(generation.revisions[0].features, state.feature_ids);
     }
 
     #[test]

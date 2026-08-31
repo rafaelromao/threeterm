@@ -82,7 +82,7 @@ fn compatibility_load_failure_preserves_structured_persistence_detail() {
     let diagnostic: Value = serde_json::from_slice(&loaded.stderr).expect("diagnostic is JSON");
     assert_eq!(diagnostic["code"], "integrity_failure");
     assert!(
-        diagnostic["arg"]
+        diagnostic["detail"]
             .as_str()
             .expect("diagnostic detail is a string")
             .contains("occt_kernel_version")

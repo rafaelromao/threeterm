@@ -25,7 +25,7 @@ use threeterm_occt_worker::{
 use threeterm_persistence::{
     Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
     ExtrudeDeterministicInputs, LoadPolicy, LoadedBundle, load, load_with_policy,
-    previous_generation_path,
+    previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -1942,6 +1942,8 @@ impl Host {
     ) -> Result<ReplayVerification, HostError> {
         let bundle = Bundle::at(root.as_ref());
         let loaded = bundle.open()?;
+        let reconstructed = replay_canonical_state(&loaded.log)?;
+        let reconstructed_model = canonical_model_fingerprint_from_state(&loaded, &reconstructed);
         let (first, second) = bundle.replay_history_states()?;
         let first_fingerprint = first.fingerprint();
         let has_geometry_intent = loaded
@@ -1965,7 +1967,9 @@ impl Host {
             && first == loaded.history
             && loaded.graph == second_loaded.graph
             && loaded.components == second_loaded.components
-            && first_model == canonical_model_fingerprint(&second_loaded)
+            && reconstructed_model == canonical_model_fingerprint(&loaded)
+            && first_model == reconstructed_model
+            && reconstructed_model == canonical_model_fingerprint(&second_loaded)
         {
             None
         } else {
@@ -5489,13 +5493,33 @@ fn committed_brep_path(root: &Path, feature_id: &str) -> PathBuf {
 }
 
 fn canonical_model_fingerprint(bundle: &LoadedBundle) -> String {
-    let bytes = serde_json::to_vec(&(
+    canonical_model_fingerprint_parts(
         &bundle.graph,
         &bundle.components,
         &bundle.history,
         &bundle.generation.revisions,
-    ))
-    .expect("canonical model state serializes");
+    )
+}
+
+fn canonical_model_fingerprint_from_state(
+    bundle: &LoadedBundle,
+    state: &threeterm_persistence::CanonicalState,
+) -> String {
+    let mut revisions = bundle.generation.revisions.clone();
+    if let Some(revision) = revisions.first_mut() {
+        revision.features = state.feature_ids.clone();
+    }
+    canonical_model_fingerprint_parts(&state.graph, &state.components, &state.history, &revisions)
+}
+
+fn canonical_model_fingerprint_parts(
+    graph: &FeatureGraph,
+    components: &ComponentGraph,
+    history: &HistoryState,
+    revisions: &[threeterm_domain::Revision],
+) -> String {
+    let bytes = serde_json::to_vec(&(graph, components, history, revisions))
+        .expect("canonical model state serializes");
     format!("{:x}", Sha256::digest(bytes))
 }
 

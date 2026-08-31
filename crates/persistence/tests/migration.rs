@@ -149,8 +149,8 @@ fn migration_is_deterministic_across_invocations() {
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-det"))
         .expect("v0 fixture writes");
     let v0 = read_v0(&root).expect("v0 reads");
-    let (a_manifest, a_generation) = migrate_v0_to_v1(&v0);
-    let (b_manifest, b_generation) = migrate_v0_to_v1(&v0);
+    let (a_manifest, a_generation) = migrate_v0_to_v1(&v0).expect("first migration succeeds");
+    let (b_manifest, b_generation) = migrate_v0_to_v1(&v0).expect("second migration succeeds");
     assert_eq!(a_manifest, b_manifest);
     assert_eq!(a_generation, b_generation);
     assert_eq!(
@@ -196,9 +196,9 @@ fn repeat_migration_idempotent_for_a_clean_v0_source() {
     let root = unique_temp_dir("repeat");
     write_v0_fixture(&root, ProjectGeneration::with_id("generation-repeat")).expect("v0 writes");
     let v0 = read_v0(&root).expect("v0 reads");
-    let (m1, _) = migrate_v0_to_v1(&v0);
+    let (m1, _) = migrate_v0_to_v1(&v0).expect("first migration succeeds");
     let v0_again = read_v0(&root).expect("v0 re-reads");
-    let (m2, _) = migrate_v0_to_v1(&v0_again);
+    let (m2, _) = migrate_v0_to_v1(&v0_again).expect("second migration succeeds");
     assert_eq!(m1, m2);
     let _ = fs::remove_dir_all(root);
 }

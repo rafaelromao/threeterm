@@ -85,9 +85,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
 # Native-worker tests are serialized to avoid resource contention, matching CI.
-THREETERM_REQUIRE_REAL_WORKER=1 cargo test --workspace --jobs 1 -- --test-threads=1 2>&1 \
+cargo test --workspace --jobs 1 -- --test-threads=1 2>&1 \
     | tee "${CARGO_TARGET_DIR}/native-worker-test.log"
 test -s "${CARGO_TARGET_DIR}/native-worker-test.log"
+
+echo "==> canonical real-worker integration tests"
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \
+    --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test bracket_integration \
+    --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_worker \
+    --jobs 1 -- --test-threads=1
 
 finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}"
 

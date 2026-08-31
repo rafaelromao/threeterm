@@ -55,6 +55,7 @@ pub const ERROR_INVALID_PARAMS: i32 = -32602;
 pub const ERROR_INTERNAL: i32 = -32603;
 pub const ERROR_PARSE: i32 = -32700;
 pub const MAX_PROGRESS_NOTIFICATIONS: usize = 100;
+const MAX_PROGRESS_STAGE_CHARS: usize = 256;
 
 /// Tool descriptor exposed by `tools/list`. The wire shape follows the MCP
 /// tool advertisement convention with `inputSchema` and `outputSchema`
@@ -706,6 +707,28 @@ impl McpServer {
                     RunEvent::Request(request)
                         if !request.is_notification && is_boolean_pattern_call(&request) =>
                     {
+                        let arguments = request
+                            .params
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(Default::default()));
+                        if let Err(reason) = validate(
+                            &threeterm_protocol::schema::BOOLEAN_PATTERN_REQUEST_SCHEMA,
+                            &arguments,
+                        ) {
+                            write_envelope(
+                                writer,
+                                &JsonRpcResponse::error(
+                                    request.id.clone(),
+                                    ERROR_INVALID_PARAMS,
+                                    format!(
+                                        "tools/call arguments failed request-schema validation: {reason}"
+                                    ),
+                                ),
+                            )?;
+                            handled += 1;
+                            continue;
+                        }
                         if active.is_some() {
                             write_envelope(
                                 writer,
@@ -723,11 +746,6 @@ impl McpServer {
                             let sender = events.clone();
                             let token = progress_token(&request);
                             let configured_worker = self.boolean_pattern_worker.clone();
-                            let arguments = request
-                                .params
-                                .get("arguments")
-                                .cloned()
-                                .unwrap_or_else(|| Value::Object(Default::default()));
                             let event_key = request_key.clone();
                             scope.spawn(move || {
                                 let mut emitted = 0usize;
@@ -740,12 +758,18 @@ impl McpServer {
                                         {
                                             return;
                                         }
+                                        let mut progress = progress.clone();
+                                        progress.stage = progress
+                                            .stage
+                                            .chars()
+                                            .take(MAX_PROGRESS_STAGE_CHARS)
+                                            .collect();
                                         last = Some(progress.clone());
                                         emitted += 1;
-                                        let _ = sender.send(RunEvent::Progress {
+                                        let _ = sender.try_send(RunEvent::Progress {
                                             request_key: event_key.clone(),
                                             token: token.clone(),
-                                            progress: progress.clone(),
+                                            progress,
                                         });
                                     };
                                 let response = execute_boolean_pattern(

@@ -5240,6 +5240,33 @@ impl Host {
             cancel,
             on_progress,
         )?;
+        if cancel.load(Ordering::SeqCst) {
+            let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
+            self.layer1_results
+                .borrow_mut()
+                .remove(&derived.artifact.cache_key);
+            if let Some(stage_root) = stage_root {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Err(HostError::WorkerTerminated {
+                record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
+                    request_id: derived.artifact.request_id,
+                    stage: "cancelled_before_promotion".to_string(),
+                    cancel_reason: Some("cancelled by host".to_string()),
+                    elapsed: Duration::ZERO,
+                    last_progress: None,
+                    last_artifact_error: None,
+                    exit_signal: None,
+                    exit_code: Some(0),
+                    stderr_tail: String::new(),
+                    failed_code: None,
+                    failed_detail: None,
+                    protocol_diagnostic: None,
+                    termination_error: None,
+                    exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
+                }),
+            });
+        }
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         let identity = ProjectIdentity::from(&Bundle::at(root).open()?);

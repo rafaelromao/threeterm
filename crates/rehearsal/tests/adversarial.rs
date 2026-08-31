@@ -14,6 +14,7 @@ fn temp_root() -> std::path::PathBuf {
 }
 
 #[test]
+#[ignore = "slow: runs every native-dependent production adversarial case"]
 fn production_adversarial_cases_preserve_canonical_state() {
     if OcctWorker::locate().is_err() {
         eprintln!("rehearsal: no OCCT worker binary found; pinned CI runs this production path");

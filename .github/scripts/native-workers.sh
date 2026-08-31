@@ -106,9 +106,9 @@ verify_native_worker_execution() {
     local output
     local status=0
     # Native workers advertise readiness before reading one bounded request.
-    # Send a newline-terminated probe so the framing check, rather than EOF,
-    # determines the expected harmless failure without mutating a workspace.
-    output="$(printf '%s\n' '{}' | timeout 10s "${worker}" 2>&1)" || status=$?
+    # Send a valid envelope with no args so both workers return a structured
+    # malformed-request response without mutating a workspace.
+    output="$(printf '%s\n' '{"kind":"request","schema_version":"threeterm.protocol/1","request_id":"ci-probe","command_id":"ci_probe"}' | timeout 10s "${worker}" 2>&1)" || status=$?
     if [[ "${status}" -ne 2 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* || "${output}" != *"\"code\":\"request_malformed\""* ]]; then
         printf 'native %s worker did not complete its ready handshake: %s (status=%s)\n' \
             "${worker_id}" "${worker}" "${status}" >&2

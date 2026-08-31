@@ -59,3 +59,19 @@ if verify_native_worker_execution /bin/false occt; then
 fi
 
 printf '%s\n' 'native-worker readiness contract satisfied'
+
+# The readiness probe must use the real protocol envelope so workers can return
+# a structured malformed-request response instead of an unbound stderr error.
+PROBE_FIXTURE="${WORK}/probe-worker"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'read -r request' \
+    'test "${request}" = '\''{"kind":"request","schema_version":"threeterm.protocol/1","request_id":"ci-probe","command_id":"ci_probe"}'\''' \
+    'printf '\''%s\\n'\'' '\''{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'\''' \
+    'printf '\''%s\\n'\'' '\''{"kind":"failed","schema_version":"threeterm.protocol/1","request_id":"ci-probe","code":"request_malformed","detail":"probe"}'\''' \
+    'exit 2' > "${PROBE_FIXTURE}"
+chmod +x "${PROBE_FIXTURE}"
+verify_native_worker_execution "${PROBE_FIXTURE}" occt
+
+printf '%s\n' 'native-worker structured probe contract satisfied'

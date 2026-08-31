@@ -2675,6 +2675,7 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "shell"
             | "draft"
             | "loft"
+            | "history-feature"
     ) || is_supported_brep_kind(kind)
         || is_supported_bracket_kind(kind)
         || matches!(kind, "plate-vertical" | "plate-horizontal")

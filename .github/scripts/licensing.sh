@@ -285,6 +285,21 @@ verify_libslvs_artifact() {
         || licensing_fail source-url "artifact ThreeTerm source URL is not immutable"
     [[ "$artifact_source_repository" == https://github.com/rafaelromao/threeterm ]] \
         || licensing_fail source-repository "artifact ThreeTerm source repository is inconsistent"
+    local source_archive source_archive_commit source_archive_entries
+    source_archive="${root}/source/threeterm-source.tar"
+    source_archive_commit="$(git get-tar-commit-id <"$source_archive" 2>/dev/null || true)"
+    [[ "$source_archive_commit" == "$source_revision" ]] \
+        || licensing_fail source-revision "artifact source archive revision is inconsistent"
+    source_archive_entries="$(tar -tf "$source_archive")"
+    for source_entry in \
+        threeterm-source/crates/workers/slvs/Cargo.toml \
+        threeterm-source/crates/workers/slvs/build.rs \
+        threeterm-source/crates/workers/slvs/src/lib.rs \
+        threeterm-source/crates/workers/slvs/src/envelope.rs \
+        threeterm-source/crates/workers/slvs/src-cpp/worker_main.cpp; do
+        grep -Fxq "$source_entry" <<<"$source_archive_entries" \
+            || { licensing_fail source-revision "artifact source archive omits ${source_entry}"; return 1; }
+    done
 
     local executable_path executable_sha256
     executable_path="$(jq -er '.artifact.executable.path' "$manifest")" \

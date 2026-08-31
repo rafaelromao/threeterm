@@ -61,12 +61,22 @@ fail() {
 }
 
 verify_release_artifact() {
-    local artifact_root="${THREETERM_RELEASE_ARTIFACT_ROOT:-${ROOT}/target/libslvs-artifact}"
-    local manifest="${THREETERM_RELEASE_ARTIFACT_MANIFEST:-${artifact_root}/manifest.json}"
+    local artifact_root manifest
+    artifact_root="$(release_artifact_root)"
+    manifest="$(release_artifact_manifest "$artifact_root")"
     [[ -f "$LICENSING_SCRIPT" ]] || fail "licensing verifier not found: ${LICENSING_SCRIPT}"
     # shellcheck source=/dev/null
     source "$LICENSING_SCRIPT"
     verify_libslvs_artifact "$manifest" "$artifact_root"
+}
+
+release_artifact_root() {
+    printf '%s\n' "${THREETERM_RELEASE_ARTIFACT_ROOT:-${ROOT}/target/libslvs-artifact}"
+}
+
+release_artifact_manifest() {
+    local artifact_root="$1"
+    printf '%s\n' "${THREETERM_RELEASE_ARTIFACT_MANIFEST:-${artifact_root}/manifest.json}"
 }
 
 current_gate() {
@@ -237,8 +247,9 @@ case "$action" in
         require_tag_at_head "$1"
         verify_release_artifact
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
-        archive="${THREETERM_RELEASE_ARTIFACT_ROOT}.tar.gz"
-        tar -czf "$archive" -C "$THREETERM_RELEASE_ARTIFACT_ROOT" .
+        artifact_root="$(release_artifact_root)"
+        archive="${artifact_root}.tar.gz"
+        tar -czf "$archive" -C "$artifact_root" .
         gh release create "$1" --verify-tag --title "$1" "$archive"
         ;;
     aur-push)

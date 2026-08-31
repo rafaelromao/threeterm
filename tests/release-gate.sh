@@ -69,6 +69,10 @@ cat >"${fake_bin}/git" <<'EOF'
 if [[ "${1:-}" == status ]]; then
     exit 0
 fi
+if [[ "${1:-}" == get-tar-commit-id ]]; then
+    /usr/bin/git "$@"
+    exit $?
+fi
 if [[ "${1:-}" == rev-parse ]]; then
     if [[ "$*" == *"${RELEASE_GATE_OLD_TAG}^{commit}"* ]]; then
         printf 'old-commit\n'

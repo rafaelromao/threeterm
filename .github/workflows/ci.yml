@@ -54,7 +54,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-worker-manifest
-          path: |
-            target/native-worker-manifest.json
-            target/native-worker-test.log
+          path: target/native-worker-manifest.json
           if-no-files-found: error

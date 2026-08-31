@@ -35,6 +35,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepTools.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <StlAPI_Writer.hxx>
@@ -1356,7 +1357,6 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
     const std::string source_feature_id = get_string(*selected, "source_feature_id");
     const std::string source_revision_id = get_string(*selected, "source_revision_id");
     const std::string source_edge_id = get_string(*selected, "source_edge_id");
-    const std::string role = get_string(*selected, "role");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (const TopoDS_Edge& edge : edges) {
@@ -1375,6 +1375,11 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
             (first_point.X() + last_point.X()) / 2.0,
             (first_point.Y() + last_point.Y()) / 2.0,
             (first_point.Z() + last_point.Z()) / 2.0);
+        // A candidate role is evidence about the returned edge, not a copy
+        // of the caller's claim. Preserve the MVP perimeter role for linear
+        // edges and expose a distinct role for curved edit results.
+        const std::string role =
+            BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter" : "fillet-transition";
         std::ostringstream identity;
         identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
                  << properties.Mass();

@@ -58,7 +58,7 @@ fn edge_reference(revision: &str) -> Value {
     })
 }
 
-fn edge_request(root: &std::path::Path, revision: &str) -> Value {
+fn edge_request(root: &std::path::Path, revision: &str, reference: Value) -> Value {
     json!({
         "bundle_path": root.to_string_lossy(),
         "expected_revision": revision,
@@ -66,7 +66,7 @@ fn edge_request(root: &std::path::Path, revision: &str) -> Value {
         "edit_kind": "fillet",
         "base_feature_id": "base",
         "radius": 0.25,
-        "reference": edge_reference(revision)
+        "reference": reference
     })
 }
 
@@ -162,11 +162,11 @@ fn cli_missing_kind(root: &std::path::Path, revision: &str) -> Value {
     serde_json::from_slice(&stderr).expect("CLI returns a structured diagnostic")
 }
 
-fn cli_reattach_edge(root: &std::path::Path, revision: &str) -> Value {
+fn cli_reattach_edge(root: &std::path::Path, revision: &str, reference: Value) -> Value {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let path = root.to_string_lossy().into_owned();
-    let reference = serde_json::to_string(&edge_reference(revision)).expect("reference serializes");
+    let reference = serde_json::to_string(&reference).expect("reference serializes");
     let args = vec![
         OsString::from("--machine"),
         OsString::from("reattach-edge"),
@@ -470,7 +470,7 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let Some(mcp_revision) = setup_edge_root(&mcp_root, "mcp") else {
         return;
     };
-    let cli = cli_reattach_edge(&cli_root, &cli_revision);
+    let cli = cli_reattach_edge(&cli_root, &cli_revision, edge_reference(&cli_revision));
     let tui = threeterm_tui::execute_selected_edge_reattachment(
         &threeterm_host::Host::new(),
         &tui_root,
@@ -488,7 +488,7 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.reattach-edge/1",
-            "arguments": edge_request(&mcp_root, &mcp_revision)
+            "arguments": edge_request(&mcp_root, &mcp_revision, edge_reference(&mcp_revision))
         }),
     });
     let mcp = mcp.result.expect("MCP edge command executes")["structuredContent"].clone();
@@ -501,6 +501,68 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
                 .starts_with("edge-")
         );
         assert_eq!(result["committed"], true);
+    }
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_report_real_worker_role_incompatibility_without_commit() {
+    let cli_root = root("edge-incompatible-cli");
+    let mcp_root = root("edge-incompatible-mcp");
+    let tui_root = root("edge-incompatible-tui");
+    let Some(cli_revision) = setup_edge_root(&cli_root, "incompatible-cli") else {
+        return;
+    };
+    let Some(tui_revision) = setup_edge_root(&tui_root, "incompatible-tui") else {
+        return;
+    };
+    let Some(mcp_revision) = setup_edge_root(&mcp_root, "incompatible-mcp") else {
+        return;
+    };
+
+    let mut cli_reference = edge_reference(&cli_revision);
+    cli_reference["role"] = json!("inner-perimeter");
+    let cli = cli_reattach_edge(&cli_root, &cli_revision, cli_reference);
+
+    let mut tui_reference = edge_reference(&tui_revision);
+    tui_reference["role"] = json!("inner-perimeter");
+    let tui = threeterm_tui::execute_selected_edge_reattachment(
+        &threeterm_host::Host::new(),
+        &tui_root,
+        &tui_revision,
+        "fillet-after-incompatible",
+        "fillet",
+        "base",
+        0.25,
+        tui_reference,
+    )
+    .expect("TUI edge command reports incompatibility");
+
+    let mut mcp_reference = edge_reference(&mcp_revision);
+    mcp_reference["role"] = json!("inner-perimeter");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.reattach-edge/1",
+            "arguments": edge_request(&mcp_root, &mcp_revision, mcp_reference)
+        }),
+    });
+    let mcp = mcp
+        .result
+        .expect("MCP edge command reports incompatibility")["structuredContent"]
+        .clone();
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["outcome"], "incompatible");
+        assert_eq!(result["committed"], false);
+    }
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        assert_eq!(Bundle::at(path).open().unwrap().log.len(), 1);
+        assert!(!path.join("brep/fillet-after-incompatible.brep").exists());
     }
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);

@@ -231,6 +231,30 @@ fn production_command_reports_failures_before_canonical_mutation() {
 }
 
 #[test]
+fn production_worker_reports_incompatible_role_before_canonical_mutation() {
+    let root = root("incompatible-role");
+    let Some((_worker, revision)) = setup(&root, "incompatible-role") else {
+        return;
+    };
+    let host = Host::new();
+    let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(root.join("transactions.log")).expect("log reads");
+    let mut selected = reference(&revision);
+    selected["role"] = json!("inner-perimeter");
+    let result = host
+        .execute_domain_command(
+            REATTACH_EDGE_COMMAND_ID,
+            request(&root, &revision, selected),
+        )
+        .expect("worker role mismatch is a structured outcome");
+    assert_eq!(result["outcome"], "incompatible");
+    assert_eq!(result["committed"], false);
+    assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn worker_evidence_reports_ambiguous_before_canonical_mutation() {
     assert_worker_outcome("ambiguous", &["edge-ambiguous-a", "edge-ambiguous-b"]);
 }

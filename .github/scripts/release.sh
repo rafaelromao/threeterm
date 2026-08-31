@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNBOOK="${ROOT}/docs/release/trademark-and-namespace-gate.md"
+LICENSING_SCRIPT="${ROOT}/.github/scripts/licensing.sh"
 readonly ROOT RUNBOOK
 
 readonly -a REQUIRED_ROWS=(
@@ -193,6 +194,7 @@ usage() {
     printf '%s\n' \
         'Usage:' \
         '  release.sh verify [runbook-path]' \
+        '  release.sh verify-artifact <manifest> <artifact-root>' \
         '  release.sh tag <annotated-tag>' \
         '  release.sh github-release <tag>' \
         '  release.sh aur-push HEAD:refs/heads/master' \
@@ -202,6 +204,12 @@ usage() {
 action=${1:-}
 shift || true
 case "$action" in
+    verify-artifact)
+        [[ $# == 2 ]] || { usage >&2; exit 2; }
+        # shellcheck source=/dev/null
+        source "${LICENSING_SCRIPT}"
+        verify_libslvs_artifact "$1" "$2"
+        ;;
     verify)
         [[ $# -le 1 ]] || { usage >&2; exit 2; }
         verify_runbook "${1:-$RUNBOOK}"

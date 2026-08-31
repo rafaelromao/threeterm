@@ -1,11 +1,15 @@
 ThreeTerm libslvs worker
 
+Worker identity: `slvs`; worker schema: `threeterm.workers.slvs/1`.
+
 This worker links SolveSpace libslvs v3.2 at commit
-27b6a080c8b669421bd4d444650c3b8eddec5687.
+27b6a080c8b669421bd4d444650c3b8eddec5687:
+https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687.
 
-libslvs is distributed under the GNU General Public License, version 3.
-The corresponding source is available from:
-https://github.com/solvespace/solvespace/tree/v3.2
+libslvs is distributed under the GNU General Public License, version 3,
+SPDX identifier GPL-3.0-only. The complete license text is distributed in
+LICENSE-GPL-3.0.txt. The corresponding-source written offer is in
+SOURCE-OFFER.txt.
 
-This notice does not replace the full license text or the source-offer
-obligations that apply to a distributed build.
+This notice, the full license text, the corresponding source, and the
+source-offer obligations must accompany every distributed worker artifact.

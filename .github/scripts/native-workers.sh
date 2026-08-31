@@ -144,7 +144,7 @@ finalize_native_worker_manifest() {
     local artifact_manifest_sha256
     occt_sha256="$(sha256sum "${occt_worker}" | cut -d' ' -f1)"
     slvs_sha256="$(sha256sum "${slvs_worker}" | cut -d' ' -f1)"
-    stage_libslvs_artifact "$(pwd)" "${slvs_worker}" "${artifact_root}"
+    stage_libslvs_artifact "$(pwd)" "${slvs_worker}" "${artifact_root}" "${slvs_sha256}"
     artifact_manifest_sha256="$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)"
     [[ -f "${artifact_root}/manifest.json" ]] || {
         printf '%s\n' 'libslvs artifact manifest was not staged' >&2

@@ -28,6 +28,11 @@ release with:
   target/libslvs-artifact/manifest.json target/libslvs-artifact
 ```
 
+The publishing actions also require `THREETERM_RELEASE_ARTIFACT_MANIFEST` and
+`THREETERM_RELEASE_ARTIFACT_ROOT`. The GitHub Release action archives the
+verified bundle as a release asset; AUR and COPR actions verify the same bundle
+before publishing their package.
+
 Canonical CI builds and executes the pinned worker, writes the native-worker
 evidence manifest, stages this artifact bundle, and refuses inconsistent or
 incomplete licensing metadata.

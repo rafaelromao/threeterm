@@ -150,6 +150,7 @@ stage_libslvs_artifact() {
     local source_root="$1"
     local worker="$2"
     local artifact_root="$3"
+    local expected_worker_sha256="${4:-}"
     verify_libslvs_source "$source_root"
     [[ -f "$worker" && -x "$worker" ]] \
         || licensing_fail worker "selected libslvs worker is not executable: ${worker}"
@@ -157,6 +158,11 @@ stage_libslvs_artifact() {
     rm -rf "$artifact_root"
     mkdir -p "${artifact_root}/bin" "${artifact_root}/licenses" "${artifact_root}/LICENSES"
     cp "$worker" "${artifact_root}/bin/threeterm-slvs-worker"
+    if [[ -n "$expected_worker_sha256" \
+        && "$(licensing_sha256 "${artifact_root}/bin/threeterm-slvs-worker")" != "$expected_worker_sha256" ]]; then
+        licensing_fail worker "staged executable does not match the selected libslvs worker"
+        return 1
+    fi
     cp "${source_root}/licenses/libslvs.json" "${artifact_root}/licenses/libslvs.json"
     cp "${source_root}/crates/workers/slvs/LICENSE-GPL-3.0.txt" \
         "${artifact_root}/LICENSES/GPL-3.0-only.txt"

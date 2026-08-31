@@ -60,6 +60,17 @@ fail() {
     exit 1
 }
 
+verify_release_artifact() {
+    local manifest="${THREETERM_RELEASE_ARTIFACT_MANIFEST:-}"
+    local artifact_root="${THREETERM_RELEASE_ARTIFACT_ROOT:-}"
+    [[ -n "$manifest" && -n "$artifact_root" ]] \
+        || fail 'release artifact manifest and root must be supplied'
+    [[ -f "$LICENSING_SCRIPT" ]] || fail "licensing verifier not found: ${LICENSING_SCRIPT}"
+    # shellcheck source=/dev/null
+    source "$LICENSING_SCRIPT"
+    verify_libslvs_artifact "$manifest" "$artifact_root"
+}
+
 current_gate() {
     awk '
         /<!-- CURRENT-GATE:START -->/ { in_gate = 1; next }
@@ -218,6 +229,7 @@ case "$action" in
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         git tag -a "$1" -m "ThreeTerm $1"
         ;;
     github-release)
@@ -225,14 +237,18 @@ case "$action" in
         verify_checked_in_runbook
         require_committed_runbook
         require_tag_at_head "$1"
+        verify_release_artifact
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
-        gh release create "$1" --verify-tag --title "$1"
+        archive="${THREETERM_RELEASE_ARTIFACT_ROOT}.tar.gz"
+        tar -czf "$archive" -C "$THREETERM_RELEASE_ARTIFACT_ROOT" .
+        gh release create "$1" --verify-tag --title "$1" "$archive"
         ;;
     aur-push)
         [[ $# == 1 && "$1" != -* ]] || { usage >&2; exit 2; }
         [[ "$1" == 'HEAD:refs/heads/master' ]] || fail 'AUR push is fixed to HEAD:refs/heads/master'
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         git push aur HEAD:refs/heads/master
         ;;
     copr-build)
@@ -240,6 +256,7 @@ case "$action" in
         [[ "$1" == 'threeterm.spec' ]] || fail 'COPR build is fixed to threeterm.spec'
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         command -v copr >/dev/null 2>&1 || fail 'copr is required for COPR build'
         if [[ $# == 2 ]]; then
             copr build threeterm "$1" --nowait

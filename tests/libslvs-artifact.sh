@@ -39,3 +39,10 @@ if verify_libslvs_artifact "${symlinked}/manifest.json" "${symlinked}"; then
 fi
 
 printf '%s\n' 'libslvs artifact symlink rejection contract satisfied'
+
+if stage_libslvs_artifact "${ROOT}" "${worker}" "${WORK}/wrong-worker" "$(printf '%064d' 0)"; then
+    printf '%s\n' 'artifact staging accepted a mismatched worker digest' >&2
+    exit 1
+fi
+
+printf '%s\n' 'libslvs artifact worker-binding contract satisfied'

@@ -138,6 +138,15 @@ enum DispatchPlan {
         profile_file: String,
         height: f64,
     },
+    ReattachEdge {
+        bundle: String,
+        expected_revision: String,
+        edit_feature_id: String,
+        edit_kind: String,
+        base_feature_id: String,
+        radius: f64,
+        reference: Value,
+    },
     FitDimension {
         bundle: String,
         expected_revision: String,
@@ -516,6 +525,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "timeline" => parse_timeline(&args[2..]),
         "replay-verify" => parse_replay_verify(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
+        "reattach-edge" => parse_reattach_edge(&args[2..]),
         "fit-dimension" => parse_fit_dimension(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
@@ -697,6 +707,7 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             .iter()
             .all(|value| value.is_finite()),
         DispatchPlan::FitDimension { clearance, .. } => clearance.is_finite(),
+        DispatchPlan::ReattachEdge { radius, .. } => radius.is_finite(),
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
@@ -1467,6 +1478,132 @@ fn parse_extrude(args: &[OsString]) -> DispatchPlan {
         feature_id,
         profile_file,
         height,
+    }
+}
+
+fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "reattach-edge".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
+    let mut edit_feature_id: Option<String> = None;
+    let mut edit_kind: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut radius: Option<f64> = None;
+    let mut reference: Option<Value> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--edit-feature-id" => {
+                    edit_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--edit-kind" => {
+                    edit_kind = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--radius" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        radius = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--radius {value_str}"),
+                        };
+                    }
+                },
+                "--reference" => match serde_json::from_str(&value_str) {
+                    Ok(parsed) => {
+                        reference = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--reference {value_str}"),
+                        };
+                    }
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(expected_revision) = expected_revision else {
+        return DispatchPlan::Unknown {
+            arg: "--expected-revision".to_string(),
+        };
+    };
+    let Some(edit_feature_id) = edit_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-feature-id".to_string(),
+        };
+    };
+    let Some(edit_kind) = edit_kind else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-kind".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(radius) = radius else {
+        return DispatchPlan::Unknown {
+            arg: "--radius".to_string(),
+        };
+    };
+    let Some(reference) = reference else {
+        return DispatchPlan::Unknown {
+            arg: "--reference".to_string(),
+        };
+    };
+    DispatchPlan::ReattachEdge {
+        bundle,
+        expected_revision,
+        edit_feature_id,
+        edit_kind,
+        base_feature_id,
+        radius,
+        reference,
     }
 }
 
@@ -2858,6 +2995,13 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
+        DispatchPlan::ReattachEdge { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, REATTACH_EDGE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::FitDimension {
             bundle,
             expected_revision,
@@ -3940,6 +4084,7 @@ fn execute_registered_with_observer(
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
+            | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
     ) {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
@@ -4084,6 +4229,23 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height })
         }
+        DispatchPlan::ReattachEdge {
+            bundle,
+            expected_revision,
+            edit_feature_id,
+            edit_kind,
+            base_feature_id,
+            radius,
+            reference,
+        } => json!({
+            "bundle_path": bundle,
+            "expected_revision": expected_revision,
+            "edit_feature_id": edit_feature_id,
+            "edit_kind": edit_kind,
+            "base_feature_id": base_feature_id,
+            "radius": radius,
+            "reference": reference,
+        }),
         DispatchPlan::FitDimension {
             bundle,
             expected_revision,

@@ -8,9 +8,7 @@ use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
-};
+use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -162,6 +160,39 @@ fn cli_missing_kind(root: &std::path::Path, revision: &str) -> Value {
     assert_ne!(status, 0, "CLI accepts a semantically invalid request");
     assert!(stdout.is_empty());
     serde_json::from_slice(&stderr).expect("CLI returns a structured diagnostic")
+}
+
+fn cli_reattach_edge(root: &std::path::Path, revision: &str) -> Value {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let path = root.to_string_lossy().into_owned();
+    let reference = serde_json::to_string(&edge_reference(revision)).expect("reference serializes");
+    let args = vec![
+        OsString::from("--machine"),
+        OsString::from("reattach-edge"),
+        OsString::from("--bundle"),
+        OsString::from(path),
+        OsString::from("--expected-revision"),
+        OsString::from(revision),
+        OsString::from("--edit-feature-id"),
+        OsString::from("fillet-after-edge"),
+        OsString::from("--edit-kind"),
+        OsString::from("fillet"),
+        OsString::from("--base"),
+        OsString::from("base"),
+        OsString::from("--radius"),
+        OsString::from("0.25"),
+        OsString::from("--reference"),
+        OsString::from(reference),
+    ];
+    let status = threeterm_cli::dispatch::dispatch(args, &mut stdout, &mut stderr);
+    assert_eq!(
+        status,
+        0,
+        "CLI edge reattachment failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    serde_json::from_slice(&stdout).expect("CLI edge command returns JSON")
 }
 
 fn mcp_identity(root: &std::path::Path) -> Value {
@@ -439,12 +470,7 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let Some(mcp_revision) = setup_edge_root(&mcp_root, "mcp") else {
         return;
     };
-    let cli = threeterm_cli::dispatch::dispatch_registered_command(
-        &threeterm_host::Host::new(),
-        REATTACH_EDGE_COMMAND_ID,
-        edge_request(&cli_root, &cli_revision),
-    )
-    .expect("CLI edge command executes");
+    let cli = cli_reattach_edge(&cli_root, &cli_revision);
     let tui = threeterm_tui::execute_selected_edge_reattachment(
         &threeterm_host::Host::new(),
         &tui_root,

@@ -33,7 +33,7 @@ verify_libslvs_source() {
     command -v jq >/dev/null 2>&1 || licensing_fail tool "jq is required"
 
     local basis worker_id worker_schema source_repository source_commit source_url
-    local license_text notice source_offer
+    local license_text license_text_sha256 notice source_offer
     basis="$(jq -er '.basis' "$policy")" || licensing_fail policy "policy basis is missing"
     worker_id="$(jq -er '.worker_id' "$policy")" || licensing_fail policy "policy worker identity is missing"
     worker_schema="$(jq -er '.worker_schema_version' "$policy")" || licensing_fail policy "policy worker schema is missing"
@@ -41,6 +41,8 @@ verify_libslvs_source() {
     source_commit="$(jq -er '.source_commit' "$policy")" || licensing_fail policy "policy source commit is missing"
     source_url="$(jq -er '.source_url' "$policy")" || licensing_fail policy "policy immutable source URL is missing"
     license_text="$(jq -er '.license_text' "$policy")" || licensing_fail policy "policy license text path is missing"
+    license_text_sha256="$(jq -er '.license_text_sha256' "$policy")" \
+        || licensing_fail policy "policy license text digest is missing"
     notice="$(jq -er '.notice' "$policy")" || licensing_fail policy "policy NOTICE path is missing"
     source_offer="$(jq -er '.source_offer' "$policy")" || licensing_fail policy "policy source-offer path is missing"
 
@@ -57,6 +59,8 @@ verify_libslvs_source() {
     licensing_require_file "$root" "$license_text"
     licensing_require_file "$root" "$notice"
     licensing_require_file "$root" "$source_offer"
+    [[ "$(licensing_sha256 "${root}/${license_text}")" == "$license_text_sha256" ]] \
+        || licensing_fail license-text "GPLv3 license text digest does not match the approved text"
     [[ "$(wc -l < "${root}/${license_text}")" -ge 300 ]] \
         || licensing_fail license-text "GPLv3 license text is incomplete"
     grep -Fq 'GNU GENERAL PUBLIC LICENSE' "${root}/${license_text}" \
@@ -72,6 +76,8 @@ verify_libslvs_source() {
         || { licensing_fail notice "NOTICE does not name the immutable source URL"; return 1; }
     grep -Fq 'SOURCE-OFFER.txt' "${root}/${notice}" \
         || { licensing_fail notice "NOTICE does not identify the source offer"; return 1; }
+    grep -Fq 'LICENSES/GPL-3.0-only.txt' "${root}/${notice}" \
+        || { licensing_fail notice "NOTICE does not identify the staged license path"; return 1; }
 
     grep -Fq 'valid for at least three years' "${root}/${source_offer}" \
         || { licensing_fail source-offer "source offer has no three-year validity"; return 1; }
@@ -157,6 +163,8 @@ stage_libslvs_artifact() {
         "${artifact_root}/source/crates/workers/slvs/build.rs"
     cp "${source_root}/crates/workers/slvs/src/lib.rs" \
         "${artifact_root}/source/crates/workers/slvs/src/lib.rs"
+    cp "${source_root}/crates/workers/slvs/src/envelope.rs" \
+        "${artifact_root}/source/crates/workers/slvs/src/envelope.rs"
     cp "${source_root}/crates/workers/slvs/src-cpp/worker_main.cpp" \
         "${artifact_root}/source/crates/workers/slvs/src-cpp/worker_main.cpp"
 
@@ -171,6 +179,7 @@ stage_libslvs_artifact() {
         source/crates/workers/slvs/Cargo.toml
         source/crates/workers/slvs/build.rs
         source/crates/workers/slvs/src/lib.rs
+        source/crates/workers/slvs/src/envelope.rs
         source/crates/workers/slvs/src-cpp/worker_main.cpp
     )
     local files='[]' path digest
@@ -252,7 +261,7 @@ verify_libslvs_artifact() {
 
     local count path digest actual
     count="$(jq '.files | length' "$manifest")"
-    [[ "$count" == 9 ]] || licensing_fail manifest "artifact manifest must list nine required files"
+    [[ "$count" == 10 ]] || licensing_fail manifest "artifact manifest must list ten required files"
     jq -e '.files | map(.path) == [
         "bin/threeterm-slvs-worker",
         "licenses/libslvs.json",
@@ -262,6 +271,7 @@ verify_libslvs_artifact() {
         "source/crates/workers/slvs/Cargo.toml",
         "source/crates/workers/slvs/build.rs",
         "source/crates/workers/slvs/src/lib.rs",
+        "source/crates/workers/slvs/src/envelope.rs",
         "source/crates/workers/slvs/src-cpp/worker_main.cpp"
     ]' "$manifest" >/dev/null \
         || licensing_fail manifest "artifact manifest file list is incomplete or inconsistent"
@@ -309,6 +319,8 @@ verify_libslvs_artifact() {
     done
     [[ "$text" == LICENSES/GPL-3.0-only.txt && "$notice" == NOTICE && "$offer" == SOURCE-OFFER.txt ]] \
         || { licensing_fail manifest "artifact licensing paths are inconsistent"; return 1; }
+    [[ "$(jq -er '.license_text_sha256' "${root}/${policy}")" == "$text_digest" ]] \
+        || { licensing_fail license-text "artifact license text is not the approved GPLv3 text"; return 1; }
     grep -Fq 'GNU GENERAL PUBLIC LICENSE' "${root}/${text}" \
         || { licensing_fail license-text "artifact GPLv3 text is incomplete"; return 1; }
     [[ "$(wc -l < "${root}/${text}")" -ge 300 ]] \

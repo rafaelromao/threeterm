@@ -146,6 +146,10 @@ finalize_native_worker_manifest() {
     slvs_sha256="$(sha256sum "${slvs_worker}" | cut -d' ' -f1)"
     stage_libslvs_artifact "$(pwd)" "${slvs_worker}" "${artifact_root}"
     artifact_manifest_sha256="$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)"
+    [[ -f "${artifact_root}/manifest.json" ]] || {
+        printf '%s\n' 'libslvs artifact manifest was not staged' >&2
+        return 1
+    }
 
     jq -n \
         --arg schema_version "${NATIVE_WORKER_MANIFEST_SCHEMA}" \
@@ -184,6 +188,9 @@ finalize_native_worker_manifest() {
            (.workers.occt.executable.sha256 | length == 64) and
            (.workers.libslvs.executable.sha256 | length == 64) and
            (.libslvs_artifact.manifest_sha256 | length == 64)' "${manifest}" >/dev/null
+    [[ "$(jq -er '.libslvs_artifact.manifest_path' "${manifest}")" == libslvs-artifact/manifest.json ]] || return 1
+    [[ "$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)" == \
+        "$(jq -er '.libslvs_artifact.manifest_sha256' "${manifest}")" ]] || return 1
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

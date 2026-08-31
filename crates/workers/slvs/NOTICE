@@ -8,8 +8,8 @@ https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8edd
 
 libslvs is distributed under the GNU General Public License, version 3,
 SPDX identifier GPL-3.0-only. The complete license text is distributed in
-LICENSE-GPL-3.0.txt. The corresponding-source written offer is in
-SOURCE-OFFER.txt.
+LICENSE-GPL-3.0.txt (and as LICENSES/GPL-3.0-only.txt in a staged artifact).
+The corresponding-source written offer is in SOURCE-OFFER.txt.
 
 This notice, the full license text, the corresponding source, and the
 source-offer obligations must accompany every distributed worker artifact.

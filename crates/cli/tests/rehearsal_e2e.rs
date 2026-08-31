@@ -362,8 +362,7 @@ fn committed_rehearsal_evidence_has_a_reproducible_sha256_catalog() {
 
 #[test]
 fn schema_and_capability_adversarial_cases_preserve_state_and_publish_evidence() {
-    if OcctWorker::locate().is_err() {
-        eprintln!("adversarial_e2e: no OCCT worker binary found; CI runs this production path");
+    if !require_occt_for_canonical_test() {
         return;
     }
     let output_dir = temp_root("adversarial-native-independent");
@@ -421,10 +420,7 @@ fn schema_and_capability_adversarial_cases_preserve_state_and_publish_evidence()
 #[test]
 #[ignore = "slow: runs every native-dependent adversarial case"]
 fn all_adversarial_cases_run_in_order_when_the_occt_worker_is_available() {
-    if OcctWorker::locate().is_err() {
-        eprintln!(
-            "adversarial_e2e: no OCCT worker binary found; pinned CI runs this production path"
-        );
+    if !require_occt_for_canonical_test() {
         return;
     }
     let output_dir = temp_root("adversarial-all");
@@ -439,8 +435,7 @@ fn all_adversarial_cases_run_in_order_when_the_occt_worker_is_available() {
 
 #[test]
 fn capability_loss_is_demoable_through_the_production_binary() {
-    if OcctWorker::locate().is_err() {
-        eprintln!("adversarial_cli: no OCCT worker binary found; CI runs this production path");
+    if !require_occt_for_canonical_test() {
         return;
     }
     let output_dir = temp_root("adversarial-cli-capability");
@@ -460,6 +455,12 @@ fn capability_loss_is_demoable_through_the_production_binary() {
 #[ignore = "slow: creates a native mismatch-cache adversarial fixture"]
 fn mismatch_cache_is_demoable_through_the_production_binary_when_occt_is_available() {
     if OcctWorker::locate().is_err() {
+        if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+            panic!(
+                "{}",
+                "{\"code\":\"worker_unavailable\",\"worker\":\"occt\"}"
+            );
+        }
         eprintln!(
             "adversarial_cli: no OCCT worker binary found; pinned CI runs this production path"
         );
@@ -479,4 +480,18 @@ fn mismatch_cache_is_demoable_through_the_production_binary_when_occt_is_availab
     );
     assert!(report["report"]["canonical_byte_equal"].as_bool().unwrap());
     let _ = fs::remove_dir_all(output_dir);
+}
+
+fn require_occt_for_canonical_test() -> bool {
+    if OcctWorker::locate().is_err() {
+        if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+            panic!(
+                "{}",
+                "{\"code\":\"worker_unavailable\",\"worker\":\"occt\"}"
+            );
+        }
+        eprintln!("rehearsal_e2e: no OCCT worker; local test skipped");
+        return false;
+    }
+    true
 }

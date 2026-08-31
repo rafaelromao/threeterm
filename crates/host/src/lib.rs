@@ -2808,7 +2808,6 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
-        let source_snapshot = self.load(root)?;
         let mut request_value =
             serde_json::to_value(request).map_err(|error| HostError::Validation {
                 detail: format!("{operation:?} request serialization failed: {error}"),
@@ -2826,6 +2825,14 @@ impl Host {
                 detail: "OCCT request is missing feature_id".to_string(),
             })?
             .to_string();
+        worker.verify_identity().map_err(|error| match error {
+            WorkerError::Spawn { binary, detail, .. } => HostError::WorkerFailure {
+                request_id: Some(request_id.clone()),
+                detail: format!("worker spawn failed at {}: {detail}", binary.display()),
+            },
+            other => HostError::from(other),
+        })?;
+        let source_snapshot = self.load(root)?;
         let binding = occt_artifact_request(
             &request_value,
             operation,
@@ -3986,6 +3993,7 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeDerivedResult, HostError> {
         let root = root.as_ref();
+        worker.verify_identity().map_err(HostError::from)?;
         let source_snapshot = self.load(root)?;
 
         let mut binding = extrude_artifact_request(&request, &source_snapshot)?;

@@ -60,6 +60,20 @@ for member in "${EXPECTED_MEMBERS[@]}"; do
     fi
 done
 
+export CARGO_TARGET_DIR="${PWD}/target"
+# shellcheck source=/dev/null
+source "${PWD}/.github/scripts/native-workers.sh"
+echo "==> Resolving immutable OCCT and libslvs sources"
+prepare_native_workers
+echo "==> Building the selected native workers"
+cargo build --workspace
+ACCEPTANCE_OCCT_WORKER="$(selected_worker_path occt)"
+ACCEPTANCE_SLVS_WORKER="$(selected_worker_path slvs)"
+export THREETERM_OCCT_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_OCCT_WORKER}" | cut -d' ' -f1)"
+export THREETERM_SLVS_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_SLVS_WORKER}" | cut -d' ' -f1)"
+verify_native_worker_execution "${ACCEPTANCE_OCCT_WORKER}" occt
+verify_native_worker_execution "${ACCEPTANCE_SLVS_WORKER}" slvs
+
 echo "==> cargo check --workspace"
 cargo check --workspace
 
@@ -73,10 +87,22 @@ echo "==> test-suite selector contract"
 bash tests/test-test-suite.sh
 
 echo "==> fast test suite"
-# Native-worker tests are serialized to avoid resource contention, matching CI.
 bash .github/scripts/test-suite.sh fast
+
+echo "==> canonical real-worker integration tests"
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \
+    --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test bracket_integration \
+    --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_worker \
+    --jobs 1 -- --test-threads=1
+
+finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}"
 
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh
+
+echo "==> native-worker evidence contract test"
+bash tests/native-worker-contract.sh
 
 echo "==> Acceptance contract satisfied"

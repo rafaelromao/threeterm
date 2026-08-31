@@ -228,6 +228,51 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
 }
 
 #[test]
+fn host_rejects_a_mismatched_worker_before_creating_a_stage_or_mutating_canonical_state() {
+    let project_root = temp_root("identity-mismatch-project");
+    let worker_root = temp_root("identity-mismatch-worker");
+    let worker_path = worker_root.join("worker.sh");
+    let host = Host::new();
+    host.save(&project_root, "seed", "box")
+        .expect("canonical snapshot saves");
+    let manifest_before = fs::read(project_root.join("manifest.json")).expect("manifest reads");
+    let log_before = fs::read(project_root.join("transactions.log")).expect("log reads");
+    let derived_before = project_root.join(".derived").exists();
+    fs::create_dir_all(&worker_root).expect("worker root creates");
+    fs::write(&worker_path, b"#!/bin/sh\nexit 0\n").expect("worker writes");
+    fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o700))
+        .expect("worker becomes executable");
+
+    let error = host
+        .stage_extrude(
+            &project_root,
+            ExtrudeRequest::new(
+                "identity-mismatch-request",
+                vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+                1.0,
+            )
+            .with_feature_id("identity-mismatch-feature"),
+            &OcctWorker::with_binary_path(worker_path.clone())
+                .with_expected_binary_sha256("0".repeat(64)),
+        )
+        .expect_err("mismatched worker must fail closed");
+
+    assert!(error.to_string().contains("worker identity mismatch"));
+    assert_eq!(
+        fs::read(project_root.join("manifest.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(project_root.join("transactions.log")).unwrap(),
+        log_before
+    );
+    assert_eq!(project_root.join(".derived").exists(), derived_before);
+
+    let _ = fs::remove_dir_all(project_root);
+    let _ = fs::remove_dir_all(worker_root);
+}
+
+#[test]
 fn host_accepts_a_valid_extrude_derived_result_without_mutating_canonical_state() {
     let project_root = temp_root("valid-project");
     let host = Host::new();

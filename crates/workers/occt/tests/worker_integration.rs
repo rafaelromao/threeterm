@@ -1,11 +1,9 @@
 //! Integration tests that exercise the production worker binary through
 //! the Rust boundary.
 //!
-//! When the worker binary is unavailable (no system OCCT in the
-//! development environment) the tests soft-skip via
-//! `OcctWorker::locate` returning `Err`. The CI archlinux container
-//! installs `opencascade` via `pacman` so the binary is built and the
-//! tests exercise the production code path end-to-end.
+//! Local runs may soft-skip when the worker is unavailable. The canonical CI
+//! contract sets `THREETERM_REQUIRE_REAL_WORKER=1`, which turns that absence
+//! into a structured failure.
 
 use std::{
     io::Write,
@@ -46,14 +44,20 @@ fn triangle_extrude_request(label: &str) -> ExtrudeRequest {
 }
 
 fn locate_worker() -> Option<OcctWorker> {
-    if let Ok(worker) = OcctWorker::locate() {
-        return Some(worker);
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+                panic!(
+                    "{{\"code\":\"worker_unavailable\",\"worker\":\"occt\",\"detail\":\"{error}\"}}"
+                );
+            }
+            eprintln!(
+                "threeterm-occt-worker: no worker binary found; local integration test skipped: {error}"
+            );
+            None
+        }
     }
-    eprintln!(
-        "threeterm-occt-worker: no worker binary found; set \
-         THREETERM_OCCTBUILD_WORKER or build the crate against a system OCCT install"
-    );
-    None
 }
 
 fn required_fixture_worker(test_name: &str) -> Option<OcctWorker> {

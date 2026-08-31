@@ -12,6 +12,9 @@ commit:
 https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687
 
 The ThreeTerm worker source and build scripts are distributed with the source
-release at the same revision as the artifact. The GNU General Public License,
+release at the same revision as the artifact and are maintained at:
+https://github.com/rafaelromao/threeterm
+
+The GNU General Public License,
 version 3, and the complete license text in LICENSE-GPL-3.0.txt govern this
 distribution.

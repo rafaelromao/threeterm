@@ -9,7 +9,7 @@ description = "Disposable libslvs sketch solver worker boundary."
 
 [package.metadata.threeterm.licensing]
 basis = "GPL-3.0-only"
-policy = "../../licenses/libslvs.json"
+policy = "../../../licenses/libslvs.json"
 worker_id = "slvs"
 worker_schema_version = "threeterm.workers.slvs/1"
 source_repository = "https://github.com/solvespace/solvespace"

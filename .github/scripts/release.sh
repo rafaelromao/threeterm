@@ -64,6 +64,8 @@ verify_release_artifact() {
     local artifact_root manifest
     artifact_root="$(release_artifact_root)"
     manifest="$(release_artifact_manifest "$artifact_root")"
+    [[ "$(realpath -m "$manifest")" == "$(realpath -m "$artifact_root/manifest.json")" ]] \
+        || fail 'release artifact manifest must be the manifest inside the artifact root'
     [[ -f "$LICENSING_SCRIPT" ]] || fail "licensing verifier not found: ${LICENSING_SCRIPT}"
     # shellcheck source=/dev/null
     source "$LICENSING_SCRIPT"

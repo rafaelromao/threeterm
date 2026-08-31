@@ -152,6 +152,9 @@ stage_libslvs_artifact() {
     local artifact_root="$3"
     local expected_worker_sha256="${4:-}"
     verify_libslvs_source "$source_root"
+    [[ -z "$(git -C "$source_root" status --porcelain --untracked-files=all)" ]] \
+        || licensing_fail source-tree "source tree must be clean before staging an artifact"
+    if (( LICENSING_FAILED )); then return 1; fi
     [[ -f "$worker" && -x "$worker" ]] \
         || licensing_fail worker "selected libslvs worker is not executable: ${worker}"
 

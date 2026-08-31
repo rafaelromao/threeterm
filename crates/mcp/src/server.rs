@@ -25,21 +25,24 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{
-    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command,
+    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command, host_error_diagnostic,
 };
-use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
+use threeterm_host::{BREP_SUBDIR, Host, HostError};
+use threeterm_occt_worker::{BooleanPatternRequest, BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema,
-    IDENTITY_COMMAND_ID, iter,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
+    CommandSchema, IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -51,6 +54,7 @@ pub const ERROR_METHOD_NOT_FOUND: i32 = -32601;
 pub const ERROR_INVALID_PARAMS: i32 = -32602;
 pub const ERROR_INTERNAL: i32 = -32603;
 pub const ERROR_PARSE: i32 = -32700;
+pub const MAX_PROGRESS_NOTIFICATIONS: usize = 100;
 
 /// Tool descriptor exposed by `tools/list`. The wire shape follows the MCP
 /// tool advertisement convention with `inputSchema` and `outputSchema`
@@ -131,14 +135,44 @@ struct BracketEditSession {
     worker: OcctWorker,
 }
 
+#[derive(Debug)]
+enum RunEvent {
+    Request(JsonRpcRequest),
+    ParseError(JsonRpcResponse),
+    EndOfInput,
+    ReadError(std::io::Error),
+    Progress {
+        request_key: String,
+        token: Value,
+        progress: threeterm_protocol::supervisor::Progress,
+    },
+    Completed {
+        request_key: String,
+        response: Result<Value, HostError>,
+    },
+}
+
+#[derive(Debug)]
+struct ActiveRequest {
+    request_key: String,
+    cancel: Arc<AtomicBool>,
+}
+
 #[derive(Debug, Default)]
 pub struct McpServer {
     bracket_edits: RefCell<HashMap<(PathBuf, String), BracketEditSession>>,
+    boolean_pattern_worker: Option<OcctWorker>,
 }
 
 impl McpServer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn with_boolean_pattern_worker(mut self, worker: OcctWorker) -> Self {
+        self.boolean_pattern_worker = Some(worker);
+        self
     }
 
     /// Build the `tools/list` response payload from the static command
@@ -258,7 +292,10 @@ impl McpServer {
             }
         };
 
-        if matches!(schema_entry.id, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+        if matches!(
+            schema_entry.id,
+            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
+        ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }
 
@@ -572,67 +609,371 @@ impl McpServer {
     /// `reader` hits EOF or a malformed frame aborts the current chunk; in
     /// the latter case the buffered bytes are dropped so the supervisor
     /// can resync on the next chunk (closed issue #49 contract).
-    pub fn run<R: BufRead, W: Write>(
+    pub fn run<R: BufRead + Send, W: Write>(
         &self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<usize, std::io::Error> {
-        let mut buffer = Vec::with_capacity(4096);
-        let mut handled = 0usize;
-        loop {
-            buffer.clear();
-            let read = reader.read_until(b'\n', &mut buffer)?;
-            if read == 0 {
-                return Ok(handled);
-            }
-            if buffer.len() > MAX_FRAME_BUFFER {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "frame buffer exceeded maximum size: {} > {}",
-                        buffer.len(),
-                        MAX_FRAME_BUFFER
-                    ),
-                ));
-            }
-            let raw_lines = split_newlines(&buffer);
-            for line in raw_lines {
-                if line.is_empty() {
-                    continue;
-                }
-                let parsed: Result<Value, _> = serde_json::from_slice(line);
-                let value = match parsed {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let response = JsonRpcResponse::error(
-                            Value::Null,
-                            ERROR_PARSE,
-                            format!("frame is not valid JSON: {error}"),
-                        );
-                        write_envelope(writer, &response)?;
-                        continue;
+        let (events, receive) = mpsc::sync_channel(128);
+        thread::scope(|scope| {
+            let sender = events.clone();
+            scope.spawn(move || {
+                let mut buffer = Vec::with_capacity(4096);
+                loop {
+                    buffer.clear();
+                    let read = match reader.read_until(b'\n', &mut buffer) {
+                        Ok(read) => read,
+                        Err(error) => {
+                            let _ = sender.send(RunEvent::ReadError(error));
+                            return;
+                        }
+                    };
+                    if read == 0 {
+                        let _ = sender.send(RunEvent::EndOfInput);
+                        return;
                     }
-                };
-                let request = match parse_request(&value) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        let response = JsonRpcResponse::error(
-                            extract_id(&value),
-                            ERROR_INVALID_REQUEST,
-                            error,
-                        );
-                        write_envelope(writer, &response)?;
-                        continue;
+                    if buffer.len() > MAX_FRAME_BUFFER {
+                        let _ = sender.send(RunEvent::ReadError(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "frame buffer exceeded maximum size: {} > {}",
+                                buffer.len(),
+                                MAX_FRAME_BUFFER
+                            ),
+                        )));
+                        return;
                     }
-                };
-                let response = self.handle_request(&request);
-                if !request.is_notification {
-                    write_envelope(writer, &response)?;
+                    for line in split_newlines(&buffer) {
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let value: Value = match serde_json::from_slice(line) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if sender
+                                    .send(RunEvent::ParseError(JsonRpcResponse::error(
+                                        Value::Null,
+                                        ERROR_PARSE,
+                                        format!("frame is not valid JSON: {error}"),
+                                    )))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                        };
+                        let request = match parse_request(&value) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                if sender
+                                    .send(RunEvent::ParseError(JsonRpcResponse::error(
+                                        extract_id(&value),
+                                        ERROR_INVALID_REQUEST,
+                                        error,
+                                    )))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                        };
+                        if sender.send(RunEvent::Request(request)).is_err() {
+                            return;
+                        }
+                    }
                 }
-                handled += 1;
+            });
+
+            let mut active: Option<ActiveRequest> = None;
+            let mut handled = 0usize;
+            let mut input_finished = false;
+            loop {
+                let event = match receive.recv() {
+                    Ok(event) => event,
+                    Err(_) => break Ok(handled),
+                };
+                match event {
+                    RunEvent::Request(request) if request.method == "notifications/cancelled" => {
+                        if let Some(active) = &active
+                            && cancellation_targets(&request, &active.request_key)
+                        {
+                            active.cancel.store(true, Ordering::SeqCst);
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request)
+                        if !request.is_notification && is_boolean_pattern_call(&request) =>
+                    {
+                        if active.is_some() {
+                            write_envelope(
+                                writer,
+                                &JsonRpcResponse::success(
+                                    request.id.clone(),
+                                    tool_execution_error(
+                                        "another expensive command is already active".to_string(),
+                                    ),
+                                ),
+                            )?;
+                        } else {
+                            let request_key = request_key(&request.id);
+                            let cancel = Arc::new(AtomicBool::new(false));
+                            let worker_cancel = Arc::clone(&cancel);
+                            let sender = events.clone();
+                            let token = progress_token(&request);
+                            let configured_worker = self.boolean_pattern_worker.clone();
+                            let arguments = request
+                                .params
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Object(Default::default()));
+                            let event_key = request_key.clone();
+                            scope.spawn(move || {
+                                let mut emitted = 0usize;
+                                let mut last = None;
+                                let mut on_progress =
+                                    |progress: &threeterm_protocol::supervisor::Progress| {
+                                        let Some(token) = &token else { return };
+                                        if emitted >= MAX_PROGRESS_NOTIFICATIONS
+                                            || last.as_ref() == Some(progress)
+                                        {
+                                            return;
+                                        }
+                                        last = Some(progress.clone());
+                                        emitted += 1;
+                                        let _ = sender.send(RunEvent::Progress {
+                                            request_key: event_key.clone(),
+                                            token: token.clone(),
+                                            progress: progress.clone(),
+                                        });
+                                    };
+                                let response = execute_boolean_pattern(
+                                    arguments,
+                                    &worker_cancel,
+                                    &mut on_progress,
+                                    configured_worker.as_ref(),
+                                );
+                                let _ = sender.send(RunEvent::Completed {
+                                    request_key: event_key,
+                                    response,
+                                });
+                            });
+                            active = Some(ActiveRequest {
+                                request_key,
+                                cancel,
+                            });
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request) => {
+                        let response = self.handle_request(&request);
+                        if !request.is_notification {
+                            write_envelope(writer, &response)?;
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Progress {
+                        request_key: event_key,
+                        token,
+                        progress,
+                    } => {
+                        if active
+                            .as_ref()
+                            .is_some_and(|request| request.request_key == event_key)
+                        {
+                            write_progress(writer, &token, &progress)?;
+                        }
+                    }
+                    RunEvent::Completed {
+                        request_key: event_key,
+                        response,
+                    } => {
+                        if active
+                            .as_ref()
+                            .is_some_and(|request| request.request_key == event_key)
+                        {
+                            let request_id =
+                                active.take().expect("active request exists").request_key;
+                            let response = match response {
+                                Ok(value) => JsonRpcResponse::success(
+                                    parse_request_id(&request_id),
+                                    tool_result(value, false),
+                                ),
+                                Err(error) => JsonRpcResponse::success(
+                                    parse_request_id(&request_id),
+                                    host_tool_execution_error(&error),
+                                ),
+                            };
+                            write_envelope(writer, &response)?;
+                        }
+                    }
+                    RunEvent::ParseError(response) => write_envelope(writer, &response)?,
+                    RunEvent::EndOfInput => {
+                        input_finished = true;
+                        if active.is_none() {
+                            break Ok(handled);
+                        }
+                    }
+                    RunEvent::ReadError(error) => break Err(error),
+                }
+                if input_finished && active.is_none() {
+                    break Ok(handled);
+                }
             }
-        }
+        })
     }
+}
+
+fn is_boolean_pattern_call(request: &JsonRpcRequest) -> bool {
+    request.method == "tools/call"
+        && request.params.get("name").and_then(Value::as_str)
+            == Some("threeterm.command.boolean-pattern/1")
+}
+
+fn request_key(id: &Value) -> String {
+    serde_json::to_string(id).expect("valid JSON-RPC id serializes")
+}
+
+fn parse_request_id(key: &str) -> Value {
+    serde_json::from_str(key).expect("active JSON-RPC id remains valid JSON")
+}
+
+fn cancellation_targets(request: &JsonRpcRequest, expected_key: &str) -> bool {
+    request
+        .params
+        .get("requestId")
+        .is_some_and(|id| request_key(id) == expected_key)
+}
+
+fn progress_token(request: &JsonRpcRequest) -> Option<Value> {
+    request
+        .params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("progressToken"))
+        .filter(|token| token.is_string() || token.as_i64().is_some() || token.as_u64().is_some())
+        .cloned()
+}
+
+fn write_progress<W: Write>(
+    writer: &mut W,
+    token: &Value,
+    progress: &threeterm_protocol::supervisor::Progress,
+) -> std::io::Result<()> {
+    let payload = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress.percent,
+            "total": 100,
+            "message": progress.stage,
+        },
+    });
+    let mut bytes = serde_json::to_vec(&payload).expect("progress serializes");
+    bytes.push(b'\n');
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+fn execute_boolean_pattern(
+    arguments: Value,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    configured_worker: Option<&OcctWorker>,
+) -> Result<Value, HostError> {
+    let bundle = arguments
+        .get("bundle_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing bundle_path".to_string(),
+        })?;
+    let feature_id = arguments
+        .get("feature_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing feature_id".to_string(),
+        })?;
+    let base_feature_id = arguments
+        .get("base_feature_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing base_feature_id".to_string(),
+        })?;
+    let origin: [f64; 3] =
+        serde_json::from_value(arguments["origin"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("invalid origin: {error}"),
+            }
+        })?;
+    let spacing: [f64; 2] =
+        serde_json::from_value(arguments["spacing"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("invalid spacing: {error}"),
+            }
+        })?;
+    let columns = arguments["columns"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid columns".to_string(),
+        })?;
+    let rows = arguments["rows"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid rows".to_string(),
+        })?;
+    let diameter = arguments["diameter"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid diameter".to_string(),
+        })?;
+    let root = Bundle::at(bundle).canonical_root().to_path_buf();
+    let request = BooleanPatternRequest::new(
+        new_request_id(),
+        root.join(BREP_SUBDIR)
+            .join(format!("{base_feature_id}.brep")),
+        origin,
+        spacing,
+        columns,
+        rows,
+        diameter,
+    )
+    .with_output_path(root.join("stage"), "boolean-pattern.brep")
+    .with_feature_id(feature_id);
+    let located_worker;
+    let worker = if let Some(worker) = configured_worker {
+        worker
+    } else {
+        located_worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+            detail: error.to_string(),
+        })?;
+        &located_worker
+    };
+    let value = Host::new()
+        .boolean_pattern_with_cancel_and_progress(bundle, request, worker, cancel, on_progress)?
+        .response_value(threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION);
+    validate(
+        &threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA,
+        &value,
+    )
+    .map_err(|reason| HostError::Validation {
+        detail: format!("boolean pattern response failed schema validation: {reason}"),
+    })?;
+    Ok(value)
+}
+
+fn host_tool_execution_error(error: &HostError) -> Value {
+    let diagnostic =
+        serde_json::to_value(host_error_diagnostic(error)).expect("diagnostic serializes");
+    let text = serde_json::to_string(&diagnostic).expect("diagnostic text serializes");
+    json!({
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": diagnostic,
+        "isError": true,
+    })
 }
 
 fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value {
@@ -1320,6 +1661,112 @@ mod tests {
         )
         .expect("text content contains JSON");
         assert_eq!(content, result["structuredContent"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_streams_bounded_progress_and_cancels_an_active_boolean_pattern() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("threeterm-mcp-progress-{}", new_request_id()));
+        Bundle::create(&root).expect("bundle creates");
+        let worker_path = root.join("worker.sh");
+        std::fs::write(
+            &worker_path,
+            r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
+read request
+rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"'$rid'","stage":"boolean_pattern:1/324","percent":1}'
+read cancel
+printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","request_id":"'$rid'","reason":"cancelled by client"}'
+"##,
+        )
+        .expect("worker script writes");
+        let mut permissions = std::fs::metadata(&worker_path)
+            .expect("worker metadata reads")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
+
+        let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+        let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+        let call = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.boolean-pattern/1",
+                "_meta": {"progressToken": "progress-1"},
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "feature_id": "pattern",
+                    "base_feature_id": "missing-base",
+                    "origin": [0.0, 0.0, 0.0],
+                    "spacing": [1.0, 1.0],
+                    "columns": 18,
+                    "rows": 18,
+                    "diameter": 1.0
+                }
+            }
+        });
+        let cancel = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "method": "notifications/cancelled",
+            "params": {"requestId": "call-1", "reason": "stop"}
+        });
+        assert_eq!(
+            progress_token(&parse_request(&call).expect("call parses")),
+            Some(json!("progress-1"))
+        );
+        let mut input = serde_json::to_vec(&call).expect("call serializes");
+        input.push(b'\n');
+        input.extend(serde_json::to_vec(&cancel).expect("cancel serializes"));
+        input.push(b'\n');
+        let mut output = Vec::new();
+        McpServer::new()
+            .with_boolean_pattern_worker(
+                OcctWorker::with_binary_path(worker_path).with_expected_worker_id("occt"),
+            )
+            .run(&mut input.as_slice(), &mut output)
+            .expect("MCP run succeeds");
+
+        let responses: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("MCP output is JSON"))
+            .collect();
+        assert!(
+            responses
+                .iter()
+                .any(|response| response["method"] == "notifications/progress"
+                    && response["params"]["progressToken"] == "progress-1"),
+            "active workers must stream progress: {responses:?}"
+        );
+        let result = responses
+            .iter()
+            .find(|response| response["id"] == "call-1")
+            .expect("call has a terminal response");
+        assert_eq!(result["result"]["isError"], true);
+        assert_eq!(
+            result["result"]["structuredContent"]["code"],
+            "worker_failure"
+        );
+        assert!(
+            result["result"]["structuredContent"]["arg"]
+                .as_str()
+                .expect("diagnostic arg is text")
+                .contains("boolean_pattern:1/324")
+        );
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).expect("manifest reads after cancellation"),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::read(root.join("transactions.log")).expect("log reads after cancellation"),
+            log_before
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

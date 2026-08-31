@@ -390,12 +390,14 @@ impl Supervisor {
     /// method does not re-consume it.
     pub fn cancel(&mut self, request_id: &str, reason: &str) -> SupervisorOutcome {
         let started = Instant::now();
+        let mut ignore_progress = |_progress: &Progress| {};
         self.cancel_with_deadline(
             request_id,
             reason,
             started,
             started + self.cancellation_grace.default_grace(),
             None,
+            &mut ignore_progress,
         )
     }
 
@@ -406,6 +408,7 @@ impl Supervisor {
         started: Instant,
         deadline: Instant,
         mut last_progress: Option<Progress>,
+        on_progress: &mut dyn FnMut(&Progress),
     ) -> SupervisorOutcome {
         if Instant::now() >= deadline {
             return self.force_terminate_outcome(
@@ -526,6 +529,9 @@ impl Supervisor {
                         );
                     }
                     last_progress = Some(Progress { stage, percent });
+                    if let Some(progress) = &last_progress {
+                        on_progress(progress);
+                    }
                 }
                 Ok(Envelope::Artifact { header, .. }) => {
                     if header.request_id != request_id {
@@ -704,6 +710,7 @@ impl Supervisor {
                     started,
                     cancel_deadline,
                     last_progress.take(),
+                    on_progress,
                 );
             }
             if let Some(outcome) = self.receive_request_envelope(

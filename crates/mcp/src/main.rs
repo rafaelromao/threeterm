@@ -6,12 +6,12 @@
 //! required; the binary runs cleanly under any MCP-compatible client
 //! (or under `cargo test --test mcp_bracket`).
 
-use std::io;
+use std::io::{self, BufReader};
 
 fn main() -> io::Result<()> {
-    let stdin = io::stdin();
+    let stdin = BufReader::new(io::stdin());
     let stdout = io::stdout();
-    let mut reader = stdin.lock();
+    let mut reader = stdin;
     let mut writer = stdout.lock();
     let server = threeterm_mcp::server::McpServer::new();
     let _handled = server.run(&mut reader, &mut writer)?;

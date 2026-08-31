@@ -4,6 +4,8 @@
 set -euo pipefail
 
 LIBSLVS_POLICY_RELATIVE="licenses/libslvs.json"
+LIBSLVS_POLICY_SCHEMA="threeterm.licensing.libslvs/1"
+LIBSLVS_LICENSE_TEXT_SHA256="3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
 LICENSING_FAILED=0
 
 licensing_fail() {
@@ -32,8 +34,11 @@ verify_libslvs_source() {
     [[ -f "$policy" ]] || licensing_fail missing-policy "policy is missing: ${LIBSLVS_POLICY_RELATIVE}"
     command -v jq >/dev/null 2>&1 || licensing_fail tool "jq is required"
 
-    local basis worker_id worker_schema source_repository source_commit source_url
+    local policy_schema basis worker_id worker_schema source_repository source_commit source_url
     local license_text license_text_sha256 notice source_offer
+    policy_schema="$(jq -er '.schema_version' "$policy")" || licensing_fail policy "policy schema is missing"
+    [[ "$policy_schema" == "$LIBSLVS_POLICY_SCHEMA" ]] \
+        || licensing_fail policy "unsupported libslvs policy schema: ${policy_schema}"
     basis="$(jq -er '.basis' "$policy")" || licensing_fail policy "policy basis is missing"
     worker_id="$(jq -er '.worker_id' "$policy")" || licensing_fail policy "policy worker identity is missing"
     worker_schema="$(jq -er '.worker_schema_version' "$policy")" || licensing_fail policy "policy worker schema is missing"
@@ -59,6 +64,8 @@ verify_libslvs_source() {
     licensing_require_file "$root" "$license_text"
     licensing_require_file "$root" "$notice"
     licensing_require_file "$root" "$source_offer"
+    [[ "$license_text_sha256" == "$LIBSLVS_LICENSE_TEXT_SHA256" ]] \
+        || licensing_fail license-text "policy license text digest is not approved"
     [[ "$(licensing_sha256 "${root}/${license_text}")" == "$license_text_sha256" ]] \
         || licensing_fail license-text "GPLv3 license text digest does not match the approved text"
     [[ "$(wc -l < "${root}/${license_text}")" -ge 300 ]] \
@@ -202,7 +209,7 @@ stage_libslvs_artifact() {
         --arg source_repository https://github.com/solvespace/solvespace \
         --arg source_commit 27b6a080c8b669421bd4d444650c3b8eddec5687 \
         --arg source_url https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687 \
-        --arg source_repository https://github.com/rafaelromao/threeterm \
+        --arg artifact_source_repository https://github.com/rafaelromao/threeterm \
         --arg source_revision "$source_revision" \
         --arg source_tree_url "https://github.com/rafaelromao/threeterm/tree/${source_revision}" \
         --arg executable_path bin/threeterm-slvs-worker \
@@ -220,7 +227,7 @@ stage_libslvs_artifact() {
           artifact: {name: $name, worker_id: $worker_id,
                      worker_schema_version: $worker_schema_version,
                      executable: {path: $executable_path, sha256: $executable_sha256},
-                     source_repository: $source_repository,
+                      source_repository: $artifact_source_repository,
                      source_revision: $source_revision,
                      source_tree_url: $source_tree_url},
           licensing: {basis: $basis, source_repository: $source_repository,
@@ -244,6 +251,7 @@ verify_libslvs_artifact() {
     [[ "$(jq -er '.schema_version' "$manifest")" == threeterm.release.libslvs/1 ]] \
         || licensing_fail manifest-schema "unsupported libslvs artifact manifest schema"
     local name worker_id worker_schema basis source_repository source_commit source_url
+    local artifact_source_repository
     local source_revision source_tree_url
     name="$(jq -er '.artifact.name' "$manifest")" || licensing_fail manifest "artifact name is missing"
     worker_id="$(jq -er '.artifact.worker_id' "$manifest")" || licensing_fail worker-identity "artifact worker identity is missing"
@@ -257,6 +265,8 @@ verify_libslvs_artifact() {
         || licensing_fail source-revision "artifact ThreeTerm source revision is missing"
     source_tree_url="$(jq -er '.artifact.source_tree_url' "$manifest")" \
         || licensing_fail source-url "artifact ThreeTerm source URL is missing"
+    artifact_source_repository="$(jq -er '.artifact.source_repository' "$manifest")" \
+        || licensing_fail source-repository "artifact ThreeTerm source repository is missing"
     [[ "$name" == threeterm-slvs-worker && "$worker_id" == slvs && "$worker_schema" == threeterm.workers.slvs/1 ]] \
         || licensing_fail worker-identity "artifact worker identity is inconsistent"
     [[ "$basis" == GPL-3.0-only && "$source_repository" == https://github.com/solvespace/solvespace \
@@ -267,6 +277,8 @@ verify_libslvs_artifact() {
     [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$source_tree_url" == \
         "https://github.com/rafaelromao/threeterm/tree/${source_revision}" ]] \
         || licensing_fail source-url "artifact ThreeTerm source URL is not immutable"
+    [[ "$artifact_source_repository" == https://github.com/rafaelromao/threeterm ]] \
+        || licensing_fail source-repository "artifact ThreeTerm source repository is inconsistent"
 
     local executable_path executable_sha256
     executable_path="$(jq -er '.artifact.executable.path' "$manifest")" \
@@ -314,7 +326,8 @@ verify_libslvs_artifact() {
     if ! licensing_require_file "$root" "$policy"; then return 1; fi
     [[ "$(licensing_sha256 "${root}/${policy}")" == "$policy_digest" ]] \
         || { licensing_fail digest "artifact policy digest is inconsistent"; return 1; }
-    [[ "$(jq -er '.basis' "${root}/${policy}")" == "$basis" \
+    [[ "$(jq -er '.schema_version' "${root}/${policy}")" == "$LIBSLVS_POLICY_SCHEMA" \
+        && "$(jq -er '.basis' "${root}/${policy}")" == "$basis" \
         && "$(jq -er '.worker_id' "${root}/${policy}")" == "$worker_id" \
         && "$(jq -er '.worker_schema_version' "${root}/${policy}")" == "$worker_schema" \
         && "$(jq -er '.source_repository' "${root}/${policy}")" == "$source_repository" \
@@ -341,6 +354,8 @@ verify_libslvs_artifact() {
         || { licensing_fail manifest "artifact licensing paths are inconsistent"; return 1; }
     [[ "$(jq -er '.license_text_sha256' "${root}/${policy}")" == "$text_digest" ]] \
         || { licensing_fail license-text "artifact license text is not the approved GPLv3 text"; return 1; }
+    [[ "$(jq -er '.license_text_sha256' "${root}/${policy}")" == "$LIBSLVS_LICENSE_TEXT_SHA256" ]] \
+        || { licensing_fail license-text "artifact policy license text digest is not approved"; return 1; }
     grep -Fq 'GNU GENERAL PUBLIC LICENSE' "${root}/${text}" \
         || { licensing_fail license-text "artifact GPLv3 text is incomplete"; return 1; }
     [[ "$(wc -l < "${root}/${text}")" -ge 300 ]] \

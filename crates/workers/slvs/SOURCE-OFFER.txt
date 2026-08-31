@@ -14,8 +14,10 @@ https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8edd
 The ThreeTerm worker source and build scripts are distributed with the source
 release at the same revision as the artifact and are maintained at:
 https://github.com/rafaelromao/threeterm
-The artifact itself also includes the complete worker source and build files
-under source/crates/workers/slvs.
+The artifact itself also includes the complete ThreeTerm source snapshot at
+the immutable revision recorded in manifest.json, in
+source/threeterm-source.tar. The worker source and build files are also
+available unpacked under source/crates/workers/slvs.
 
 The GNU General Public License,
 version 3, and the complete license text in LICENSE-GPL-3.0.txt govern this

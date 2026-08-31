@@ -167,6 +167,8 @@ stage_libslvs_artifact() {
         "${artifact_root}/source/crates/workers/slvs/src/envelope.rs"
     cp "${source_root}/crates/workers/slvs/src-cpp/worker_main.cpp" \
         "${artifact_root}/source/crates/workers/slvs/src-cpp/worker_main.cpp"
+    git -C "$source_root" archive --format=tar --prefix=threeterm-source/ HEAD \
+        >"${artifact_root}/source/threeterm-source.tar"
 
     local manifest="${artifact_root}/manifest.json"
     local temporary="${manifest}.tmp.$$"
@@ -181,7 +183,10 @@ stage_libslvs_artifact() {
         source/crates/workers/slvs/src/lib.rs
         source/crates/workers/slvs/src/envelope.rs
         source/crates/workers/slvs/src-cpp/worker_main.cpp
+        source/threeterm-source.tar
     )
+    local source_revision
+    source_revision="$(git -C "$source_root" rev-parse HEAD)"
     local files='[]' path digest
     for path in "${file_paths[@]}"; do
         digest="$(licensing_sha256 "${artifact_root}/${path}")"
@@ -197,6 +202,9 @@ stage_libslvs_artifact() {
         --arg source_repository https://github.com/solvespace/solvespace \
         --arg source_commit 27b6a080c8b669421bd4d444650c3b8eddec5687 \
         --arg source_url https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687 \
+        --arg source_repository https://github.com/rafaelromao/threeterm \
+        --arg source_revision "$source_revision" \
+        --arg source_tree_url "https://github.com/rafaelromao/threeterm/tree/${source_revision}" \
         --arg executable_path bin/threeterm-slvs-worker \
         --arg executable_sha256 "$(licensing_sha256 "${artifact_root}/bin/threeterm-slvs-worker")" \
         --arg policy_path licenses/libslvs.json \
@@ -211,7 +219,10 @@ stage_libslvs_artifact() {
         '{schema_version: $schema_version,
           artifact: {name: $name, worker_id: $worker_id,
                      worker_schema_version: $worker_schema_version,
-                     executable: {path: $executable_path, sha256: $executable_sha256}},
+                     executable: {path: $executable_path, sha256: $executable_sha256},
+                     source_repository: $source_repository,
+                     source_revision: $source_revision,
+                     source_tree_url: $source_tree_url},
           licensing: {basis: $basis, source_repository: $source_repository,
                       source_commit: $source_commit, source_url: $source_url,
                       policy: {path: $policy_path, sha256: $policy_sha256},
@@ -233,6 +244,7 @@ verify_libslvs_artifact() {
     [[ "$(jq -er '.schema_version' "$manifest")" == threeterm.release.libslvs/1 ]] \
         || licensing_fail manifest-schema "unsupported libslvs artifact manifest schema"
     local name worker_id worker_schema basis source_repository source_commit source_url
+    local source_revision source_tree_url
     name="$(jq -er '.artifact.name' "$manifest")" || licensing_fail manifest "artifact name is missing"
     worker_id="$(jq -er '.artifact.worker_id' "$manifest")" || licensing_fail worker-identity "artifact worker identity is missing"
     worker_schema="$(jq -er '.artifact.worker_schema_version' "$manifest")" || licensing_fail worker-schema "artifact worker schema is missing"
@@ -241,6 +253,10 @@ verify_libslvs_artifact() {
         || licensing_fail source-repository "artifact source repository is missing"
     source_commit="$(jq -er '.licensing.source_commit' "$manifest")" || licensing_fail source-commit "artifact source commit is missing"
     source_url="$(jq -er '.licensing.source_url' "$manifest")" || licensing_fail source-url "artifact source URL is missing"
+    source_revision="$(jq -er '.artifact.source_revision' "$manifest")" \
+        || licensing_fail source-revision "artifact ThreeTerm source revision is missing"
+    source_tree_url="$(jq -er '.artifact.source_tree_url' "$manifest")" \
+        || licensing_fail source-url "artifact ThreeTerm source URL is missing"
     [[ "$name" == threeterm-slvs-worker && "$worker_id" == slvs && "$worker_schema" == threeterm.workers.slvs/1 ]] \
         || licensing_fail worker-identity "artifact worker identity is inconsistent"
     [[ "$basis" == GPL-3.0-only && "$source_repository" == https://github.com/solvespace/solvespace \
@@ -248,6 +264,9 @@ verify_libslvs_artifact() {
         || licensing_fail basis "artifact licensing basis is inconsistent"
     [[ "$source_url" == "https://github.com/solvespace/solvespace/tree/${source_commit}" ]] \
         || licensing_fail source-url "artifact source URL is not immutable"
+    [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$source_tree_url" == \
+        "https://github.com/rafaelromao/threeterm/tree/${source_revision}" ]] \
+        || licensing_fail source-url "artifact ThreeTerm source URL is not immutable"
 
     local executable_path executable_sha256
     executable_path="$(jq -er '.artifact.executable.path' "$manifest")" \
@@ -261,7 +280,7 @@ verify_libslvs_artifact() {
 
     local count path digest actual
     count="$(jq '.files | length' "$manifest")"
-    [[ "$count" == 10 ]] || licensing_fail manifest "artifact manifest must list ten required files"
+    [[ "$count" == 11 ]] || licensing_fail manifest "artifact manifest must list eleven required files"
     jq -e '.files | map(.path) == [
         "bin/threeterm-slvs-worker",
         "licenses/libslvs.json",
@@ -272,7 +291,8 @@ verify_libslvs_artifact() {
         "source/crates/workers/slvs/build.rs",
         "source/crates/workers/slvs/src/lib.rs",
         "source/crates/workers/slvs/src/envelope.rs",
-        "source/crates/workers/slvs/src-cpp/worker_main.cpp"
+        "source/crates/workers/slvs/src-cpp/worker_main.cpp",
+        "source/threeterm-source.tar"
     ]' "$manifest" >/dev/null \
         || licensing_fail manifest "artifact manifest file list is incomplete or inconsistent"
     while IFS=$'\t' read -r path digest; do
@@ -335,6 +355,10 @@ verify_libslvs_artifact() {
         || { licensing_fail notice "artifact NOTICE does not name the immutable source URL"; return 1; }
     grep -Fq 'SOURCE-OFFER.txt' "${root}/${notice}" \
         || { licensing_fail notice "artifact NOTICE is incomplete"; return 1; }
+    grep -Fq 'slvs' "${root}/${notice}" \
+        || { licensing_fail notice "artifact NOTICE omits the worker identity"; return 1; }
+    grep -Fq 'threeterm.workers.slvs/1' "${root}/${notice}" \
+        || { licensing_fail notice "artifact NOTICE omits the worker schema"; return 1; }
     grep -Fq 'valid for at least three years' "${root}/${offer}" \
         || { licensing_fail source-offer "artifact source offer is incomplete"; return 1; }
     grep -Fq 'Corresponding Source' "${root}/${offer}" \
@@ -347,6 +371,8 @@ verify_libslvs_artifact() {
         || { licensing_fail source-offer "artifact source offer omits the ThreeTerm source"; return 1; }
     grep -Fq 'source/crates/workers/slvs' "${root}/${offer}" \
         || { licensing_fail source-offer "artifact source offer omits the bundled source"; return 1; }
+    grep -Fq 'source/threeterm-source.tar' "${root}/${offer}" \
+        || { licensing_fail source-offer "artifact source offer omits the immutable source snapshot"; return 1; }
     if (( LICENSING_FAILED )); then return 1; fi
     printf '%s\n' 'libslvs licensing artifact verified'
 }

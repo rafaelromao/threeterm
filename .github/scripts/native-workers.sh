@@ -191,6 +191,7 @@ finalize_native_worker_manifest() {
     [[ "$(jq -er '.libslvs_artifact.manifest_path' "${manifest}")" == libslvs-artifact/manifest.json ]] || return 1
     [[ "$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)" == \
         "$(jq -er '.libslvs_artifact.manifest_sha256' "${manifest}")" ]] || return 1
+    [[ "$(jq -er '.artifact.executable.sha256' "${artifact_root}/manifest.json")" == "${slvs_sha256}" ]] || return 1
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

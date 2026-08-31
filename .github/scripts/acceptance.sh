@@ -99,6 +99,11 @@ THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_
 
 finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}"
 
+echo "==> Verifying libslvs source and release artifact licensing"
+verify_libslvs_source "${PWD}"
+verify_libslvs_artifact "${CARGO_TARGET_DIR}/libslvs-artifact/manifest.json" \
+    "${CARGO_TARGET_DIR}/libslvs-artifact"
+
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh
 

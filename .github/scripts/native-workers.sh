@@ -4,7 +4,11 @@
 
 set -euo pipefail
 
-NATIVE_WORKER_MANIFEST_SCHEMA="threeterm.ci.native-workers/1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/licensing.sh"
+
+NATIVE_WORKER_MANIFEST_SCHEMA="threeterm.ci.native-workers/2"
 NATIVE_ARCH_IMAGE="docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309"
 OCCT_SOURCE_REPOSITORY="https://github.com/Open-Cascade-SAS/OCCT"
 OCCT_SOURCE_COMMIT="c5f20409c52bf8f658314d205a0e5d6f0be0969c"
@@ -134,10 +138,18 @@ finalize_native_worker_manifest() {
     local executed="${3:-false}"
     local manifest="${CARGO_TARGET_DIR}/native-worker-manifest.json"
     local temporary="${manifest}.tmp.$$"
+    local artifact_root="${CARGO_TARGET_DIR}/libslvs-artifact"
     local occt_sha256
     local slvs_sha256
+    local artifact_manifest_sha256
     occt_sha256="$(sha256sum "${occt_worker}" | cut -d' ' -f1)"
     slvs_sha256="$(sha256sum "${slvs_worker}" | cut -d' ' -f1)"
+    stage_libslvs_artifact "$(pwd)" "${slvs_worker}" "${artifact_root}" "${slvs_sha256}"
+    artifact_manifest_sha256="$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)"
+    [[ -f "${artifact_root}/manifest.json" ]] || {
+        printf '%s\n' 'libslvs artifact manifest was not staged' >&2
+        return 1
+    }
 
     jq -n \
         --arg schema_version "${NATIVE_WORKER_MANIFEST_SCHEMA}" \
@@ -154,8 +166,12 @@ finalize_native_worker_manifest() {
         --arg slvs_sha256 "${slvs_sha256}" \
         --argjson slvs_executed "${executed}" \
         --argjson slvs_libraries "$(worker_linked_libraries "${slvs_worker}")" \
+        --arg artifact_manifest_path "libslvs-artifact/manifest.json" \
+        --arg artifact_manifest_sha256 "${artifact_manifest_sha256}" \
         '{schema_version: $schema_version,
           container_image: $container_image,
+          libslvs_artifact: {manifest_path: $artifact_manifest_path,
+                             manifest_sha256: $artifact_manifest_sha256},
           workers: {
             occt: {source_repository: $occt_repository, source_commit: $occt_commit,
                    package_identity: "source-commit",
@@ -168,9 +184,14 @@ finalize_native_worker_manifest() {
           }}' > "${temporary}"
     mv "${temporary}" "${manifest}"
 
-    jq -e '.schema_version == "threeterm.ci.native-workers/1" and
+    jq -e '.schema_version == "threeterm.ci.native-workers/2" and
            (.workers.occt.executable.sha256 | length == 64) and
-           (.workers.libslvs.executable.sha256 | length == 64)' "${manifest}" >/dev/null
+           (.workers.libslvs.executable.sha256 | length == 64) and
+           (.libslvs_artifact.manifest_sha256 | length == 64)' "${manifest}" >/dev/null
+    [[ "$(jq -er '.libslvs_artifact.manifest_path' "${manifest}")" == libslvs-artifact/manifest.json ]] || return 1
+    [[ "$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)" == \
+        "$(jq -er '.libslvs_artifact.manifest_sha256' "${manifest}")" ]] || return 1
+    [[ "$(jq -er '.artifact.executable.sha256' "${artifact_root}/manifest.json")" == "${slvs_sha256}" ]] || return 1
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

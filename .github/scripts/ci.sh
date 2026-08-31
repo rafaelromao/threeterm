@@ -57,10 +57,13 @@ cargo fmt --all -- --check
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "==> cargo test --workspace"
+echo "==> test-suite selector contract"
+bash tests/test-test-suite.sh
+
+echo "==> fast test suite"
 # OCCT integration tests spawn disposable native workers; serialize the test
 # harness so the rootless CI container does not kill workers under fan-out.
-THREETERM_REQUIRE_OCCT=1 cargo test --workspace --jobs 1 -- --test-threads=1
+THREETERM_REQUIRE_OCCT=1 bash .github/scripts/test-suite.sh fast
 
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh

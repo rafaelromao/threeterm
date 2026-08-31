@@ -1065,6 +1065,7 @@ fn boolean_pattern_request(
 }
 
 #[test]
+#[ignore = "slow: validates 324 real-OCCT Boolean cuts"]
 fn boolean_pattern_cuts_324_holes_with_real_occt() {
     let Some(worker) = required_fixture_worker("boolean_pattern_cuts_324_holes_with_real_occt")
     else {

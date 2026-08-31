@@ -5,7 +5,7 @@
 #   3. cargo check --workspace succeeds.
 #   4. cargo fmt --all -- --check passes.
 #   5. cargo clippy --workspace --all-targets -- -D warnings passes.
-#   6. serialized cargo test --workspace passes.
+#   6. the fast serialized test suite passes.
 #   7. the unsigned trademark and namespace release gate is refused, while a
 #      complete fixture is accepted by the gate verifier.
 #
@@ -69,9 +69,12 @@ cargo fmt --all -- --check
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "==> cargo test --workspace"
+echo "==> test-suite selector contract"
+bash tests/test-test-suite.sh
+
+echo "==> fast test suite"
 # Native-worker tests are serialized to avoid resource contention, matching CI.
-cargo test --workspace --jobs 1 -- --test-threads=1
+bash .github/scripts/test-suite.sh fast
 
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh

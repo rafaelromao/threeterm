@@ -763,7 +763,7 @@ impl McpServer {
                             &threeterm_protocol::schema::BOOLEAN_PATTERN_REQUEST_SCHEMA,
                             &arguments,
                         ) {
-                            write_envelope(
+                            if let Err(error) = write_envelope(
                                 writer,
                                 &JsonRpcResponse::error(
                                     request.id.clone(),
@@ -772,12 +772,17 @@ impl McpServer {
                                         "tools/call arguments failed request-schema validation: {reason}"
                                     ),
                                 ),
-                            )?;
+                            ) {
+                                if let Some(active) = &active {
+                                    active.cancel.store(true, Ordering::SeqCst);
+                                }
+                                return Err(error);
+                            }
                             handled += 1;
                             continue;
                         }
                         if active.is_some() {
-                            write_envelope(
+                            if let Err(error) = write_envelope(
                                 writer,
                                 &JsonRpcResponse::success(
                                     request.id.clone(),
@@ -785,7 +790,12 @@ impl McpServer {
                                         "another expensive command is already active".to_string(),
                                     ),
                                 ),
-                            )?;
+                            ) {
+                                if let Some(active) = &active {
+                                    active.cancel.store(true, Ordering::SeqCst);
+                                }
+                                return Err(error);
+                            }
                         } else {
                             let request_key = request_key(&request.id);
                             let cancel = Arc::new(AtomicBool::new(false));
@@ -816,7 +826,7 @@ impl McpServer {
                                             .collect();
                                         last = Some(progress.clone());
                                         emitted += 1;
-                                        let _ = sender.try_send(RunEvent::Progress {
+                                        let _ = sender.send(RunEvent::Progress {
                                             request_key: event_key.clone(),
                                             token: token.clone(),
                                             progress,
@@ -842,8 +852,13 @@ impl McpServer {
                     }
                     RunEvent::Request(request) => {
                         let response = self.handle_request(&request);
-                        if !request.is_notification {
-                            write_envelope(writer, &response)?;
+                        if !request.is_notification
+                            && let Err(error) = write_envelope(writer, &response)
+                        {
+                            if let Some(active) = &active {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            }
+                            return Err(error);
                         }
                         handled += 1;
                     }
@@ -855,8 +870,12 @@ impl McpServer {
                         if active
                             .as_ref()
                             .is_some_and(|request| request.request_key == event_key)
+                            && let Err(error) = write_progress(writer, &token, &progress)
                         {
-                            write_progress(writer, &token, &progress)?;
+                            if let Some(active) = &active {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            }
+                            return Err(error);
                         }
                     }
                     RunEvent::Completed {
@@ -898,10 +917,22 @@ impl McpServer {
                                     host_tool_execution_error(&error),
                                 ),
                             };
-                            write_envelope(writer, &response)?;
+                            if let Err(error) = write_envelope(writer, &response) {
+                                if let Some(active) = &active {
+                                    active.cancel.store(true, Ordering::SeqCst);
+                                }
+                                return Err(error);
+                            }
                         }
                     }
-                    RunEvent::ParseError(response) => write_envelope(writer, &response)?,
+                    RunEvent::ParseError(response) => {
+                        if let Err(error) = write_envelope(writer, &response) {
+                            if let Some(active) = &active {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            }
+                            return Err(error);
+                        }
+                    }
                     RunEvent::EndOfInput => {
                         input_finished = true;
                         if active.is_none() {
@@ -949,6 +980,13 @@ fn progress_token(request: &JsonRpcRequest) -> Option<Value> {
         .and_then(|meta| meta.get("progressToken"))
         .filter(|token| token.is_string() || token.as_i64().is_some() || token.as_u64().is_some())
         .cloned()
+}
+
+fn valid_feature_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn write_progress<W: Write>(
@@ -1025,6 +1063,11 @@ fn execute_boolean_pattern(
         .ok_or_else(|| HostError::Validation {
             detail: "invalid diameter".to_string(),
         })?;
+    if !valid_feature_path_component(feature_id) || !valid_feature_path_component(base_feature_id) {
+        return Err(HostError::Validation {
+            detail: "boolean pattern feature IDs must be plain path components".to_string(),
+        });
+    }
     let root = Bundle::at(bundle).canonical_root().to_path_buf();
     let request = BooleanPatternRequest::new(
         new_request_id(),
@@ -1674,6 +1717,25 @@ mod tests {
             .expect_err("oversized frame must fail closed");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(buffer.len() <= MAX_FRAME_BUFFER);
+    }
+
+    #[test]
+    fn boolean_pattern_rejects_feature_ids_that_escape_the_bundle() {
+        let arguments = json!({
+            "bundle_path": "/tmp/project",
+            "feature_id": "pattern",
+            "base_feature_id": "../outside",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        });
+        let cancel = AtomicBool::new(false);
+        let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        let error = execute_boolean_pattern(arguments, &cancel, &mut on_progress, None)
+            .expect_err("path traversal must fail before worker lookup");
+        assert!(matches!(error, HostError::Validation { .. }));
     }
 
     #[test]

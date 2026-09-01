@@ -1685,6 +1685,14 @@ impl Host {
                     let bundle_path = string_field("bundle_path")?;
                     let feature_id = string_field("feature_id")?;
                     let base_feature_id = string_field("base_feature_id")?;
+                    if !valid_feature_path_component(feature_id)
+                        || !valid_feature_path_component(base_feature_id)
+                    {
+                        return Err(HostError::Validation {
+                            detail: "boolean pattern feature IDs must be plain path components"
+                                .to_string(),
+                        });
+                    }
                     let root = Bundle::at(bundle_path).canonical_root().to_path_buf();
                     let base_path = root
                         .join(BREP_SUBDIR)

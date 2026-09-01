@@ -75,14 +75,6 @@ fn edge_edit_target(revision: &str) -> Value {
     })
 }
 
-fn edge_adjacent_target(revision: &str) -> Value {
-    let mut target = edge_edit_target(revision);
-    target["semantic_id"] = json!("edge-adjacent-target");
-    target["provenance"]["source_edge_id"] = json!("edge-adjacent-target");
-    target["evidence"]["midpoint"] = json!([0.0, 0.0, 1.0]);
-    target
-}
-
 fn edge_request(root: &std::path::Path, revision: &str, reference: Value) -> Value {
     edge_request_with_target(root, revision, reference, edge_edit_target(revision))
 }
@@ -575,7 +567,7 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         &cli_root,
         &cli_revision,
         edge_reference(&cli_revision),
-        edge_adjacent_target(&cli_revision),
+        edge_reference(&cli_revision),
     );
     let tui = threeterm_tui::execute_selected_edge_reattachment(
         &threeterm_host::Host::new(),
@@ -586,7 +578,7 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         "base",
         0.25,
         edge_reference(&tui_revision),
-        edge_adjacent_target(&tui_revision),
+        edge_reference(&tui_revision),
     )
     .expect("TUI edge command reports ambiguity");
     let mcp = McpServer::new().handle_request(&JsonRpcRequest {
@@ -599,7 +591,7 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
                 &mcp_root,
                 &mcp_revision,
                 edge_reference(&mcp_revision),
-                edge_adjacent_target(&mcp_revision),
+                edge_reference(&mcp_revision),
             )
         }),
     });

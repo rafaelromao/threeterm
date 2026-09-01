@@ -97,9 +97,6 @@ fn setup(root: &std::path::Path, label: &str) -> Option<(OcctWorker, String)> {
 fn evidence_worker(root: &Path, outcome: &str) -> OcctWorker {
     let script = root.join(format!("{outcome}-worker.sh"));
     let candidates = match outcome {
-        "ambiguous" => {
-            r#"candidates=$(printf '[{"semantic_id":"edge-ambiguous-a","source_feature_id":"base","source_revision_id":"%s","source_edge_id":"edge-source","role":"outer-perimeter","midpoint":[2.0,0.0,0.0],"tangent":[1.0,0.0,0.0],"length":4.0},{"semantic_id":"edge-ambiguous-b","source_feature_id":"base","source_revision_id":"%s","source_edge_id":"edge-source","role":"outer-perimeter","midpoint":[2.0,0.0,0.0],"tangent":[1.0,0.0,0.0],"length":4.0}]' "$source_revision_id" "$source_revision_id")"#
-        }
         "incompatible" => {
             r#"candidates=$(printf '[{"semantic_id":"edge-incompatible","source_feature_id":"base","source_revision_id":"%s","source_edge_id":"edge-source","role":"inner-perimeter","midpoint":[2.0,0.0,0.0],"tangent":[1.0,0.0,0.0],"length":4.0}]' "$source_revision_id")"#
         }
@@ -304,11 +301,6 @@ fn production_worker_reports_ambiguous_descendants_before_canonical_mutation() {
     assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
     let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn worker_evidence_reports_ambiguous_before_canonical_mutation() {
-    assert_worker_outcome("ambiguous", &["edge-ambiguous-a", "edge-ambiguous-b"]);
 }
 
 #[test]

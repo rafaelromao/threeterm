@@ -15,6 +15,8 @@ readonly ROOT RUNBOOK
 source "$RELEASE_ARTIFACTS_SCRIPT"
 # shellcheck source=/dev/null
 source "$PERFORMANCE_GATE_SCRIPT"
+# shellcheck source=/dev/null
+source "$LICENSING_SCRIPT"
 
 readonly -a REQUIRED_ROWS=(
     T-USPTO T-WIPO T-TMVIEW T-EUIPO T-NATIONAL T-VARIANTS

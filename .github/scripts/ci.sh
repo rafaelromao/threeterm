@@ -98,6 +98,12 @@ verify_libslvs_artifact "${CARGO_TARGET_DIR}/libslvs-artifact/manifest.json" \
 echo "==> trademark and namespace release-gate test"
 bash tests/release-gate.sh
 
+echo "==> deterministic release artifact test"
+bash tests/release-artifacts.sh
+
+echo "==> performance claims gate test"
+bash tests/performance-gate.sh
+
 echo "==> native-worker evidence contract test"
 bash tests/native-worker-contract.sh
 

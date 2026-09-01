@@ -7,7 +7,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNBOOK="${ROOT}/docs/release/trademark-and-namespace-gate.md"
 LICENSING_SCRIPT="${ROOT}/.github/scripts/licensing.sh"
+RELEASE_ARTIFACTS_SCRIPT="${ROOT}/.github/scripts/release-artifacts.sh"
+PERFORMANCE_GATE_SCRIPT="${ROOT}/.github/scripts/performance-gate.sh"
 readonly ROOT RUNBOOK
+
+# shellcheck source=/dev/null
+source "$RELEASE_ARTIFACTS_SCRIPT"
+# shellcheck source=/dev/null
+source "$PERFORMANCE_GATE_SCRIPT"
 
 readonly -a REQUIRED_ROWS=(
     T-USPTO T-WIPO T-TMVIEW T-EUIPO T-NATIONAL T-VARIANTS
@@ -70,6 +77,46 @@ verify_release_artifact() {
     # shellcheck source=/dev/null
     source "$LICENSING_SCRIPT"
     verify_libslvs_artifact "$manifest" "$artifact_root"
+}
+
+release_source_root() {
+    printf '%s\n' "${THREETERM_RELEASE_SOURCE_ROOT:-${ROOT}}"
+}
+
+release_bundle_root() {
+    printf '%s\n' "${THREETERM_RELEASE_BUNDLE_ROOT:-${ROOT}/target/release-artifact}"
+}
+
+release_verified_commit() {
+    git -C "$(release_source_root)" rev-parse HEAD
+}
+
+verify_release_material() {
+    verify_performance_material \
+        "$(release_source_root)" \
+        "${THREETERM_RELEASE_MATERIAL:-}" \
+        "${THREETERM_PERFORMANCE_RECORD:-${ROOT}/docs/release/six-gate-performance-claims-gate.md}" \
+        "$1" "$2"
+}
+
+build_release_bundle_for() {
+    local tag="$1"
+    local commit="$2"
+    build_release_bundle \
+        "$(release_source_root)" "$tag" "$commit" \
+        "$(release_artifact_root)" "$(release_bundle_root)"
+}
+
+verify_release_bundle_for() {
+    verify_release_bundle "$(release_bundle_root)" "$1" "$2"
+}
+
+require_release_tag_for_package() {
+    local tag="${THREETERM_RELEASE_TAG:-}"
+    [[ -n "$tag" ]] || fail 'AUR/COPR publication requires THREETERM_RELEASE_TAG'
+    valid_tag "$tag" || fail "invalid THREETERM_RELEASE_TAG: ${tag}"
+    require_tag_at_head "$tag"
+    printf '%s\n' "$tag"
 }
 
 release_artifact_root() {
@@ -216,6 +263,7 @@ usage() {
         'Usage:' \
         '  release.sh verify [runbook-path]' \
         '  release.sh verify-artifact <manifest> <artifact-root>' \
+        '  release.sh build <tag>' \
         '  release.sh tag <annotated-tag>' \
         '  release.sh github-release <tag>' \
         '  release.sh aur-push HEAD:refs/heads/master' \
@@ -231,6 +279,14 @@ case "$action" in
         source "${LICENSING_SCRIPT}"
         verify_libslvs_artifact "$1" "$2"
         ;;
+    build)
+        [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
+        verify_checked_in_runbook
+        require_committed_runbook
+        commit="$(release_verified_commit)"
+        verify_release_material "$commit" "$1"
+        build_release_bundle_for "$1" "$commit"
+        ;;
     verify)
         [[ $# -le 1 ]] || { usage >&2; exit 2; }
         verify_runbook "${1:-$RUNBOOK}"
@@ -239,7 +295,9 @@ case "$action" in
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
         require_committed_runbook
-        verify_release_artifact
+        commit="$(release_verified_commit)"
+        verify_release_material "$commit" "$1"
+        build_release_bundle_for "$1" "$commit"
         git tag -a "$1" -m "ThreeTerm $1"
         ;;
     github-release)
@@ -247,19 +305,35 @@ case "$action" in
         verify_checked_in_runbook
         require_committed_runbook
         require_tag_at_head "$1"
-        verify_release_artifact
+        commit="$(release_verified_commit)"
+        verify_release_material "$commit" "$1"
+        build_release_bundle_for "$1" "$commit"
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
-        artifact_root="$(release_artifact_root)"
-        archive="${artifact_root}.tar.gz"
-        tar -czf "$archive" -C "$artifact_root" .
-        gh release create "$1" --verify-tag --title "$1" "$archive"
+        bundle_root="$(release_bundle_root)"
+        archive="${bundle_root}/threeterm-${1}.tar.gz"
+        release_args=("$1" --verify-tag --title "$1")
+        if [[ -n "${THREETERM_RELEASE_MATERIAL:-}" ]]; then
+            release_args+=(--notes-file "${THREETERM_RELEASE_MATERIAL}")
+        fi
+        release_args+=(
+            "$archive"
+            "${bundle_root}/release-manifest.json"
+            "${bundle_root}/SHA256SUMS"
+            "${bundle_root}/worker-manifest.json"
+        )
+        [[ -z "${THREETERM_RELEASE_MATERIAL:-}" ]] || release_args+=("${THREETERM_RELEASE_MATERIAL}")
+        gh release create "${release_args[@]}"
         ;;
     aur-push)
         [[ $# == 1 && "$1" != -* ]] || { usage >&2; exit 2; }
         [[ "$1" == 'HEAD:refs/heads/master' ]] || fail 'AUR push is fixed to HEAD:refs/heads/master'
         verify_checked_in_runbook
         require_committed_runbook
-        verify_release_artifact
+        tag="$(require_release_tag_for_package)"
+        commit="$(release_verified_commit)"
+        verify_release_material "$commit" "$tag"
+        build_release_bundle_for "$tag" "$commit"
+        verify_release_bundle_for "$tag" "$commit"
         git push aur HEAD:refs/heads/master
         ;;
     copr-build)
@@ -267,7 +341,11 @@ case "$action" in
         [[ "$1" == 'threeterm.spec' ]] || fail 'COPR build is fixed to threeterm.spec'
         verify_checked_in_runbook
         require_committed_runbook
-        verify_release_artifact
+        tag="$(require_release_tag_for_package)"
+        commit="$(release_verified_commit)"
+        verify_release_material "$commit" "$tag"
+        build_release_bundle_for "$tag" "$commit"
+        verify_release_bundle_for "$tag" "$commit"
         command -v copr >/dev/null 2>&1 || fail 'copr is required for COPR build'
         if [[ $# == 2 ]]; then
             copr build threeterm "$1" --nowait

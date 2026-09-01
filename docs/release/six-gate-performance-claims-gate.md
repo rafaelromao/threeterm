@@ -291,6 +291,35 @@ Reasoning or required follow-up: ______________________________________________
 
 ## Current Pre-Release Run
 
+The release script consumes the machine-readable record delimited below when
+release material is selected with `THREETERM_RELEASE_MATERIAL`. Human prose in
+this runbook is not evidence. Every signed record must bind its commit, tag,
+evidence digest, owner, and admitted claim rows to the exact release.
+
+<!-- PERFORMANCE-RECORD:START -->
+record_status: UNSIGNED
+release_commit: not recorded
+release_tag: not recorded
+evidence_path: not recorded
+evidence_sha256: not recorded
+owner: not recorded
+record_signature: not recorded
+record_date: not recorded
+gate_1: FAIL
+gate_1_signature: not recorded
+gate_2: FAIL
+gate_2_signature: not recorded
+gate_3: FAIL
+gate_3_signature: not recorded
+gate_4: FAIL
+gate_4_signature: not recorded
+gate_5: FAIL
+gate_5_signature: not recorded
+gate_6: FAIL
+gate_6_signature: not recorded
+claim: none
+<!-- PERFORMANCE-RECORD:END -->
+
 Run date: **2026-08-26 UTC**
 
 This run assesses the latest checked-in two-release-candidate artifact at

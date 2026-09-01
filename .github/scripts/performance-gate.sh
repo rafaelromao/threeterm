@@ -139,6 +139,12 @@ verify_performance_material() {
         [[ -n "$value" && "$value" != 'not recorded' ]] \
             || { performance_gate_fail "six-gate field is missing: ${field}"; return 1; }
     done
+    for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel hardware_microcode \
+        hardware_container hardware_container_digest hardware_package_versions hardware_toolchain hardware_ghostty \
+        hardware_term hardware_term_program hardware_topology; do
+        [[ "$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)" == "$(jq -er --arg field "$field" '.[$field]' "$root/$evidence")" ]] \
+            || { performance_gate_fail "six-gate hardware field disagrees with evidence: ${field}"; return 1; }
+    done
     [[ "$(jq -er '.feature_count' "$root/$evidence")" == "$(grep -E '^feature_count: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(jq -er '.transaction_count' "$root/$evidence")" == "$(grep -E '^transaction_count: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(jq -er '.derived_result_count' "$root/$evidence")" == "$(grep -E '^derived_result_count: ' <<<"$block" | cut -d' ' -f2-)" ]] \
@@ -175,18 +181,24 @@ verify_performance_material() {
         [[ "$(sha256sum "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" | cut -d' ' -f1)" == "$evidence_digest_record" ]] \
             || { performance_gate_fail "six-gate catalog digest mismatch: ${evidence_file}"; return 1; }
     done < <(jq -r '.runs[].artifacts[] | [.relative_path, .sha256] | @tsv' "$root/$evidence")
-    local stl_rc1 stl_rc2 recorded_stl_rc1 recorded_stl_rc2 format format_rc1 format_rc2
+    local stl_rc1 stl_rc2 recorded_stl_rc1 recorded_stl_rc2 format format_rc1 format_rc2 comparison_field
     stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
     stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
     recorded_stl_rc1="$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     recorded_stl_rc2="$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$stl_rc1" == "$recorded_stl_rc1" && "$stl_rc2" == "$recorded_stl_rc2" ]] \
         || { performance_gate_fail 'six-gate STL hashes do not match the evidence catalog'; return 1; }
+    [[ "$recorded_stl_rc1" == "$recorded_stl_rc2" ]] \
+        || { performance_gate_fail 'six-gate STL output is not deterministic across release candidates'; return 1; }
     for format in step 3mf; do
+        comparison_field="${format}_comparison"
+        [[ "$format" == 3mf ]] && comparison_field=three_mf_comparison
         format_rc1="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
         format_rc2="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
         [[ "$format_rc1" == "$(grep -E "^${format}_rc1_sha256: " <<<"$block" | cut -d' ' -f2-)" && \
-            "$format_rc2" == "$(grep -E "^${format}_rc2_sha256: " <<<"$block" | cut -d' ' -f2-)" ]] \
+            "$format_rc2" == "$(grep -E "^${format}_rc2_sha256: " <<<"$block" | cut -d' ' -f2-)" && \
+            "$(grep -E "^${comparison_field}: " <<<"$block" | cut -d' ' -f2-)" == equal && \
+            "$format_rc1" == "$format_rc2" ]] \
             || { performance_gate_fail "six-gate ${format} hashes do not match the evidence catalog"; return 1; }
     done
     local comparison_class comparison_match comparison comparison_prefix comparison_suffix

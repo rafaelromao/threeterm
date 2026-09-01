@@ -300,6 +300,9 @@ must be an ancestor of the tagged release commit; the artifact manifest binds
 the published bytes to the exact tag commit. This permits the signed runbook
 update itself to be committed after the measured source revision without a
 self-referential Git commit.
+The release script currently admits only timing claims expressed in milliseconds
+with a `p50`, `p95`, or `p99` percentile; other performance classes remain
+refused until their evidence schema is added.
 
 <!-- PERFORMANCE-RECORD:START -->
 record_status: UNSIGNED
@@ -342,6 +345,10 @@ step_rc2_sha256: not recorded
 3mf_rc2_sha256: not recorded
 step_comparison: not recorded
 three_mf_comparison: not recorded
+step_comparison_explanation: not recorded
+step_claim_impact: not recorded
+three_mf_comparison_explanation: not recorded
+three_mf_claim_impact: not recorded
 <!-- PERFORMANCE-RECORD:END -->
 
 Run date: **2026-08-26 UTC**

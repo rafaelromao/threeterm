@@ -61,6 +61,13 @@ release_artifact="${tmpdir}/release-artifact"
 mkdir -p "${release_root}" "${fake_bin}"
 git archive HEAD | tar -x -C "${release_root}"
 jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    .hardware_cpu = "test-cpu" | .hardware_threads = 8 | .hardware_memory_mb = 16384 |
+    .hardware_kernel = "test-kernel" | .hardware_microcode = "test-microcode" |
+    .hardware_container = "podman@test-image" |
+    .hardware_container_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000" |
+    .hardware_package_versions = "pinned" | .hardware_toolchain = "rust-1.97.1" |
+    .hardware_ghostty = "xterm-ghostty/1.3.1" | .hardware_term = "xterm-ghostty" |
+    .hardware_term_program = "ghostty" | .hardware_topology = "direct-local" |
     .feature_count = 1 | .transaction_count = 1 | .derived_result_count = 1 |
     (.runs[].timings[].sample_count) = 30 |
     (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \

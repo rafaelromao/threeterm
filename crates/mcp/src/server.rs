@@ -142,7 +142,6 @@ enum RunEvent {
     Request(JsonRpcRequest),
     ParseError(JsonRpcResponse),
     EndOfInput,
-    ReadError(std::io::Error),
     Progress {
         request_key: String,
         token: Value,
@@ -152,6 +151,12 @@ enum RunEvent {
         request_key: String,
         response: Result<Value, HostError>,
     },
+}
+
+#[derive(Debug)]
+enum ControlEvent {
+    Cancellation(JsonRpcRequest),
+    ReadError(std::io::Error),
 }
 
 #[derive(Debug)]
@@ -616,14 +621,11 @@ impl McpServer {
         reader: &mut R,
         writer: &mut W,
     ) -> Result<usize, std::io::Error> {
-        // Requests are unbounded here so the reader cannot block before it
-        // reaches a later cancellation notification. Progress remains bounded
-        // by MAX_PROGRESS_NOTIFICATIONS per active request.
-        let (events, receive) = mpsc::channel();
-        let (cancellation_events, cancellation_receive) = mpsc::channel();
+        let (events, receive) = mpsc::sync_channel(128);
+        let (control_events, control_receive) = mpsc::sync_channel(128);
         thread::scope(|scope| {
             let sender = events.clone();
-            let cancellation_sender = cancellation_events.clone();
+            let control_sender = control_events.clone();
             scope.spawn(move || {
                 let mut buffer = Vec::with_capacity(4096);
                 loop {
@@ -631,7 +633,7 @@ impl McpServer {
                     let read = match read_bounded_frame(reader, &mut buffer) {
                         Ok(read) => read,
                         Err(error) => {
-                            let _ = sender.send(RunEvent::ReadError(error));
+                            let _ = control_sender.send(ControlEvent::ReadError(error));
                             return;
                         }
                     };
@@ -647,13 +649,16 @@ impl McpServer {
                             Ok(value) => value,
                             Err(error) => {
                                 if sender
-                                    .send(RunEvent::ParseError(JsonRpcResponse::error(
+                                    .try_send(RunEvent::ParseError(JsonRpcResponse::error(
                                         Value::Null,
                                         ERROR_PARSE,
                                         format!("frame is not valid JSON: {error}"),
                                     )))
                                     .is_err()
                                 {
+                                    let _ = control_sender.send(ControlEvent::ReadError(
+                                        std::io::Error::other("MCP event queue is full"),
+                                    ));
                                     return;
                                 }
                                 continue;
@@ -663,23 +668,32 @@ impl McpServer {
                             Ok(request) => request,
                             Err(error) => {
                                 if sender
-                                    .send(RunEvent::ParseError(JsonRpcResponse::error(
+                                    .try_send(RunEvent::ParseError(JsonRpcResponse::error(
                                         extract_id(&value),
                                         ERROR_INVALID_REQUEST,
                                         error,
                                     )))
                                     .is_err()
                                 {
+                                    let _ = control_sender.send(ControlEvent::ReadError(
+                                        std::io::Error::other("MCP event queue is full"),
+                                    ));
                                     return;
                                 }
                                 continue;
                             }
                         };
                         if request.method == "notifications/cancelled" {
-                            if cancellation_sender.send(request).is_err() {
+                            if control_sender
+                                .send(ControlEvent::Cancellation(request))
+                                .is_err()
+                            {
                                 return;
                             }
-                        } else if sender.send(RunEvent::Request(request)).is_err() {
+                        } else if sender.try_send(RunEvent::Request(request)).is_err() {
+                            let _ = control_sender.send(ControlEvent::ReadError(
+                                std::io::Error::other("MCP event queue is full"),
+                            ));
                             return;
                         }
                     }
@@ -692,17 +706,34 @@ impl McpServer {
             let mut read_error = None;
             let mut pending_cancellations = HashSet::new();
             loop {
-                while let Ok(request) = cancellation_receive.try_recv() {
-                    if let Some(active) = &active
-                        && cancellation_targets(&request, &active.request_key)
-                    {
-                        active.cancel.store(true, Ordering::SeqCst);
-                    } else if pending_cancellations.len() < MAX_PENDING_CANCELLATIONS
-                        && let Some(request_id) = request.params.get("requestId")
-                    {
-                        pending_cancellations.insert(request_key(request_id));
+                while let Ok(control) = control_receive.try_recv() {
+                    match control {
+                        ControlEvent::Cancellation(request) => {
+                            if let Some(active) = &active
+                                && cancellation_targets(&request, &active.request_key)
+                            {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            } else if pending_cancellations.len() < MAX_PENDING_CANCELLATIONS
+                                && let Some(request_id) = request.params.get("requestId")
+                            {
+                                pending_cancellations.insert(request_key(request_id));
+                            }
+                            handled += 1;
+                        }
+                        ControlEvent::ReadError(error) => {
+                            if let Some(active) = &active {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            }
+                            read_error = Some(error);
+                            input_finished = true;
+                        }
                     }
-                    handled += 1;
+                }
+                if input_finished && active.is_none() {
+                    break match read_error.take() {
+                        Some(error) => Err(error),
+                        None => Ok(handled),
+                    };
                 }
                 let event = match receive.recv_timeout(Duration::from_millis(10)) {
                     Ok(event) => event,
@@ -785,7 +816,7 @@ impl McpServer {
                                             .collect();
                                         last = Some(progress.clone());
                                         emitted += 1;
-                                        let _ = sender.send(RunEvent::Progress {
+                                        let _ = sender.try_send(RunEvent::Progress {
                                             request_key: event_key.clone(),
                                             token: token.clone(),
                                             progress,
@@ -806,22 +837,6 @@ impl McpServer {
                                 request_key,
                                 cancel,
                             });
-                        }
-                        handled += 1;
-                    }
-                    RunEvent::Request(request)
-                        if active.is_some() && request.method == "tools/call" =>
-                    {
-                        if !request.is_notification {
-                            write_envelope(
-                                writer,
-                                &JsonRpcResponse::success(
-                                    request.id,
-                                    tool_execution_error(
-                                        "another expensive command is already active".to_string(),
-                                    ),
-                                ),
-                            )?;
                         }
                         handled += 1;
                     }
@@ -852,13 +867,24 @@ impl McpServer {
                             .as_ref()
                             .is_some_and(|request| request.request_key == event_key)
                         {
-                            while let Ok(request) = cancellation_receive.try_recv() {
-                                if cancellation_targets(&request, &event_key)
-                                    && let Some(active) = &active
-                                {
-                                    active.cancel.store(true, Ordering::SeqCst);
+                            while let Ok(control) = control_receive.try_recv() {
+                                match control {
+                                    ControlEvent::Cancellation(request) => {
+                                        if cancellation_targets(&request, &event_key)
+                                            && let Some(active) = &active
+                                        {
+                                            active.cancel.store(true, Ordering::SeqCst);
+                                        }
+                                        handled += 1;
+                                    }
+                                    ControlEvent::ReadError(error) => {
+                                        if let Some(active) = &active {
+                                            active.cancel.store(true, Ordering::SeqCst);
+                                        }
+                                        read_error = Some(error);
+                                        input_finished = true;
+                                    }
                                 }
-                                handled += 1;
                             }
                             let request_id =
                                 active.take().expect("active request exists").request_key;
@@ -880,16 +906,6 @@ impl McpServer {
                         input_finished = true;
                         if active.is_none() {
                             break Ok(handled);
-                        }
-                    }
-                    RunEvent::ReadError(error) => {
-                        if let Some(active) = &active {
-                            active.cancel.store(true, Ordering::SeqCst);
-                        }
-                        read_error = Some(error);
-                        input_finished = true;
-                        if active.is_none() {
-                            break Err(read_error.take().expect("read error is present"));
                         }
                     }
                 }

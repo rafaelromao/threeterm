@@ -192,9 +192,12 @@ The canonical release script is the only supported release entry point. Its
 four publication commands fail closed when any current-gate item is unchecked,
 unsigned, stale, blocked, or not explicitly authorized.
 
-Set `THREETERM_RELEASE_MATERIAL` to the exact release notes or publication
-material before `build`, `tag`, `github-release`, `aur-push`, or `copr-build`.
-If that material contains a performance claim, the script verifies the signed
+When release notes or other publication material is supplied, set
+`THREETERM_RELEASE_MATERIAL` to its exact path before `build`, `tag`,
+`github-release`, `aur-push`, or `copr-build`. If that material contains a
+performance claim, the script verifies the signed
 machine-readable record in `docs/release/six-gate-performance-claims-gate.md`
 before doing any release side effect. GitHub Release attaches the material,
 deterministic archive, release manifest, checksum catalog, and worker manifest.
+`aur-push` and `copr-build` additionally require
+`THREETERM_RELEASE_TAG=<tag>` pointing at `HEAD`.

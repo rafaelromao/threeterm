@@ -31,6 +31,19 @@ performance_gate_field() {
     return 1
 }
 
+performance_gate_has_symlink_component() {
+    local root="$1"
+    local path="$2"
+    local component cursor="$root"
+    IFS='/' read -ra components <<<"$path"
+    for component in "${components[@]}"; do
+        [[ -z "$component" || "$component" == . ]] && continue
+        cursor="${cursor}/${component}"
+        [[ ! -L "$cursor" ]] || return 0
+    done
+    return 1
+}
+
 verify_performance_material() {
     local root="$1"
     local material="$2"
@@ -61,8 +74,17 @@ verify_performance_material() {
     local evidence evidence_digest actual owner signature gate
     evidence="$(grep -E '^evidence_path: ' <<<"$block" | cut -d' ' -f2-)"
     evidence_digest="$(grep -E '^evidence_sha256: ' <<<"$block" | cut -d' ' -f2-)"
-    [[ -n "$evidence" && "$evidence" != /* && "$evidence" != *..* && -f "$root/$evidence" ]] \
+    [[ -n "$evidence" && "$evidence" != /* && "$evidence" != *..* && -f "$root/$evidence" && ! -L "$root/$evidence" ]] \
         || { performance_gate_fail 'six-gate evidence path is missing or unsafe'; return 1; }
+    if performance_gate_has_symlink_component "$root" "$evidence"; then
+        performance_gate_fail 'six-gate evidence path contains a symlink'
+        return 1
+    fi
+    local resolved_root resolved_evidence
+    resolved_root="$(realpath -e "$root")"
+    resolved_evidence="$(realpath -e "$root/$evidence")"
+    [[ "$resolved_evidence" == "$resolved_root"/* ]] \
+        || { performance_gate_fail 'six-gate evidence resolves outside the release source root'; return 1; }
     [[ "$evidence_digest" =~ ^[0-9a-f]{64}$ ]] \
         || { performance_gate_fail 'six-gate evidence digest is invalid'; return 1; }
     actual="$(sha256sum "$root/$evidence" | cut -d' ' -f1)"
@@ -70,7 +92,8 @@ verify_performance_material() {
         || { performance_gate_fail 'six-gate evidence digest does not match'; return 1; }
     owner="$(grep -E '^owner: ' <<<"$block" | cut -d' ' -f2-)"
     signature="$(grep -E '^record_signature: ' <<<"$block" | cut -d' ' -f2-)"
-    [[ -n "$owner" && "$owner" == "$signature" ]] \
+    [[ -n "$owner" && "$owner" != 'not recorded' && "$owner" != 'unknown' && \
+        "$signature" != 'not recorded' && "$signature" != 'unknown' && "$owner" == "$signature" ]] \
         || { performance_gate_fail 'six-gate record signature does not identify the owner'; return 1; }
     for gate in 1 2 3 4 5 6; do
         grep -Fxq "gate_${gate}: PASS" <<<"$block" \
@@ -79,6 +102,8 @@ verify_performance_material() {
             || { performance_gate_fail "six-gate ${gate} is not signed by the owner"; return 1; }
         grep -Fxq "gate_${gate}_date: ${today}" <<<"$block" \
             || { performance_gate_fail "six-gate ${gate} is not dated"; return 1; }
+        grep -Fxq "gate_${gate}_signature: not recorded" <<<"$block" \
+            && { performance_gate_fail "six-gate ${gate} has no owner signature"; return 1; }
     done
 
     local claims claim id metric unit percentile fixture scale row field
@@ -89,7 +114,8 @@ verify_performance_material() {
         return 1
     fi
     while IFS= read -r claim; do
-        [[ "$claim" =~ ^ThreeTerm\ performance\ claim:\ .+$ ]] || continue
+        [[ "$claim" =~ ^ThreeTerm[[:space:]]performance[[:space:]]claim:[[:space:]]id=[A-Za-z0-9._/-]+[[:space:]]metric=[A-Za-z0-9._/-]+[[:space:]]unit=[A-Za-z0-9%/_-]+[[:space:]]percentile=p(50|95|99)[[:space:]]fixture=[A-Za-z0-9._/-]+[[:space:]]scale=[A-Za-z0-9._/-]+$ ]] \
+            || { performance_gate_fail 'performance claim has invalid grammar'; return 1; }
         for field in id metric unit percentile fixture scale; do
             performance_gate_field "$field" "${claim#*: }" >/dev/null \
                 || { performance_gate_fail "performance claim is missing ${field}"; return 1; }

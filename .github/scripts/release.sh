@@ -82,7 +82,7 @@ verify_release_artifact() {
 }
 
 release_source_root() {
-    printf '%s\n' "${THREETERM_RELEASE_SOURCE_ROOT:-${ROOT}}"
+    printf '%s\n' "${ROOT}"
 }
 
 release_bundle_root() {
@@ -97,7 +97,7 @@ verify_release_material() {
     verify_performance_material \
         "$(release_source_root)" \
         "${THREETERM_RELEASE_MATERIAL:-}" \
-        "${THREETERM_PERFORMANCE_RECORD:-${ROOT}/docs/release/six-gate-performance-claims-gate.md}" \
+        "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
         "$1" "$2"
 }
 
@@ -325,7 +325,7 @@ case "$action" in
         )
         if [[ -n "${THREETERM_RELEASE_MATERIAL:-}" ]]; then
             release_args+=("${THREETERM_RELEASE_MATERIAL}")
-            release_args+=("${THREETERM_PERFORMANCE_RECORD:-${ROOT}/docs/release/six-gate-performance-claims-gate.md}")
+            release_args+=("${ROOT}/docs/release/six-gate-performance-claims-gate.md")
         fi
         gh release create "${release_args[@]}"
         ;;

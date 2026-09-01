@@ -22,10 +22,10 @@ release_artifact_require_safe_tree() {
 release_artifact_write_archive() {
     local root="$1"
     local archive="$2"
-    tar --sort=name --format=ustar --mtime='1970-01-01 00:00:00Z' \
+    LC_ALL=C TZ=UTC tar --sort=name --format=ustar --mtime='1970-01-01 00:00:00Z' \
         --owner=0 --group=0 --numeric-owner \
         -cf - -C "$root" release-manifest.json worker-manifest.json libslvs-artifact \
-        | gzip -n -c >"$archive"
+        | LC_ALL=C TZ=UTC gzip -n -c >"$archive"
 }
 
 release_artifact_file_list() {
@@ -63,6 +63,9 @@ build_release_bundle() {
     mkdir -p "$output_root"
     cp -a "$artifact_root" "$output_root/libslvs-artifact"
     release_artifact_require_safe_tree "$output_root"
+    find "$output_root" -type d -exec chmod 755 {} +
+    find "$output_root" -type f -exec chmod 644 {} +
+    chmod 755 "$output_root/libslvs-artifact/bin/threeterm-slvs-worker"
     cp "$output_root/libslvs-artifact/manifest.json" "$output_root/worker-manifest.json"
     worker_manifest_digest="$(release_artifact_sha256 "$output_root/worker-manifest.json")"
 
@@ -139,6 +142,21 @@ verify_release_bundle() {
         || { release_artifact_fail 'release manifest worker or licensing identity is invalid'; return 1; }
     [[ "$(jq -er '.archive' "$manifest")" == "threeterm-${expected_tag}.tar.gz" ]] \
         || { release_artifact_fail 'release archive name is invalid'; return 1; }
+
+    local actual_files expected_files catalog_files
+    actual_files="$(find "$root" -type f -printf '%P\n' | LC_ALL=C sort)"
+    expected_files="$(
+        {
+            printf '%s\n' release-manifest.json worker-manifest.json SHA256SUMS
+            printf '%s\n' "$(jq -er '.archive' "$manifest")"
+            jq -r '.files[].path' "$manifest"
+        } | LC_ALL=C sort
+    )"
+    [[ "$actual_files" == "$expected_files" ]] \
+        || { release_artifact_fail 'release bundle contains an unlisted file'; return 1; }
+    catalog_files="$(sed -E 's/^[0-9a-f]{64}  //' "$root/SHA256SUMS" | LC_ALL=C sort)"
+    [[ "$catalog_files" == "$(printf '%s\n' "$actual_files" | grep -Fxv SHA256SUMS)" ]] \
+        || { release_artifact_fail 'checksum catalog does not cover the complete release bundle'; return 1; }
 
     while IFS=$'\t' read -r path expected; do
         [[ "$path" != /* && "$path" != *..* && -n "$path" ]] \

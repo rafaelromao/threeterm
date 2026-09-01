@@ -37,6 +37,18 @@ release_artifact_file_list() {
         done
 }
 
+release_artifact_has_symlink_component() {
+    local path="$1"
+    local component cursor=
+    IFS='/' read -ra components <<<"$path"
+    for component in "${components[@]}"; do
+        [[ -z "$component" || "$component" == . ]] && continue
+        cursor="${cursor}/${component}"
+        [[ ! -L "$cursor" ]] || return 0
+    done
+    return 1
+}
+
 release_artifact_validate_output_root() {
     local source_root="$1"
     local artifact_root="$2"
@@ -44,6 +56,10 @@ release_artifact_validate_output_root() {
     local source_path artifact_path output_path allowed_target_prefix
     [[ -n "$output_root" && "$output_root" = /* ]] \
         || { release_artifact_fail 'release bundle output root must be an absolute path'; return 1; }
+    if release_artifact_has_symlink_component "$output_root"; then
+        release_artifact_fail 'release bundle output root contains a symlink component'
+        return 1
+    fi
     source_path="$(realpath -e "$source_root")" \
         || { release_artifact_fail 'release source root is not resolvable'; return 1; }
     artifact_path="$(realpath -e "$artifact_root")" \

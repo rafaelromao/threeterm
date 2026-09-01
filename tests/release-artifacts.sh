@@ -42,6 +42,16 @@ if build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${sour
     printf '%s\n' 'protected source root was accepted as release output' >&2
     exit 1
 fi
+if build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${input}/nested" >/dev/null 2>&1; then
+    printf '%s\n' 'nested artifact root was accepted as release output' >&2
+    exit 1
+fi
+mkdir -p "${WORK}/real-output-parent"
+ln -s "${WORK}/real-output-parent" "${WORK}/symlink-output-parent"
+if build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${WORK}/symlink-output-parent/bundle" >/dev/null 2>&1; then
+    printf '%s\n' 'symlinked output parent was accepted' >&2
+    exit 1
+fi
 
 jq -e --arg commit "${commit}" --arg tag "${tag}" '
   .schema_version == "threeterm.release/1" and

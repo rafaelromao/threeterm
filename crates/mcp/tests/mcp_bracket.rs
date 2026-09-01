@@ -122,12 +122,20 @@ impl McpSession {
     }
 
     fn send(&mut self, request: &Value) -> Value {
+        self.write(request);
+        self.read()
+    }
+
+    fn write(&mut self, request: &Value) {
         let mut bytes = serde_json::to_vec(request).expect("request serializes");
         bytes.push(b'\n');
         self.stdin
             .write_all(&bytes)
             .expect("session request writes");
         self.stdin.flush().expect("session request flushes");
+    }
+
+    fn read(&mut self) -> Value {
         let mut line = Vec::new();
         self.stdout
             .read_until(b'\n', &mut line)
@@ -157,6 +165,53 @@ impl McpSession {
 
 fn structured(responses: &[Value], index: usize) -> &Value {
     &responses[index]["result"]["structuredContent"]
+}
+
+fn create_boolean_pattern_base(root: &std::path::Path) {
+    let output = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(root)
+        .args([
+            "--bracket-id",
+            "l-1",
+            "--length",
+            "120",
+            "--width",
+            "120",
+            "--height",
+            "20",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("cli bracket process runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn boolean_pattern_call(root: &std::path::Path, id: &str) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.boolean-pattern/1",
+            "_meta": {"progressToken": format!("progress-{id}")},
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": "pattern-1",
+                "base_feature_id": "l-1",
+                "origin": [6.0, 6.0, -1.0],
+                "spacing": [6.0, 6.0],
+                "columns": 18,
+                "rows": 18,
+                "diameter": 2.0
+            }
+        }
+    })
 }
 
 #[test]
@@ -385,6 +440,78 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
 
     let _ = std::fs::remove_dir_all(cli_root);
     let _ = std::fs::remove_dir_all(mcp_root);
+}
+
+#[test]
+#[ignore = "slow: runs real OCCT through the production MCP subprocess"]
+fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
+    let root = fresh_bundle("boolean-pattern-production");
+    create_boolean_pattern_base(&root);
+
+    let responses = run_mcp(&[boolean_pattern_call(&root, "pattern-1")]);
+    assert!(
+        responses
+            .iter()
+            .any(|response| response["method"] == "notifications/progress"
+                && response["params"]["progressToken"] == "progress-pattern-1"),
+        "production MCP must stream Boolean Pattern progress: {responses:?}"
+    );
+    let result = responses
+        .iter()
+        .find(|response| response["id"] == "pattern-1")
+        .expect("production MCP returns a terminal response");
+    assert_eq!(result["result"]["isError"], false);
+    assert_eq!(result["result"]["structuredContent"]["status"], "ok");
+    assert!(root.join("brep/pattern-1.brep").is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "slow: cancels real OCCT through the production MCP subprocess"]
+fn production_mcp_cancels_real_boolean_pattern_before_commit() {
+    if OcctWorker::locate().is_err() {
+        return;
+    }
+    let root = fresh_bundle("boolean-pattern-production-cancel");
+    create_boolean_pattern_base(&root);
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+
+    let mut session = McpSession::spawn();
+    let first = session.send(&boolean_pattern_call(&root, "pattern-cancel"));
+    assert_eq!(first["method"], "notifications/progress");
+    assert_eq!(first["params"]["progressToken"], "progress-pattern-cancel");
+    session.write(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": "pattern-cancel", "reason": "test cancellation"}
+    }));
+
+    let terminal = loop {
+        let response = session.read();
+        if response["id"] == "pattern-cancel" {
+            break response;
+        }
+    };
+    assert_eq!(terminal["result"]["isError"], true);
+    assert_eq!(
+        terminal["result"]["structuredContent"]["code"],
+        "worker_failure"
+    );
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads after cancellation"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("log reads after cancellation"),
+        log_before
+    );
+    session.finish();
+    assert!(!root.join("brep/pattern-1.brep").exists());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

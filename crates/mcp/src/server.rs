@@ -22,7 +22,7 @@
 //! `Host` and `Bundle` layers).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +56,7 @@ pub const ERROR_INTERNAL: i32 = -32603;
 pub const ERROR_PARSE: i32 = -32700;
 pub const MAX_PROGRESS_NOTIFICATIONS: usize = 100;
 const MAX_PROGRESS_STAGE_CHARS: usize = 256;
+const MAX_PENDING_CANCELLATIONS: usize = 128;
 
 /// Tool descriptor exposed by `tools/list`. The wire shape follows the MCP
 /// tool advertisement convention with `inputSchema` and `outputSchema`
@@ -615,9 +616,14 @@ impl McpServer {
         reader: &mut R,
         writer: &mut W,
     ) -> Result<usize, std::io::Error> {
-        let (events, receive) = mpsc::sync_channel(128);
+        // Requests are unbounded here so the reader cannot block before it
+        // reaches a later cancellation notification. Progress remains bounded
+        // by MAX_PROGRESS_NOTIFICATIONS per active request.
+        let (events, receive) = mpsc::channel();
+        let (cancellation_events, cancellation_receive) = mpsc::channel();
         thread::scope(|scope| {
             let sender = events.clone();
+            let cancellation_sender = cancellation_events.clone();
             scope.spawn(move || {
                 let mut buffer = Vec::with_capacity(4096);
                 loop {
@@ -680,7 +686,11 @@ impl McpServer {
                                 continue;
                             }
                         };
-                        if sender.send(RunEvent::Request(request)).is_err() {
+                        if request.method == "notifications/cancelled" {
+                            if cancellation_sender.send(request).is_err() {
+                                return;
+                            }
+                        } else if sender.send(RunEvent::Request(request)).is_err() {
                             return;
                         }
                     }
@@ -690,10 +700,24 @@ impl McpServer {
             let mut active: Option<ActiveRequest> = None;
             let mut handled = 0usize;
             let mut input_finished = false;
+            let mut pending_cancellations = HashSet::new();
             loop {
-                let event = match receive.recv() {
+                while let Ok(request) = cancellation_receive.try_recv() {
+                    if let Some(active) = &active
+                        && cancellation_targets(&request, &active.request_key)
+                    {
+                        active.cancel.store(true, Ordering::SeqCst);
+                    } else if pending_cancellations.len() < MAX_PENDING_CANCELLATIONS
+                        && let Some(request_id) = request.params.get("requestId")
+                    {
+                        pending_cancellations.insert(request_key(request_id));
+                    }
+                    handled += 1;
+                }
+                let event = match receive.recv_timeout(Duration::from_millis(10)) {
                     Ok(event) => event,
-                    Err(_) => break Ok(handled),
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(handled),
                 };
                 match event {
                     RunEvent::Request(request) if request.method == "notifications/cancelled" => {
@@ -742,6 +766,9 @@ impl McpServer {
                         } else {
                             let request_key = request_key(&request.id);
                             let cancel = Arc::new(AtomicBool::new(false));
+                            if pending_cancellations.remove(&request_key) {
+                                cancel.store(true, Ordering::SeqCst);
+                            }
                             let worker_cancel = Arc::clone(&cancel);
                             let sender = events.clone();
                             let token = progress_token(&request);
@@ -766,7 +793,7 @@ impl McpServer {
                                             .collect();
                                         last = Some(progress.clone());
                                         emitted += 1;
-                                        let _ = sender.try_send(RunEvent::Progress {
+                                        let _ = sender.send(RunEvent::Progress {
                                             request_key: event_key.clone(),
                                             token: token.clone(),
                                             progress,
@@ -787,6 +814,22 @@ impl McpServer {
                                 request_key,
                                 cancel,
                             });
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request)
+                        if active.is_some() && request.method == "tools/call" =>
+                    {
+                        if !request.is_notification {
+                            write_envelope(
+                                writer,
+                                &JsonRpcResponse::success(
+                                    request.id,
+                                    tool_execution_error(
+                                        "another expensive command is already active".to_string(),
+                                    ),
+                                ),
+                            )?;
                         }
                         handled += 1;
                     }

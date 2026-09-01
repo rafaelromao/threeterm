@@ -5842,7 +5842,20 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
             .unwrap_or_else(|| detail.clone()),
         _ => error.to_string(),
     };
-    Diagnostic::worker_failure(&detail)
+    match error {
+        HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
+            Diagnostic::brep_invalid(&detail)
+        }
+        HostError::UnsupportedGeometry { .. } => Diagnostic::unsupported_geometry(&detail),
+        HostError::WorkerFailure { .. }
+        | HostError::WorkerUnavailable { .. }
+        | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
+        HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
+        HostError::DerivedResult { diagnostic } => diagnostic.clone(),
+        _ => Diagnostic::integrity_failure(&detail),
+    }
 }
 
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
@@ -6105,6 +6118,24 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "worker_failure");
         assert_eq!(parsed["arg"], "request_id=req-42; foreign completion");
+    }
+
+    #[test]
+    fn host_validation_and_persistence_failures_use_shared_codes() {
+        assert_eq!(
+            host_error_diagnostic(&HostError::Validation {
+                detail: "missing feature_id".to_string(),
+            })
+            .code,
+            threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest
+        );
+        assert_eq!(
+            host_error_diagnostic(&HostError::Persistence(
+                threeterm_persistence::BundleError::Invalid("broken transaction".to_string(),)
+            ))
+            .code,
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure
+        );
     }
 
     #[test]

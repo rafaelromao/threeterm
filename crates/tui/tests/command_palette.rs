@@ -93,4 +93,6 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
         decode_terminal_input(b"\x1b[13;5u"),
         Some(TerminalInput::Commit)
     );
+    assert_eq!(decode_terminal_input(b"\x1b[13;2u"), None);
+    assert_eq!(decode_terminal_input(b"\x03"), Some(TerminalInput::Escape));
 }

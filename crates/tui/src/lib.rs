@@ -2889,7 +2889,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.tui
             .transition_command(CommandEvent::PreviewRequested)
             .map_err(TuiViewportError::Tui)?;
-        let request = match self.domain_request(root, false) {
+        let request = match self.domain_request(root, true) {
             Ok(request) => request,
             Err(detail) => return self.reject_preview(detail),
         };
@@ -3265,8 +3265,9 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
     match bytes {
         b"\x10" => Some(TerminalInput::OpenPalette),
         b"\x16" => Some(TerminalInput::Preview),
-        b"\x1b[13;5u" | b"\x1b[13;2u" => Some(TerminalInput::Commit),
+        b"\x1b[13;5u" => Some(TerminalInput::Commit),
         b"\x1b" => Some(TerminalInput::Escape),
+        b"\x03" => Some(TerminalInput::Escape),
         b"\x7f" | b"\x08" => Some(TerminalInput::Backspace),
         b"\r" | b"\n" => Some(TerminalInput::Enter),
         _ => {

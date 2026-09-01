@@ -60,7 +60,8 @@ fake_bin="${tmpdir}/bin"
 release_artifact="${tmpdir}/release-artifact"
 mkdir -p "${release_root}" "${fake_bin}"
 git archive HEAD | tar -x -C "${release_root}"
-jq '(.runs[].timings[].sample_count) = 30 |
+jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    (.runs[].timings[].sample_count) = 30 |
     (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
     "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json" \
     >"${tmpdir}/evidence.json"
@@ -118,6 +119,7 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "statistical_method: nearest-rank"
         print "units: ms"
         print "sample_minimum: 30"
+        print "independent_sample_definition: one-process-run-per-sample"
         print "limitations_path: " limitations
         print "limitations_sha256: " limitations_sha
         print "stl_rc1_sha256: " stl_rc1
@@ -138,7 +140,7 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
             print "gate_" i "_date: " today
         }
         split("project_create bracket_create edit_open edit_update edit_preview edit_commit reload export catalog", classes, " ")
-        for (i = 1; i <= 9; i++) print "comparison: class=" classes[i] " same_order=YES"
+        for (i = 1; i <= 9; i++) print "comparison: class=" classes[i] " rc1=measured rc2=measured same_order=YES"
         print "claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT"
         inside = 1
         next

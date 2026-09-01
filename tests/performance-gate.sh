@@ -12,7 +12,8 @@ cp -a "${ROOT}/docs/research/rehearsal-evidence/l-bracket" \
     "${source_root}/docs/research/rehearsal-evidence/"
 cp "${ROOT}/docs/release/performance-claim-limitations.md" "${source_root}/docs/release/"
 evidence_file="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
-jq '(.runs[].timings[].sample_count) = 30 |
+jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    (.runs[].timings[].sample_count) = 30 |
     (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
     "${evidence_file}" >"${WORK}/evidence.json"
 mv "${WORK}/evidence.json" "${evidence_file}"
@@ -59,6 +60,7 @@ derived_result_count: 1
 statistical_method: nearest-rank
 units: ms
 sample_minimum: 30
+independent_sample_definition: one-process-run-per-sample
 limitations_path: docs/release/performance-claim-limitations.md
 limitations_sha256: ${limitations_sha}
 stl_rc1_sha256: ${stl_rc1}
@@ -91,15 +93,15 @@ gate_5_date: ${today}
 gate_6: PASS
 gate_6_signature: Release Owner
 gate_6_date: ${today}
-comparison: class=project_create same_order=YES
-comparison: class=bracket_create same_order=YES
-comparison: class=edit_open same_order=YES
-comparison: class=edit_update same_order=YES
-comparison: class=edit_preview same_order=YES
-comparison: class=edit_commit same_order=YES
-comparison: class=reload same_order=YES
-comparison: class=export same_order=YES
-comparison: class=catalog same_order=YES
+comparison: class=project_create rc1=measured rc2=measured same_order=YES
+comparison: class=bracket_create rc1=measured rc2=measured same_order=YES
+comparison: class=edit_open rc1=measured rc2=measured same_order=YES
+comparison: class=edit_update rc1=measured rc2=measured same_order=YES
+comparison: class=edit_preview rc1=measured rc2=measured same_order=YES
+comparison: class=edit_commit rc1=measured rc2=measured same_order=YES
+comparison: class=reload rc1=measured rc2=measured same_order=YES
+comparison: class=export rc1=measured rc2=measured same_order=YES
+comparison: class=catalog rc1=measured rc2=measured same_order=YES
 claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT
 <!-- PERFORMANCE-RECORD:END -->
 EOF

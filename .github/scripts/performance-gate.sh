@@ -14,7 +14,7 @@ performance_gate_block() {
 }
 
 performance_gate_claim_language() {
-    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
+    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|s|sec|secs|second|seconds|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
 }
 
 performance_gate_claim_lines() {
@@ -97,6 +97,11 @@ verify_performance_material() {
         -n "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" != 'not recorded' ]] \
         || { performance_gate_fail 'six-gate hardware profile or project scale is missing'; return 1; }
+    [[ "$(grep -E '^hardware_profile: ' <<<"$block" | cut -d' ' -f2-)" == \
+        "$(jq -er '.hardware_profile' "$root/$evidence")" && \
+        "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" == \
+        "$(jq -er '.project_scale' "$root/$evidence")" ]] \
+        || { performance_gate_fail 'six-gate profile or project scale disagrees with evidence'; return 1; }
     local limitations limitations_digest committed_limitations_digest
     limitations="$(grep -E '^limitations_path: ' <<<"$block" | cut -d' ' -f2-)"
     limitations_digest="$(grep -E '^limitations_sha256: ' <<<"$block" | cut -d' ' -f2-)"
@@ -107,7 +112,8 @@ verify_performance_material() {
     committed_limitations_digest="$(git -C "$root" show "HEAD:${limitations}" | sha256sum | cut -d' ' -f1)"
     [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
         || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
-    for limitation in fixture renderer terminal 'project-scale' 'warm and cold' 'input-to-photon' 'human-usability'; do
+    for limitation in fixture renderer terminal compositor 'project-scale' 'warm and cold' \
+        'input-to-photon' 'human-usability' 'unexercised'; do
         grep -Fqi "$limitation" "$root/$limitations" \
             || { performance_gate_fail "limitations document omits ${limitation} scope"; return 1; }
     done
@@ -122,7 +128,7 @@ verify_performance_material() {
     for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel hardware_microcode \
         hardware_container hardware_container_digest hardware_package_versions hardware_toolchain hardware_ghostty \
         hardware_term hardware_term_program hardware_topology fixture_name feature_count transaction_count derived_result_count \
-        statistical_method units sample_minimum; do
+        statistical_method units sample_minimum independent_sample_definition; do
         value="$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)"
         [[ -n "$value" && "$value" != 'not recorded' ]] \
             || { performance_gate_fail "six-gate field is missing: ${field}"; return 1; }
@@ -162,18 +168,20 @@ verify_performance_material() {
     recorded_stl_rc2="$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$stl_rc1" == "$recorded_stl_rc1" && "$stl_rc2" == "$recorded_stl_rc2" ]] \
         || { performance_gate_fail 'six-gate STL hashes do not match the evidence catalog'; return 1; }
-    local comparison_class comparison_match
+    local comparison_class comparison_match comparison comparison_prefix comparison_suffix
     while IFS= read -r comparison_class; do
         comparison_match=0
         while IFS= read -r comparison; do
-            if [[ "$comparison" == "comparison: class=${comparison_class} same_order=YES" ]]; then
+            comparison_prefix="comparison: class=${comparison_class} "
+            comparison_suffix="${comparison#"$comparison_prefix"}"
+            if [[ "$comparison_suffix" != "$comparison" && "$comparison_suffix" =~ ^rc1=[^[:space:]]+[[:space:]]rc2=[^[:space:]]+[[:space:]]same_order=YES$ ]]; then
                 comparison_match=1
                 break
             fi
         done < <(grep -E '^comparison: ' <<<"$block")
         (( comparison_match )) \
             || { performance_gate_fail "six-gate comparison is missing for ${comparison_class}"; return 1; }
-    done < <(jq -r '.comparisons[].class' "$root/$evidence")
+    done < <(jq -r '.runs[].timings[].class' "$root/$evidence" | LC_ALL=C sort -u)
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"
@@ -235,10 +243,13 @@ verify_performance_material() {
         done < <(grep -E '^claim: ' <<<"$block")
         (( claim_admitted )) \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }
+        [[ "$metric" == timing && "$unit" == ms && "$percentile" =~ ^p(50|95|99)$ ]] \
+            || { performance_gate_fail "performance claim metric is unsupported: ${id}"; return 1; }
         jq -e --arg class "$id" '
-            [.runs[].timings[] | select(.class == $class)
+            [.runs[] | select(.release_candidate == "rc-1" or .release_candidate == "rc-2")
+             | .timings[] | select(.class == $class)
              | (.sample_count >= 30 and (.samples_ms | length) >= .sample_count
-                and all(.samples_ms[]; type == "number"))]
+                and all(.samples_ms[]; type == "number") and has("p50_ms") and has("p95_ms") and has("p99_ms"))]
             | length == 2 and all(. == true)
         ' "$root/$evidence" >/dev/null \
             || { performance_gate_fail "performance evidence has fewer than 30 samples per release candidate: ${id}"; return 1; }

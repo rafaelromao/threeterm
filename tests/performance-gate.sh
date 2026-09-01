@@ -141,6 +141,13 @@ if verify_performance_material "${source_root}" "${material}" "${conflicting_rec
     exit 1
 fi
 
+duplicate_status_record="${WORK}/duplicate-status-record.md"
+sed '/^record_status: SIGNED$/a record_status: UNSIGNED' "${record}" >"${duplicate_status_record}"
+if verify_performance_material "${source_root}" "${material}" "${duplicate_status_record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+    printf '%s\n' 'duplicate performance record status was accepted' >&2
+    exit 1
+fi
+
 git -C "${source_root}" commit --quiet --allow-empty -m newer-source
 new_commit="$(git -C "${source_root}" rev-parse HEAD)"
 if verify_performance_material "${source_root}" "${material}" "${record}" "${new_commit}" "v0.1.0-performance" >/dev/null 2>&1; then

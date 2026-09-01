@@ -296,6 +296,7 @@ case "$action" in
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
         require_committed_runbook
+        require_tag_at_head "$1"
         commit="$(release_verified_commit)"
         verify_release_material "$commit" "$1"
         build_release_bundle_for "$1" "$commit"

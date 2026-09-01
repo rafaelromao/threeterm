@@ -62,8 +62,12 @@ verify_performance_material() {
     [[ -n "$block" ]] || { performance_gate_fail 'six-gate record block is missing'; return 1; }
     grep -Fxq 'record_status: SIGNED' <<<"$block" \
         || { performance_gate_fail 'six-gate record is not signed'; return 1; }
-    grep -Fxq "release_commit: ${expected_commit}" <<<"$block" \
-        || { performance_gate_fail 'six-gate record is bound to a different commit'; return 1; }
+    local record_commit
+    record_commit="$(grep -E '^release_commit: ' <<<"$block" | cut -d' ' -f2-)"
+    [[ "$record_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || { performance_gate_fail 'six-gate record commit identity is invalid'; return 1; }
+    git -C "$root" merge-base --is-ancestor "$record_commit" "$expected_commit" \
+        || { performance_gate_fail 'six-gate record is not bound to the release source history'; return 1; }
     grep -Fxq "release_tag: ${expected_tag}" <<<"$block" \
         || { performance_gate_fail 'six-gate record is bound to a different tag'; return 1; }
     local today
@@ -88,6 +92,27 @@ verify_performance_material() {
     committed_evidence_digest="$(git -C "$root" show "HEAD:${evidence}" | sha256sum | cut -d' ' -f1)"
     [[ "$committed_evidence_digest" == "$evidence_digest" ]] \
         || { performance_gate_fail 'six-gate evidence digest does not match the committed source'; return 1; }
+    [[ -n "$(grep -E '^hardware_profile: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(grep -E '^hardware_profile: ' <<<"$block" | cut -d' ' -f2-)" != 'not recorded' && \
+        -n "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" != 'not recorded' ]] \
+        || { performance_gate_fail 'six-gate hardware profile or project scale is missing'; return 1; }
+    local limitations limitations_digest committed_limitations_digest
+    limitations="$(grep -E '^limitations_path: ' <<<"$block" | cut -d' ' -f2-)"
+    limitations_digest="$(grep -E '^limitations_sha256: ' <<<"$block" | cut -d' ' -f2-)"
+    [[ "$limitations" == docs/release/* && -f "$root/$limitations" && ! -L "$root/$limitations" ]] \
+        || { performance_gate_fail 'six-gate limitations document is missing or unsafe'; return 1; }
+    git -C "$root" ls-files --error-unmatch -- "$limitations" >/dev/null 2>&1 \
+        || { performance_gate_fail 'six-gate limitations document is not tracked'; return 1; }
+    committed_limitations_digest="$(git -C "$root" show "HEAD:${limitations}" | sha256sum | cut -d' ' -f1)"
+    [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
+        || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
+    [[ "$(grep -E '^stl_deterministic: ' <<<"$block" | cut -d' ' -f2-)" == YES && \
+        "$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
+        "$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
+        "$(grep -E '^step_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented && \
+        "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented ]] \
+        || { performance_gate_fail 'six-gate two-release comparison evidence is incomplete'; return 1; }
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"
@@ -134,8 +159,8 @@ verify_performance_material() {
         percentile="$(performance_gate_field percentile "${claim#*: }")"
         fixture="$(performance_gate_field fixture "${claim#*: }")"
         scale="$(performance_gate_field scale "${claim#*: }")"
-        row="claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} decision=ADMIT"
-        grep -Fxq "$row" <<<"$block" \
+        row_re="^claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} n_rc1=([3-9][0-9]|[1-9][0-9]{2,}) n_rc2=([3-9][0-9]|[1-9][0-9]{2,}) decision=ADMIT$"
+        grep -Eq "$row_re" <<<"$block" \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }
     done <<<"$claims"
     printf '%s\n' 'performance claims gate verified'

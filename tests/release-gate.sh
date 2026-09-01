@@ -72,6 +72,51 @@ git -C "${release_root}" tag -a "${old_tag}" -m old
 printf '%s\n' source-change >>"${release_root}/README.md"
 git -C "${release_root}" add README.md
 git -C "${release_root}" commit --quiet -m source-change
+record_commit="$(git -C "${release_root}" rev-parse HEAD)"
+evidence_path="docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
+evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
+limitations_path="docs/release/performance-claim-limitations.md"
+limitations_sha="$(sha256sum "${release_root}/${limitations_path}" | cut -d' ' -f1)"
+today="$(date -u +%F)"
+awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
+    -v evidence_sha="${evidence_sha}" -v limitations="${limitations_path}" \
+    -v limitations_sha="${limitations_sha}" -v today="${today}" '
+    /<!-- PERFORMANCE-RECORD:START -->/ {
+        print
+        print "record_status: SIGNED"
+        print "release_commit: " commit
+        print "release_tag: " tag
+        print "evidence_path: " evidence
+        print "evidence_sha256: " evidence_sha
+        print "hardware_profile: pinned-test-profile"
+        print "project_scale: L-bracket-small"
+        print "limitations_path: " limitations
+        print "limitations_sha256: " limitations_sha
+        print "stl_rc1_sha256: 0000000000000000000000000000000000000000000000000000000000000000"
+        print "stl_rc2_sha256: 0000000000000000000000000000000000000000000000000000000000000000"
+        print "stl_deterministic: YES"
+        print "step_comparison: documented"
+        print "three_mf_comparison: documented"
+        print "owner: Release Owner"
+        print "record_signature: Release Owner"
+        print "record_date: " today
+        for (i = 1; i <= 6; i++) {
+            print "gate_" i ": PASS"
+            print "gate_" i "_signature: Release Owner"
+            print "gate_" i "_date: " today
+        }
+        print "claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT"
+        inside = 1
+        next
+    }
+    /<!-- PERFORMANCE-RECORD:END -->/ { inside = 0; print; next }
+    !inside { print }
+' "${release_root}/docs/release/six-gate-performance-claims-gate.md" \
+    >"${tmpdir}/signed-performance.md"
+mv "${tmpdir}/signed-performance.md" \
+    "${release_root}/docs/release/six-gate-performance-claims-gate.md"
+git -C "${release_root}" add docs/release/six-gate-performance-claims-gate.md
+git -C "${release_root}" commit --quiet -m performance-record
 git -C "${release_root}" tag -a "${current_tag}" -m current
 source "${ROOT}/.github/scripts/licensing.sh"
 stage_libslvs_artifact "${release_root}" /bin/true "${release_artifact}" >/dev/null

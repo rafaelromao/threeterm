@@ -10,6 +10,8 @@ commit="$(git rev-parse HEAD)"
 today="$(date -u +%F)"
 evidence="${ROOT}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 evidence_sha="$(sha256sum "${evidence}" | cut -d' ' -f1)"
+limitations="${ROOT}/docs/release/performance-claim-limitations.md"
+limitations_sha="$(sha256sum "${limitations}" | cut -d' ' -f1)"
 record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
 <!-- PERFORMANCE-RECORD:START -->
@@ -18,6 +20,15 @@ release_commit: ${commit}
 release_tag: v0.1.0-performance
 evidence_path: docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json
 evidence_sha256: ${evidence_sha}
+hardware_profile: pinned-test-profile
+project_scale: L-bracket-small
+limitations_path: docs/release/performance-claim-limitations.md
+limitations_sha256: ${limitations_sha}
+stl_rc1_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+stl_rc2_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+stl_deterministic: YES
+step_comparison: documented
+three_mf_comparison: documented
 owner: Release Owner
 record_signature: Release Owner
 record_date: ${today}
@@ -39,7 +50,7 @@ gate_5_date: ${today}
 gate_6: PASS
 gate_6_signature: Release Owner
 gate_6_date: ${today}
-claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small decision=ADMIT
+claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT
 <!-- PERFORMANCE-RECORD:END -->
 EOF
 material="${WORK}/notes.md"

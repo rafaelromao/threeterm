@@ -1859,12 +1859,14 @@ impl Host {
             EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
             _ => unreachable!(),
         };
-        let reference_payload = serde_json::json!({
-            "schema": "threeterm.reattach-edge/1",
-            "selected_edge_id": selected_edge_id,
-            "reference": reference,
-        })
-        .to_string();
+        let reference_payload = format!(
+            "edge-reattachment:{}",
+            serde_json::json!({
+                "schema": "threeterm.reattach-edge/1",
+                "selected_edge_id": selected_edge_id,
+                "reference": reference,
+            })
+        );
         let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
             root,
             derived,

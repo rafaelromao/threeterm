@@ -295,7 +295,11 @@ fn run_event_loop<W: InteractiveTerminal>(
             .writer_mut()
             .read_event()
             .map_err(|error| LaunchError::Runtime(format!("terminal input failed: {error}")))?;
-        for event in input_decoder.feed(&bytes) {
+        let mut events = input_decoder.feed(&bytes);
+        if bytes == b"\x1b" {
+            events.extend(input_decoder.flush());
+        }
+        for event in events {
             if (event == b"q" || event == b"\x03") && !session.command_input_active() {
                 return Ok(());
             }

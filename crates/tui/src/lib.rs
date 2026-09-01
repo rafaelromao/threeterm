@@ -3311,6 +3311,13 @@ impl TerminalInputDecoder {
         events
     }
 
+    pub fn flush(&mut self) -> Vec<Vec<u8>> {
+        if self.pending == b"\x1b" {
+            return vec![self.pending.drain(..).collect()];
+        }
+        Vec::new()
+    }
+
     fn next_event_length(&self) -> Option<usize> {
         let first = *self.pending.first()?;
         if first == 0x1b {

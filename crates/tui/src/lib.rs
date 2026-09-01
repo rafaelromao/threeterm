@@ -181,6 +181,37 @@ pub struct CommandPreview {
     pub input_fingerprint: String,
 }
 
+pub trait CommandGateway {
+    fn current_revision(&self, root: &Path) -> Result<String, String>;
+
+    fn preview(&self, command: CommandId, request: Value) -> Result<DomainCommandPreview, String>;
+
+    fn commit(&self, command: CommandId, request: Value) -> Result<Value, String>;
+}
+
+struct HostCommandGateway<'a> {
+    host: &'a Host,
+}
+
+impl CommandGateway for HostCommandGateway<'_> {
+    fn current_revision(&self, root: &Path) -> Result<String, String> {
+        self.host
+            .identity(root)
+            .map(|identity| identity.revision_hash)
+            .map_err(|error| error.to_string())
+    }
+
+    fn preview(&self, command: CommandId, request: Value) -> Result<DomainCommandPreview, String> {
+        self.host
+            .preview_domain_command(command, request)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    fn commit(&self, command: CommandId, request: Value) -> Result<Value, String> {
+        execute_domain_command(self.host, command, request).map_err(|error| format!("{error:?}"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandDraftError {
     AlreadyOpen,
@@ -2719,6 +2750,17 @@ impl<R: Renderer> TuiViewportSession<R> {
         host: &Host,
         root: impl AsRef<Path>,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        let gateway = HostCommandGateway { host };
+        self.process_keyboard_input_with_gateway(bytes, host, root, &gateway)
+    }
+
+    pub fn process_keyboard_input_with_gateway<G: CommandGateway>(
+        &mut self,
+        bytes: &[u8],
+        host: &Host,
+        root: impl AsRef<Path>,
+        gateway: &G,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         let root = root.as_ref();
         let input = decode_terminal_input(bytes).ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
@@ -2733,10 +2775,10 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
 
         if self.palette.is_open() {
-            return self.process_palette_input(input, host, root);
+            return self.process_palette_input(input, gateway, root);
         }
         if self.draft.draft().is_some() {
-            return self.process_draft_input(input, host, root);
+            return self.process_draft_input(input, host, gateway, root);
         }
         match input {
             TerminalInput::OpenPalette => {
@@ -2753,10 +2795,10 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
     }
 
-    fn process_palette_input(
+    fn process_palette_input<G: CommandGateway>(
         &mut self,
         input: TerminalInput,
-        host: &Host,
+        gateway: &G,
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         match input {
@@ -2794,12 +2836,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                         command.0
                     )));
                 }
-                let revision = host
-                    .identity(root)
-                    .map_err(|error| {
-                        TuiViewportError::Tui(self.command_diagnostic(&error.to_string()))
-                    })?
-                    .revision_hash;
+                let revision = gateway
+                    .current_revision(root)
+                    .map_err(|error| TuiViewportError::Tui(self.command_diagnostic(&error)))?;
                 self.draft
                     .open(command, revision.clone())
                     .map_err(|error| {
@@ -2822,10 +2861,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
     }
 
-    fn process_draft_input(
+    fn process_draft_input<G: CommandGateway>(
         &mut self,
         input: TerminalInput,
         host: &Host,
+        gateway: &G,
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         match input {
@@ -2861,8 +2901,8 @@ impl<R: Renderer> TuiViewportSession<R> {
                     self.draft.input_text()
                 )))
             }
-            TerminalInput::Preview => self.preview_draft(host, root),
-            TerminalInput::Commit => self.commit_draft(host, root),
+            TerminalInput::Preview => self.preview_draft(gateway, root),
+            TerminalInput::Commit => self.commit_draft(host, gateway, root),
             TerminalInput::Arrow(_) | TerminalInput::Enter | TerminalInput::OpenPalette => Ok(self
                 .keyboard_overlay(format!(
                     "[outline] Draft: {} input={}",
@@ -2881,9 +2921,9 @@ impl<R: Renderer> TuiViewportSession<R> {
             .map_err(TuiViewportError::Tui)
     }
 
-    fn preview_draft(
+    fn preview_draft<G: CommandGateway>(
         &mut self,
-        host: &Host,
+        gateway: &G,
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         self.tui
@@ -2893,9 +2933,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(request) => request,
             Err(detail) => return self.reject_preview(detail),
         };
-        match host
-            .preview_domain_command(self.draft.draft().expect("draft remains").command, request)
-        {
+        match gateway.preview(self.draft.draft().expect("draft remains").command, request) {
             Ok(preview) => {
                 self.draft.set_preview(
                     preview.preview_revision.clone(),
@@ -2919,9 +2957,10 @@ impl<R: Renderer> TuiViewportSession<R> {
         Ok(self.keyboard_overlay(format!("[error-glyph] Failure: preview rejected: {detail}")))
     }
 
-    fn commit_draft(
+    fn commit_draft<G: CommandGateway>(
         &mut self,
         host: &Host,
+        gateway: &G,
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         if self.draft.preview().is_none() {
@@ -2943,7 +2982,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(request) => request,
             Err(detail) => return self.reject_commit(detail),
         };
-        let response = match execute_domain_command(host, command, request) {
+        let response = match gateway.commit(command, request) {
             Ok(response) => response,
             Err(error) => return self.reject_commit(format!("{error:?}")),
         };

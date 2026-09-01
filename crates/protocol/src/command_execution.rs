@@ -13,6 +13,13 @@ pub enum ExecutionError<E> {
     InvalidResponse(String),
 }
 
+/// Validate a request against the registered command contract without
+/// invoking its handler. Interactive previews use this read-only boundary.
+pub fn validate_request(command: CommandId, request: &Value) -> Result<(), ExecutionError<()>> {
+    let schema = find(command).ok_or(ExecutionError::UnknownCommand(command))?;
+    validate(&schema.request_schema, request).map_err(ExecutionError::InvalidRequest)
+}
+
 /// Execute a registered command with its request and response contracts.
 ///
 /// Adapters provide only semantic JSON and the command handler. This guard is

@@ -12,7 +12,7 @@ use threeterm_viewport::{
     ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
 };
 
-use crate::{TuiViewportSession, decode_arrow_key};
+use crate::{TuiViewportSession, decode_terminal_input};
 
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
 pub const EXIT_CAPABILITY_FAILURE: i32 = 10;
@@ -133,6 +133,7 @@ pub fn launch<W: InteractiveTerminal>(
     terminal: &mut W,
     environment: TerminalEnvironment,
 ) -> Result<LaunchOutcome, LaunchError> {
+    let root = root.as_ref();
     let prepared = environment.foreground_tty;
     if prepared && let Err(error) = terminal.prepare() {
         return Err(with_restore_error(
@@ -178,7 +179,7 @@ pub fn launch<W: InteractiveTerminal>(
         ));
     }
     let (width, height) = terminal.viewport_size();
-    let launch_result = run_session(host, width, height, placement, terminal, &probe);
+    let launch_result = run_session(host, root, width, height, placement, terminal, &probe);
     let launch_result = with_restore_result(launch_result, terminal.restore());
     launch_result?;
 
@@ -226,6 +227,7 @@ fn with_restore_result(
 
 fn run_session<W: InteractiveTerminal>(
     host: &Host,
+    root: &Path,
     width: u32,
     height: u32,
     placement: KittyPlacement,
@@ -241,7 +243,7 @@ fn run_session<W: InteractiveTerminal>(
     );
     let launch_result = match session_result {
         Ok(mut session) => {
-            let result = run_event_loop(&mut session, &probe.unrelated_input);
+            let result = run_event_loop(&mut session, host, root, &probe.unrelated_input);
             let cleanup = session.cleanup();
             drop(session);
             match (result, cleanup) {
@@ -262,6 +264,8 @@ fn run_session<W: InteractiveTerminal>(
 
 fn run_event_loop<W: InteractiveTerminal>(
     session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
+    host: &Host,
+    root: &Path,
     replayed_probe_input: &[u8],
 ) -> Result<(), LaunchError> {
     let initial = session
@@ -293,7 +297,7 @@ fn run_event_loop<W: InteractiveTerminal>(
         if bytes.is_empty() {
             continue;
         }
-        if bytes == b"q" || bytes == b"\x03" {
+        if (bytes == b"q" || bytes == b"\x03") && !session.command_input_active() {
             return Ok(());
         }
         if let Some((image_id, _)) = acknowledgement(&bytes) {
@@ -313,15 +317,22 @@ fn run_event_loop<W: InteractiveTerminal>(
                 .map_err(LaunchError::Viewport)?;
             continue;
         }
-        if decode_arrow_key(&bytes).is_some() {
-            session
-                .process_terminal_input(&bytes)
+        if decode_terminal_input(&bytes).is_some() {
+            let outcome = session
+                .process_keyboard_input(&bytes, host, root)
                 .map_err(|error| match error {
                     crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
                     crate::TuiViewportError::Tui(error) => {
                         LaunchError::Runtime(format!("{error:?}"))
                     }
                 })?;
+            let revision = session.state().canonical_revision;
+            let overlay = format!("\r\n{}\r\n", outcome.overlay);
+            session
+                .coordinator_mut()
+                .renderer_mut()
+                .write_control(overlay.as_bytes(), &revision)
+                .map_err(LaunchError::Viewport)?;
         }
     }
 }

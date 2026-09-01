@@ -387,7 +387,8 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                     "items": { "type": "number" }
                 }
             },
-            "height": { "type": "number", "exclusiveMinimum": 0 }
+            "height": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         },
         "additionalProperties": false
     })

@@ -9,7 +9,9 @@ use threeterm_domain::{
     FeatureGraph,
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
-use threeterm_host::{HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export};
+use threeterm_host::{
+    DomainCommandPreview, HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export,
+};
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{
@@ -39,6 +41,254 @@ pub fn execute_domain_command(
     request: Value,
 ) -> Result<Value, ExecutionError<HostError>> {
     host.execute_domain_command(command, request)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteEntry {
+    pub id: CommandId,
+    pub name: String,
+    pub schema_version: String,
+    pub request_schema: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteDirection {
+    Previous,
+    Next,
+}
+
+/// Modeless command discovery backed directly by the registered command table.
+#[derive(Debug, Clone)]
+pub struct CommandPalette {
+    entries: Vec<PaletteEntry>,
+    query: String,
+    selected: usize,
+    open: bool,
+}
+
+impl Default for CommandPalette {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandPalette {
+    pub fn new() -> Self {
+        Self {
+            entries: threeterm_protocol::schema::iter()
+                .map(|schema| PaletteEntry {
+                    id: schema.id,
+                    name: schema.name.to_string(),
+                    schema_version: schema.schema_version.to_string(),
+                    request_schema: schema.request_schema.clone(),
+                })
+                .collect(),
+            query: String::new(),
+            selected: 0,
+            open: false,
+        }
+    }
+
+    pub fn entries(&self) -> &[PaletteEntry] {
+        &self.entries
+    }
+
+    pub fn visible_entries(&self) -> Vec<&PaletteEntry> {
+        let query = self.query.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.name.to_ascii_lowercase().contains(&query)
+                    || entry.id.0.to_ascii_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    pub fn selected(&self) -> Option<&PaletteEntry> {
+        self.visible_entries().get(self.selected).copied()
+    }
+
+    pub fn select(&mut self) -> Option<CommandId> {
+        let command = self.selected().map(|entry| entry.id);
+        if command.is_some() {
+            self.dismiss();
+        }
+        command
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn open(&mut self) {
+        self.open = true;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    pub fn dismiss(&mut self) {
+        self.open = false;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
+        self.selected = 0;
+    }
+
+    pub fn push_query_char(&mut self, character: char) {
+        self.query.push(character);
+        self.selected = 0;
+    }
+
+    pub fn pop_query_char(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    pub fn move_selection(&mut self, direction: PaletteDirection) {
+        let length = self.visible_entries().len();
+        if length == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = match direction {
+            PaletteDirection::Previous if self.selected == 0 => length - 1,
+            PaletteDirection::Previous => self.selected - 1,
+            PaletteDirection::Next if self.selected + 1 >= length => 0,
+            PaletteDirection::Next => self.selected + 1,
+        };
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandDraft {
+    pub command: CommandId,
+    pub source_revision: String,
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPreview {
+    pub source_revision: String,
+    pub preview_revision: String,
+    pub input_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandDraftError {
+    AlreadyOpen,
+    NoDraft,
+    PreviewRequired,
+}
+
+/// Owns the one interactive draft and its transient preview identity.
+#[derive(Debug, Default, Clone)]
+pub struct CommandDraftSession {
+    draft: Option<CommandDraft>,
+    preview: Option<CommandPreview>,
+    input_text: String,
+}
+
+impl CommandDraftSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn draft(&self) -> Option<&CommandDraft> {
+        self.draft.as_ref()
+    }
+
+    pub fn preview(&self) -> Option<&CommandPreview> {
+        self.preview.as_ref()
+    }
+
+    pub fn input_text(&self) -> &str {
+        &self.input_text
+    }
+
+    pub fn input_value(&self) -> Result<Value, serde_json::Error> {
+        if self.input_text.trim().is_empty() {
+            Ok(Value::Object(Default::default()))
+        } else {
+            serde_json::from_str(&self.input_text)
+        }
+    }
+
+    pub fn open(
+        &mut self,
+        command: CommandId,
+        source_revision: impl Into<String>,
+    ) -> Result<CommandDraft, CommandDraftError> {
+        if self.draft.is_some() {
+            return Err(CommandDraftError::AlreadyOpen);
+        }
+        let draft = CommandDraft {
+            command,
+            source_revision: source_revision.into(),
+            input: Value::Object(Default::default()),
+        };
+        self.draft = Some(draft.clone());
+        self.input_text.clear();
+        Ok(draft)
+    }
+
+    pub fn replace_input(&mut self, input: Value) {
+        if let Some(draft) = &mut self.draft {
+            self.input_text = serde_json::to_string(&input).expect("JSON values serialize");
+            draft.input = input;
+            self.preview = None;
+        }
+    }
+
+    pub fn push_input_char(&mut self, character: char) {
+        self.input_text.push(character);
+        if let Some(draft) = &mut self.draft {
+            if let Ok(input) = serde_json::from_str(&self.input_text) {
+                draft.input = input;
+            }
+            self.preview = None;
+        }
+    }
+
+    pub fn pop_input_char(&mut self) {
+        self.input_text.pop();
+        if let Some(draft) = &mut self.draft {
+            if let Ok(input) = serde_json::from_str(&self.input_text) {
+                draft.input = input;
+            }
+            self.preview = None;
+        }
+    }
+
+    pub fn set_preview(&mut self, preview_revision: String, input_fingerprint: String) {
+        if let Some(draft) = &self.draft {
+            self.preview = Some(CommandPreview {
+                source_revision: draft.source_revision.clone(),
+                preview_revision,
+                input_fingerprint,
+            });
+        }
+    }
+
+    pub fn take_for_commit(&mut self) -> Result<CommandDraft, CommandDraftError> {
+        if self.preview.is_none() {
+            return Err(CommandDraftError::PreviewRequired);
+        }
+        self.preview = None;
+        self.draft.take().ok_or(CommandDraftError::NoDraft)
+    }
+
+    pub fn cancel(&mut self) {
+        self.preview = None;
+        self.draft = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1099,7 +1349,7 @@ impl TuiSession {
                 self.finish_transition_with_diagnostic(
                     kind,
                     "restoring after runtime failure",
-                    TransientState::Warning,
+                    TransientState::Error,
                     Some(diagnostic),
                 )
             }
@@ -1493,7 +1743,7 @@ impl TuiSession {
                     command,
                     input_fingerprint,
                 };
-                self.finish_transition(kind, "command draft updated", TransientState::Ready)
+                self.finish_transition(kind, "command draft updated", TransientState::Hover)
             }
             CommandEvent::PreviewRequested
                 if matches!(self.command_phase, CommandPhase::Draft { .. })
@@ -1506,7 +1756,7 @@ impl TuiSession {
                     _ => unreachable!("draft phase was checked above"),
                 };
                 self.command_phase = CommandPhase::Previewing { input_fingerprint };
-                self.finish_transition(kind, "command previewing", TransientState::Drag)
+                self.finish_transition(kind, "command previewing", TransientState::Candidate)
             }
             CommandEvent::PreviewCompleted(PreviewResult::Ready)
                 if matches!(self.command_phase, CommandPhase::Previewing { .. })
@@ -1517,7 +1767,7 @@ impl TuiSession {
                     _ => unreachable!("previewing phase was checked above"),
                 };
                 self.command_phase = CommandPhase::PreviewReady { input_fingerprint };
-                self.finish_transition(kind, "command preview ready", TransientState::Ready)
+                self.finish_transition(kind, "command preview ready", TransientState::Candidate)
             }
             CommandEvent::PreviewCompleted(PreviewResult::Rejected { detail })
                 if matches!(self.command_phase, CommandPhase::Previewing { .. })
@@ -1544,7 +1794,7 @@ impl TuiSession {
                 self.finish_transition_with_diagnostic(
                     kind,
                     "command preview rejected",
-                    TransientState::Warning,
+                    TransientState::Error,
                     Some(diagnostic),
                 )
             }
@@ -2025,7 +2275,7 @@ impl TuiSession {
             command,
             input_fingerprint: String::new(),
         };
-        self.finish_transition(event, "command draft open", TransientState::Ready)
+        self.finish_transition(event, "command draft open", TransientState::Hover)
     }
 
     fn invalid_transition(
@@ -2268,9 +2518,18 @@ pub struct ViewportInputOutcome {
     pub camera: CameraState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInputOutcome {
+    pub rendered: Option<RenderedInput>,
+    pub submission: Option<SubmitOutcome>,
+    pub overlay: String,
+}
+
 #[derive(Debug)]
 pub struct TuiViewportSession<R: Renderer> {
     tui: TuiSession,
+    palette: CommandPalette,
+    draft: CommandDraftSession,
     scene: ViewportScene,
     camera: CameraState,
     width: u32,
@@ -2375,6 +2634,8 @@ impl<R: Renderer> TuiViewportSession<R> {
         let tui = TuiSession::from_feature_graph_with_theme(&presentation.graph, revision, theme);
         Ok(Self {
             tui,
+            palette: CommandPalette::new(),
+            draft: CommandDraftSession::new(),
             scene,
             camera: CameraState::default(),
             width,
@@ -2432,6 +2693,367 @@ impl<R: Renderer> TuiViewportSession<R> {
             submission,
             camera: self.camera,
         })
+    }
+
+    pub fn palette(&self) -> &CommandPalette {
+        &self.palette
+    }
+
+    pub fn draft(&self) -> Option<&CommandDraft> {
+        self.draft.draft()
+    }
+
+    pub fn command_preview(&self) -> Option<&CommandPreview> {
+        self.draft.preview()
+    }
+
+    pub fn command_input_active(&self) -> bool {
+        self.palette.is_open() || self.draft.draft().is_some()
+    }
+
+    /// Route decoded keyboard input through the modeless palette and the one
+    /// draft session. Arrow navigation remains the ordinary viewport path.
+    pub fn process_keyboard_input(
+        &mut self,
+        bytes: &[u8],
+        host: &Host,
+        root: impl AsRef<Path>,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        let root = root.as_ref();
+        let input = decode_terminal_input(bytes).ok_or_else(|| {
+            TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
+        })?;
+        if matches!(input, TerminalInput::Arrow(_)) && !self.command_input_active() {
+            let outcome = self.process_terminal_input(bytes)?;
+            return Ok(KeyboardInputOutcome {
+                overlay: outcome.rendered.overlay.clone(),
+                rendered: Some(outcome.rendered),
+                submission: Some(outcome.submission),
+            });
+        }
+
+        if self.palette.is_open() {
+            return self.process_palette_input(input, host, root);
+        }
+        if self.draft.draft().is_some() {
+            return self.process_draft_input(input, host, root);
+        }
+        match input {
+            TerminalInput::OpenPalette => {
+                self.palette.open();
+                Ok(self.keyboard_overlay(self.palette_overlay()))
+            }
+            TerminalInput::Arrow(_)
+            | TerminalInput::Character(_)
+            | TerminalInput::Backspace
+            | TerminalInput::Escape
+            | TerminalInput::Preview
+            | TerminalInput::Commit
+            | TerminalInput::Enter => Ok(self.keyboard_overlay(String::new())),
+        }
+    }
+
+    fn process_palette_input(
+        &mut self,
+        input: TerminalInput,
+        host: &Host,
+        root: &Path,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        match input {
+            TerminalInput::Escape => {
+                self.palette.dismiss();
+                Ok(self
+                    .keyboard_overlay("[cancellation-glyph] Command palette dismissed".to_string()))
+            }
+            TerminalInput::Character(character) => {
+                self.palette.push_query_char(character);
+                Ok(self.keyboard_overlay(self.palette_overlay()))
+            }
+            TerminalInput::Backspace => {
+                self.palette.pop_query_char();
+                Ok(self.keyboard_overlay(self.palette_overlay()))
+            }
+            TerminalInput::Arrow(key) => {
+                self.palette.move_selection(match key {
+                    ArrowKey::Up | ArrowKey::Left => PaletteDirection::Previous,
+                    ArrowKey::Down | ArrowKey::Right => PaletteDirection::Next,
+                });
+                Ok(self.keyboard_overlay(self.palette_overlay()))
+            }
+            TerminalInput::Enter => {
+                let Some(command) = self.palette.select() else {
+                    return Ok(self.keyboard_overlay(
+                        "[error-glyph] Failure: command palette has no matching command"
+                            .to_string(),
+                    ));
+                };
+                if command != threeterm_protocol::schema::EXTRUDE_COMMAND_ID {
+                    self.palette.open();
+                    return Ok(self.keyboard_overlay(format!(
+                        "[error-glyph] Failure: command {} is discovery-only",
+                        command.0
+                    )));
+                }
+                let revision = host
+                    .identity(root)
+                    .map_err(|error| {
+                        TuiViewportError::Tui(self.command_diagnostic(&error.to_string()))
+                    })?
+                    .revision_hash;
+                self.draft
+                    .open(command, revision.clone())
+                    .map_err(|error| {
+                        TuiViewportError::Tui(self.command_diagnostic(&format!("{error:?}")))
+                    })?;
+                self.tui
+                    .transition_command(CommandEvent::Open {
+                        command: command.0.to_string(),
+                    })
+                    .map_err(TuiViewportError::Tui)?;
+                Ok(self.keyboard_overlay(format!(
+                    "[outline] Draft: {} source_revision={revision} input={{}}",
+                    command.0
+                )))
+            }
+            TerminalInput::OpenPalette => Ok(self.keyboard_overlay(self.palette_overlay())),
+            TerminalInput::Preview | TerminalInput::Commit => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: select a command before preview or commit".to_string(),
+            )),
+        }
+    }
+
+    fn process_draft_input(
+        &mut self,
+        input: TerminalInput,
+        host: &Host,
+        root: &Path,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        match input {
+            TerminalInput::Escape => {
+                self.tui
+                    .transition_command(CommandEvent::CancelRequested)
+                    .map_err(TuiViewportError::Tui)?;
+                self.draft.cancel();
+                self.tui
+                    .transition_command(CommandEvent::CancellationCompleted {
+                        detail: "user cancelled the command draft".to_string(),
+                    })
+                    .map_err(TuiViewportError::Tui)?;
+                Ok(self.keyboard_overlay(
+                    "[cancellation-glyph] Cancellation: command draft discarded".to_string(),
+                ))
+            }
+            TerminalInput::Character(character) => {
+                self.draft.push_input_char(character);
+                self.transition_draft_update()?;
+                Ok(self.keyboard_overlay(format!(
+                    "[outline] Draft: {} input={}",
+                    self.draft.draft().expect("draft remains").command.0,
+                    self.draft.input_text()
+                )))
+            }
+            TerminalInput::Backspace => {
+                self.draft.pop_input_char();
+                self.transition_draft_update()?;
+                Ok(self.keyboard_overlay(format!(
+                    "[outline] Draft: {} input={}",
+                    self.draft.draft().expect("draft remains").command.0,
+                    self.draft.input_text()
+                )))
+            }
+            TerminalInput::Preview => self.preview_draft(host, root),
+            TerminalInput::Commit => self.commit_draft(host, root),
+            TerminalInput::Arrow(_) | TerminalInput::Enter | TerminalInput::OpenPalette => Ok(self
+                .keyboard_overlay(format!(
+                    "[outline] Draft: {} input={}",
+                    self.draft.draft().expect("draft remains").command.0,
+                    self.draft.input_text()
+                ))),
+        }
+    }
+
+    fn transition_draft_update(&mut self) -> Result<(), TuiViewportError> {
+        self.tui
+            .transition_command(CommandEvent::DraftUpdated {
+                input_fingerprint: self.draft.input_text().to_string(),
+            })
+            .map(|_| ())
+            .map_err(TuiViewportError::Tui)
+    }
+
+    fn preview_draft(
+        &mut self,
+        host: &Host,
+        root: &Path,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        self.tui
+            .transition_command(CommandEvent::PreviewRequested)
+            .map_err(TuiViewportError::Tui)?;
+        let request = match self.domain_request(root, false) {
+            Ok(request) => request,
+            Err(detail) => return self.reject_preview(detail),
+        };
+        match host
+            .preview_domain_command(self.draft.draft().expect("draft remains").command, request)
+        {
+            Ok(preview) => {
+                self.draft.set_preview(
+                    preview.preview_revision.clone(),
+                    preview.input_fingerprint.clone(),
+                );
+                self.tui
+                    .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
+                    .map_err(TuiViewportError::Tui)?;
+                Ok(self.keyboard_overlay(format_preview(&preview)))
+            }
+            Err(error) => self.reject_preview(format!("{error:?}")),
+        }
+    }
+
+    fn reject_preview(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        self.tui
+            .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Rejected {
+                detail: detail.clone(),
+            }))
+            .map_err(TuiViewportError::Tui)?;
+        Ok(self.keyboard_overlay(format!("[error-glyph] Failure: preview rejected: {detail}")))
+    }
+
+    fn commit_draft(
+        &mut self,
+        host: &Host,
+        root: &Path,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        self.tui
+            .transition_command(CommandEvent::CommitRequested)
+            .map_err(TuiViewportError::Tui)?;
+        let source_revision = self
+            .draft
+            .draft()
+            .expect("draft remains")
+            .source_revision
+            .clone();
+        let command = self.draft.draft().expect("draft remains").command;
+        let request = match self.domain_request(root, true) {
+            Ok(request) => request,
+            Err(detail) => return self.reject_commit(detail),
+        };
+        let response = match execute_domain_command(host, command, request) {
+            Ok(response) => response,
+            Err(error) => return self.reject_commit(format!("{error:?}")),
+        };
+        let revision = match response.get("revision_hash").and_then(Value::as_str) {
+            Some(revision) => revision.to_string(),
+            None => return self.reject_commit("commit response has no revision_hash".to_string()),
+        };
+        self.tui
+            .transition_command(CommandEvent::CommitAccepted {
+                source_revision: source_revision.clone(),
+                validated_revision: source_revision,
+                revision: revision.clone(),
+            })
+            .map_err(TuiViewportError::Tui)?;
+        self.draft.cancel();
+        self.refresh_scene_from_host(host)?;
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        Ok(KeyboardInputOutcome {
+            rendered: None,
+            submission: Some(submission),
+            overlay: format!(
+                "[selection-glyph] Commit: {} revision={revision}",
+                command.0
+            ),
+        })
+    }
+
+    fn reject_commit(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        self.draft.cancel();
+        self.tui
+            .transition_command(CommandEvent::CommitRejected {
+                detail: detail.clone(),
+            })
+            .map_err(TuiViewportError::Tui)?;
+        Ok(self.keyboard_overlay(format!("[error-glyph] Failure: commit rejected: {detail}")))
+    }
+
+    fn domain_request(&self, root: &Path, include_expected: bool) -> Result<Value, String> {
+        let draft = self
+            .draft
+            .draft()
+            .ok_or_else(|| "no command draft".to_string())?;
+        let mut request = self
+            .draft
+            .input_value()
+            .map_err(|error| format!("draft input is not valid JSON: {error}"))?;
+        let object = request
+            .as_object_mut()
+            .ok_or_else(|| "draft input must be a JSON object".to_string())?;
+        object.insert(
+            "bundle_path".to_string(),
+            Value::String(root.to_string_lossy().into_owned()),
+        );
+        if include_expected {
+            object.insert(
+                "expected_revision".to_string(),
+                Value::String(draft.source_revision.clone()),
+            );
+        }
+        Ok(request)
+    }
+
+    fn refresh_scene_from_host(&mut self, host: &Host) -> Result<(), TuiViewportError> {
+        let presentation = host.presentation_snapshot().ok_or_else(|| {
+            TuiViewportError::Tui(self.command_diagnostic("host has no canonical presentation"))
+        })?;
+        let mut scene = host
+            .presentation_viewport_scene()
+            .map_err(|error| TuiViewportError::Tui(self.command_diagnostic(&error.to_string())))?;
+        for result in presentation.layer1_results {
+            scene = scene.with_layer1_reference(result.request_id);
+        }
+        self.scene = scene;
+        Ok(())
+    }
+
+    fn keyboard_overlay(&self, overlay: String) -> KeyboardInputOutcome {
+        KeyboardInputOutcome {
+            rendered: None,
+            submission: None,
+            overlay,
+        }
+    }
+
+    fn command_diagnostic(&self, detail: &str) -> TuiDiagnostic {
+        TuiDiagnostic {
+            code: TuiDiagnosticCode::CommandRejected,
+            detail: detail.to_string(),
+            canonical_revision: self.tui.state().canonical_revision,
+            axis: Some(StateAxis::CommandPhase),
+            event: None,
+            from: Some("keyboard-palette".to_string()),
+        }
+    }
+
+    fn palette_overlay(&self) -> String {
+        let selected = self.palette.selected().map(|entry| entry.id.0);
+        let entries = self
+            .palette
+            .visible_entries()
+            .iter()
+            .map(|entry| {
+                if Some(entry.id.0) == selected {
+                    format!("> {}", entry.name)
+                } else {
+                    entry.name.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "[outline] Command Palette query={:?} {}",
+            self.palette.query(),
+            entries
+        )
     }
 
     pub fn acknowledge(
@@ -2615,6 +3237,51 @@ fn decode_arrow(bytes: &[u8]) -> Option<ArrowKey> {
 
 pub fn decode_arrow_key(bytes: &[u8]) -> Option<ArrowKey> {
     decode_arrow(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalInput {
+    Character(char),
+    Backspace,
+    Arrow(ArrowKey),
+    Escape,
+    OpenPalette,
+    Preview,
+    Commit,
+    Enter,
+}
+
+/// Decode the small, protocol-neutral keyboard vocabulary used by the
+/// production palette. Kitty's CSI-u encoding is preferred for Ctrl-Enter.
+pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
+    if let Some(key) = decode_arrow(bytes) {
+        return Some(TerminalInput::Arrow(key));
+    }
+    match bytes {
+        b"\x10" => Some(TerminalInput::OpenPalette),
+        b"\x16" => Some(TerminalInput::Preview),
+        b"\x1b[13;5u" | b"\x1b[13;2u" => Some(TerminalInput::Commit),
+        b"\x1b" => Some(TerminalInput::Escape),
+        b"\x7f" | b"\x08" => Some(TerminalInput::Backspace),
+        b"\r" | b"\n" => Some(TerminalInput::Enter),
+        _ => {
+            let text = std::str::from_utf8(bytes).ok()?;
+            let mut characters = text.chars();
+            let character = characters.next()?;
+            (characters.next().is_none() && !character.is_control())
+                .then_some(TerminalInput::Character(character))
+        }
+    }
+}
+
+fn format_preview(preview: &DomainCommandPreview) -> String {
+    format!(
+        "[dashed-outline] Preview: {} source_revision={} preview_revision={} geometry={}",
+        preview.command.0,
+        preview.source_revision,
+        preview.preview_revision,
+        preview.geometry_fingerprint
+    )
 }
 
 fn stable_ids_are_distinct(stable_ids: &[String]) -> bool {

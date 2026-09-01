@@ -3,9 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, IDENTITY_COMMAND_ID};
+use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
 
 fn root(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -28,6 +29,19 @@ fn apply_request(path: &std::path::Path, revision: &str, kind: Option<&str>) -> 
     });
     if let Some(kind) = kind {
         request["kind"] = kind.into();
+    }
+    request
+}
+
+fn extrude_request(path: &std::path::Path, revision: Option<&str>) -> Value {
+    let mut request = json!({
+        "bundle_path": path.to_string_lossy(),
+        "feature_id": "keyboard-extrude",
+        "profile": [[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]],
+        "height": 3.0,
+    });
+    if let Some(revision) = revision {
+        request["expected_revision"] = revision.into();
     }
     request
 }
@@ -154,4 +168,52 @@ fn shared_executor_distinguishes_schema_semantic_and_stale_rejections() {
     assert_ne!(log_before, fs::read(root.join("transactions.log")).unwrap());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));
+}
+
+#[test]
+fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
+    let Some(_worker) = OcctWorker::locate().ok() else {
+        eprintln!("domain preview: OCCT worker unavailable");
+        return;
+    };
+    let root = root("preview");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let initial = host
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
+        .expect("identity executes");
+    let revision = initial["revision_hash"].as_str().unwrap().to_string();
+    let before_manifest = fs::read(root.join("manifest.json")).unwrap();
+    let before_log = fs::read(root.join("transactions.log")).unwrap();
+
+    let preview = host
+        .preview_domain_command(EXTRUDE_COMMAND_ID, extrude_request(&root, Some(&revision)))
+        .expect("preview executes");
+    assert_eq!(preview.source_revision, revision);
+    assert_ne!(preview.preview_revision, preview.source_revision);
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        before_manifest
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+
+    host.save(&root, "advance", "box")
+        .expect("revision advances");
+    let after_advance_manifest = fs::read(root.join("manifest.json")).unwrap();
+    let after_advance_log = fs::read(root.join("transactions.log")).unwrap();
+    let stale =
+        host.execute_domain_command(EXTRUDE_COMMAND_ID, extrude_request(&root, Some(&revision)));
+    assert!(matches!(
+        stale,
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        after_advance_manifest
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).unwrap(),
+        after_advance_log
+    );
+    let _ = fs::remove_dir_all(&root);
 }

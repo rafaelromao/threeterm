@@ -538,7 +538,7 @@ fn selected_edge_schema() -> Value {
 pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "base_feature_id", "radius", "reference"],
+        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "base_feature_id", "radius", "reference", "edit_target"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -547,6 +547,7 @@ pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "base_feature_id": { "type": "string", "minLength": 1 },
             "radius": { "type": "number", "exclusiveMinimum": 0 },
             "reference": selected_edge_schema(),
+            "edit_target": selected_edge_schema(),
         },
         "additionalProperties": false
     })
@@ -2097,8 +2098,8 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         CommandSchema {
             id: REATTACH_EDGE_COMMAND_ID,
             name: "reattach-edge",
-            schema_version: "threeterm.command.reattach-edge/1",
-            request_schema_version: "threeterm.command.reattach-edge.request/1",
+            schema_version: "threeterm.command.reattach-edge/2",
+            request_schema_version: "threeterm.command.reattach-edge.request/2",
             request_schema: REATTACH_EDGE_REQUEST_SCHEMA.clone(),
             response_schema_version: REATTACH_EDGE_RESPONSE_SCHEMA_VERSION,
             response_schema: REATTACH_EDGE_RESPONSE_SCHEMA.clone(),

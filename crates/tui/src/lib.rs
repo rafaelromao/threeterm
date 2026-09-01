@@ -69,6 +69,7 @@ pub fn execute_selected_edge_reattachment(
     base_feature_id: &str,
     radius: f64,
     reference: Value,
+    edit_target: Value,
 ) -> Result<Value, ExecutionError<HostError>> {
     execute_domain_command(
         host,
@@ -81,6 +82,7 @@ pub fn execute_selected_edge_reattachment(
             "base_feature_id": base_feature_id,
             "radius": radius,
             "reference": reference,
+            "edit_target": edit_target,
         }),
     )
 }
@@ -786,6 +788,7 @@ impl TuiSession {
         base_feature_id: &str,
         radius: f64,
         reference: Value,
+        edit_target: Value,
     ) -> Result<EdgeReattachmentInteraction, ExecutionError<HostError>> {
         let response = execute_selected_edge_reattachment(
             host,
@@ -796,6 +799,7 @@ impl TuiSession {
             base_feature_id,
             radius,
             reference,
+            edit_target,
         )?;
         let acknowledgement = reattachment_acknowledgement(&response);
         Ok(EdgeReattachmentInteraction {

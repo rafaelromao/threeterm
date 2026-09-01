@@ -34,7 +34,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "6adacb35135931e7bad9bc7dbb0a4532c03ef7f8546e6f57a4d67bbe8467dd27",
+        "472dee28d953e1d4e669b3e41256f1b44f99c25cf7bd0026033454b10cacd4b3",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -54,7 +54,8 @@ fn registry_contains_the_semantic_edge_reattachment_contract() {
             "edit_kind",
             "base_feature_id",
             "radius",
-            "reference"
+            "reference",
+            "edit_target"
         ])
     );
     assert_eq!(edge.request_schema["additionalProperties"], false);

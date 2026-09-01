@@ -35,7 +35,42 @@ fn reference(revision: &str) -> Value {
     })
 }
 
+fn edit_target(revision: &str) -> Value {
+    json!({
+        "semantic_id": "edge-target",
+        "provenance": {
+            "source_feature_id": "base",
+            "source_revision_id": revision,
+            "source_edge_id": "edge-target"
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": [0.0, 4.0, 1.0],
+            "tangent": [0.0, 0.0, 1.0],
+            "length": 2.0
+        }
+    })
+}
+
+fn adjacent_edit_target(revision: &str) -> Value {
+    let mut target = edit_target(revision);
+    target["semantic_id"] = json!("edge-adjacent-target");
+    target["provenance"]["source_edge_id"] = json!("edge-adjacent-target");
+    target["evidence"]["midpoint"] = json!([0.0, 0.0, 1.0]);
+    target["evidence"]["tangent"] = json!([0.0, 0.0, 1.0]);
+    target
+}
+
 fn request(root: &std::path::Path, revision: &str, reference: Value) -> Value {
+    request_with_edit_target(root, revision, reference, edit_target(revision))
+}
+
+fn request_with_edit_target(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+) -> Value {
     json!({
         "bundle_path": root.to_string_lossy(),
         "expected_revision": revision,
@@ -43,7 +78,8 @@ fn request(root: &std::path::Path, revision: &str, reference: Value) -> Value {
         "edit_kind": "fillet",
         "base_feature_id": "base",
         "radius": 0.25,
-        "reference": reference
+        "reference": reference,
+        "edit_target": edit_target
     })
 }
 
@@ -126,6 +162,7 @@ fn assert_worker_outcome(outcome: &str, expected_ids: &[&str]) {
     let host = Host::new();
     let before = host.load(&root).expect("bundle loads");
     let reference = serde_json::from_value(reference(&revision)).expect("reference is typed");
+    let edit_target = serde_json::from_value(edit_target(&revision)).expect("edit target is typed");
     let view = host
         .reattach_edge_with_fillet(
             &root,
@@ -134,6 +171,7 @@ fn assert_worker_outcome(outcome: &str, expected_ids: &[&str]) {
             &format!("fillet-after-{outcome}"),
             0.25,
             reference,
+            edit_target,
             &evidence_worker(&root, outcome),
         )
         .expect("worker outcome is structured");
@@ -248,6 +286,34 @@ fn production_worker_reports_incompatible_role_before_canonical_mutation() {
         )
         .expect("worker role mismatch is a structured outcome");
     assert_eq!(result["outcome"], "incompatible");
+    assert_eq!(result["committed"], false);
+    assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn production_worker_reports_ambiguous_descendants_before_canonical_mutation() {
+    let root = root("ambiguous-descendants");
+    let Some((_worker, revision)) = setup(&root, "ambiguous-descendants") else {
+        return;
+    };
+    let host = Host::new();
+    let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(root.join("transactions.log")).expect("log reads");
+    let result = host
+        .execute_domain_command(
+            REATTACH_EDGE_COMMAND_ID,
+            request_with_edit_target(
+                &root,
+                &revision,
+                reference(&revision),
+                adjacent_edit_target(&revision),
+            ),
+        )
+        .expect("worker ambiguity is a structured outcome");
+    assert_eq!(result["outcome"], "ambiguous");
+    assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
     assert_eq!(result["committed"], false);
     assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);

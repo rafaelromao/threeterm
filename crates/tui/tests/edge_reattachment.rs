@@ -32,6 +32,23 @@ fn reference(revision: &str) -> serde_json::Value {
     })
 }
 
+fn edit_target(revision: &str) -> serde_json::Value {
+    json!({
+        "semantic_id": "edge-target",
+        "provenance": {
+            "source_feature_id": "base",
+            "source_revision_id": revision,
+            "source_edge_id": "edge-target"
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": [0.0, 4.0, 1.0],
+            "tangent": [0.0, 0.0, 1.0],
+            "length": 2.0
+        }
+    })
+}
+
 #[test]
 fn interactive_overlay_acknowledges_each_structured_reattachment_outcome() {
     assert_eq!(
@@ -81,6 +98,7 @@ fn selected_edge_action_uses_the_shared_executor_and_returns_acknowledgement() {
             "base",
             0.25,
             reference(&identity.revision_hash),
+            edit_target(&identity.revision_hash),
         )
         .expect("selected edge executes");
     assert_eq!(result.response["outcome"], "resolved");

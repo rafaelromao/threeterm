@@ -146,6 +146,7 @@ enum DispatchPlan {
         base_feature_id: String,
         radius: f64,
         reference: Value,
+        edit_target: Value,
     },
     FitDimension {
         bundle: String,
@@ -1494,6 +1495,7 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut radius: Option<f64> = None;
     let mut reference: Option<Value> = None;
+    let mut edit_target: Option<Value> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -1549,6 +1551,18 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--edit-target" => match serde_json::from_str(&value_str) {
+                    Ok(parsed) => {
+                        edit_target = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--edit-target {value_str}"),
+                        };
+                    }
+                },
                 _ => {}
             }
         }
@@ -1596,6 +1610,11 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
             arg: "--reference".to_string(),
         };
     };
+    let Some(edit_target) = edit_target else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-target".to_string(),
+        };
+    };
     DispatchPlan::ReattachEdge {
         bundle,
         expected_revision,
@@ -1604,6 +1623,7 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         radius,
         reference,
+        edit_target,
     }
 }
 
@@ -4237,6 +4257,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             base_feature_id,
             radius,
             reference,
+            edit_target,
         } => json!({
             "bundle_path": bundle,
             "expected_revision": expected_revision,
@@ -4245,6 +4266,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             "base_feature_id": base_feature_id,
             "radius": radius,
             "reference": reference,
+            "edit_target": edit_target,
         }),
         DispatchPlan::FitDimension {
             bundle,

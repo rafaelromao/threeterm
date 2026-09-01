@@ -1398,8 +1398,9 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
 }
 
 TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
-                                    const JsonParser::Value& request) {
-    const auto* selected = find_field(request, "selected_edge");
+                                    const JsonParser::Value& request,
+                                    const char* field_name) {
+    const auto* selected = find_field(request, field_name);
     if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) return {};
     const auto midpoint = get_vec3(*selected, "midpoint");
     const auto tangent = get_vec3(*selected, "tangent");
@@ -1472,7 +1473,8 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request);
+        const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request, "selected_edge");
+        const TopoDS_Edge edit_target_edge = source_edge_for_context(base, request, "edit_target");
         BRepFilletAPI_MakeFillet fillet(base);
         TopoDS_Edge fallback_edit_edge;
         TopoDS_Vertex selected_first_vertex;
@@ -1480,7 +1482,10 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         if (!selected_source_edge.IsNull()) {
             TopExp::Vertices(selected_source_edge, selected_first_vertex, selected_last_vertex);
         }
-        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+        if (!edit_target_edge.IsNull()) {
+            fillet.Add(radius, edit_target_edge);
+        }
+        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edit_target_edge.IsNull() && edge_explorer.More(); edge_explorer.Next()) {
             TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
             if (!selected_source_edge.IsNull() && edge.IsSame(selected_source_edge)) continue;
             if (!selected_source_edge.IsNull()) {

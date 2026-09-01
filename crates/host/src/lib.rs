@@ -1678,6 +1678,15 @@ impl Host {
                         .map_err(|error| HostError::Validation {
                             detail: format!("invalid selected edge reference: {error}"),
                         })?;
+                    let edit_target: SelectedEdgeReference =
+                        serde_json::from_value(request.get("edit_target").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing edge edit target reference".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid edge edit target reference: {error}"),
+                        })?;
                     let bundle_path = string_field("bundle_path")?;
                     let expected_revision = string_field("expected_revision")?;
                     let edit_feature_id = string_field("edit_feature_id")?;
@@ -1688,6 +1697,14 @@ impl Host {
                         });
                     }
                     let base_feature_id = string_field("base_feature_id")?;
+                    if edit_target.provenance.source_feature_id != base_feature_id
+                        || edit_target.provenance.source_revision_id != expected_revision
+                    {
+                        return Err(HostError::Validation {
+                            detail: "edge edit target provenance does not match edit source"
+                                .to_string(),
+                        });
+                    }
                     let radius = request
                         .get("radius")
                         .and_then(serde_json::Value::as_f64)
@@ -1705,6 +1722,7 @@ impl Host {
                         edit_feature_id,
                         radius,
                         reference,
+                        edit_target,
                         &worker,
                     )?;
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
@@ -1752,6 +1770,7 @@ impl Host {
         edit_feature_id: &str,
         radius: f64,
         reference: SelectedEdgeReference,
+        edit_target: SelectedEdgeReference,
         worker: &OcctWorker,
     ) -> Result<EdgeReattachmentView, HostError> {
         let root = root.as_ref();
@@ -1772,6 +1791,13 @@ impl Host {
             return Err(HostError::Validation {
                 detail: "edge reference source revision does not match current revision"
                     .to_string(),
+            });
+        }
+        if edit_target.provenance.source_feature_id != base_feature_id
+            || edit_target.provenance.source_revision_id != source_snapshot.revision_hash
+        {
+            return Err(HostError::Validation {
+                detail: "edge edit target provenance does not match edit source".to_string(),
             });
         }
         let mut worker_reference = reference.clone();
@@ -1795,6 +1821,16 @@ impl Host {
             midpoint: worker_reference.evidence.midpoint,
             tangent: worker_reference.evidence.tangent,
             length: worker_reference.evidence.length,
+        });
+        let request = request.with_edit_target(SelectedEdgeContext {
+            semantic_id: edit_target.semantic_id.clone(),
+            source_feature_id: edit_target.provenance.source_feature_id.clone(),
+            source_revision_id: edit_target.provenance.source_revision_id.clone(),
+            source_edge_id: edit_target.provenance.source_edge_id.clone(),
+            role: edit_target.role.clone(),
+            midpoint: edit_target.evidence.midpoint,
+            tangent: edit_target.evidence.tangent,
+            length: edit_target.evidence.length,
         });
         let derived = self.stage_occt_result::<FilletResult>(
             root,

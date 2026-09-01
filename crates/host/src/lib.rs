@@ -1549,12 +1549,13 @@ impl Host {
                 }
                 EXTRUDE_COMMAND_ID => {
                     let bundle_path = string_field("bundle_path")?;
-                    if let Some(expected_revision) = request
+                    let expected_revision = request
                         .get("expected_revision")
                         .and_then(serde_json::Value::as_str)
-                    {
+                        .map(str::to_string);
+                    if let Some(expected_revision) = &expected_revision {
                         let current = self.load(bundle_path)?;
-                        if current.revision_hash != expected_revision {
+                        if current.revision_hash != expected_revision.as_str() {
                             return Err(HostError::Validation {
                                 detail: format!(
                                     "extrude source revision {expected_revision:?} does not match current revision {:?}",
@@ -1582,16 +1583,17 @@ impl Host {
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
                         })?;
-                    let view = self.extrude(
-                        bundle_path,
-                        ExtrudeRequest::new(
-                            threeterm_occt_worker::new_request_id(),
-                            profile.into_iter().map(|[x, y]| (x, y)).collect(),
-                            height,
-                        )
-                        .with_feature_id(string_field("feature_id")?),
-                        &worker,
-                    )?;
+                    let request = ExtrudeRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        profile.into_iter().map(|[x, y]| (x, y)).collect(),
+                        height,
+                    )
+                    .with_feature_id(string_field("feature_id")?);
+                    let view = if let Some(expected_revision) = expected_revision {
+                        self.extrude_at_revision(bundle_path, request, &worker, &expected_revision)?
+                    } else {
+                        self.extrude(bundle_path, request, &worker)?
+                    };
                     Ok(serde_json::json!({
                         "status": view.result.status,
                         "operation": "extrude",
@@ -4178,6 +4180,15 @@ impl Host {
         }
     }
 
+    fn discard_staged_occt_result<R>(&self, derived: &StagedOcctResult<R>) {
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
+        if let Some(stage_root) = derived.artifact.path.parent() {
+            let _ = fs::remove_dir_all(stage_root);
+        }
+    }
+
     /// Promote one Host-validated extrude result into the next canonical
     /// Project Generation. The request stage is consumed before persistence
     /// copies the bundle, so transient worker artifacts cannot become part of
@@ -4972,6 +4983,43 @@ impl Host {
             threeterm_occt_worker::Operation::Extrude,
             worker,
         )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(ExtrudeCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact,
+        })
+    }
+
+    /// Commit an extrude only if the worker was staged from the caller's
+    /// expected source revision. The final promotion still performs its own
+    /// persistence-lock comparison.
+    pub fn extrude_at_revision(
+        &self,
+        root: impl AsRef<Path>,
+        request: ExtrudeRequest,
+        worker: &OcctWorker,
+        expected_revision: &str,
+    ) -> Result<ExtrudeCommitView, HostError> {
+        let root = root.as_ref();
+        let derived = self.stage_occt_result::<ExtrudeResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Extrude,
+            worker,
+        )?;
+        if derived.source_snapshot.revision_hash != expected_revision {
+            let current_revision = derived.source_snapshot.revision_hash.clone();
+            self.discard_staged_occt_result(&derived);
+            return Err(HostError::Validation {
+                detail: format!(
+                    "extrude source revision {expected_revision:?} changed to {current_revision:?}"
+                ),
+            });
+        }
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(ExtrudeCommitView {

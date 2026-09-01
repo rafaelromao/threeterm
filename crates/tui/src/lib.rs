@@ -2924,6 +2924,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         host: &Host,
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        if self.draft.preview().is_none() {
+            return Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: commit requires a current preview".to_string(),
+            ));
+        }
         self.tui
             .transition_command(CommandEvent::CommitRequested)
             .map_err(TuiViewportError::Tui)?;

@@ -65,6 +65,19 @@ verify_performance_material() {
     local block
     block="$(performance_gate_block "$record")"
     [[ -n "$block" ]] || { performance_gate_fail 'six-gate record block is missing'; return 1; }
+    local field
+    for field in record_status release_commit release_tag evidence_path evidence_sha256 \
+        hardware_profile project_scale fixture_name limitations_path limitations_sha256 \
+        owner record_signature record_date; do
+        [[ "$(grep -Ec "^${field}: " <<<"$block")" == 1 ]] \
+            || { performance_gate_fail "six-gate record field is missing or duplicated: ${field}"; return 1; }
+    done
+    for field in 1 2 3 4 5 6; do
+        [[ "$(grep -Ec "^gate_${field}: " <<<"$block")" == 1 && \
+            "$(grep -Ec "^gate_${field}_signature: " <<<"$block")" == 1 && \
+            "$(grep -Ec "^gate_${field}_date: " <<<"$block")" == 1 ]] \
+            || { performance_gate_fail "six-gate gate fields are missing or duplicated: ${field}"; return 1; }
+    done
     grep -Fxq 'record_status: SIGNED' <<<"$block" \
         || { performance_gate_fail 'six-gate record is not signed'; return 1; }
     local record_commit

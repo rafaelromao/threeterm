@@ -201,7 +201,7 @@ PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
     RELEASE_GATE_COMMIT="${verified_commit}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
-    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
 grep -Fq "threeterm-${current_tag}.tar.gz" "${release_root}/gh-args"
@@ -216,7 +216,7 @@ PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
     THREETERM_RELEASE_MATERIAL="${performance_material}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
-    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
 grep -Fq "unsupported-performance.md" "${release_root}/gh-args"
 grep -Fq "six-gate-performance-claims-gate.md" "${release_root}/gh-args"
@@ -232,7 +232,7 @@ expect_failure env PATH="${fake_bin}:${PATH}" \
     THREETERM_RELEASE_MATERIAL="${performance_material}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
-    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
 if [[ -e "${release_root}/gh-args" ]]; then
     printf '%s\n' 'GitHub API was called for an unsupported performance claim' >&2
@@ -243,7 +243,7 @@ expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_COMMIT="${verified_commit}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
-    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${old_tag}"
 
 stale_fixture="${tmpdir}/stale.md"

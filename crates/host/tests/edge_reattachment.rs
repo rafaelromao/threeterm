@@ -175,7 +175,7 @@ fn assert_worker_outcome(outcome: &str, expected_ids: &[&str]) {
             &evidence_worker(&root, outcome),
         )
         .expect("worker outcome is structured");
-    assert_eq!(view.committed, false);
+    assert!(!view.committed);
     assert_eq!(host.current(), Some(before));
     assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);

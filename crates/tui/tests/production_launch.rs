@@ -321,13 +321,12 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
         .expect("project is persisted");
     let request =
         br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3}"#;
-    let mut script = vec![b"\x10".to_vec()];
+    let mut script = vec![b"\x1b_Gi=2;OK\x1b\\".to_vec(), b"\x10".to_vec()];
     script.extend(b"extrude".iter().map(|byte| vec![*byte]));
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
-    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {

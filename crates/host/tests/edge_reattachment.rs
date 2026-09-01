@@ -312,6 +312,7 @@ fn production_worker_reports_ambiguous_descendants_before_canonical_mutation() {
             ),
         )
         .expect("worker ambiguity is a structured outcome");
+    eprintln!("ambiguous worker result: {result}");
     assert_eq!(result["outcome"], "ambiguous");
     assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
     assert_eq!(result["committed"], false);

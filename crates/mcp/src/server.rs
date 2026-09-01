@@ -2223,10 +2223,48 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
 
     #[test]
     fn run_shuts_down_a_blocked_input_when_output_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("threeterm-mcp-shutdown-{}", new_request_id()));
+        Bundle::create(&root).expect("bundle creates");
+        let worker_path = root.join("worker.sh");
+        std::fs::write(
+            &worker_path,
+            r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
+read request
+rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+while [ "$i" -lt 1000 ]; do
+  printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"'$rid'","stage":"boolean_pattern:1/324","percent":1}'
+  i=$((i + 1))
+"##,
+        )
+        .expect("worker script writes");
+        let mut permissions = std::fs::metadata(&worker_path)
+            .expect("worker metadata reads")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
+
         let call = json!({
             "jsonrpc": JSONRPC_VERSION,
-            "id": 1,
-            "method": "tools/list"
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.boolean-pattern/1",
+                "_meta": {"progressToken": "progress-1"},
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "feature_id": "pattern",
+                    "base_feature_id": "missing-base",
+                    "origin": [0.0, 0.0, 0.0],
+                    "spacing": [1.0, 1.0],
+                    "columns": 18,
+                    "rows": 18,
+                    "diameter": 1.0
+                }
+            }
         });
         let mut frame = serde_json::to_vec(&call).expect("call serializes");
         frame.push(b'\n');
@@ -2236,11 +2274,15 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
         let mut writer = FailingWriter;
         let started = std::time::Instant::now();
         let error = McpServer::new()
+            .with_boolean_pattern_worker(
+                OcctWorker::with_binary_path(worker_path).with_expected_worker_id("occt"),
+            )
             .run(&mut reader, &mut writer)
             .expect_err("a disconnected output returns an error");
 
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         assert!(shutdown.load(Ordering::SeqCst));
         assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

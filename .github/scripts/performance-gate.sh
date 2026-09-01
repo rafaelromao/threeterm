@@ -313,8 +313,12 @@ verify_performance_material() {
             || { performance_gate_fail 'six-gate fixture disagrees with evidence'; return 1; }
         row_prefix="claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} "
         claim_admitted=0
+        claim_id_match_count=0
         claim_match_count=0
         while IFS= read -r row; do
+            row_id="$(performance_gate_field id "${row#*: }")"
+            [[ "$row_id" == "$id" ]] || continue
+            claim_id_match_count=$((claim_id_match_count + 1))
             [[ "${row#"$row_prefix"}" != "$row" ]] || continue
             claim_match_count=$((claim_match_count + 1))
             if [[ "${row#"$row_prefix"}" =~ ^n_rc1=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]n_rc2=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]decision=ADMIT$ ]]; then
@@ -323,7 +327,7 @@ verify_performance_material() {
                 recorded_n_rc2="${BASH_REMATCH[2]}"
             fi
         done < <(grep -E '^claim: ' <<<"$block")
-        [[ "$claim_match_count" == 1 ]] \
+        [[ "$claim_id_match_count" == 1 && "$claim_match_count" == 1 ]] \
             || { performance_gate_fail "performance claim has conflicting decision rows: ${id}"; return 1; }
         (( claim_admitted )) \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }

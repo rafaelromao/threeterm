@@ -53,6 +53,8 @@ release_artifact_validate_output_root() {
         || { release_artifact_fail 'release bundle output root is a protected path'; return 1; }
     [[ "$source_path" != "$output_path"/* && "$artifact_path" != "$output_path"/* ]] \
         || { release_artifact_fail 'release bundle output root would remove a protected path'; return 1; }
+    [[ "$output_path" != "$artifact_path"/* ]] \
+        || { release_artifact_fail 'release bundle output root is nested in the protected artifact path'; return 1; }
     allowed_target_prefix="${source_path}/target/"
     [[ "$output_path" != "$source_path"/* || "$output_path" = "$allowed_target_prefix"* ]] \
         || { release_artifact_fail 'release bundle output root is nested in a protected source path'; return 1; }

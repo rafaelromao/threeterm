@@ -133,6 +133,14 @@ printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms perc
 
 verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance"
 
+conflicting_record="${WORK}/conflicting-record.md"
+sed '/^claim: id=export /a claim: id=export metric=timing unit=ms percentile=p95 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT' \
+    "${record}" >"${conflicting_record}"
+if verify_performance_material "${source_root}" "${material}" "${conflicting_record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+    printf '%s\n' 'conflicting performance claim identity was accepted' >&2
+    exit 1
+fi
+
 git -C "${source_root}" commit --quiet --allow-empty -m newer-source
 new_commit="$(git -C "${source_root}" rev-parse HEAD)"
 if verify_performance_material "${source_root}" "${material}" "${record}" "${new_commit}" "v0.1.0-performance" >/dev/null 2>&1; then

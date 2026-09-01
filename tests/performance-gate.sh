@@ -38,13 +38,20 @@ release_tag: v0.1.0-performance
 evidence_path: docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json
 evidence_sha256: ${evidence_sha}
 hardware_profile: pinned-test-profile
-project_scale: L-bracket-small
+project_scale: small
 hardware_cpu: test-cpu
 hardware_threads: 8
 hardware_memory_mb: 16384
 hardware_kernel: test-kernel
+hardware_microcode: test-microcode
 hardware_container: podman@test-image
+hardware_container_digest: sha256:test-image
+hardware_package_versions: pinned
+hardware_toolchain: rust-1.97.1
 hardware_ghostty: direct-local
+hardware_term: xterm-ghostty
+hardware_term_program: ghostty
+hardware_topology: direct-local
 fixture_name: L-bracket
 feature_count: 1
 transaction_count: 1
@@ -84,6 +91,15 @@ gate_5_date: ${today}
 gate_6: PASS
 gate_6_signature: Release Owner
 gate_6_date: ${today}
+comparison: class=project_create same_order=YES
+comparison: class=bracket_create same_order=YES
+comparison: class=edit_open same_order=YES
+comparison: class=edit_update same_order=YES
+comparison: class=edit_preview same_order=YES
+comparison: class=edit_commit same_order=YES
+comparison: class=reload same_order=YES
+comparison: class=export same_order=YES
+comparison: class=catalog same_order=YES
 claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT
 <!-- PERFORMANCE-RECORD:END -->
 EOF

@@ -97,13 +97,20 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "evidence_path: " evidence
         print "evidence_sha256: " evidence_sha
         print "hardware_profile: pinned-test-profile"
-        print "project_scale: L-bracket-small"
+        print "project_scale: small"
         print "hardware_cpu: test-cpu"
         print "hardware_threads: 8"
         print "hardware_memory_mb: 16384"
         print "hardware_kernel: test-kernel"
+        print "hardware_microcode: test-microcode"
         print "hardware_container: podman@test-image"
+        print "hardware_container_digest: sha256:test-image"
+        print "hardware_package_versions: pinned"
+        print "hardware_toolchain: rust-1.97.1"
         print "hardware_ghostty: direct-local"
+        print "hardware_term: xterm-ghostty"
+        print "hardware_term_program: ghostty"
+        print "hardware_topology: direct-local"
         print "fixture_name: L-bracket"
         print "feature_count: 1"
         print "transaction_count: 1"
@@ -130,6 +137,8 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
             print "gate_" i "_signature: Release Owner"
             print "gate_" i "_date: " today
         }
+        split("project_create bracket_create edit_open edit_update edit_preview edit_commit reload export catalog", classes, " ")
+        for (i = 1; i <= 9; i++) print "comparison: class=" classes[i] " same_order=YES"
         print "claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT"
         inside = 1
         next

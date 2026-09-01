@@ -295,6 +295,11 @@ The release script consumes the machine-readable record delimited below when
 release material is selected with `THREETERM_RELEASE_MATERIAL`. Human prose in
 this runbook is not evidence. Every signed record must bind its commit, tag,
 evidence digest, owner, and admitted claim rows to the exact release.
+The `release_commit` field identifies the evidence-producing source revision and
+must be an ancestor of the tagged release commit; the artifact manifest binds
+the published bytes to the exact tag commit. This permits the signed runbook
+update itself to be committed after the measured source revision without a
+self-referential Git commit.
 
 <!-- PERFORMANCE-RECORD:START -->
 record_status: UNSIGNED

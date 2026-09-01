@@ -119,8 +119,9 @@ verify_performance_material() {
         -n "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" != documented ]] \
         || { performance_gate_fail 'six-gate two-release comparison evidence is incomplete'; return 1; }
-    for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel \
-        hardware_container hardware_ghostty fixture_name feature_count transaction_count derived_result_count \
+    for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel hardware_microcode \
+        hardware_container hardware_container_digest hardware_package_versions hardware_toolchain hardware_ghostty \
+        hardware_term hardware_term_program hardware_topology fixture_name feature_count transaction_count derived_result_count \
         statistical_method units sample_minimum; do
         value="$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)"
         [[ -n "$value" && "$value" != 'not recorded' ]] \
@@ -161,6 +162,18 @@ verify_performance_material() {
     recorded_stl_rc2="$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$stl_rc1" == "$recorded_stl_rc1" && "$stl_rc2" == "$recorded_stl_rc2" ]] \
         || { performance_gate_fail 'six-gate STL hashes do not match the evidence catalog'; return 1; }
+    local comparison_class comparison_match
+    while IFS= read -r comparison_class; do
+        comparison_match=0
+        while IFS= read -r comparison; do
+            if [[ "$comparison" == "comparison: class=${comparison_class} same_order=YES" ]]; then
+                comparison_match=1
+                break
+            fi
+        done < <(grep -E '^comparison: ' <<<"$block")
+        (( comparison_match )) \
+            || { performance_gate_fail "six-gate comparison is missing for ${comparison_class}"; return 1; }
+    done < <(jq -r '.comparisons[].class' "$root/$evidence")
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"
@@ -207,12 +220,26 @@ verify_performance_material() {
         percentile="$(performance_gate_field percentile "${claim#*: }")"
         fixture="$(performance_gate_field fixture "${claim#*: }")"
         scale="$(performance_gate_field scale "${claim#*: }")"
-        row_re="^claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} n_rc1=([3-9][0-9]|[1-9][0-9]{2,}) n_rc2=([3-9][0-9]|[1-9][0-9]{2,}) decision=ADMIT$"
-        grep -Eq "$row_re" <<<"$block" \
+        record_fixture="$(grep -E '^fixture_name: ' <<<"$block" | cut -d' ' -f2-)"
+        record_scale="$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)"
+        [[ "${fixture,,}" == "${record_fixture,,}" && "$scale" == "$record_scale" ]] \
+            || { performance_gate_fail "performance claim is outside the signed fixture or scale: ${id}"; return 1; }
+        row_prefix="claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} "
+        claim_admitted=0
+        while IFS= read -r row; do
+            [[ "${row#"$row_prefix"}" != "$row" ]] || continue
+            if [[ "${row#"$row_prefix"}" =~ ^n_rc1=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]n_rc2=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]decision=ADMIT$ ]]; then
+                claim_admitted=1
+                break
+            fi
+        done < <(grep -E '^claim: ' <<<"$block")
+        (( claim_admitted )) \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }
         jq -e --arg class "$id" '
-            [.runs[].timings[] | select(.class == $class) | .sample_count]
-            | length == 2 and all(. >= 30)
+            [.runs[].timings[] | select(.class == $class)
+             | (.sample_count >= 30 and (.samples_ms | length) >= .sample_count
+                and all(.samples_ms[]; type == "number"))]
+            | length == 2 and all(. == true)
         ' "$root/$evidence" >/dev/null \
             || { performance_gate_fail "performance evidence has fewer than 30 samples per release candidate: ${id}"; return 1; }
     done <<<"$claims"

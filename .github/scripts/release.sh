@@ -326,6 +326,11 @@ case "$action" in
         if [[ -n "${THREETERM_RELEASE_MATERIAL:-}" ]]; then
             release_args+=("${THREETERM_RELEASE_MATERIAL}")
             release_args+=("${ROOT}/docs/release/six-gate-performance-claims-gate.md")
+            if performance_gate_claim_language <"${THREETERM_RELEASE_MATERIAL}"; then
+                evidence_path="$(performance_gate_block "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
+                    | grep -E '^evidence_path: ' | cut -d' ' -f2-)"
+                release_args+=("${ROOT}/${evidence_path}")
+            fi
         fi
         gh release create "${release_args[@]}"
         ;;
@@ -339,7 +344,7 @@ case "$action" in
         verify_release_material "$commit" "$tag"
         build_release_bundle_for "$tag" "$commit"
         verify_release_bundle_for "$tag" "$commit"
-        git push aur HEAD:refs/heads/master
+        git -C "$(release_source_root)" push aur HEAD:refs/heads/master
         ;;
     copr-build)
         [[ $# == 1 || ( $# == 2 && "$2" == '--nowait' ) ]] || { usage >&2; exit 2; }

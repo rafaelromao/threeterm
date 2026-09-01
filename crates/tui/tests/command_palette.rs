@@ -107,4 +107,10 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
     );
     assert!(decoder.feed(b"\x1b[13;").is_empty());
     assert_eq!(decoder.feed(b"5u"), vec![b"\x1b[13;5u".to_vec()]);
+    let mut decoder = TerminalInputDecoder::default();
+    assert!(decoder.feed(b"\x1b_Gi=2;").is_empty());
+    assert_eq!(
+        decoder.feed(b"OK\x1b\\q"),
+        vec![b"\x1b_Gi=2;OK\x1b\\".to_vec(), b"q".to_vec()]
+    );
 }

@@ -3314,6 +3314,17 @@ impl TerminalInputDecoder {
     fn next_event_length(&self) -> Option<usize> {
         let first = *self.pending.first()?;
         if first == 0x1b {
+            const ACK_PREFIX: &[u8] = b"\x1b_G";
+            const ACK_SUFFIX: &[u8] = b";OK\x1b\\";
+            if self.pending.starts_with(ACK_PREFIX) {
+                if let Some(offset) = self.pending[ACK_PREFIX.len()..]
+                    .windows(ACK_SUFFIX.len())
+                    .position(|window| window == ACK_SUFFIX)
+                {
+                    return Some(ACK_PREFIX.len() + offset + ACK_SUFFIX.len());
+                }
+                return None;
+            }
             let complete: [&[u8]; 5] = [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[13;5u"];
             if let Some(sequence) = complete
                 .iter()

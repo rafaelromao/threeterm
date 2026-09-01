@@ -242,15 +242,15 @@ verify_checked_in_runbook() {
 }
 
 require_committed_runbook() {
-    [[ -z "$(git status --porcelain -- "$RUNBOOK")" ]] \
+    [[ -z "$(git -C "$(release_source_root)" status --porcelain -- "$RUNBOOK")" ]] \
         || fail 'signed runbook must be committed before publishing'
 }
 
 require_tag_at_head() {
     local tag=$1 tag_commit head_commit
-    tag_commit="$(git rev-parse --verify "${tag}^{commit}" 2>/dev/null)" \
+    tag_commit="$(git -C "$(release_source_root)" rev-parse --verify "${tag}^{commit}" 2>/dev/null)" \
         || fail "release tag does not exist: ${tag}"
-    head_commit="$(git rev-parse --verify HEAD)" \
+    head_commit="$(git -C "$(release_source_root)" rev-parse --verify HEAD)" \
         || fail 'unable to resolve the verified checkout revision'
     [[ "$tag_commit" == "$head_commit" ]] \
         || fail "release tag ${tag} does not point at the verified checkout revision"
@@ -300,7 +300,7 @@ case "$action" in
         commit="$(release_verified_commit)"
         verify_release_material "$commit" "$1"
         build_release_bundle_for "$1" "$commit"
-        git tag -a "$1" -m "ThreeTerm $1"
+        git -C "$(release_source_root)" tag -a "$1" -m "ThreeTerm $1"
         ;;
     github-release)
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }

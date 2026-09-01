@@ -147,7 +147,7 @@ verify_release_bundle() {
     actual_files="$(find "$root" -type f -printf '%P\n' | LC_ALL=C sort)"
     expected_files="$(
         {
-            printf '%s\n' release-manifest.json worker-manifest.json SHA256SUMS
+            printf '%s\n' release-manifest.json SHA256SUMS
             printf '%s\n' "$(jq -er '.archive' "$manifest")"
             jq -r '.files[].path' "$manifest"
         } | LC_ALL=C sort

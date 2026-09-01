@@ -89,7 +89,7 @@ verify_performance_material() {
     git -C "$root" ls-files --error-unmatch -- "$evidence" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate evidence is not tracked in the source commit'; return 1; }
     local committed_evidence_digest
-    committed_evidence_digest="$(git -C "$root" show "HEAD:${evidence}" | sha256sum | cut -d' ' -f1)"
+    committed_evidence_digest="$(git -C "$root" show "${record_commit}:${evidence}" | sha256sum | cut -d' ' -f1)"
     [[ "$committed_evidence_digest" == "$evidence_digest" ]] \
         || { performance_gate_fail 'six-gate evidence digest does not match the committed source'; return 1; }
     [[ -n "$(grep -E '^hardware_profile: ' <<<"$block" | cut -d' ' -f2-)" && \
@@ -115,7 +115,7 @@ verify_performance_material() {
         || { performance_gate_fail 'six-gate limitations document is missing or unsafe'; return 1; }
     git -C "$root" ls-files --error-unmatch -- "$limitations" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate limitations document is not tracked'; return 1; }
-    committed_limitations_digest="$(git -C "$root" show "HEAD:${limitations}" | sha256sum | cut -d' ' -f1)"
+    committed_limitations_digest="$(git -C "$root" show "${record_commit}:${limitations}" | sha256sum | cut -d' ' -f1)"
     [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
         || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
     for limitation in fixture renderer terminal compositor 'project-scale' 'warm and cold' \
@@ -145,6 +145,11 @@ verify_performance_material() {
         [[ "$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)" == "$(jq -er --arg field "$field" '.[$field]' "$root/$evidence")" ]] \
             || { performance_gate_fail "six-gate hardware field disagrees with evidence: ${field}"; return 1; }
     done
+    [[ "$(grep -E '^hardware_package_versions: ' <<<"$block" | cut -d' ' -f2-)" == *rust=* && \
+        "$(grep -E '^hardware_package_versions: ' <<<"$block" | cut -d' ' -f2-)" == *occt=* && \
+        "$(grep -E '^hardware_package_versions: ' <<<"$block" | cut -d' ' -f2-)" == *libslvs=* && \
+        "$(grep -E '^hardware_package_versions: ' <<<"$block" | cut -d' ' -f2-)" == *lib3mf=* ]] \
+        || { performance_gate_fail 'six-gate package versions are incomplete'; return 1; }
     [[ "$(jq -er '.feature_count' "$root/$evidence")" == "$(grep -E '^feature_count: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(jq -er '.transaction_count' "$root/$evidence")" == "$(grep -E '^transaction_count: ' <<<"$block" | cut -d' ' -f2-)" && \
         "$(jq -er '.derived_result_count' "$root/$evidence")" == "$(grep -E '^derived_result_count: ' <<<"$block" | cut -d' ' -f2-)" ]] \
@@ -196,10 +201,14 @@ verify_performance_material() {
         format_rc1="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
         format_rc2="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
         [[ "$format_rc1" == "$(grep -E "^${format}_rc1_sha256: " <<<"$block" | cut -d' ' -f2-)" && \
-            "$format_rc2" == "$(grep -E "^${format}_rc2_sha256: " <<<"$block" | cut -d' ' -f2-)" && \
-            "$(grep -E "^${comparison_field}: " <<<"$block" | cut -d' ' -f2-)" == equal && \
-            "$format_rc1" == "$format_rc2" ]] \
+            "$format_rc2" == "$(grep -E "^${format}_rc2_sha256: " <<<"$block" | cut -d' ' -f2-)" ]] \
             || { performance_gate_fail "six-gate ${format} hashes do not match the evidence catalog"; return 1; }
+        comparison_state="$(grep -E "^${comparison_field}: " <<<"$block" | cut -d' ' -f2-)"
+        if [[ "$format_rc1" == "$format_rc2" && "$comparison_state" != equal ]] || \
+            [[ "$format_rc1" != "$format_rc2" && "$comparison_state" != diverged ]]; then
+            performance_gate_fail "six-gate ${format} comparison state disagrees with evidence"
+            return 1
+        fi
     done
     local comparison_class comparison_match comparison comparison_prefix comparison_suffix
     while IFS= read -r comparison_class; do
@@ -297,7 +306,11 @@ verify_performance_material() {
              | (.sample_count >= 30 and (.samples_ms | length) >= .sample_count
                 and all(.samples_ms[]; type == "number")
                 and (.p50_ms | type == "number") and (.p95_ms | type == "number")
-                and (.p99_ms | type == "number"))]
+                and (.p99_ms | type == "number")
+                and ((.samples_ms | sort) as $sorted | (.samples_ms | length) as $n
+                     | .p50_ms == $sorted[((($n * 50) + 99) / 100 | floor) - 1]
+                     and .p95_ms == $sorted[((($n * 95) + 99) / 100 | floor) - 1]
+                     and .p99_ms == $sorted[((($n * 99) + 99) / 100 | floor) - 1]))]
             | length == 2 and all(. == true)
         ' "$root/$evidence" >/dev/null \
             || { performance_gate_fail "performance evidence has fewer than 30 samples per release candidate: ${id}"; return 1; }

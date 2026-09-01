@@ -43,6 +43,7 @@ build_release_bundle() {
     local expected_commit="$3"
     local artifact_root="$4"
     local output_root="$5"
+    local input_manifest="${6:-${artifact_root}/manifest.json}"
     local actual_commit worker_manifest worker_manifest_digest
 
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
@@ -52,7 +53,7 @@ build_release_bundle() {
     [[ "$actual_commit" == "$expected_commit" && "$expected_commit" =~ ^[0-9a-f]{40}$ ]] \
         || { release_artifact_fail 'release bundle source commit is not the verified checkout commit'; return 1; }
 
-    worker_manifest="${artifact_root}/manifest.json"
+    worker_manifest="$input_manifest"
     [[ -f "$worker_manifest" ]] || { release_artifact_fail 'verified worker manifest is missing'; return 1; }
     verify_libslvs_artifact "$worker_manifest" "$artifact_root" >/dev/null \
         || { release_artifact_fail 'verified worker artifact is invalid'; return 1; }
@@ -95,6 +96,7 @@ build_release_bundle() {
           licensing_basis: $license_basis, licensing_manifest: $worker_manifest_path,
           licensing_manifest_sha256: $worker_manifest_sha256}, archive: $archive,
           files: $files}' >"$output_root/release-manifest.json"
+    chmod 644 "$output_root/release-manifest.json"
 
     release_artifact_write_archive "$output_root" "$output_root/threeterm-${tag}.tar.gz"
     {

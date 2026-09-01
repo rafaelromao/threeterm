@@ -65,12 +65,14 @@ jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
     .hardware_kernel = "test-kernel" | .hardware_microcode = "test-microcode" |
     .hardware_container = "podman@test-image" |
     .hardware_container_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000" |
-    .hardware_package_versions = "pinned" | .hardware_toolchain = "rust-1.97.1" |
+    .hardware_package_versions = "rust=1.97.1,occt=pinned,libslvs=pinned,lib3mf=pinned" | .hardware_toolchain = "rust-1.97.1" |
     .hardware_ghostty = "xterm-ghostty/1.3.1" | .hardware_term = "xterm-ghostty" |
     .hardware_term_program = "ghostty" | .hardware_topology = "direct-local" |
     .feature_count = 1 | .transaction_count = 1 | .derived_result_count = 1 |
     (.runs[].timings[].sample_count) = 30 |
-    (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
+    (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0]) |
+    (.runs[].timings[].p50_ms) = 15.0 | (.runs[].timings[].p95_ms) = 29.0 |
+    (.runs[].timings[].p99_ms) = 30.0' \
     "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json" \
     >"${tmpdir}/evidence.json"
 mv "${tmpdir}/evidence.json" \
@@ -120,7 +122,7 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "hardware_microcode: test-microcode"
         print "hardware_container: podman@test-image"
         print "hardware_container_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000"
-        print "hardware_package_versions: pinned"
+        print "hardware_package_versions: rust=1.97.1,occt=pinned,libslvs=pinned,lib3mf=pinned"
         print "hardware_toolchain: rust-1.97.1"
         print "hardware_ghostty: xterm-ghostty/1.3.1"
         print "hardware_term: xterm-ghostty"

@@ -114,7 +114,8 @@ build_release_bundle_for() {
     local commit="$2"
     build_release_bundle \
         "$(release_source_root)" "$tag" "$commit" \
-        "$(release_artifact_root)" "$(release_bundle_root)"
+        "$(release_artifact_root)" "$(release_bundle_root)" \
+        "$(release_artifact_manifest "$(release_artifact_root)")"
 }
 
 verify_release_bundle_for() {

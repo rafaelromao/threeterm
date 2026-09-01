@@ -8,6 +8,7 @@ publish.workspace = true
 description = "MCP adapter exposing the ThreeTerm domain command API as agent tools."
 
 [dependencies]
+nix = { version = "0.31", features = ["poll"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 threeterm-cli = { path = "../cli" }

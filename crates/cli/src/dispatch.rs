@@ -148,6 +148,8 @@ enum DispatchPlan {
         radius: f64,
         reference: Value,
         edit_target: Value,
+        plane_point: Option<[f64; 3]>,
+        plane_normal: Option<[f64; 3]>,
     },
     FitDimension {
         bundle: String,
@@ -720,7 +722,19 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             .iter()
             .all(|value| value.is_finite()),
         DispatchPlan::FitDimension { clearance, .. } => clearance.is_finite(),
-        DispatchPlan::ReattachEdge { radius, .. } => radius.is_finite(),
+        DispatchPlan::ReattachEdge {
+            radius,
+            plane_point,
+            plane_normal,
+            ..
+        } => {
+            radius.is_finite()
+                && plane_point
+                    .iter()
+                    .chain(plane_normal.iter())
+                    .flatten()
+                    .all(|value| value.is_finite())
+        }
         DispatchPlan::BooleanPattern {
             origin,
             spacing,
@@ -1514,6 +1528,8 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
     let mut radius: Option<f64> = None;
     let mut reference: Option<Value> = None;
     let mut edit_target: Option<Value> = None;
+    let mut plane_point: Option<[f64; 3]> = None;
+    let mut plane_normal: Option<[f64; 3]> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -1581,6 +1597,22 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--plane-point" => match parse_vec3(&value_str, "--plane-point") {
+                    Ok(parsed) => {
+                        plane_point = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(error) => return error,
+                },
+                "--plane-normal" => match parse_vec3(&value_str, "--plane-normal") {
+                    Ok(parsed) => {
+                        plane_normal = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(error) => return error,
+                },
                 _ => {}
             }
         }
@@ -1633,6 +1665,16 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
             arg: "--edit-target".to_string(),
         };
     };
+    if edit_kind == "split" && (plane_point.is_none() || plane_normal.is_none()) {
+        return DispatchPlan::Unknown {
+            arg: "--plane-point/--plane-normal".to_string(),
+        };
+    }
+    if edit_kind == "fillet" && (plane_point.is_some() || plane_normal.is_some()) {
+        return DispatchPlan::Unknown {
+            arg: "--plane-point/--plane-normal".to_string(),
+        };
+    }
     DispatchPlan::ReattachEdge {
         bundle,
         expected_revision,
@@ -1642,6 +1684,8 @@ fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
         radius,
         reference,
         edit_target,
+        plane_point,
+        plane_normal,
     }
 }
 
@@ -4416,16 +4460,27 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             radius,
             reference,
             edit_target,
-        } => json!({
-            "bundle_path": bundle,
-            "expected_revision": expected_revision,
-            "edit_feature_id": edit_feature_id,
-            "edit_kind": edit_kind,
-            "base_feature_id": base_feature_id,
-            "radius": radius,
-            "reference": reference,
-            "edit_target": edit_target,
-        }),
+            plane_point,
+            plane_normal,
+        } => {
+            let mut request = json!({
+                "bundle_path": bundle,
+                "expected_revision": expected_revision,
+                "edit_feature_id": edit_feature_id,
+                "edit_kind": edit_kind,
+                "base_feature_id": base_feature_id,
+                "radius": radius,
+                "reference": reference,
+                "edit_target": edit_target,
+            });
+            if let Some(plane_point) = plane_point {
+                request["plane_point"] = json!(plane_point);
+            }
+            if let Some(plane_normal) = plane_normal {
+                request["plane_normal"] = json!(plane_normal);
+            }
+            request
+        }
         DispatchPlan::FitDimension {
             bundle,
             expected_revision,

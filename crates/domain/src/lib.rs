@@ -565,6 +565,44 @@ pub fn resolve_edge_reference(
     }
 }
 
+/// Resolve a selected edge against descendants produced by a real split.
+/// A split edge is represented by its actual fragments, so the fragments do
+/// not individually match the source length and midpoint. They remain
+/// ambiguous when their shared lineage, role, direction, and contiguous
+/// geometry reconstruct the selected source edge.
+pub fn resolve_split_edge_reference(
+    reference: &SelectedEdgeReference,
+    candidates: impl IntoIterator<Item = PostEditEdgeCandidate>,
+) -> EdgeReattachmentOutcome {
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    let outcome = resolve_edge_reference(reference, candidates.clone());
+    if !matches!(outcome, EdgeReattachmentOutcome::Incompatible { .. }) {
+        return outcome;
+    }
+    if reference.semantic_id.is_empty()
+        || reference.role.is_empty()
+        || reference.provenance.source_feature_id.is_empty()
+        || reference.provenance.source_revision_id.is_empty()
+        || reference.provenance.source_edge_id.is_empty()
+        || reference.provenance.source_edge_id != reference.semantic_id
+        || reference.evidence.validate().is_err()
+    {
+        return outcome;
+    }
+    let lineage: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.provenance == reference.provenance && candidate.role == reference.role
+        })
+        .collect();
+    if lineage.len() >= 2 && split_fragments_reconstruct_reference(reference, &lineage) {
+        return EdgeReattachmentOutcome::Ambiguous {
+            candidate_ids: sorted_candidate_ids(&lineage),
+        };
+    }
+    outcome
+}
+
 fn sorted_candidate_ids(
     candidates: &[impl std::borrow::Borrow<PostEditEdgeCandidate>],
 ) -> Vec<String> {
@@ -607,6 +645,95 @@ fn geometric_match(reference: &EdgeGeometricEvidence, candidate: &EdgeGeometricE
     midpoint_delta <= EDGE_MIDPOINT_TOLERANCE
         && (reference.length - candidate.length).abs() <= EDGE_LENGTH_TOLERANCE
         && 1.0 - tangent_dot.abs() <= EDGE_TANGENT_TOLERANCE
+}
+
+fn split_fragments_reconstruct_reference(
+    reference: &SelectedEdgeReference,
+    candidates: &[&PostEditEdgeCandidate],
+) -> bool {
+    let direction_length = reference
+        .evidence
+        .tangent
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if direction_length <= f64::EPSILON {
+        return false;
+    }
+    let direction = reference
+        .evidence
+        .tangent
+        .map(|value| value / direction_length);
+    let half_length = reference.evidence.length / 2.0;
+    let mut intervals: Vec<_> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let tangent_length = candidate
+                .evidence
+                .tangent
+                .into_iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            if tangent_length <= f64::EPSILON {
+                return None;
+            }
+            let tangent = candidate
+                .evidence
+                .tangent
+                .map(|value| value / tangent_length);
+            let tangent_dot = direction
+                .into_iter()
+                .zip(tangent)
+                .map(|(left, right)| left * right)
+                .sum::<f64>();
+            let offset = candidate
+                .evidence
+                .midpoint
+                .into_iter()
+                .zip(reference.evidence.midpoint)
+                .map(|(candidate, reference)| candidate - reference)
+                .collect::<Vec<_>>();
+            let along = offset
+                .iter()
+                .zip(direction)
+                .map(|(offset, direction)| offset * direction)
+                .sum::<f64>();
+            let perpendicular_squared = offset
+                .iter()
+                .zip(direction)
+                .map(|(offset, direction)| {
+                    let perpendicular = offset - along * direction;
+                    perpendicular * perpendicular
+                })
+                .sum::<f64>();
+            if 1.0 - tangent_dot.abs() > EDGE_TANGENT_TOLERANCE
+                || perpendicular_squared.sqrt() > EDGE_MIDPOINT_TOLERANCE
+            {
+                return None;
+            }
+            Some((
+                along - candidate.evidence.length / 2.0,
+                along + candidate.evidence.length / 2.0,
+            ))
+        })
+        .collect();
+    if intervals.len() < 2 {
+        return false;
+    }
+    intervals.sort_by(|left, right| left.0.total_cmp(&right.0));
+    if intervals[0].0 > -half_length + EDGE_LENGTH_TOLERANCE {
+        return false;
+    }
+    let mut covered_end = intervals[0].1;
+    for (start, end) in intervals.into_iter().skip(1) {
+        if start > covered_end + EDGE_LENGTH_TOLERANCE {
+            return false;
+        }
+        covered_end = covered_end.max(end);
+    }
+    covered_end >= half_length - EDGE_LENGTH_TOLERANCE
 }
 
 /// Resolve only stable semantic identities. The caller supplies semantic
@@ -1206,6 +1333,24 @@ mod tests {
             resolve_edge_reference(&selected_edge(), [invalid]),
             EdgeReattachmentOutcome::Incompatible {
                 candidate_ids: vec!["edge-invalid".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn split_edge_fragments_remain_ambiguous_when_they_reconstruct_the_source() {
+        let reference = selected_edge();
+        let mut first = candidate("edge-left");
+        first.evidence.midpoint = [5.0, 2.0, 0.0];
+        first.evidence.length = 10.0;
+        let mut second = candidate("edge-right");
+        second.evidence.midpoint = [15.0, 2.0, 0.0];
+        second.evidence.length = 10.0;
+
+        assert_eq!(
+            resolve_split_edge_reference(&reference, [first, second]),
+            EdgeReattachmentOutcome::Ambiguous {
+                candidate_ids: vec!["edge-left".to_string(), "edge-right".to_string()]
             }
         );
     }

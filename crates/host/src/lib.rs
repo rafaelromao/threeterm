@@ -14,7 +14,7 @@ use threeterm_domain::{
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
-    resolve_edge_reference,
+    resolve_edge_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
@@ -23,7 +23,7 @@ use threeterm_occt_worker::{
     ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult,
     LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
     MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
-    ShellRequest, ShellResult, WorkerError,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
 };
 use threeterm_persistence::{
     Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -1826,9 +1826,18 @@ impl Host {
                     let expected_revision = string_field("expected_revision")?;
                     let edit_feature_id = string_field("edit_feature_id")?;
                     let edit_kind = string_field("edit_kind")?;
-                    if edit_kind != "fillet" {
+                    if !matches!(edit_kind, "fillet" | "split") {
                         return Err(HostError::Validation {
-                            detail: "edge reattachment currently requires fillet".to_string(),
+                            detail: "edge reattachment requires fillet or split".to_string(),
+                        });
+                    }
+                    if edit_kind == "fillet"
+                        && (request.get("plane_point").is_some()
+                            || request.get("plane_normal").is_some())
+                    {
+                        return Err(HostError::Validation {
+                            detail: "fillet edge reattachment does not accept a split plane"
+                                .to_string(),
                         });
                     }
                     let base_feature_id = string_field("base_feature_id")?;
@@ -1846,20 +1855,74 @@ impl Host {
                         .ok_or_else(|| HostError::Validation {
                             detail: "edge reattachment requires radius".to_string(),
                         })?;
-                    let worker =
-                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-                            detail: error.to_string(),
+                    let view = if edit_kind == "fillet" {
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        self.reattach_edge_with_fillet(
+                            bundle_path,
+                            expected_revision,
+                            base_feature_id,
+                            edit_feature_id,
+                            radius,
+                            reference,
+                            edit_target,
+                            &worker,
+                        )?
+                    } else {
+                        let plane_point = serde_json::from_value::<[f64; 3]>(
+                            request.get("plane_point").cloned().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "split edge reattachment requires plane_point"
+                                        .to_string(),
+                                }
+                            })?,
+                        )
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid split plane_point: {error}"),
                         })?;
-                    let view = self.reattach_edge_with_fillet(
-                        bundle_path,
-                        expected_revision,
-                        base_feature_id,
-                        edit_feature_id,
-                        radius,
-                        reference,
-                        edit_target,
-                        &worker,
-                    )?;
+                        let plane_normal = serde_json::from_value::<[f64; 3]>(
+                            request.get("plane_normal").cloned().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "split edge reattachment requires plane_normal"
+                                        .to_string(),
+                                }
+                            })?,
+                        )
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid split plane_normal: {error}"),
+                        })?;
+                        if !plane_point
+                            .iter()
+                            .chain(plane_normal.iter())
+                            .all(|component| component.is_finite())
+                            || plane_normal
+                                .iter()
+                                .map(|component| component * component)
+                                .sum::<f64>()
+                                <= f64::EPSILON
+                        {
+                            return Err(HostError::Validation {
+                                detail: "split plane must have finite point and non-zero normal"
+                                    .to_string(),
+                            });
+                        }
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        self.reattach_edge_with_split(
+                            bundle_path,
+                            expected_revision,
+                            base_feature_id,
+                            edit_feature_id,
+                            plane_point,
+                            plane_normal,
+                            reference,
+                            &worker,
+                        )?
+                    };
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
                         EdgeReattachmentOutcome::Resolved { semantic_id } => {
                             ("resolved", Some(semantic_id), Vec::new())
@@ -1975,6 +2038,119 @@ impl Host {
         )?;
         let candidates = domain_edge_candidates(&derived.result.edge_candidates);
         let outcome = resolve_edge_reference(&worker_reference, candidates);
+        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            if let Some(stage_root) = derived.artifact.path.parent() {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Ok(EdgeReattachmentView {
+                outcome,
+                source_snapshot: source_snapshot.clone(),
+                snapshot: source_snapshot,
+                edit_feature_id: edit_feature_id.to_string(),
+                committed: false,
+            });
+        }
+        let selected_edge_id = match &outcome {
+            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
+            _ => unreachable!(),
+        };
+        let reference_payload = format!(
+            "edge-reattachment:{}",
+            serde_json::json!({
+                "schema": "threeterm.reattach-edge/1",
+                "selected_edge_id": selected_edge_id,
+                "reference": reference,
+            })
+        );
+        let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, _current, _derived, artifact, bytes, provenance| {
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                    &artifact.feature_id,
+                    &reference_payload,
+                    expected_revision,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )?;
+        Ok(EdgeReattachmentView {
+            outcome,
+            source_snapshot,
+            snapshot,
+            edit_feature_id: edit_feature_id.to_string(),
+            committed: true,
+        })
+    }
+
+    /// Run a real OCCT split edit and resolve the selected edge against the
+    /// split descendants. Ambiguous descendants are returned without
+    /// promotion, preserving the canonical revision and feature graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_edge_with_split(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        base_feature_id: &str,
+        edit_feature_id: &str,
+        plane_point: [f64; 3],
+        plane_normal: [f64; 3],
+        reference: SelectedEdgeReference,
+        worker: &OcctWorker,
+    ) -> Result<EdgeReattachmentView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        if source_snapshot.revision_hash != expected_revision {
+            return Err(HostError::Validation {
+                detail: "edge edit source revision does not match current revision".to_string(),
+            });
+        }
+        if reference.provenance.source_feature_id != base_feature_id {
+            return Err(HostError::Validation {
+                detail: "edge reference source feature does not match edit base feature"
+                    .to_string(),
+            });
+        }
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "edge reference source revision does not match current revision"
+                    .to_string(),
+            });
+        }
+        let mut worker_reference = reference.clone();
+        worker_reference.provenance.source_feature_id = base_feature_id.to_string();
+        worker_reference.provenance.source_revision_id = source_snapshot.revision_hash.clone();
+        let request = SplitRequest::new(
+            threeterm_occt_worker::new_request_id(),
+            bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{base_feature_id}.brep")),
+            plane_point,
+            plane_normal,
+        )
+        .with_output_path(root.join("stage"), format!("{edit_feature_id}.brep"))
+        .with_feature_id(edit_feature_id)
+        .with_selected_edge(SelectedEdgeContext {
+            semantic_id: worker_reference.semantic_id.clone(),
+            source_feature_id: worker_reference.provenance.source_feature_id.clone(),
+            source_revision_id: worker_reference.provenance.source_revision_id.clone(),
+            source_edge_id: worker_reference.provenance.source_edge_id.clone(),
+            role: worker_reference.role.clone(),
+            midpoint: worker_reference.evidence.midpoint,
+            tangent: worker_reference.evidence.tangent,
+            length: worker_reference.evidence.length,
+        });
+        let derived = self.stage_occt_result::<SplitResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Split,
+            worker,
+        )?;
+        let candidates = domain_edge_candidates(&derived.result.edge_candidates);
+        let outcome = resolve_split_edge_reference(&worker_reference, candidates);
         if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
             if let Some(stage_root) = derived.artifact.path.parent() {
                 let _ = fs::remove_dir_all(stage_root);

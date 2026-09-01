@@ -87,6 +87,39 @@ pub fn execute_selected_edge_reattachment(
     )
 }
 
+/// Execute the ambiguity-resolution split edit through the same registered
+/// command seam as the CLI and MCP adapters.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_selected_edge_split(
+    host: &Host,
+    bundle_path: &Path,
+    expected_revision: &str,
+    edit_feature_id: &str,
+    base_feature_id: &str,
+    radius: f64,
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    reference: Value,
+    edit_target: Value,
+) -> Result<Value, ExecutionError<HostError>> {
+    execute_domain_command(
+        host,
+        REATTACH_EDGE_COMMAND_ID,
+        json!({
+            "bundle_path": bundle_path.to_string_lossy(),
+            "expected_revision": expected_revision,
+            "edit_feature_id": edit_feature_id,
+            "edit_kind": "split",
+            "base_feature_id": base_feature_id,
+            "radius": radius,
+            "plane_point": plane_point,
+            "plane_normal": plane_normal,
+            "reference": reference,
+            "edit_target": edit_target,
+        }),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeReattachmentInteraction {
     pub response: Value,
@@ -798,6 +831,39 @@ impl TuiSession {
             edit_kind,
             base_feature_id,
             radius,
+            reference,
+            edit_target,
+        )?;
+        let acknowledgement = reattachment_acknowledgement(&response);
+        Ok(EdgeReattachmentInteraction {
+            response,
+            acknowledgement,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_selected_edge(
+        &self,
+        host: &Host,
+        bundle_path: &Path,
+        expected_revision: &str,
+        edit_feature_id: &str,
+        base_feature_id: &str,
+        radius: f64,
+        plane_point: [f64; 3],
+        plane_normal: [f64; 3],
+        reference: Value,
+        edit_target: Value,
+    ) -> Result<EdgeReattachmentInteraction, ExecutionError<HostError>> {
+        let response = execute_selected_edge_split(
+            host,
+            bundle_path,
+            expected_revision,
+            edit_feature_id,
+            base_feature_id,
+            radius,
+            plane_point,
+            plane_normal,
             reference,
             edit_target,
         )?;

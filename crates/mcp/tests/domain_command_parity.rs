@@ -105,6 +105,19 @@ fn edge_request_with_target(
     })
 }
 
+fn edge_split_request(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+) -> Value {
+    let mut request = edge_request_with_target(root, revision, reference, edit_target);
+    request["edit_kind"] = json!("split");
+    request["plane_point"] = json!([2.0, 0.0, 0.0]);
+    request["plane_normal"] = json!([1.0, 0.0, 0.0]);
+    request
+}
+
 fn setup_edge_root(root: &std::path::Path, label: &str) -> Option<String> {
     let worker = OcctWorker::locate().ok()?;
     Bundle::create(root).expect("bundle creates");
@@ -203,12 +216,39 @@ fn cli_reattach_edge(
     reference: Value,
     edit_target: Value,
 ) -> Value {
+    cli_reattach_edge_with_kind(root, revision, reference, edit_target, "fillet", None)
+}
+
+fn cli_reattach_edge_split(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+) -> Value {
+    cli_reattach_edge_with_kind(
+        root,
+        revision,
+        reference,
+        edit_target,
+        "split",
+        Some(([2.0, 0.0, 0.0], [1.0, 0.0, 0.0])),
+    )
+}
+
+fn cli_reattach_edge_with_kind(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+    edit_kind: &str,
+    split_plane: Option<([f64; 3], [f64; 3])>,
+) -> Value {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let path = root.to_string_lossy().into_owned();
     let reference = serde_json::to_string(&reference).expect("reference serializes");
     let edit_target = serde_json::to_string(&edit_target).expect("edit target serializes");
-    let args = vec![
+    let mut args = vec![
         OsString::from("--machine"),
         OsString::from("reattach-edge"),
         OsString::from("--bundle"),
@@ -218,7 +258,7 @@ fn cli_reattach_edge(
         OsString::from("--edit-feature-id"),
         OsString::from("fillet-after-edge"),
         OsString::from("--edit-kind"),
-        OsString::from("fillet"),
+        OsString::from(edit_kind),
         OsString::from("--base"),
         OsString::from("base"),
         OsString::from("--radius"),
@@ -228,6 +268,14 @@ fn cli_reattach_edge(
         OsString::from("--edit-target"),
         OsString::from(edit_target),
     ];
+    if let Some((point, normal)) = split_plane {
+        args.extend([
+            OsString::from("--plane-point"),
+            OsString::from(format!("{},{},{}", point[0], point[1], point[2])),
+            OsString::from("--plane-normal"),
+            OsString::from(format!("{},{},{}", normal[0], normal[1], normal[2])),
+        ]);
+    }
     let status = threeterm_cli::dispatch::dispatch(args, &mut stdout, &mut stderr);
     assert_eq!(
         status,
@@ -639,20 +687,32 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         return;
     };
 
-    let cli = cli_reattach_edge(
+    let before = [
+        fs::read(cli_root.join("manifest.json")).expect("CLI manifest reads"),
+        fs::read(mcp_root.join("manifest.json")).expect("MCP manifest reads"),
+        fs::read(tui_root.join("manifest.json")).expect("TUI manifest reads"),
+    ];
+    let logs = [
+        fs::read(cli_root.join("transactions.log")).expect("CLI log reads"),
+        fs::read(mcp_root.join("transactions.log")).expect("MCP log reads"),
+        fs::read(tui_root.join("transactions.log")).expect("TUI log reads"),
+    ];
+
+    let cli = cli_reattach_edge_split(
         &cli_root,
         &cli_revision,
         edge_reference(&cli_revision),
         edge_adjacent_target(&cli_revision),
     );
-    let tui = threeterm_tui::execute_selected_edge_reattachment(
+    let tui = threeterm_tui::execute_selected_edge_split(
         &threeterm_host::Host::new(),
         &tui_root,
         &tui_revision,
         "fillet-after-ambiguous",
-        "fillet",
         "base",
         0.25,
+        [2.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
         edge_reference(&tui_revision),
         edge_adjacent_target(&tui_revision),
     )
@@ -663,7 +723,7 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.reattach-edge/2",
-            "arguments": edge_request_with_target(
+            "arguments": edge_split_request(
                 &mcp_root,
                 &mcp_revision,
                 edge_reference(&mcp_revision),
@@ -675,11 +735,18 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
 
     for result in [&cli, &tui, &mcp] {
         assert_eq!(result["outcome"], "ambiguous");
-        assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
+        let candidates = result["candidate_edge_ids"].as_array().unwrap();
+        assert!(candidates.len() >= 2);
+        assert_ne!(candidates[0], candidates[1]);
         assert_eq!(result["committed"], false);
     }
-    for path in [&cli_root, &mcp_root, &tui_root] {
+    for (index, path) in [&cli_root, &mcp_root, &tui_root].into_iter().enumerate() {
         assert_eq!(Bundle::at(path).open().unwrap().log.len(), 1);
+        assert_eq!(fs::read(path.join("manifest.json")).unwrap(), before[index]);
+        assert_eq!(
+            fs::read(path.join("transactions.log")).unwrap(),
+            logs[index]
+        );
         assert!(!path.join("brep/fillet-after-ambiguous.brep").exists());
     }
     let _ = fs::remove_dir_all(cli_root);

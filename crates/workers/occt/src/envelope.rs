@@ -57,6 +57,23 @@ pub enum Operation {
     Export,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtrudeMode {
+    #[default]
+    Additive,
+    Subtractive,
+}
+
+impl ExtrudeMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Additive => "additive",
+            Self::Subtractive => "subtractive",
+        }
+    }
+}
+
 impl Operation {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -278,6 +295,15 @@ pub struct ExtrudeRequest {
     pub profile: Vec<[f64; 2]>,
     /// Prism height along +Z.
     pub height: f64,
+    /// Whether the prism is added as a new solid or cut from a semantic target.
+    pub mode: ExtrudeMode,
+    /// Stable target feature for a subtractive extrusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_feature_id: Option<String>,
+    /// Host-resolved target BREP path. This is disposable worker input, never
+    /// canonical intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<PathBuf>,
     /// Output directory where the worker writes the BREP file.
     pub output_dir: PathBuf,
     /// Output file name (no path separators; the worker appends `.brep`).
@@ -298,6 +324,9 @@ impl ExtrudeRequest {
             operation: Operation::Extrude,
             profile: profile.into_iter().map(|(x, y)| [x, y]).collect(),
             height,
+            mode: ExtrudeMode::Additive,
+            target_feature_id: None,
+            target_path: None,
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
@@ -317,6 +346,31 @@ impl ExtrudeRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_mode(mut self, mode: ExtrudeMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_target_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.target_feature_id = Some(feature_id.into());
+        self
+    }
+
+    pub fn with_optional_target_feature_id(mut self, feature_id: Option<String>) -> Self {
+        self.target_feature_id = feature_id;
+        self
+    }
+
+    pub fn with_target_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.target_path = Some(path.into());
+        self
+    }
+
+    pub fn with_optional_target_path(mut self, path: Option<PathBuf>) -> Self {
+        self.target_path = path;
         self
     }
 
@@ -349,6 +403,31 @@ impl ExtrudeRequest {
         }
         if !self.height.is_finite() || self.height <= 0.0 {
             return Err("extrude height must be a positive finite number".to_string());
+        }
+        match self.mode {
+            ExtrudeMode::Additive => {
+                if self.target_feature_id.is_some() || self.target_path.is_some() {
+                    return Err("additive extrude must not have a target".to_string());
+                }
+            }
+            ExtrudeMode::Subtractive => {
+                if self
+                    .target_feature_id
+                    .as_deref()
+                    .is_none_or(|value| !is_feature_id(value))
+                {
+                    return Err(
+                        "subtractive extrude requires a valid target_feature_id".to_string()
+                    );
+                }
+                if self
+                    .target_path
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err("subtractive extrude requires a resolved target_path".to_string());
+                }
+            }
         }
         if self.output_filename.is_empty() || self.output_filename.contains('/') {
             return Err("output_filename must be a non-empty plain filename".to_string());
@@ -2207,6 +2286,26 @@ mod tests {
                 .with_feature_id("box-1");
         request.schema_version = SCHEMA_VERSION.to_string();
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_requires_a_target_only_for_subtractive_extrude() {
+        let additive = ExtrudeRequest::new("req-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 1.0)
+            .with_output_path("/tmp", "out.brep")
+            .with_feature_id("box-1");
+        additive
+            .validate()
+            .expect("additive extrude needs no target");
+
+        let subtractive = additive
+            .clone()
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("base");
+        assert!(subtractive.validate().is_err());
+        subtractive
+            .with_target_path("/tmp/base.brep")
+            .validate()
+            .expect("subtractive extrude needs a resolved target path");
     }
 
     #[test]

@@ -71,7 +71,7 @@ fn extrude_command_is_registered() {
     assert_eq!(entry.name, "extrude");
     assert_eq!(
         entry.response_schema_version,
-        "threeterm.command.extrude.response/3"
+        "threeterm.command.extrude.response/4"
     );
 }
 
@@ -109,6 +109,7 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
         .arg(&profile_path)
         .args(["--height"])
         .arg("3.0")
+        .args(["--mode", "additive"])
         .output()
         .expect("extrude runs");
     assert!(
@@ -133,7 +134,7 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
     assert_eq!(parsed["feature_id"], "box-rect");
     assert_eq!(
         parsed["schema_version"],
-        "threeterm.command.extrude.response/3"
+        "threeterm.command.extrude.response/4"
     );
     let brep_path = parsed["brep_path"].as_str().expect("brep_path is a string");
     let brep_pathbuf = PathBuf::from(brep_path);

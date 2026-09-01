@@ -988,6 +988,8 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
     std::string output_dir = get_string(request, "output_dir");
     std::string output_filename = get_string(request, "output_filename");
     double height = get_number(request, "height");
+    std::string mode = get_string(request, "mode");
+    std::string target_path = get_string(request, "target_path");
     std::vector<std::array<double, 2>> profile;
     if (!get_profile(request, "profile", profile, error)) return false;
 
@@ -1005,6 +1007,15 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
     }
     if (output_filename.find('/') != std::string::npos) {
         error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (mode.empty()) mode = "additive";
+    if (mode != "additive" && mode != "subtractive") {
+        error = "extrude mode must be additive or subtractive";
+        return false;
+    }
+    if (mode == "subtractive" && target_path.empty()) {
+        error = "subtractive extrude requires a target BREP";
         return false;
     }
 
@@ -1031,6 +1042,32 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
         return false;
     }
     TopoDS_Shape solid = prism.Shape();
+    if (mode == "subtractive") {
+        TopoDS_Shape target;
+        BRep_Builder builder;
+        if (!BRepTools::Read(target, target_path.c_str(), builder) || target.IsNull()) {
+            error = "could not read subtractive target BREP";
+            return false;
+        }
+        BRepAlgoAPI_Cut cut(target, solid);
+        cut.Build();
+        if (!cut.IsDone() || cut.Shape().IsNull()) {
+            error = "subtractive extrusion did not produce a solid";
+            return false;
+        }
+        GProp_GProps target_properties;
+        GProp_GProps result_properties;
+        BRepGProp::VolumeProperties(target, target_properties);
+        BRepGProp::VolumeProperties(cut.Shape(), result_properties);
+        const double target_volume = target_properties.Mass();
+        const double result_volume = result_properties.Mass();
+        if (!std::isfinite(target_volume) || !std::isfinite(result_volume) ||
+            result_volume >= target_volume - 1e-9 * std::max(1.0, target_volume)) {
+            error = "subtractive extrusion does not intersect the target solid";
+            return false;
+        }
+        solid = cut.Shape();
+    }
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {

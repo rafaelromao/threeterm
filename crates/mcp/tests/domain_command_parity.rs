@@ -37,7 +37,19 @@ fn extrude_request(root: &std::path::Path) -> Value {
         "bundle_path": root.to_string_lossy(),
         "feature_id": "extrude",
         "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
-        "height": 2.0
+        "height": 2.0,
+        "mode": "additive"
+    })
+}
+
+fn subtractive_extrude_request(root: &std::path::Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "cut",
+        "profile": [[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]],
+        "height": 2.0,
+        "mode": "subtractive",
+        "target_feature_id": "base"
     })
 }
 
@@ -513,7 +525,7 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
         is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
-            "name": "threeterm.command.extrude/1",
+            "name": "threeterm.command.extrude/2",
             "arguments": extrude_request(&mcp_root)
         }),
     });
@@ -541,6 +553,70 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
         assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
         assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
     }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
+    let cli_root = root("subtractive-cli");
+    let mcp_root = root("subtractive-mcp");
+    let tui_root = root("subtractive-tui");
+    let Some(worker) = OcctWorker::locate().ok() else {
+        let _ = fs::remove_dir_all(&cli_root);
+        let _ = fs::remove_dir_all(&mcp_root);
+        let _ = fs::remove_dir_all(&tui_root);
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+        threeterm_host::Host::new()
+            .extrude(
+                path,
+                ExtrudeRequest::new(
+                    format!("base-{}", path.file_name().unwrap().to_string_lossy()),
+                    vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
+                    2.0,
+                )
+                .with_feature_id("base"),
+                &worker,
+            )
+            .expect("base solid commits");
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&cli_root),
+    )
+    .expect("CLI subtractive extrude executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&tui_root),
+    )
+    .expect("TUI subtractive extrude executes");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/2",
+            "arguments": subtractive_extrude_request(&mcp_root)
+        }),
+    });
+    let mcp = mcp.result.expect("MCP subtractive extrude executes")["structuredContent"].clone();
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["mode"], "subtractive");
+        assert_eq!(result["target_feature_id"], "base");
+        assert_eq!(result["feature_id"], "cut");
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
 
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);

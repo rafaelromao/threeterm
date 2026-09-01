@@ -20,8 +20,8 @@ use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
-    ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult,
-    LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
+    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
     MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
     ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
 };
@@ -1298,7 +1298,14 @@ impl Host {
                 detail: "duplicate export format".to_string(),
             });
         }
-        let prior = Bundle::at(root).open()?;
+        let mut prior = Bundle::at(root).open()?;
+        let brep = bundle_root(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{feature_id}.brep"));
+        if !brep.is_file() {
+            self.load_with_extrude_replay(root)?;
+            prior = Bundle::at(root).open()?;
+        }
         let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
         if !stale_features.is_empty() && !accept_stale_geometry {
             return Err(HostError::StaleLastValidGeometry {
@@ -1307,9 +1314,6 @@ impl Host {
                 stale_features,
             });
         }
-        let brep = bundle_root(root)
-            .join(BREP_SUBDIR)
-            .join(format!("{feature_id}.brep"));
         if !brep.is_file() {
             return Err(HostError::BrepFileMissing { path: brep });
         }
@@ -1632,25 +1636,34 @@ impl Host {
                         .ok_or_else(|| HostError::Validation {
                             detail: "missing extrude height".to_string(),
                         })?;
+                    let mode = parse_extrude_mode(request.get("mode"))?;
+                    let target_feature_id = request
+                        .get("target_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let bundle_path = string_field("bundle_path")?.to_string();
+                    let extrusion = ExtrudeRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        profile.into_iter().map(|[x, y]| (x, y)).collect(),
+                        height,
+                    )
+                    .with_mode(mode)
+                    .with_optional_target_feature_id(target_feature_id.clone())
+                    .with_feature_id(string_field("feature_id")?);
+                    let extrusion =
+                        self.resolve_extrude_request(Path::new(&bundle_path), extrusion)?;
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
                         })?;
-                    let view = self.extrude(
-                        string_field("bundle_path")?,
-                        ExtrudeRequest::new(
-                            threeterm_occt_worker::new_request_id(),
-                            profile.into_iter().map(|[x, y]| (x, y)).collect(),
-                            height,
-                        )
-                        .with_feature_id(string_field("feature_id")?),
-                        &worker,
-                    )?;
+                    let view = self.extrude(bundle_path, extrusion, &worker)?;
                     Ok(serde_json::json!({
                         "status": view.result.status,
                         "operation": "extrude",
                         "feature_id": view.result.feature_id,
                         "request_id": view.result.request_id,
+                        "mode": mode.as_str(),
+                        "target_feature_id": target_feature_id,
                         "source_snapshot": {
                             "feature_graph_hash": view.source_snapshot.feature_graph_hash,
                             "revision_hash": view.source_snapshot.revision_hash,
@@ -2645,6 +2658,7 @@ impl Host {
             .collect::<Vec<_>>();
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
+        let mut replayed_paths = HashMap::with_capacity(intents.len());
         for intent in intents {
             let expected_worker = expected_occt_worker_fingerprint();
             if intent.worker_requirements != expected_worker {
@@ -2685,8 +2699,27 @@ impl Host {
                     .collect(),
                 intent.deterministic_inputs.height,
             )
+            .with_mode(parse_extrude_mode_value(&intent.operation)?)
+            .with_optional_target_feature_id(intent.target_feature_id.clone())
             .with_output_path(&stage_root, "replay.brep.partial")
             .with_feature_id(&feature_id);
+            let target_path = if let Some(target_feature_id) = &intent.target_feature_id {
+                let path = replayed_paths
+                    .get(target_feature_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        root.join(BREP_SUBDIR)
+                            .join(format!("{target_feature_id}.brep"))
+                    });
+                if !path.is_file() {
+                    let _ = stage.discard();
+                    return Err(HostError::BrepFileMissing { path });
+                }
+                Some(path)
+            } else {
+                None
+            };
+            let request = request.with_optional_target_path(target_path);
             let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
             binding.source_revision_id = intent.source_revision.clone();
             binding.staging_name = "replay.brep".to_string();
@@ -2744,6 +2777,7 @@ impl Host {
                 }
             };
             let _ = stage.discard();
+            replayed_paths.insert(feature_id.clone(), path.clone());
             feature_ids.push(feature_id);
             geometry_fingerprints.push(sha256_path(&path).map_err(|error| HostError::BrepIo {
                 detail: format!("hash replayed BREP failed: {error}"),
@@ -4629,6 +4663,50 @@ impl Host {
         Ok(())
     }
 
+    fn resolve_extrude_request(
+        &self,
+        root: &Path,
+        mut request: ExtrudeRequest,
+    ) -> Result<ExtrudeRequest, HostError> {
+        if request.mode == ExtrudeMode::Additive {
+            if request.target_feature_id.is_some() || request.target_path.is_some() {
+                return Err(HostError::Validation {
+                    detail: "additive extrude must not have a target".to_string(),
+                });
+            }
+            return Ok(request);
+        }
+        let target_feature_id =
+            request
+                .target_feature_id
+                .clone()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "subtractive extrude requires target_feature_id".to_string(),
+                })?;
+        let loaded = Bundle::at(root).open()?;
+        if !loaded.graph.contains_feature(&target_feature_id) {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "subtractive extrude target feature is missing: {target_feature_id}"
+                ),
+            });
+        }
+        let target_path = root
+            .join(BREP_SUBDIR)
+            .join(format!("{target_feature_id}.brep"));
+        if !target_path.is_file() {
+            self.load_with_extrude_replay(root)?;
+        }
+        if !target_path.is_file() {
+            return Err(HostError::BrepFileMissing { path: target_path });
+        }
+        request.target_path = Some(target_path);
+        request
+            .validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        Ok(request)
+    }
+
     /// Run one extrude through the Host-owned Derived Result boundary. This
     /// captures the source Revision Snapshot and retains a validated result
     /// outside canonical persistence for a later promotion slice.
@@ -4640,6 +4718,7 @@ impl Host {
     ) -> Result<ExtrudeDerivedResult, HostError> {
         let root = root.as_ref();
         worker.verify_identity().map_err(HostError::from)?;
+        let request = self.resolve_extrude_request(root, request)?;
         let source_snapshot = self.load(root)?;
 
         let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
@@ -5471,6 +5550,7 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
+        let request = self.resolve_extrude_request(root, request)?;
         let derived = self.stage_occt_result::<ExtrudeResult>(
             root,
             &request,
@@ -5499,6 +5579,7 @@ impl Host {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
+        let request = self.resolve_extrude_request(root, request)?;
         let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
         let derived = self.stage_occt_result_inner::<ExtrudeResult>(
             root,
@@ -6430,6 +6511,8 @@ fn extrude_artifact_request(
             feature_id: &request.feature_id,
             profile: &request.profile,
             height: request.height,
+            mode: request.mode.as_str(),
+            target_feature_id: request.target_feature_id.as_deref(),
         },
         threeterm_protocol::frame::MAX_FRAME_BUFFER,
     )
@@ -6463,10 +6546,16 @@ fn canonical_extrude_intent(
         .ok_or_else(|| HostError::Validation {
             detail: "canonical extrude height is missing or invalid".to_string(),
         })?;
+    let mode = parse_extrude_mode(request.get("mode"))?;
+    let target_feature_id = request
+        .get("target_feature_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let intent = CanonicalExtrudeIntent {
         schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
         command: "extrude".to_string(),
-        operation: "additive".to_string(),
+        operation: mode.as_str().to_string(),
+        target_feature_id,
         request_id: artifact.request_id.clone(),
         deterministic_inputs: ExtrudeDeterministicInputs { profile, height },
         affected_semantic_ids: vec![artifact.feature_id.clone()],
@@ -6490,7 +6579,12 @@ fn occt_artifact_request(
 ) -> Result<Layer1ArtifactRequest, HostError> {
     let mut semantic = request.clone();
     if let Some(object) = semantic.as_object_mut() {
-        for field in ["output_dir", "output_filename", "artifact_request"] {
+        for field in [
+            "output_dir",
+            "output_filename",
+            "artifact_request",
+            "target_path",
+        ] {
             object.remove(field);
         }
         for field in ["base_path", "tool_path"] {
@@ -6527,6 +6621,27 @@ struct ExtrudeSemanticInput<'a> {
     feature_id: &'a str,
     profile: &'a [[f64; 2]],
     height: f64,
+    mode: &'static str,
+    target_feature_id: Option<&'a str>,
+}
+
+fn parse_extrude_mode(value: Option<&serde_json::Value>) -> Result<ExtrudeMode, HostError> {
+    let value = value
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing extrude mode".to_string(),
+        })?;
+    parse_extrude_mode_value(value)
+}
+
+fn parse_extrude_mode_value(value: &str) -> Result<ExtrudeMode, HostError> {
+    match value {
+        "additive" => Ok(ExtrudeMode::Additive),
+        "subtractive" => Ok(ExtrudeMode::Subtractive),
+        _ => Err(HostError::Validation {
+            detail: format!("invalid extrude mode: {value}"),
+        }),
+    }
 }
 fn cleanup_staged_artifact(root: &Path, staging_name: &str) {
     if staging_name.is_empty()
@@ -7289,7 +7404,7 @@ mod tests {
             recovered_from_previous: false,
         };
         let binding = extrude_artifact_request(&request, &snapshot).expect("binding derives");
-        let expected = br#"{"operation":"extrude","feature_id":"feature-1","profile":[[0.0,0.0],[1.0,0.0],[1.0,1.0]],"height":2.0}"#;
+        let expected = br#"{"operation":"extrude","feature_id":"feature-1","profile":[[0.0,0.0],[1.0,0.0],[1.0,1.0]],"height":2.0,"mode":"additive","target_feature_id":null}"#;
 
         assert_eq!(
             binding.semantic_input_sha256,

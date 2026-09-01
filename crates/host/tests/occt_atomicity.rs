@@ -21,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
-    DraftRequest, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest,
-    MirrorRequest, Operation, ShellRequest,
+    DraftRequest, ExtrudeMode, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest,
+    LoftRequest, MirrorRequest, Operation, ShellRequest,
 };
 use threeterm_persistence::{
     Bundle, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION, ExtrudeDeterministicInputs,
@@ -48,6 +48,45 @@ fn unique_request_id(label: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{label}-{nanos}-{}", std::process::id())
+}
+
+#[test]
+fn subtractive_extrude_rejects_a_missing_semantic_target_without_mutation() {
+    let root = temp_root("subtractive-missing-target");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let before_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let before_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    let before = host.load(&root).expect("snapshot loads");
+    let worker = threeterm_occt_worker::OcctWorker::with_binary_path(PathBuf::from(
+        "/missing/threeterm-occt-worker",
+    ));
+
+    let error = host
+        .extrude(
+            &root,
+            ExtrudeRequest::new(
+                unique_request_id("missing-target"),
+                vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+                1.0,
+            )
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("does-not-exist")
+            .with_feature_id("cut"),
+            &worker,
+        )
+        .expect_err("missing semantic target must fail closed");
+    assert!(matches!(error, HostError::Validation { .. }));
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+        before_manifest
+    );
+    assert_eq!(
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+        before_log
+    );
+    assert_eq!(host.load(&root).unwrap(), before);
+    let _ = fs::remove_dir_all(root);
 }
 
 fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
@@ -301,6 +340,81 @@ fn production_load_path_replays_missing_extrude_results() {
 }
 
 #[test]
+fn subtractive_extrude_replays_and_exports_the_same_cut_after_derived_deletion() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("subtractive-replay", "seed", "box");
+    let host = Host::new();
+    host.extrude(
+        &root,
+        rectangle_extrude_request("subtractive-base")
+            .with_feature_id("base")
+            .with_output_path(root.join("stage"), "base.brep"),
+        &worker,
+    )
+    .expect("base solid commits");
+    let committed = host
+        .extrude(
+            &root,
+            ExtrudeRequest::new(
+                "subtractive-cut",
+                vec![(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)],
+                2.0,
+            )
+            .with_feature_id("cut")
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("base"),
+            &worker,
+        )
+        .expect("subtractive solid commits");
+    let original_cut = fs::read(&committed.result.brep_path).expect("cut BREP reads");
+    let before_export = host
+        .export(
+            &root,
+            "cut",
+            &["step".to_string()],
+            &root.join("export-before"),
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("cut exports");
+    let before_step =
+        fs::read(before_export.artifacts.first().expect("STEP artifact")).expect("STEP reads");
+    fs::remove_file(&committed.result.brep_path).expect("cut BREP removes");
+    fs::remove_file(root.join("brep/base.brep")).expect("base BREP removes");
+    let after_export = Host::new()
+        .export(
+            &root,
+            "cut",
+            &["step".to_string()],
+            &root.join("export-after"),
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("deleted cut reloads and exports");
+    assert_eq!(
+        fs::read(root.join("brep/cut.brep")).expect("replayed cut reads"),
+        original_cut
+    );
+    assert_eq!(
+        fs::read(
+            after_export
+                .artifacts
+                .first()
+                .expect("replayed STEP artifact")
+        )
+        .expect("replayed STEP reads"),
+        before_step
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn replay_reconstructs_persisted_extrude_inputs_through_a_worker_boundary() {
     let root = temp_root("replay-fake-worker");
     let worker_root = temp_root("replay-fake-worker-bin");
@@ -340,6 +454,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
         schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
         command: "extrude".to_string(),
         operation: "additive".to_string(),
+        target_feature_id: None,
         request_id: "replay-request".to_string(),
         deterministic_inputs: ExtrudeDeterministicInputs {
             profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],

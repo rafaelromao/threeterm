@@ -16,6 +16,8 @@
 //! - `minLength` enforces a minimum length on string fields.
 //! - `minimum` enforces a lower bound on numeric and integer fields.
 //! - `pattern` enforces a regex on string fields.
+//! - `oneOf` requires exactly one matching alternative.
+//! - `type` may be an array for nullable fields.
 //! - `enum` restricts a value to one of a fixed set of JSON values.
 //!
 //! Anything outside this subset is treated as "no constraint" so the
@@ -55,10 +57,31 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
         }
     }
 
+    if schema_object.get("type").is_none()
+        && (schema_object.contains_key("required") || schema_object.contains_key("properties"))
+    {
+        validate_object_type(schema_object, value)?;
+    }
+
     if let Some(expected_type) = schema_object.get("type") {
-        let expected_type = expected_type
+        let expected_types = expected_type
             .as_str()
-            .ok_or_else(|| format!("schema `type` must be a string, got {expected_type}"))?;
+            .map(|value| vec![value])
+            .or_else(|| {
+                expected_type
+                    .as_array()
+                    .map(|values| values.iter().filter_map(Value::as_str).collect())
+            })
+            .ok_or_else(|| {
+                format!("schema `type` must be a string or array, got {expected_type}")
+            })?;
+        if expected_types.len() > 1 {
+            if !expected_types.iter().any(|kind| type_matches(kind, value)) {
+                return Err(format!("value {value} does not match type {expected_type}"));
+            }
+            return Ok(());
+        }
+        let expected_type = expected_types[0];
         match expected_type {
             "object" => validate_object_type(schema_object, value)?,
             "array" => validate_array_type(schema_object, value)?,
@@ -91,7 +114,35 @@ fn validate_object(schema: &Value, value: &Value) -> Result<(), String> {
         }
     }
 
+    if let Some(one_of) = schema_object.get("oneOf") {
+        let alternatives = one_of
+            .as_array()
+            .ok_or_else(|| format!("schema `oneOf` must be an array, got {one_of}"))?;
+        let matches = alternatives
+            .iter()
+            .filter(|alternative| validate(alternative, value).is_ok())
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "value {value} matches {matches} `oneOf` alternatives"
+            ));
+        }
+    }
+
     Ok(())
+}
+
+fn type_matches(expected: &str, value: &Value) -> bool {
+    match expected {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        "integer" => value.is_i64() || value.is_u64(),
+        _ => false,
+    }
 }
 
 fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<(), String> {

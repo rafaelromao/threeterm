@@ -96,7 +96,8 @@ pub const TRANSACTIONS_LOG_FILENAME: &str = "transactions.log";
 pub const MANIFEST_SCHEMA_GENERATION: u32 = 1;
 pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
-pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
+pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
+pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -350,6 +351,8 @@ pub struct CanonicalExtrudeIntent {
     pub schema_version: String,
     pub command: String,
     pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_feature_id: Option<String>,
     pub request_id: String,
     pub deterministic_inputs: ExtrudeDeterministicInputs,
     pub affected_semantic_ids: Vec<String>,
@@ -359,13 +362,25 @@ pub struct CanonicalExtrudeIntent {
 
 impl CanonicalExtrudeIntent {
     pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
-        if self.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION
-            || self.command != "extrude"
-            || self.operation != "additive"
+        if !matches!(
+            self.schema_version.as_str(),
+            EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+        ) || self.command != "extrude"
+            || !matches!(self.operation.as_str(), "additive" | "subtractive")
             || self.request_id.is_empty()
         {
             return Err(BundleError::Invalid(
                 "canonical extrude intent identity is invalid".to_string(),
+            ));
+        }
+        if (self.operation == "additive" && self.target_feature_id.is_some())
+            || (self.operation == "subtractive"
+                && self.target_feature_id.as_deref().is_none_or(str::is_empty))
+            || (self.schema_version == LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+                && self.operation != "additive")
+        {
+            return Err(BundleError::Invalid(
+                "canonical extrude mode and target do not match".to_string(),
             ));
         }
         if self.deterministic_inputs.profile.len() < 3
@@ -1790,11 +1805,20 @@ impl Bundle {
                     version: intent.schema_version.clone(),
                 });
             }
-            if intent.command != "extrude" || intent.operation != "additive" {
+            if intent.command != "extrude"
+                || !matches!(intent.operation.as_str(), "additive" | "subtractive")
+            {
                 return Err(BundleError::CanonicalOperationUnknown {
                     log_index: None,
                     operation: format!("{}:{}", intent.command, intent.operation),
                 });
+            }
+            if let Some(target_feature_id) = &intent.target_feature_id
+                && !loaded.graph.contains_feature(target_feature_id)
+            {
+                return Err(BundleError::Invalid(format!(
+                    "canonical extrude target feature is missing: {target_feature_id}"
+                )));
             }
             if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
                 return Err(BundleError::Invalid(
@@ -2263,6 +2287,16 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                             .to_string(),
                 });
             }
+            if let Some(target_feature_id) = &intent.target_feature_id
+                && !graph.contains_feature(target_feature_id)
+            {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!(
+                        "canonical extrude target feature is missing: {target_feature_id}"
+                    ),
+                });
+            }
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
             let event: HistoryEvent =
@@ -2508,13 +2542,18 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
         });
     }
     if let Some(intent) = &entry.intent {
-        if intent.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION {
+        if !matches!(
+            intent.schema_version.as_str(),
+            EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+        ) {
             return Err(BundleError::CanonicalVersionUnsupported {
                 log_index: Some(entry.log_index),
                 version: intent.schema_version.clone(),
             });
         }
-        if intent.command != "extrude" || intent.operation != "additive" {
+        if intent.command != "extrude"
+            || !matches!(intent.operation.as_str(), "additive" | "subtractive")
+        {
             return Err(BundleError::CanonicalOperationUnknown {
                 log_index: Some(entry.log_index),
                 operation: format!("{}:{}", intent.command, intent.operation),

@@ -138,6 +138,8 @@ enum DispatchPlan {
         feature_id: String,
         profile_file: String,
         height: f64,
+        mode: String,
+        target_feature_id: Option<String>,
     },
     ReattachEdge {
         bundle: String,
@@ -1441,6 +1443,8 @@ fn parse_extrude(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut profile_file: Option<String> = None;
     let mut height: Option<f64> = None;
+    let mut mode: Option<String> = None;
+    let mut target_feature_id: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -1474,6 +1478,16 @@ fn parse_extrude(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--mode" => {
+                    mode = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--target-feature-id" => {
+                    target_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -1506,11 +1520,18 @@ fn parse_extrude(args: &[OsString]) -> DispatchPlan {
             arg: "--height".to_string(),
         };
     };
+    let Some(mode) = mode else {
+        return DispatchPlan::Unknown {
+            arg: "--mode".to_string(),
+        };
+    };
     DispatchPlan::Extrude {
         bundle,
         feature_id,
         profile_file,
         height,
+        mode,
+        target_feature_id,
     }
 }
 
@@ -4448,8 +4469,14 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             profile_file,
             height,
+            mode,
+            target_feature_id,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height, "mode": mode });
+            if let Some(target_feature_id) = target_feature_id {
+                request["target_feature_id"] = json!(target_feature_id);
+            }
+            request
         }
         DispatchPlan::ReattachEdge {
             bundle,
@@ -6556,6 +6583,8 @@ mod tests {
                 "missing-profile.json",
                 "--height",
                 "1",
+                "--mode",
+                "additive",
             ],
             vec![
                 "--machine",
@@ -7489,6 +7518,8 @@ mod tests {
                 "missing.json",
                 "--height",
                 "inf",
+                "--mode",
+                "additive",
             ],
             vec![
                 "--machine",

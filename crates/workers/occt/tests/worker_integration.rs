@@ -12,7 +12,7 @@ use std::{
 };
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
+    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest, ExtrudeMode,
     ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
     OcctDiagnostic, OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
 };
@@ -102,6 +102,44 @@ fn extrude_rectangle_returns_ok_with_real_brep() {
         "BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
     );
 
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn subtractive_extrude_cuts_a_semantic_target_solid() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-subtractive-extrude-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+    let base = worker
+        .extrude(
+            &rectangle_extrude_request()
+                .with_output_path(&temp, "base.brep")
+                .with_feature_id("base"),
+        )
+        .expect("target extrude succeeds");
+    let cut = worker
+        .extrude(
+            &ExtrudeRequest::new(
+                unique_request_id("cut"),
+                vec![(2.0, 1.0), (8.0, 1.0), (8.0, 4.0), (2.0, 4.0)],
+                3.0,
+            )
+            .with_output_path(&temp, "cut.brep")
+            .with_feature_id("cut")
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("base")
+            .with_target_path(base.brep_path.clone()),
+        )
+        .expect("subtractive extrude succeeds");
+
+    assert_eq!(cut.status, "ok");
+    assert_ne!(cut.brep_sha256, base.brep_sha256);
+    assert!(cut.brep_path.is_file());
     let _ = std::fs::remove_dir_all(temp);
 }
 

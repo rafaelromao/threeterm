@@ -373,7 +373,7 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "profile", "height"],
+        "required": ["bundle_path", "feature_id", "profile", "height", "mode"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
@@ -387,8 +387,23 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                     "items": { "type": "number" }
                 }
             },
-            "height": { "type": "number", "exclusiveMinimum": 0 }
+            "height": { "type": "number", "exclusiveMinimum": 0 },
+            "mode": { "enum": ["additive", "subtractive"] },
+            "target_feature_id": { "type": "string", "minLength": 1 }
         },
+        "oneOf": [
+            {
+                "required": ["mode"],
+                "properties": {
+                    "mode": { "const": "additive" },
+                    "target_feature_id": false
+                }
+            },
+            {
+                "required": ["mode", "target_feature_id"],
+                "properties": { "mode": { "const": "subtractive" } }
+            }
+        ],
         "additionalProperties": false
     })
 });
@@ -721,6 +736,8 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "operation",
             "feature_id",
             "request_id",
+            "mode",
+            "target_feature_id",
             "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
@@ -738,6 +755,10 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "request_id": { "type": "string", "minLength": 1 },
+            "mode": { "enum": ["additive", "subtractive"] },
+            "target_feature_id": {
+                "type": ["string", "null"]
+            },
             "source_snapshot": {
                 "type": "object",
                 "required": ["feature_graph_hash", "revision_hash"],
@@ -2133,8 +2154,8 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         CommandSchema {
             id: EXTRUDE_COMMAND_ID,
             name: "extrude",
-            schema_version: "threeterm.command.extrude/1",
-            request_schema_version: "threeterm.command.extrude.request/1",
+            schema_version: "threeterm.command.extrude/2",
+            request_schema_version: EXTRUDE_REQUEST_SCHEMA_VERSION,
             request_schema: EXTRUDE_REQUEST_SCHEMA.clone(),
             response_schema_version: EXTRUDE_RESPONSE_SCHEMA_VERSION,
             response_schema: EXTRUDE_RESPONSE_SCHEMA.clone(),
@@ -2371,7 +2392,8 @@ pub const REHEARSE_RUN_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehear
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";
-pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/3";
+pub const EXTRUDE_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.extrude.request/2";
+pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/4";
 pub const FIT_DIMENSION_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.fit-dimension.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";

@@ -324,6 +324,15 @@ gate_6: FAIL
 gate_6_signature: not recorded
 gate_6_date: not recorded
 claim: none
+hardware_profile: not recorded
+project_scale: not recorded
+limitations_path: not recorded
+limitations_sha256: not recorded
+stl_rc1_sha256: not recorded
+stl_rc2_sha256: not recorded
+stl_deterministic: NO
+step_comparison: not recorded
+three_mf_comparison: not recorded
 <!-- PERFORMANCE-RECORD:END -->
 
 Run date: **2026-08-26 UTC**

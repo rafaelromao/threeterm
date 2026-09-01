@@ -23,7 +23,7 @@ input="${WORK}/libslvs-artifact"
 tag="v0.1.0-artifacts"
 first="${WORK}/first"
 second="${WORK}/second"
-touch "${source_root}/crates/workers/slvs/NOTICE"
+printf '%s\n' source-change >>"${source_root}/crates/workers/slvs/NOTICE"
 git -C "${source_root}" add crates/workers/slvs/NOTICE
 git -C "${source_root}" commit --quiet -m source-notice
 commit="$(git -C "${source_root}" rev-parse HEAD)"

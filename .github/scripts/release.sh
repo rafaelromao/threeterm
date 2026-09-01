@@ -323,7 +323,10 @@ case "$action" in
             "${bundle_root}/SHA256SUMS"
             "${bundle_root}/worker-manifest.json"
         )
-        [[ -z "${THREETERM_RELEASE_MATERIAL:-}" ]] || release_args+=("${THREETERM_RELEASE_MATERIAL}")
+        if [[ -n "${THREETERM_RELEASE_MATERIAL:-}" ]]; then
+            release_args+=("${THREETERM_RELEASE_MATERIAL}")
+            release_args+=("${THREETERM_PERFORMANCE_RECORD:-${ROOT}/docs/release/six-gate-performance-claims-gate.md}")
+        fi
         gh release create "${release_args[@]}"
         ;;
     aur-push)

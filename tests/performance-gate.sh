@@ -25,16 +25,22 @@ record_signature: Release Owner
 record_date: ${today}
 gate_1: PASS
 gate_1_signature: Release Owner
+gate_1_date: ${today}
 gate_2: PASS
 gate_2_signature: Release Owner
+gate_2_date: ${today}
 gate_3: PASS
 gate_3_signature: Release Owner
+gate_3_date: ${today}
 gate_4: PASS
 gate_4_signature: Release Owner
+gate_4_date: ${today}
 gate_5: PASS
 gate_5_signature: Release Owner
+gate_5_date: ${today}
 gate_6: PASS
 gate_6_signature: Release Owner
+gate_6_date: ${today}
 claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small decision=ADMIT
 <!-- PERFORMANCE-RECORD:END -->
 EOF

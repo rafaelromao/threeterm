@@ -66,6 +66,8 @@ cp "${ROOT}/.github/scripts/licensing.sh" "${release_root}/.github/scripts/licen
 cp "${ROOT}/.github/scripts/release-artifacts.sh" "${release_root}/.github/scripts/release-artifacts.sh"
 cp "${ROOT}/.github/scripts/performance-gate.sh" "${release_root}/.github/scripts/performance-gate.sh"
 cp "${fixture}" "${release_root}/docs/release/trademark-and-namespace-gate.md"
+cp "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
+    "${release_root}/docs/release/six-gate-performance-claims-gate.md"
 cat >"${fake_bin}/git" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == -C ]]; then
@@ -90,6 +92,7 @@ exit 1
 EOF
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >"${RELEASE_GATE_GH_ARGS}"
 exit 0
 EOF
 chmod +x "${fake_bin}/git" "${fake_bin}/gh"
@@ -105,7 +108,31 @@ PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
     THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+grep -Fq "threeterm-${current_tag}.tar.gz" "${release_root}/gh-args"
+grep -Fq "release-manifest.json" "${release_root}/gh-args"
+grep -Fq "SHA256SUMS" "${release_root}/gh-args"
+grep -Fq "worker-manifest.json" "${release_root}/gh-args"
+
+performance_material="${tmpdir}/unsupported-performance.md"
+printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' \
+    >"${performance_material}"
+rm -f "${release_root}/gh-args"
+expect_failure env PATH="${fake_bin}:${PATH}" \
+    RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
+    RELEASE_GATE_COMMIT="${verified_commit}" \
+    RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
+    THREETERM_RELEASE_SOURCE_ROOT="${ROOT}" \
+    THREETERM_RELEASE_MATERIAL="${performance_material}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+if [[ -e "${release_root}/gh-args" ]]; then
+    printf '%s\n' 'GitHub API was called for an unsupported performance claim' >&2
+    exit 1
+fi
 expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
     RELEASE_GATE_COMMIT="${verified_commit}" \

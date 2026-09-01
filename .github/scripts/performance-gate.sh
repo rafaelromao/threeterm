@@ -77,11 +77,17 @@ verify_performance_material() {
             || { performance_gate_fail "six-gate ${gate} did not pass"; return 1; }
         grep -Fxq "gate_${gate}_signature: ${owner}" <<<"$block" \
             || { performance_gate_fail "six-gate ${gate} is not signed by the owner"; return 1; }
+        grep -Fxq "gate_${gate}_date: ${today}" <<<"$block" \
+            || { performance_gate_fail "six-gate ${gate} is not dated"; return 1; }
     done
 
     local claims claim id metric unit percentile fixture scale row field
     claims="$(performance_gate_claim_lines <"$material")"
     [[ -n "$claims" ]] || { performance_gate_fail 'performance claim must use the structured claim grammar'; return 1; }
+    if performance_gate_claim_language < <(grep -Ev '^ThreeTerm performance claim: ' "$material"); then
+        performance_gate_fail 'performance material contains an unstructured claim'
+        return 1
+    fi
     while IFS= read -r claim; do
         [[ "$claim" =~ ^ThreeTerm\ performance\ claim:\ .+$ ]] || continue
         for field in id metric unit percentile fixture scale; do

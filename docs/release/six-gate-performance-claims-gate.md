@@ -307,16 +307,22 @@ record_signature: not recorded
 record_date: not recorded
 gate_1: FAIL
 gate_1_signature: not recorded
+gate_1_date: not recorded
 gate_2: FAIL
 gate_2_signature: not recorded
+gate_2_date: not recorded
 gate_3: FAIL
 gate_3_signature: not recorded
+gate_3_date: not recorded
 gate_4: FAIL
 gate_4_signature: not recorded
+gate_4_date: not recorded
 gate_5: FAIL
 gate_5_signature: not recorded
+gate_5_date: not recorded
 gate_6: FAIL
 gate_6_signature: not recorded
+gate_6_date: not recorded
 claim: none
 <!-- PERFORMANCE-RECORD:END -->
 

@@ -52,15 +52,6 @@ fn edit_target(revision: &str) -> Value {
     })
 }
 
-fn adjacent_edit_target(revision: &str) -> Value {
-    let mut target = edit_target(revision);
-    target["semantic_id"] = json!("edge-adjacent-target");
-    target["provenance"]["source_edge_id"] = json!("edge-adjacent-target");
-    target["evidence"]["midpoint"] = json!([0.0, 0.0, 1.0]);
-    target["evidence"]["tangent"] = json!([0.0, 0.0, 1.0]);
-    target
-}
-
 fn request(root: &std::path::Path, revision: &str, reference: Value) -> Value {
     request_with_edit_target(root, revision, reference, edit_target(revision))
 }
@@ -304,15 +295,9 @@ fn production_worker_reports_ambiguous_descendants_before_canonical_mutation() {
     let result = host
         .execute_domain_command(
             REATTACH_EDGE_COMMAND_ID,
-            request_with_edit_target(
-                &root,
-                &revision,
-                reference(&revision),
-                adjacent_edit_target(&revision),
-            ),
+            request_with_edit_target(&root, &revision, reference(&revision), reference(&revision)),
         )
         .expect("worker ambiguity is a structured outcome");
-    eprintln!("ambiguous worker result: {result}");
     assert_eq!(result["outcome"], "ambiguous");
     assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
     assert_eq!(result["committed"], false);

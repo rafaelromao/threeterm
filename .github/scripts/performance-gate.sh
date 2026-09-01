@@ -14,7 +14,7 @@ performance_gate_block() {
 }
 
 performance_gate_claim_language() {
-    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(ms|millisecond|milliseconds|us|microsecond|microseconds|秒)([^[:alnum:]]|$)'
+    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
 }
 
 performance_gate_claim_lines() {
@@ -80,6 +80,14 @@ verify_performance_material() {
         performance_gate_fail 'six-gate evidence path contains a symlink'
         return 1
     fi
+    [[ "$evidence" == docs/research/rehearsal-evidence/* ]] \
+        || { performance_gate_fail 'six-gate evidence must be checked-in rehearsal evidence'; return 1; }
+    git -C "$root" ls-files --error-unmatch -- "$evidence" >/dev/null 2>&1 \
+        || { performance_gate_fail 'six-gate evidence is not tracked in the source commit'; return 1; }
+    local committed_evidence_digest
+    committed_evidence_digest="$(git -C "$root" show "HEAD:${evidence}" | sha256sum | cut -d' ' -f1)"
+    [[ "$committed_evidence_digest" == "$evidence_digest" ]] \
+        || { performance_gate_fail 'six-gate evidence digest does not match the committed source'; return 1; }
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"

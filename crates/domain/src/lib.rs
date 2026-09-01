@@ -12,7 +12,9 @@ pub mod graph {
 pub mod component {
     pub use super::{
         ComponentCommand, ComponentDefinition, ComponentGraph, ComponentInstance,
-        LBracketDescriptor, ReferenceOutcome, SemanticReference, resolve_semantic_reference,
+        EdgeGeometricEvidence, EdgeProvenance, EdgeReattachmentOutcome, LBracketDescriptor,
+        PostEditEdgeCandidate, ReferenceOutcome, SelectedEdgeReference, SemanticReference,
+        resolve_edge_reference, resolve_semantic_reference,
     };
 }
 
@@ -420,6 +422,318 @@ pub enum ReferenceOutcome {
     Ambiguous,
     Lost,
     Incompatible,
+}
+
+pub const EDGE_MIDPOINT_TOLERANCE: f64 = 1e-6;
+pub const EDGE_LENGTH_TOLERANCE: f64 = 1e-6;
+pub const EDGE_TANGENT_TOLERANCE: f64 = 1e-6;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeGeometricEvidence {
+    pub midpoint: [f64; 3],
+    pub tangent: [f64; 3],
+    pub length: f64,
+}
+
+impl EdgeGeometricEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self
+            .midpoint
+            .into_iter()
+            .chain(self.tangent)
+            .all(f64::is_finite)
+        {
+            return Err("edge geometric evidence must be finite".to_string());
+        }
+        if !self.length.is_finite() || self.length <= 0.0 {
+            return Err("edge geometric evidence length must be positive and finite".to_string());
+        }
+        let tangent_length = self
+            .tangent
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        if tangent_length <= f64::EPSILON {
+            return Err("edge geometric evidence tangent must not be zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeProvenance {
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedEdgeReference {
+    pub semantic_id: String,
+    pub provenance: EdgeProvenance,
+    pub role: String,
+    pub evidence: EdgeGeometricEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostEditEdgeCandidate {
+    pub semantic_id: String,
+    pub provenance: EdgeProvenance,
+    pub role: String,
+    pub evidence: EdgeGeometricEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EdgeReattachmentOutcome {
+    Resolved { semantic_id: String },
+    Ambiguous { candidate_ids: Vec<String> },
+    Lost,
+    Incompatible { candidate_ids: Vec<String> },
+}
+
+/// Reattach one selected edge without consulting topology order or position.
+/// Provenance narrows the lineage first; role and geometric evidence then
+/// decide whether that lineage is safe to use.
+pub fn resolve_edge_reference(
+    reference: &SelectedEdgeReference,
+    candidates: impl IntoIterator<Item = PostEditEdgeCandidate>,
+) -> EdgeReattachmentOutcome {
+    if reference.semantic_id.is_empty()
+        || reference.role.is_empty()
+        || reference.provenance.source_feature_id.is_empty()
+        || reference.provenance.source_revision_id.is_empty()
+        || reference.provenance.source_edge_id.is_empty()
+        || reference.provenance.source_edge_id != reference.semantic_id
+        || reference.evidence.validate().is_err()
+    {
+        return EdgeReattachmentOutcome::Incompatible {
+            candidate_ids: Vec::new(),
+        };
+    }
+
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    if candidates.iter().any(|candidate| {
+        candidate.semantic_id.is_empty()
+            || candidate.role.is_empty()
+            || candidate.provenance.source_feature_id.is_empty()
+            || candidate.provenance.source_revision_id.is_empty()
+            || candidate.provenance.source_edge_id.is_empty()
+            || candidate.evidence.validate().is_err()
+    }) {
+        return EdgeReattachmentOutcome::Incompatible {
+            candidate_ids: sorted_candidate_ids(&candidates),
+        };
+    }
+
+    let lineage: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.provenance == reference.provenance)
+        .collect();
+    if lineage.is_empty() {
+        return EdgeReattachmentOutcome::Lost;
+    }
+
+    let role_matches: Vec<_> = lineage
+        .iter()
+        .filter(|candidate| candidate.role == reference.role)
+        .copied()
+        .collect();
+    if role_matches.is_empty() {
+        return EdgeReattachmentOutcome::Incompatible {
+            candidate_ids: sorted_candidate_ids(&lineage),
+        };
+    }
+
+    let geometric_matches: Vec<_> = role_matches
+        .into_iter()
+        .filter(|candidate| geometric_match(&reference.evidence, &candidate.evidence))
+        .collect();
+    let candidate_ids = sorted_candidate_ids(&geometric_matches);
+    match geometric_matches.as_slice() {
+        [candidate] => EdgeReattachmentOutcome::Resolved {
+            semantic_id: candidate.semantic_id.clone(),
+        },
+        [] => EdgeReattachmentOutcome::Incompatible {
+            candidate_ids: sorted_candidate_ids(&lineage),
+        },
+        _ => EdgeReattachmentOutcome::Ambiguous { candidate_ids },
+    }
+}
+
+/// Resolve a selected edge against descendants produced by a real split.
+/// A split edge is represented by its actual fragments, so the fragments do
+/// not individually match the source length and midpoint. They remain
+/// ambiguous when their shared lineage, role, direction, and contiguous
+/// geometry reconstruct the selected source edge.
+pub fn resolve_split_edge_reference(
+    reference: &SelectedEdgeReference,
+    candidates: impl IntoIterator<Item = PostEditEdgeCandidate>,
+) -> EdgeReattachmentOutcome {
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    let outcome = resolve_edge_reference(reference, candidates.clone());
+    if !matches!(outcome, EdgeReattachmentOutcome::Incompatible { .. }) {
+        return outcome;
+    }
+    if reference.semantic_id.is_empty()
+        || reference.role.is_empty()
+        || reference.provenance.source_feature_id.is_empty()
+        || reference.provenance.source_revision_id.is_empty()
+        || reference.provenance.source_edge_id.is_empty()
+        || reference.provenance.source_edge_id != reference.semantic_id
+        || reference.evidence.validate().is_err()
+    {
+        return outcome;
+    }
+    let lineage: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.provenance == reference.provenance && candidate.role == reference.role
+        })
+        .collect();
+    if lineage.len() >= 2 && split_fragments_reconstruct_reference(reference, &lineage) {
+        return EdgeReattachmentOutcome::Ambiguous {
+            candidate_ids: sorted_candidate_ids(&lineage),
+        };
+    }
+    outcome
+}
+
+fn sorted_candidate_ids(
+    candidates: &[impl std::borrow::Borrow<PostEditEdgeCandidate>],
+) -> Vec<String> {
+    let mut ids: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.borrow().semantic_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn geometric_match(reference: &EdgeGeometricEvidence, candidate: &EdgeGeometricEvidence) -> bool {
+    let midpoint_delta = reference
+        .midpoint
+        .into_iter()
+        .zip(candidate.midpoint)
+        .map(|(left, right)| (left - right) * (left - right))
+        .sum::<f64>()
+        .sqrt();
+    let reference_tangent_length = reference
+        .tangent
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    let candidate_tangent_length = candidate
+        .tangent
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    let tangent_dot = reference
+        .tangent
+        .into_iter()
+        .zip(candidate.tangent)
+        .map(|(left, right)| left * right)
+        .sum::<f64>()
+        / (reference_tangent_length * candidate_tangent_length);
+    midpoint_delta <= EDGE_MIDPOINT_TOLERANCE
+        && (reference.length - candidate.length).abs() <= EDGE_LENGTH_TOLERANCE
+        && 1.0 - tangent_dot.abs() <= EDGE_TANGENT_TOLERANCE
+}
+
+fn split_fragments_reconstruct_reference(
+    reference: &SelectedEdgeReference,
+    candidates: &[&PostEditEdgeCandidate],
+) -> bool {
+    let direction_length = reference
+        .evidence
+        .tangent
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if direction_length <= f64::EPSILON {
+        return false;
+    }
+    let direction = reference
+        .evidence
+        .tangent
+        .map(|value| value / direction_length);
+    let half_length = reference.evidence.length / 2.0;
+    let mut intervals: Vec<_> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let tangent_length = candidate
+                .evidence
+                .tangent
+                .into_iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            if tangent_length <= f64::EPSILON {
+                return None;
+            }
+            let tangent = candidate
+                .evidence
+                .tangent
+                .map(|value| value / tangent_length);
+            let tangent_dot = direction
+                .into_iter()
+                .zip(tangent)
+                .map(|(left, right)| left * right)
+                .sum::<f64>();
+            let offset = candidate
+                .evidence
+                .midpoint
+                .into_iter()
+                .zip(reference.evidence.midpoint)
+                .map(|(candidate, reference)| candidate - reference)
+                .collect::<Vec<_>>();
+            let along = offset
+                .iter()
+                .zip(direction)
+                .map(|(offset, direction)| offset * direction)
+                .sum::<f64>();
+            let perpendicular_squared = offset
+                .iter()
+                .zip(direction)
+                .map(|(offset, direction)| {
+                    let perpendicular = offset - along * direction;
+                    perpendicular * perpendicular
+                })
+                .sum::<f64>();
+            if 1.0 - tangent_dot.abs() > EDGE_TANGENT_TOLERANCE
+                || perpendicular_squared.sqrt() > EDGE_MIDPOINT_TOLERANCE
+            {
+                return None;
+            }
+            Some((
+                along - candidate.evidence.length / 2.0,
+                along + candidate.evidence.length / 2.0,
+            ))
+        })
+        .collect();
+    if intervals.len() < 2 {
+        return false;
+    }
+    intervals.sort_by(|left, right| left.0.total_cmp(&right.0));
+    if intervals[0].0 > -half_length + EDGE_LENGTH_TOLERANCE {
+        return false;
+    }
+    let mut covered_end = intervals[0].1;
+    for (start, end) in intervals.into_iter().skip(1) {
+        if start > covered_end + EDGE_LENGTH_TOLERANCE {
+            return false;
+        }
+        covered_end = covered_end.max(end);
+    }
+    covered_end >= half_length - EDGE_LENGTH_TOLERANCE
 }
 
 /// Resolve only stable semantic identities. The caller supplies semantic
@@ -921,6 +1235,123 @@ mod tests {
         assert_eq!(
             resolve_semantic_reference(&reference, [("different".to_string(), "definition")]),
             ReferenceOutcome::Lost
+        );
+    }
+
+    fn selected_edge() -> SelectedEdgeReference {
+        SelectedEdgeReference {
+            semantic_id: "edge-source".to_string(),
+            provenance: EdgeProvenance {
+                source_feature_id: "feature-before".to_string(),
+                source_revision_id: "revision-before".to_string(),
+                source_edge_id: "edge-source".to_string(),
+            },
+            role: "outer-perimeter".to_string(),
+            evidence: EdgeGeometricEvidence {
+                midpoint: [10.0, 2.0, 0.0],
+                tangent: [1.0, 0.0, 0.0],
+                length: 20.0,
+            },
+        }
+    }
+
+    fn candidate(id: &str) -> PostEditEdgeCandidate {
+        PostEditEdgeCandidate {
+            semantic_id: id.to_string(),
+            provenance: selected_edge().provenance,
+            role: "outer-perimeter".to_string(),
+            evidence: selected_edge().evidence,
+        }
+    }
+
+    #[test]
+    fn edge_reference_resolves_by_provenance_role_and_geometry_not_candidate_order() {
+        let reference = selected_edge();
+        let mut candidates = vec![candidate("edge-new")];
+        assert_eq!(
+            resolve_edge_reference(&reference, candidates.clone()),
+            EdgeReattachmentOutcome::Resolved {
+                semantic_id: "edge-new".to_string()
+            }
+        );
+        candidates.reverse();
+        assert_eq!(
+            resolve_edge_reference(&reference, candidates),
+            EdgeReattachmentOutcome::Resolved {
+                semantic_id: "edge-new".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn edge_reference_reports_all_explicit_failure_outcomes() {
+        let reference = selected_edge();
+
+        let mut ambiguous = candidate("edge-a");
+        ambiguous.evidence.midpoint[0] += 0.5;
+        assert_eq!(
+            resolve_edge_reference(&reference, [candidate("edge-a"), candidate("edge-b")]),
+            EdgeReattachmentOutcome::Ambiguous {
+                candidate_ids: vec!["edge-a".to_string(), "edge-b".to_string()]
+            }
+        );
+        assert_eq!(
+            resolve_edge_reference(
+                &reference,
+                [PostEditEdgeCandidate {
+                    provenance: EdgeProvenance {
+                        source_feature_id: "other-feature".to_string(),
+                        ..candidate("edge-lost").provenance
+                    },
+                    ..candidate("edge-lost")
+                }]
+            ),
+            EdgeReattachmentOutcome::Lost
+        );
+        let mut wrong_role = candidate("edge-wrong-role");
+        wrong_role.role = "inner-loop".to_string();
+        assert_eq!(
+            resolve_edge_reference(&reference, [wrong_role]),
+            EdgeReattachmentOutcome::Incompatible {
+                candidate_ids: vec!["edge-wrong-role".to_string()]
+            }
+        );
+        ambiguous.evidence.midpoint[0] = 11.0;
+        assert_eq!(
+            resolve_edge_reference(&reference, [ambiguous]),
+            EdgeReattachmentOutcome::Incompatible {
+                candidate_ids: vec!["edge-a".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn edge_reference_rejects_invalid_evidence_without_falling_back() {
+        let mut invalid = candidate("edge-invalid");
+        invalid.evidence.tangent = [0.0; 3];
+        assert_eq!(
+            resolve_edge_reference(&selected_edge(), [invalid]),
+            EdgeReattachmentOutcome::Incompatible {
+                candidate_ids: vec!["edge-invalid".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn split_edge_fragments_remain_ambiguous_when_they_reconstruct_the_source() {
+        let reference = selected_edge();
+        let mut first = candidate("edge-left");
+        first.evidence.midpoint = [5.0, 2.0, 0.0];
+        first.evidence.length = 10.0;
+        let mut second = candidate("edge-right");
+        second.evidence.midpoint = [15.0, 2.0, 0.0];
+        second.evidence.length = 10.0;
+
+        assert_eq!(
+            resolve_split_edge_reference(&reference, [first, second]),
+            EdgeReattachmentOutcome::Ambiguous {
+                candidate_ids: vec!["edge-left".to_string(), "edge-right".to_string()]
+            }
         );
     }
 

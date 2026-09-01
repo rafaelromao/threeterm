@@ -9,18 +9,21 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
-    ComponentCommand, ComponentGraph, FeatureGraph, FitDimension,
-    SketchConstraint as DomainSketchConstraint, SketchDiagnostic as DomainSketchDiagnostic,
-    SketchEntity as DomainSketchEntity, SketchPayload, SolvedCoordinate as DomainSolvedCoordinate,
+    ComponentCommand, ComponentGraph, EdgeReattachmentOutcome, FeatureGraph, FitDimension,
+    PostEditEdgeCandidate, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
+    SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
+    SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
+    resolve_edge_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExtrudeRequest, ExtrudeResult,
-    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, RevolveRequest, RevolveResult, ShellRequest, ShellResult, WorkerError,
+    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
+    ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult,
+    LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
 };
 use threeterm_persistence::{
     Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -391,6 +394,15 @@ pub struct ApplyView {
 pub struct FitDimensionCommitView {
     pub snapshot: SnapshotView,
     pub fit: FitDimension,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeReattachmentView {
+    pub outcome: EdgeReattachmentOutcome,
+    pub source_snapshot: SnapshotView,
+    pub snapshot: SnapshotView,
+    pub edit_feature_id: String,
+    pub committed: bool,
 }
 
 impl From<&LoadedBundle> for SnapshotView {
@@ -1236,6 +1248,26 @@ fn draft_map_key(root: &Path, draft_id: &str) -> (PathBuf, String) {
     (root.to_path_buf(), draft_id.to_string())
 }
 
+fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeCandidate> {
+    result
+        .iter()
+        .map(|candidate| PostEditEdgeCandidate {
+            semantic_id: candidate.semantic_id.clone(),
+            provenance: threeterm_domain::EdgeProvenance {
+                source_feature_id: candidate.source_feature_id.clone(),
+                source_revision_id: candidate.source_revision_id.clone(),
+                source_edge_id: candidate.source_edge_id.clone(),
+            },
+            role: candidate.role.clone(),
+            evidence: threeterm_domain::EdgeGeometricEvidence {
+                midpoint: candidate.midpoint,
+                tangent: candidate.tangent,
+                length: candidate.length,
+            },
+        })
+        .collect()
+}
+
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn export(
@@ -1771,6 +1803,149 @@ impl Host {
                             .response_schema_version,
                     }))
                 }
+                threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID => {
+                    let reference: SelectedEdgeReference =
+                        serde_json::from_value(request.get("reference").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing selected edge reference".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid selected edge reference: {error}"),
+                        })?;
+                    let edit_target: SelectedEdgeReference =
+                        serde_json::from_value(request.get("edit_target").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing edge edit target reference".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid edge edit target reference: {error}"),
+                        })?;
+                    let bundle_path = string_field("bundle_path")?;
+                    let expected_revision = string_field("expected_revision")?;
+                    let edit_feature_id = string_field("edit_feature_id")?;
+                    let edit_kind = string_field("edit_kind")?;
+                    if !matches!(edit_kind, "fillet" | "split") {
+                        return Err(HostError::Validation {
+                            detail: "edge reattachment requires fillet or split".to_string(),
+                        });
+                    }
+                    if edit_kind == "fillet"
+                        && (request.get("plane_point").is_some()
+                            || request.get("plane_normal").is_some())
+                    {
+                        return Err(HostError::Validation {
+                            detail: "fillet edge reattachment does not accept a split plane"
+                                .to_string(),
+                        });
+                    }
+                    let base_feature_id = string_field("base_feature_id")?;
+                    if edit_target.provenance.source_feature_id != base_feature_id
+                        || edit_target.provenance.source_revision_id != expected_revision
+                    {
+                        return Err(HostError::Validation {
+                            detail: "edge edit target provenance does not match edit source"
+                                .to_string(),
+                        });
+                    }
+                    let radius = request
+                        .get("radius")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "edge reattachment requires radius".to_string(),
+                        })?;
+                    let view = if edit_kind == "fillet" {
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        self.reattach_edge_with_fillet(
+                            bundle_path,
+                            expected_revision,
+                            base_feature_id,
+                            edit_feature_id,
+                            radius,
+                            reference,
+                            edit_target,
+                            &worker,
+                        )?
+                    } else {
+                        let plane_point = serde_json::from_value::<[f64; 3]>(
+                            request.get("plane_point").cloned().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "split edge reattachment requires plane_point"
+                                        .to_string(),
+                                }
+                            })?,
+                        )
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid split plane_point: {error}"),
+                        })?;
+                        let plane_normal = serde_json::from_value::<[f64; 3]>(
+                            request.get("plane_normal").cloned().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "split edge reattachment requires plane_normal"
+                                        .to_string(),
+                                }
+                            })?,
+                        )
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid split plane_normal: {error}"),
+                        })?;
+                        if !plane_point
+                            .iter()
+                            .chain(plane_normal.iter())
+                            .all(|component| component.is_finite())
+                            || plane_normal
+                                .iter()
+                                .map(|component| component * component)
+                                .sum::<f64>()
+                                <= f64::EPSILON
+                        {
+                            return Err(HostError::Validation {
+                                detail: "split plane must have finite point and non-zero normal"
+                                    .to_string(),
+                            });
+                        }
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        self.reattach_edge_with_split(
+                            bundle_path,
+                            expected_revision,
+                            base_feature_id,
+                            edit_feature_id,
+                            plane_point,
+                            plane_normal,
+                            reference,
+                            &worker,
+                        )?
+                    };
+                    let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
+                        EdgeReattachmentOutcome::Resolved { semantic_id } => {
+                            ("resolved", Some(semantic_id), Vec::new())
+                        }
+                        EdgeReattachmentOutcome::Ambiguous { candidate_ids } => {
+                            ("ambiguous", None, candidate_ids)
+                        }
+                        EdgeReattachmentOutcome::Lost => ("lost", None, Vec::new()),
+                        EdgeReattachmentOutcome::Incompatible { candidate_ids } => {
+                            ("incompatible", None, candidate_ids)
+                        }
+                    };
+                    Ok(serde_json::json!({
+                        "outcome": outcome,
+                        "selected_edge_id": selected_edge_id.unwrap_or_default(),
+                        "candidate_edge_ids": candidate_edge_ids,
+                        "committed": view.committed,
+                        "edit_feature_id": view.edit_feature_id,
+                        "source_revision": view.source_snapshot.revision_hash,
+                        "revision_hash": view.snapshot.revision_hash,
+                        "schema_version": find(command).expect("reattach-edge is registered").response_schema_version,
+                    }))
+                }
                 _ => Err(HostError::Validation {
                     detail: format!(
                         "command {} is not handled by the domain executor",
@@ -1778,6 +1953,248 @@ impl Host {
                     ),
                 }),
             }
+        })
+    }
+
+    /// Run a real OCCT fillet, resolve the selected edge against evidence
+    /// returned by that worker, and publish neither result nor reference until
+    /// resolution and the source-revision guard have both succeeded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_edge_with_fillet(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        base_feature_id: &str,
+        edit_feature_id: &str,
+        radius: f64,
+        reference: SelectedEdgeReference,
+        edit_target: SelectedEdgeReference,
+        worker: &OcctWorker,
+    ) -> Result<EdgeReattachmentView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        if source_snapshot.revision_hash != expected_revision {
+            return Err(HostError::Validation {
+                detail: "edge edit source revision does not match current revision".to_string(),
+            });
+        }
+        if reference.provenance.source_feature_id != base_feature_id {
+            return Err(HostError::Validation {
+                detail: "edge reference source feature does not match edit base feature"
+                    .to_string(),
+            });
+        }
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "edge reference source revision does not match current revision"
+                    .to_string(),
+            });
+        }
+        if edit_target.provenance.source_feature_id != base_feature_id
+            || edit_target.provenance.source_revision_id != source_snapshot.revision_hash
+        {
+            return Err(HostError::Validation {
+                detail: "edge edit target provenance does not match edit source".to_string(),
+            });
+        }
+        let mut worker_reference = reference.clone();
+        worker_reference.provenance.source_feature_id = base_feature_id.to_string();
+        worker_reference.provenance.source_revision_id = source_snapshot.revision_hash.clone();
+        let request = FilletRequest::new(
+            threeterm_occt_worker::new_request_id(),
+            bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{base_feature_id}.brep")),
+            radius,
+        )
+        .with_output_path(root.join("stage"), format!("{edit_feature_id}.brep"))
+        .with_feature_id(edit_feature_id)
+        .with_selected_edge(SelectedEdgeContext {
+            semantic_id: worker_reference.semantic_id.clone(),
+            source_feature_id: worker_reference.provenance.source_feature_id.clone(),
+            source_revision_id: worker_reference.provenance.source_revision_id.clone(),
+            source_edge_id: worker_reference.provenance.source_edge_id.clone(),
+            role: worker_reference.role.clone(),
+            midpoint: worker_reference.evidence.midpoint,
+            tangent: worker_reference.evidence.tangent,
+            length: worker_reference.evidence.length,
+        });
+        let request = request.with_edit_target(SelectedEdgeContext {
+            semantic_id: edit_target.semantic_id.clone(),
+            source_feature_id: edit_target.provenance.source_feature_id.clone(),
+            source_revision_id: edit_target.provenance.source_revision_id.clone(),
+            source_edge_id: edit_target.provenance.source_edge_id.clone(),
+            role: edit_target.role.clone(),
+            midpoint: edit_target.evidence.midpoint,
+            tangent: edit_target.evidence.tangent,
+            length: edit_target.evidence.length,
+        });
+        let derived = self.stage_occt_result::<FilletResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Fillet,
+            worker,
+        )?;
+        let candidates = domain_edge_candidates(&derived.result.edge_candidates);
+        let outcome = resolve_edge_reference(&worker_reference, candidates);
+        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            if let Some(stage_root) = derived.artifact.path.parent() {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Ok(EdgeReattachmentView {
+                outcome,
+                source_snapshot: source_snapshot.clone(),
+                snapshot: source_snapshot,
+                edit_feature_id: edit_feature_id.to_string(),
+                committed: false,
+            });
+        }
+        let selected_edge_id = match &outcome {
+            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
+            _ => unreachable!(),
+        };
+        let reference_payload = format!(
+            "edge-reattachment:{}",
+            serde_json::json!({
+                "schema": "threeterm.reattach-edge/1",
+                "selected_edge_id": selected_edge_id,
+                "reference": reference,
+            })
+        );
+        let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, _current, _derived, artifact, bytes, provenance| {
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                    &artifact.feature_id,
+                    &reference_payload,
+                    expected_revision,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )?;
+        Ok(EdgeReattachmentView {
+            outcome,
+            source_snapshot,
+            snapshot,
+            edit_feature_id: edit_feature_id.to_string(),
+            committed: true,
+        })
+    }
+
+    /// Run a real OCCT split edit and resolve the selected edge against the
+    /// split descendants. Ambiguous descendants are returned without
+    /// promotion, preserving the canonical revision and feature graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_edge_with_split(
+        &self,
+        root: impl AsRef<Path>,
+        expected_revision: &str,
+        base_feature_id: &str,
+        edit_feature_id: &str,
+        plane_point: [f64; 3],
+        plane_normal: [f64; 3],
+        reference: SelectedEdgeReference,
+        worker: &OcctWorker,
+    ) -> Result<EdgeReattachmentView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        if source_snapshot.revision_hash != expected_revision {
+            return Err(HostError::Validation {
+                detail: "edge edit source revision does not match current revision".to_string(),
+            });
+        }
+        if reference.provenance.source_feature_id != base_feature_id {
+            return Err(HostError::Validation {
+                detail: "edge reference source feature does not match edit base feature"
+                    .to_string(),
+            });
+        }
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "edge reference source revision does not match current revision"
+                    .to_string(),
+            });
+        }
+        let mut worker_reference = reference.clone();
+        worker_reference.provenance.source_feature_id = base_feature_id.to_string();
+        worker_reference.provenance.source_revision_id = source_snapshot.revision_hash.clone();
+        let request = SplitRequest::new(
+            threeterm_occt_worker::new_request_id(),
+            bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{base_feature_id}.brep")),
+            plane_point,
+            plane_normal,
+        )
+        .with_output_path(root.join("stage"), format!("{edit_feature_id}.brep"))
+        .with_feature_id(edit_feature_id)
+        .with_selected_edge(SelectedEdgeContext {
+            semantic_id: worker_reference.semantic_id.clone(),
+            source_feature_id: worker_reference.provenance.source_feature_id.clone(),
+            source_revision_id: worker_reference.provenance.source_revision_id.clone(),
+            source_edge_id: worker_reference.provenance.source_edge_id.clone(),
+            role: worker_reference.role.clone(),
+            midpoint: worker_reference.evidence.midpoint,
+            tangent: worker_reference.evidence.tangent,
+            length: worker_reference.evidence.length,
+        });
+        let derived = self.stage_occt_result::<SplitResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Split,
+            worker,
+        )?;
+        let candidates = domain_edge_candidates(&derived.result.edge_candidates);
+        let outcome = resolve_split_edge_reference(&worker_reference, candidates);
+        if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            if let Some(stage_root) = derived.artifact.path.parent() {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Ok(EdgeReattachmentView {
+                outcome,
+                source_snapshot: source_snapshot.clone(),
+                snapshot: source_snapshot,
+                edit_feature_id: edit_feature_id.to_string(),
+                committed: false,
+            });
+        }
+        let selected_edge_id = match &outcome {
+            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
+            _ => unreachable!(),
+        };
+        let reference_payload = format!(
+            "edge-reattachment:{}",
+            serde_json::json!({
+                "schema": "threeterm.reattach-edge/1",
+                "selected_edge_id": selected_edge_id,
+                "reference": reference,
+            })
+        );
+        let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
+            root,
+            derived,
+            |bundle, _current, _derived, artifact, bytes, provenance| {
+                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                    &artifact.feature_id,
+                    &reference_payload,
+                    expected_revision,
+                    &artifact.request_id,
+                    provenance,
+                    bytes,
+                )
+            },
+        )?;
+        Ok(EdgeReattachmentView {
+            outcome,
+            source_snapshot,
+            snapshot,
+            edit_feature_id: edit_feature_id.to_string(),
+            committed: true,
         })
     }
 
@@ -3028,6 +3445,19 @@ impl Host {
             serde_json::to_value(request).map_err(|error| HostError::Validation {
                 detail: format!("{operation:?} request serialization failed: {error}"),
             })?;
+        if let Some(selected_edge) = request_value.get("selected_edge").cloned() {
+            for (target, source) in [
+                ("selected_edge_id", "semantic_id"),
+                ("source_feature_id", "source_feature_id"),
+                ("source_revision_id", "source_revision_id"),
+                ("source_edge_id", "source_edge_id"),
+                ("selected_role", "role"),
+            ] {
+                if let Some(value) = selected_edge.get(source) {
+                    request_value[target] = value.clone();
+                }
+            }
+        }
         let canonical_request = request_value.clone();
         let request_id = request_value["request_id"]
             .as_str()
@@ -3170,7 +3600,7 @@ impl Host {
                 Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
             ));
         };
-        if result != typed_result {
+        if !json_values_match_worker_result(result, typed_result) {
             return Err(discard_stage(
                 stage,
                 Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
@@ -6290,6 +6720,39 @@ struct WorkerStageCleanup<'a> {
     path: &'a Path,
 }
 
+fn json_values_match_worker_result(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| json_values_match_worker_result(value, other))
+                })
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(value, other)| json_values_match_worker_result(value, other))
+        }
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            left == right
+                || match (left.as_i64(), left.as_u64(), right.as_i64(), right.as_u64()) {
+                    (Some(left), _, Some(right), _) => left == right,
+                    (_, Some(left), _, Some(right)) => left == right,
+                    (Some(left), _, _, Some(right)) => left >= 0 && left as u64 == right,
+                    (_, Some(left), Some(right), _) => right >= 0 && left == right as u64,
+                    _ => left
+                        .as_f64()
+                        .is_some_and(|left| right.as_f64().is_some_and(|right| left == right)),
+                }
+        }
+        (left, right) => left == right,
+    }
+}
+
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
@@ -6320,6 +6783,18 @@ mod tests {
                 .expect("clock is after epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn worker_result_comparison_accepts_equivalent_float_and_integer_numbers() {
+        assert!(json_values_match_worker_result(
+            &serde_json::json!({"edge_candidates": [{"length": 4}]}),
+            &serde_json::json!({"edge_candidates": [{"length": 4.0}]}),
+        ));
+        assert!(!json_values_match_worker_result(
+            &serde_json::json!({"edge_candidates": [{"length": 4}]}),
+            &serde_json::json!({"edge_candidates": [{"length": 5.0}]}),
+        ));
     }
 
     #[test]

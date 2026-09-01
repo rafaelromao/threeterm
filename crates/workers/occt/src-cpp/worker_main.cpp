@@ -2,7 +2,7 @@
 //
 // threeterm-occt-worker: disposable worker binary for the ThreeTerm OCCT
 // geometry kernel. Reads a JSON envelope from stdin, runs the requested
-// operation (extrude, boolean_fuse, fillet, chamfer, hole, revolve,
+// operation (extrude, boolean_fuse, fillet, split, chamfer, hole, revolve,
 // mirror, linear_pattern, circular_pattern, shell, draft, or loft),
 // validates the BREP with BRepCheck_Analyzer, and writes the BREP to the
 // host-staged output path.
@@ -22,6 +22,7 @@
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -35,6 +36,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepTools.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <StlAPI_Writer.hxx>
@@ -47,6 +49,7 @@
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Edge.hxx>
@@ -56,6 +59,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -70,6 +74,7 @@
 #include <Geom_Plane.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopoDS_Face.hxx>
 
 #include <cmath>
@@ -1170,7 +1175,7 @@ bool write_staged_artifact(const JsonParser::Value& request,
         get_string(*binding, "deterministic_settings_sha256");
 
     const bool is_brep_operation = operation == "extrude" || operation == "bracket" ||
-        operation == "boolean_fuse" || operation == "fillet" || operation == "chamfer" ||
+        operation == "boolean_fuse" || operation == "fillet" || operation == "split" || operation == "chamfer" ||
         operation == "hole" || operation == "revolve" || operation == "mirror" ||
         operation == "linear_pattern" || operation == "circular_pattern" ||
         operation == "boolean_pattern" || operation == "shell" || operation == "draft" ||
@@ -1344,6 +1349,97 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
+void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Edge>& edges,
+                            const JsonParser::Value& request) {
+    const auto* selected = find_field(request, "selected_edge");
+    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) {
+        out << ",\"edge_candidates\":[]";
+        return;
+    }
+    const std::string source_feature_id = get_string(*selected, "source_feature_id");
+    const std::string source_revision_id = get_string(*selected, "source_revision_id");
+    const std::string source_edge_id = get_string(*selected, "source_edge_id");
+    bool first = true;
+    out << ",\"edge_candidates\":[";
+    for (const TopoDS_Edge& edge : edges) {
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+        TopoDS_Vertex first_vertex;
+        TopoDS_Vertex last_vertex;
+        TopExp::Vertices(edge, first_vertex, last_vertex);
+        const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+        const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+        gp_Vec tangent(first_point, last_point);
+        if (tangent.SquareMagnitude() <= std::numeric_limits<double>::epsilon()) {
+            tangent = gp_Vec(0.0, 0.0, 1.0);
+        }
+        const gp_Pnt midpoint(
+            (first_point.X() + last_point.X()) / 2.0,
+            (first_point.Y() + last_point.Y()) / 2.0,
+            (first_point.Z() + last_point.Z()) / 2.0);
+        // A candidate role is evidence about the returned edge, not a copy
+        // of the caller's claim. Preserve the MVP perimeter role for linear
+        // edges and expose a distinct role for curved edit results.
+        const std::string role =
+            BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter" : "fillet-transition";
+        std::ostringstream identity;
+        identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
+                 << properties.Mass();
+        if (!first) out << ',';
+        first = false;
+        out << "{\"semantic_id\":\"edge-" << sha256_hex(identity.str()) << "\","
+            << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
+            << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
+            << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
+            << "\"role\":\"" << json_escape(role) << "\","
+            << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
+            << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"
+            << "\"length\":" << properties.Mass() << "}";
+    }
+    out << ']';
+}
+
+TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
+                                    const JsonParser::Value& request,
+                                    const char* field_name) {
+    const auto* selected = find_field(request, field_name);
+    if (selected == nullptr || selected->kind != JsonParser::ValueKind::Object) return {};
+    const auto midpoint = get_vec3(*selected, "midpoint");
+    const auto tangent = get_vec3(*selected, "tangent");
+    const double length = get_number(*selected, "length");
+    const double tangent_length = std::sqrt(
+        tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
+    if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
+
+    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+        TopoDS_Vertex first_vertex;
+        TopoDS_Vertex last_vertex;
+        TopExp::Vertices(edge, first_vertex, last_vertex);
+        const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+        const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+        gp_Vec edge_tangent(first_point, last_point);
+        const gp_Pnt edge_midpoint(
+            (first_point.X() + last_point.X()) / 2.0,
+            (first_point.Y() + last_point.Y()) / 2.0,
+            (first_point.Z() + last_point.Z()) / 2.0);
+        const double midpoint_distance = edge_midpoint.Distance(
+            gp_Pnt(midpoint[0], midpoint[1], midpoint[2]));
+        const double edge_tangent_length = edge_tangent.Magnitude();
+        const double tangent_dot =
+            (edge_tangent.X() * tangent[0] + edge_tangent.Y() * tangent[1] +
+             edge_tangent.Z() * tangent[2]) /
+            (edge_tangent_length * tangent_length);
+        if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
+            1.0 - std::abs(tangent_dot) <= 1e-6) {
+            return edge;
+        }
+    }
+    return {};
+}
+
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
     std::string request_id = get_string(request, "request_id");
     std::string feature_id = get_string(request, "feature_id");
@@ -1379,10 +1475,40 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
+        const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request, "selected_edge");
+        const TopoDS_Edge edit_target_edge = source_edge_for_context(base, request, "edit_target");
         BRepFilletAPI_MakeFillet fillet(base);
-        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+        TopoDS_Edge fallback_edit_edge;
+        TopoDS_Vertex selected_first_vertex;
+        TopoDS_Vertex selected_last_vertex;
+        if (!selected_source_edge.IsNull()) {
+            TopExp::Vertices(selected_source_edge, selected_first_vertex, selected_last_vertex);
+        }
+        if (!edit_target_edge.IsNull()) {
+            fillet.Add(radius, edit_target_edge);
+        }
+        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edit_target_edge.IsNull() && edge_explorer.More(); edge_explorer.Next()) {
             TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+            if (!selected_source_edge.IsNull() && edge.IsSame(selected_source_edge)) continue;
+            if (!selected_source_edge.IsNull()) {
+                if (fallback_edit_edge.IsNull()) fallback_edit_edge = edge;
+                TopoDS_Vertex first_vertex;
+                TopoDS_Vertex last_vertex;
+                TopExp::Vertices(edge, first_vertex, last_vertex);
+                if (first_vertex.IsSame(selected_first_vertex) ||
+                    first_vertex.IsSame(selected_last_vertex) ||
+                    last_vertex.IsSame(selected_first_vertex) ||
+                    last_vertex.IsSame(selected_last_vertex)) {
+                    continue;
+                }
+                fillet.Add(radius, edge);
+                fallback_edit_edge = {};
+                break;
+            }
             fillet.Add(radius, edge);
+        }
+        if (!selected_source_edge.IsNull() && !fallback_edit_edge.IsNull()) {
+            fillet.Add(radius, fallback_edit_edge);
         }
         fillet.Build();
         if (!fillet.IsDone()) {
@@ -1410,6 +1536,34 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             status = "brep_invalid";
         }
 
+        std::vector<TopoDS_Edge> edge_candidates;
+        if (!selected_source_edge.IsNull()) {
+            const TopTools_ListOfShape& modified = fillet.Modified(selected_source_edge);
+            for (TopTools_ListIteratorOfListOfShape iterator(modified); iterator.More();
+                 iterator.Next()) {
+                if (iterator.Value().ShapeType() == TopAbs_EDGE) {
+                    edge_candidates.push_back(TopoDS::Edge(iterator.Value()));
+                }
+            }
+            const TopTools_ListOfShape& generated = fillet.Generated(selected_source_edge);
+            for (TopTools_ListIteratorOfListOfShape iterator(generated); iterator.More();
+                 iterator.Next()) {
+                if (iterator.Value().ShapeType() == TopAbs_EDGE) {
+                    edge_candidates.push_back(TopoDS::Edge(iterator.Value()));
+                }
+            }
+            if (edge_candidates.empty()) {
+                for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More();
+                     explorer.Next()) {
+                    const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+                    if (edge.IsSame(selected_source_edge)) {
+                        edge_candidates.push_back(edge);
+                        break;
+                    }
+                }
+            }
+        }
+
         std::ostringstream out;
         out << "{"
             << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
@@ -1419,8 +1573,9 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
             << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
             << "\"brep_sha256\":\"" << json_escape(sha) << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
-            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
-            << "}";
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\"";
+        append_edge_candidates(out, edge_candidates, request);
+        out << "}";
         g_result_json = out.str();
         return status == "ok";
     } catch (const Standard_Failure& e) {
@@ -1430,6 +1585,184 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
     } catch (const std::exception& e) {
         error = "std::exception during fillet: ";
         error += e.what();
+        return false;
+    }
+}
+
+std::vector<TopoDS_Edge> split_descendants(BRepAlgoAPI_Splitter& splitter,
+                                           const TopoDS_Edge& source_edge,
+                                           const TopoDS_Shape& result) {
+    std::vector<TopoDS_Edge> descendants;
+    if (source_edge.IsNull()) return descendants;
+    GProp_GProps source_properties;
+    BRepGProp::LinearProperties(source_edge, source_properties);
+    const auto append_unique = [&descendants, &source_edge, &source_properties](
+                                   const TopTools_ListOfShape& shapes) {
+        for (TopTools_ListIteratorOfListOfShape iterator(shapes); iterator.More();
+             iterator.Next()) {
+            if (iterator.Value().ShapeType() != TopAbs_EDGE) continue;
+            const TopoDS_Edge edge = TopoDS::Edge(iterator.Value());
+            if (edge.IsSame(source_edge)) continue;
+            GProp_GProps properties;
+            BRepGProp::LinearProperties(edge, properties);
+            if (properties.Mass() >= source_properties.Mass() - 1e-6) continue;
+            const bool already_present = std::any_of(
+                descendants.begin(), descendants.end(),
+                [&edge](const TopoDS_Edge& candidate) { return candidate.IsSame(edge); });
+            if (!already_present) descendants.push_back(edge);
+        }
+    };
+    append_unique(splitter.Modified(source_edge));
+    append_unique(splitter.Generated(source_edge));
+
+    // Some OCCT versions expose split descendants only through the result.
+    // Keep the fallback grounded in the source edge's actual line geometry.
+    TopoDS_Vertex first_vertex;
+    TopoDS_Vertex last_vertex;
+    TopExp::Vertices(source_edge, first_vertex, last_vertex);
+    const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+    const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+    const gp_Vec source_direction(first_point, last_point);
+    for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(edge, properties);
+        TopoDS_Vertex edge_first;
+        TopoDS_Vertex edge_last;
+        TopExp::Vertices(edge, edge_first, edge_last);
+        const gp_Pnt edge_first_point = BRep_Tool::Pnt(edge_first);
+        const gp_Pnt edge_last_point = BRep_Tool::Pnt(edge_last);
+        const gp_Pnt edge_midpoint(
+            (edge_first_point.X() + edge_last_point.X()) / 2.0,
+            (edge_first_point.Y() + edge_last_point.Y()) / 2.0,
+            (edge_first_point.Z() + edge_last_point.Z()) / 2.0);
+        const gp_Vec edge_direction(edge_first_point, edge_last_point);
+        if (source_direction.SquareMagnitude() > 0.0 && edge_direction.SquareMagnitude() > 0.0 &&
+            !edge.IsSame(source_edge) &&
+            properties.Mass() < source_properties.Mass() - 1e-6 &&
+            source_direction.Crossed(gp_Vec(first_point, edge_midpoint)).Magnitude() /
+                    source_direction.Magnitude() <= 1e-6 &&
+            std::abs(source_direction.Dot(edge_direction)) /
+                    (source_direction.Magnitude() * edge_direction.Magnitude()) > 1.0 - 1e-6) {
+            const bool already_present = std::any_of(
+                descendants.begin(), descendants.end(),
+                [&edge](const TopoDS_Edge& candidate) { return candidate.IsSame(edge); });
+            if (!already_present) descendants.push_back(edge);
+        }
+    }
+    return descendants;
+}
+
+bool handle_split(const JsonParser::Value& request, std::string& error) {
+    const std::string request_id = get_string(request, "request_id");
+    const std::string feature_id = get_string(request, "feature_id");
+    const std::string base_path_str = get_string(request, "base_path");
+    const std::string output_dir = get_string(request, "output_dir");
+    const std::string output_filename = get_string(request, "output_filename");
+    const auto plane_point = get_vec3(request, "plane_point");
+    const auto plane_normal = get_vec3(request, "plane_normal");
+    const double normal_length = std::sqrt(
+        plane_normal[0] * plane_normal[0] + plane_normal[1] * plane_normal[1] +
+        plane_normal[2] * plane_normal[2]);
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() || output_dir.empty() ||
+        output_filename.empty()) {
+        error = "split request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    if (!std::all_of(plane_point.begin(), plane_point.end(), [](double value) {
+            return std::isfinite(value);
+        }) ||
+        !std::all_of(plane_normal.begin(), plane_normal.end(), [](double value) {
+            return std::isfinite(value);
+        }) ||
+        !(normal_length > 0.0)) {
+        error = "split plane must have finite point and non-zero normal";
+        return false;
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder) || base.IsNull()) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        Bnd_Box bounds;
+        BRepBndLib::Add(base, bounds);
+        double xmin = 0.0;
+        double ymin = 0.0;
+        double zmin = 0.0;
+        double xmax = 0.0;
+        double ymax = 0.0;
+        double zmax = 0.0;
+        bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        const double diagonal = std::sqrt((xmax - xmin) * (xmax - xmin) +
+                                          (ymax - ymin) * (ymax - ymin) +
+                                          (zmax - zmin) * (zmax - zmin));
+        if (!(diagonal > 0.0) || !std::isfinite(diagonal)) {
+            error = "base BREP has no finite bounding box";
+            return false;
+        }
+        const double extent = diagonal * 2.0 + 1.0;
+        const gp_Pln plane(
+            gp_Pnt(plane_point[0], plane_point[1], plane_point[2]),
+            gp_Dir(plane_normal[0], plane_normal[1], plane_normal[2]));
+        BRepBuilderAPI_MakeFace plane_builder(plane, -extent, extent, -extent, extent);
+        if (!plane_builder.IsDone()) {
+            error = "could not build split plane";
+            return false;
+        }
+
+        TopTools_ListOfShape arguments;
+        arguments.Append(base);
+        TopTools_ListOfShape tools;
+        tools.Append(plane_builder.Face());
+        BRepAlgoAPI_Splitter splitter;
+        splitter.SetArguments(arguments);
+        splitter.SetTools(tools);
+        splitter.Build();
+        if (!splitter.IsDone() || splitter.Shape().IsNull()) {
+            error = "BRepAlgoAPI_Splitter did not complete";
+            return false;
+        }
+        const TopoDS_Shape result = splitter.Shape();
+        // Resolve the source edge against the input as well: the selected
+        // context describes the pre-edit topology, not the split result.
+        const TopoDS_Edge source_input_edge = source_edge_for_context(base, request, "selected_edge");
+        const auto candidates = split_descendants(splitter, source_input_edge, result);
+
+        const std::filesystem::path output_path =
+            std::filesystem::path(output_dir) / output_filename;
+        if (!write_brep(result, output_path, error)) return false;
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        const std::string sha = sha256_hex(bytes.str());
+        const std::string status = analyze_brep(result) ? "ok" : "brep_invalid";
+        std::ostringstream out;
+        out << "{\"schema_version\":\"" << json_escape(kSchemaVersion)
+            << "\",\"request_id\":\"" << json_escape(request_id)
+            << "\",\"operation\":\"split\",\"status\":\"" << status
+            << "\",\"brep_path\":\"" << json_escape(output_path.string())
+            << "\",\"brep_sha256\":\"" << json_escape(sha)
+            << "\",\"brep_bytes\":" << bytes.str().size()
+            << ",\"feature_id\":\"" << json_escape(feature_id) << "\"";
+        append_edge_candidates(out, candidates, request);
+        out << "}";
+        g_result_json = out.str();
+        if (status != "ok") error = "brep_invalid: BRepCheck_Analyzer failed";
+        return status == "ok";
+    } catch (const Standard_Failure& exception) {
+        error = "OCCT exception during split: ";
+        error += exception.GetMessageString();
+        return false;
+    } catch (const std::exception& exception) {
+        error = "std::exception during split: ";
+        error += exception.what();
         return false;
     }
 }
@@ -3004,6 +3337,8 @@ int main() {
         success = handle_boolean_fuse(*args, error);
     } else if (command_id == "fillet") {
         success = handle_fillet(*args, error);
+    } else if (command_id == "split") {
+        success = handle_split(*args, error);
     } else if (command_id == "chamfer") {
         success = handle_chamfer(*args, error);
     } else if (command_id == "hole") {

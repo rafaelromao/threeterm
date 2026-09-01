@@ -22,8 +22,9 @@ use threeterm_protocol::schema::{
     CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
     EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
     HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
-    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
+    REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
+    find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
@@ -137,6 +138,18 @@ enum DispatchPlan {
         feature_id: String,
         profile_file: String,
         height: f64,
+    },
+    ReattachEdge {
+        bundle: String,
+        expected_revision: String,
+        edit_feature_id: String,
+        edit_kind: String,
+        base_feature_id: String,
+        radius: f64,
+        reference: Value,
+        edit_target: Value,
+        plane_point: Option<[f64; 3]>,
+        plane_normal: Option<[f64; 3]>,
     },
     FitDimension {
         bundle: String,
@@ -526,6 +539,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "timeline" => parse_timeline(&args[2..]),
         "replay-verify" => parse_replay_verify(&args[2..]),
         "extrude" => parse_extrude(&args[2..]),
+        "reattach-edge" => parse_reattach_edge(&args[2..]),
         "fit-dimension" => parse_fit_dimension(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
         "boolean-pattern" => parse_boolean_pattern(&args[2..]),
@@ -708,6 +722,19 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             .iter()
             .all(|value| value.is_finite()),
         DispatchPlan::FitDimension { clearance, .. } => clearance.is_finite(),
+        DispatchPlan::ReattachEdge {
+            radius,
+            plane_point,
+            plane_normal,
+            ..
+        } => {
+            radius.is_finite()
+                && plane_point
+                    .iter()
+                    .chain(plane_normal.iter())
+                    .flatten()
+                    .all(|value| value.is_finite())
+        }
         DispatchPlan::BooleanPattern {
             origin,
             spacing,
@@ -1484,6 +1511,181 @@ fn parse_extrude(args: &[OsString]) -> DispatchPlan {
         feature_id,
         profile_file,
         height,
+    }
+}
+
+fn parse_reattach_edge(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "reattach-edge".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
+    let mut edit_feature_id: Option<String> = None;
+    let mut edit_kind: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut radius: Option<f64> = None;
+    let mut reference: Option<Value> = None;
+    let mut edit_target: Option<Value> = None;
+    let mut plane_point: Option<[f64; 3]> = None;
+    let mut plane_normal: Option<[f64; 3]> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--edit-feature-id" => {
+                    edit_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--edit-kind" => {
+                    edit_kind = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--radius" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        radius = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--radius {value_str}"),
+                        };
+                    }
+                },
+                "--reference" => match serde_json::from_str(&value_str) {
+                    Ok(parsed) => {
+                        reference = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--reference {value_str}"),
+                        };
+                    }
+                },
+                "--edit-target" => match serde_json::from_str(&value_str) {
+                    Ok(parsed) => {
+                        edit_target = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--edit-target {value_str}"),
+                        };
+                    }
+                },
+                "--plane-point" => match parse_vec3(&value_str, "--plane-point") {
+                    Ok(parsed) => {
+                        plane_point = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(error) => return error,
+                },
+                "--plane-normal" => match parse_vec3(&value_str, "--plane-normal") {
+                    Ok(parsed) => {
+                        plane_normal = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(error) => return error,
+                },
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(expected_revision) = expected_revision else {
+        return DispatchPlan::Unknown {
+            arg: "--expected-revision".to_string(),
+        };
+    };
+    let Some(edit_feature_id) = edit_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-feature-id".to_string(),
+        };
+    };
+    let Some(edit_kind) = edit_kind else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-kind".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(radius) = radius else {
+        return DispatchPlan::Unknown {
+            arg: "--radius".to_string(),
+        };
+    };
+    let Some(reference) = reference else {
+        return DispatchPlan::Unknown {
+            arg: "--reference".to_string(),
+        };
+    };
+    let Some(edit_target) = edit_target else {
+        return DispatchPlan::Unknown {
+            arg: "--edit-target".to_string(),
+        };
+    };
+    if edit_kind == "split" && (plane_point.is_none() || plane_normal.is_none()) {
+        return DispatchPlan::Unknown {
+            arg: "--plane-point/--plane-normal".to_string(),
+        };
+    }
+    if edit_kind == "fillet" && (plane_point.is_some() || plane_normal.is_some()) {
+        return DispatchPlan::Unknown {
+            arg: "--plane-point/--plane-normal".to_string(),
+        };
+    }
+    DispatchPlan::ReattachEdge {
+        bundle,
+        expected_revision,
+        edit_feature_id,
+        edit_kind,
+        base_feature_id,
+        radius,
+        reference,
+        edit_target,
+        plane_point,
+        plane_normal,
     }
 }
 
@@ -3002,6 +3204,13 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
+        DispatchPlan::ReattachEdge { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, REATTACH_EDGE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::FitDimension {
             bundle,
             expected_revision,
@@ -3371,7 +3580,11 @@ pub fn dispatch_registered_command(
 ) -> Result<Value, DispatchError> {
     if matches!(
         command,
-        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
+        IDENTITY_COMMAND_ID
+            | APPLY_COMMAND_ID
+            | EXTRUDE_COMMAND_ID
+            | BOOLEAN_PATTERN_COMMAND_ID
+            | REATTACH_EDGE_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)
@@ -4093,6 +4306,7 @@ fn execute_registered_with_observer(
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
+            | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
     ) {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
@@ -4236,6 +4450,36 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             height,
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "height": height })
+        }
+        DispatchPlan::ReattachEdge {
+            bundle,
+            expected_revision,
+            edit_feature_id,
+            edit_kind,
+            base_feature_id,
+            radius,
+            reference,
+            edit_target,
+            plane_point,
+            plane_normal,
+        } => {
+            let mut request = json!({
+                "bundle_path": bundle,
+                "expected_revision": expected_revision,
+                "edit_feature_id": edit_feature_id,
+                "edit_kind": edit_kind,
+                "base_feature_id": base_feature_id,
+                "radius": radius,
+                "reference": reference,
+                "edit_target": edit_target,
+            });
+            if let Some(plane_point) = plane_point {
+                request["plane_point"] = json!(plane_point);
+            }
+            if let Some(plane_normal) = plane_normal {
+                request["plane_normal"] = json!(plane_normal);
+            }
+            request
         }
         DispatchPlan::FitDimension {
             bundle,
@@ -5985,7 +6229,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 37);
+        assert_eq!(commands.len(), 38);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

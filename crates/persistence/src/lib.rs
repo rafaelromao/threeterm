@@ -2679,6 +2679,7 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "loft"
             | "history-feature"
     ) || is_supported_brep_kind(kind)
+        || is_supported_edge_reattachment_kind(kind)
         || is_supported_bracket_kind(kind)
         || matches!(kind, "plate-vertical" | "plate-horizontal")
         || is_supported_sketch_segment_kind(kind)
@@ -2692,6 +2693,23 @@ fn is_supported_brep_kind(kind: &str) -> bool {
         && feature_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_supported_edge_reattachment_kind(kind: &str) -> bool {
+    let Some(payload) = kind.strip_prefix("edge-reattachment:") else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    payload.get("schema").and_then(serde_json::Value::as_str) == Some("threeterm.reattach-edge/1")
+        && payload
+            .get("selected_edge_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        && payload
+            .get("reference")
+            .is_some_and(serde_json::Value::is_object)
 }
 
 fn is_supported_sketch_segment_kind(kind: &str) -> bool {

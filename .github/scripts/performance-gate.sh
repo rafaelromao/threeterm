@@ -120,6 +120,8 @@ verify_performance_material() {
     committed_limitations_digest="$(git -C "$root" show "${expected_commit}:${limitations}" | sha256sum | cut -d' ' -f1)"
     [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
         || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
+    [[ "$(sha256sum "$root/$limitations" | cut -d' ' -f1)" == "$limitations_digest" ]] \
+        || { performance_gate_fail 'six-gate limitations document has changed since signing'; return 1; }
     for limitation in fixture renderer terminal compositor 'project-scale' 'warm and cold' \
         'input-to-photon' 'human-usability' 'unexercised'; do
         grep -Fqi "$limitation" "$root/$limitations" \

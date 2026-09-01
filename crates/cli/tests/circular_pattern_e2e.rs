@@ -95,7 +95,7 @@ fn circular_pattern_cli_drives_host_to_commit_a_patterned_brep() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root("commit");
     new_project(bin, &root);
-    save(bin, &root, "circular-pattern-seed", "circular-pattern");
+    save(bin, &root, "circular-pattern-seed", "box");
 
     let rect_profile = serde_json::json!([[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
     extrude(bin, &root, "circular-pattern-base", rect_profile, 2.0);

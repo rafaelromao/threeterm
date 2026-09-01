@@ -50,6 +50,8 @@ build_release_bundle() {
         || { release_artifact_fail "invalid release tag: ${tag}"; return 1; }
     actual_commit="$(git -C "$source_root" rev-parse HEAD)" \
         || { release_artifact_fail 'unable to resolve source commit'; return 1; }
+    [[ -z "$(git -C "$source_root" status --porcelain --untracked-files=all)" ]] \
+        || { release_artifact_fail 'source checkout must be clean before bundling'; return 1; }
     [[ "$actual_commit" == "$expected_commit" && "$expected_commit" =~ ^[0-9a-f]{40}$ ]] \
         || { release_artifact_fail 'release bundle source commit is not the verified checkout commit'; return 1; }
 

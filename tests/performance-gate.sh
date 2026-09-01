@@ -116,18 +116,16 @@ gate_5_date: ${today}
 gate_6: PASS
 gate_6_signature: Release Owner
 gate_6_date: ${today}
-comparison: class=project_create rc1=measured rc2=measured same_order=YES
-comparison: class=bracket_create rc1=measured rc2=measured same_order=YES
-comparison: class=edit_open rc1=measured rc2=measured same_order=YES
-comparison: class=edit_update rc1=measured rc2=measured same_order=YES
-comparison: class=edit_preview rc1=measured rc2=measured same_order=YES
-comparison: class=edit_commit rc1=measured rc2=measured same_order=YES
-comparison: class=reload rc1=measured rc2=measured same_order=YES
-comparison: class=export rc1=measured rc2=measured same_order=YES
-comparison: class=catalog rc1=measured rc2=measured same_order=YES
 claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT
 <!-- PERFORMANCE-RECORD:END -->
 EOF
+while IFS=$'\t' read -r class rc1 rc2; do
+    printf 'comparison: class=%s rc1=%s rc2=%s same_order=YES\n' "$class" "$rc1" "$rc2"
+done < <(jq -r '.comparisons[] | [.class, .run_1.p50_ms, .run_2.p50_ms] | @tsv' "${evidence}") \
+    >"${WORK}/comparisons"
+awk -v comparisons="${WORK}/comparisons" '/^claim: / { while ((getline line < comparisons) > 0) print line } { print }' \
+    "${record}" >"${WORK}/record-with-comparisons"
+mv "${WORK}/record-with-comparisons" "${record}"
 material="${WORK}/notes.md"
 printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' >"${material}"
 

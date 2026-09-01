@@ -165,7 +165,6 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
             print "gate_" i "_date: " today
         }
         split("project_create bracket_create edit_open edit_update edit_preview edit_commit reload export catalog", classes, " ")
-        for (i = 1; i <= 9; i++) print "comparison: class=" classes[i] " rc1=measured rc2=measured same_order=YES"
         print "claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT"
         inside = 1
         next
@@ -174,6 +173,13 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
     !inside { print }
 ' "${release_root}/docs/release/six-gate-performance-claims-gate.md" \
     >"${tmpdir}/signed-performance.md"
+while IFS=$'\t' read -r class rc1 rc2; do
+    printf 'comparison: class=%s rc1=%s rc2=%s same_order=YES\n' "$class" "$rc1" "$rc2"
+done < <(jq -r '.comparisons[] | [.class, .run_1.p50_ms, .run_2.p50_ms] | @tsv' \
+    "${release_root}/${evidence_path}") >"${tmpdir}/comparisons"
+awk -v comparisons="${tmpdir}/comparisons" '/^claim: / { while ((getline line < comparisons) > 0) print line } { print }' \
+    "${tmpdir}/signed-performance.md" >"${tmpdir}/record-with-comparisons"
+mv "${tmpdir}/record-with-comparisons" "${tmpdir}/signed-performance.md"
 mv "${tmpdir}/signed-performance.md" \
     "${release_root}/docs/release/six-gate-performance-claims-gate.md"
 git -C "${release_root}" add docs/release/six-gate-performance-claims-gate.md

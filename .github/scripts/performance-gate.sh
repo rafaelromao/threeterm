@@ -14,7 +14,7 @@ performance_gate_block() {
 }
 
 performance_gate_claim_language() {
-    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|fast|slow|quick|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|s|sec|secs|second|seconds|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
+    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|fast|slow|quick|efficient|efficiency|optimi[sz]|CPU|resource|responsive|load[[:space:]]+time|render[[:space:]]+time|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|s|sec|secs|second|seconds|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
 }
 
 performance_gate_claim_lines() {
@@ -236,7 +236,9 @@ verify_performance_material() {
         while IFS= read -r comparison; do
             comparison_prefix="comparison: class=${comparison_class} "
             comparison_suffix="${comparison#"$comparison_prefix"}"
-            if [[ "$comparison_suffix" != "$comparison" && "$comparison_suffix" =~ ^rc1=[^[:space:]]+[[:space:]]rc2=[^[:space:]]+[[:space:]]same_order=YES$ ]]; then
+            expected_rc1="$(jq -er --arg class "$comparison_class" '.comparisons[] | select(.class == $class) | .run_1.p50_ms' "$root/$evidence")"
+            expected_rc2="$(jq -er --arg class "$comparison_class" '.comparisons[] | select(.class == $class) | .run_2.p50_ms' "$root/$evidence")"
+            if [[ "$comparison" == "comparison: class=${comparison_class} rc1=${expected_rc1} rc2=${expected_rc2} same_order=YES" ]]; then
                 comparison_match=1
                 break
             fi

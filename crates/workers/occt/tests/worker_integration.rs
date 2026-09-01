@@ -73,7 +73,8 @@ fn required_fixture_worker(test_name: &str) -> Option<OcctWorker> {
 
 #[test]
 fn extrude_rectangle_returns_ok_with_real_brep() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) = required_fixture_worker("subtractive_extrude_cuts_a_semantic_target_solid")
+    else {
         return;
     };
     let temp = std::env::temp_dir().join(format!("threeterm-occt-extrude-{}", std::process::id()));

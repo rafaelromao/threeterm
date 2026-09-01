@@ -564,7 +564,8 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
     let cli_root = root("subtractive-cli");
     let mcp_root = root("subtractive-mcp");
     let tui_root = root("subtractive-tui");
-    let Some(worker) = OcctWorker::locate().ok() else {
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_subtractive_extrusions")
+    else {
         let _ = fs::remove_dir_all(&cli_root);
         let _ = fs::remove_dir_all(&mcp_root);
         let _ = fs::remove_dir_all(&tui_root);
@@ -623,6 +624,19 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
     let _ = fs::remove_dir_all(tui_root);
 }
 
+fn required_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("CI").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("{test_name}: OCCT worker is required: {error}")
+        }
+        Err(_) => None,
+    }
+}
+
 #[test]
 fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
     let cli_root = root("invalid-subtractive-cli");
@@ -653,13 +667,19 @@ fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
         }),
     });
     let mcp = mcp.result.expect("MCP returns a tool error result");
-    assert!(format!("{cli:?}").contains("target feature is missing"));
-    assert!(format!("{tui:?}").contains("target feature is missing"));
+    let normalize = |diagnostic: &str| {
+        diagnostic
+            .contains("subtractive extrude target feature is missing: base")
+            .then_some("subtractive extrude target feature is missing: base")
+    };
+    assert_eq!(
+        normalize(&format!("{cli:?}")),
+        normalize(&format!("{tui:?}"))
+    );
     assert_eq!(mcp["isError"], true);
-    assert!(
-        mcp["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("target feature is missing"))
+    assert_eq!(
+        normalize(mcp["content"][0]["text"].as_str().unwrap_or_default()),
+        Some("subtractive extrude target feature is missing: base")
     );
     for path in [cli_root, mcp_root, tui_root] {
         let _ = fs::remove_dir_all(path);

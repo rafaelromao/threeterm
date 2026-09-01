@@ -376,6 +376,11 @@ impl CanonicalExtrudeIntent {
             ));
         }
         let mode = if self.mode.is_empty() {
+            if self.schema_version != LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION {
+                return Err(BundleError::Invalid(
+                    "current canonical extrude intent must declare mode".to_string(),
+                ));
+            }
             self.operation.as_str()
         } else {
             if self.mode != self.operation {

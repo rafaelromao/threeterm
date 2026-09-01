@@ -205,7 +205,9 @@ fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
 
 #[test]
 fn extrude_commits_brep_into_a_new_revision() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) = required_fixture_worker(
+        "subtractive_extrude_replays_and_exports_the_same_cut_after_derived_deletion",
+    ) else {
         return;
     };
     let root = fresh_bundle_with_feature("commit", "box-seed", "box");
@@ -231,7 +233,9 @@ fn extrude_commits_brep_into_a_new_revision() {
 
 #[test]
 fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() {
-    let Some(worker) = locate_worker() else {
+    let Some(worker) =
+        required_fixture_worker("invalid_subtractive_cut_preserves_the_prior_revision_snapshot")
+    else {
         return;
     };
     let root = fresh_bundle_with_feature("replay", "box-seed", "box");

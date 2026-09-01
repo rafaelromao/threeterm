@@ -1009,7 +1009,10 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
         error = "output_filename must not contain a path separator";
         return false;
     }
-    if (mode.empty()) mode = "additive";
+    if (mode.empty()) {
+        error = "extrude mode is required";
+        return false;
+    }
     if (mode != "additive" && mode != "subtractive") {
         error = "extrude mode must be additive or subtractive";
         return false;

@@ -1650,8 +1650,12 @@ impl Host {
                     .with_mode(mode)
                     .with_optional_target_feature_id(target_feature_id.clone())
                     .with_feature_id(string_field("feature_id")?);
-                    let extrusion =
-                        self.resolve_extrude_request(Path::new(&bundle_path), extrusion)?;
+                    let source_snapshot = self.load(&bundle_path)?;
+                    let extrusion = self.resolve_extrude_request(
+                        Path::new(&bundle_path),
+                        extrusion,
+                        Some(&source_snapshot.revision_hash),
+                    )?;
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
@@ -4671,11 +4675,20 @@ impl Host {
         &self,
         root: &Path,
         mut request: ExtrudeRequest,
+        expected_revision: Option<&str>,
     ) -> Result<ExtrudeRequest, HostError> {
         if request.mode == ExtrudeMode::Additive {
             if request.target_feature_id.is_some() || request.target_path.is_some() {
                 return Err(HostError::Validation {
                     detail: "additive extrude must not have a target".to_string(),
+                });
+            }
+            if let Some(expected) = expected_revision
+                && Bundle::at(root).open()?.manifest.revision_hash != expected
+            {
+                return Err(HostError::Validation {
+                    detail: "extrude source Revision Snapshot changed; retry the command"
+                        .to_string(),
                 });
             }
             return Ok(request);
@@ -4688,6 +4701,11 @@ impl Host {
                     detail: "subtractive extrude requires target_feature_id".to_string(),
                 })?;
         let loaded = Bundle::at(root).open()?;
+        if expected_revision.is_some_and(|expected| loaded.manifest.revision_hash != expected) {
+            return Err(HostError::Validation {
+                detail: "extrude source Revision Snapshot changed; retry the command".to_string(),
+            });
+        }
         if !loaded.graph.contains_feature(&target_feature_id) {
             return Err(HostError::Validation {
                 detail: format!(
@@ -4704,6 +4722,42 @@ impl Host {
         if !target_path.is_file() {
             return Err(HostError::BrepFileMissing { path: target_path });
         }
+        let loaded = Bundle::at(root).open()?;
+        if expected_revision.is_some_and(|expected| loaded.manifest.revision_hash != expected) {
+            return Err(HostError::Validation {
+                detail: "extrude source Revision Snapshot changed; retry the command".to_string(),
+            });
+        }
+        let target_entry = loaded
+            .log
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.feature_id == target_feature_id
+                    && entry.brep_byte_count.is_some()
+                    && entry.brep_sha256.is_some()
+            })
+            .ok_or_else(|| HostError::Validation {
+                detail: format!(
+                    "subtractive extrude target has no authenticated geometry: {target_feature_id}"
+                ),
+            })?;
+        let expected_bytes = target_entry
+            .brep_byte_count
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: "subtractive target BREP byte count is invalid".to_string(),
+            })?;
+        let expected_sha256 =
+            target_entry
+                .brep_sha256
+                .as_deref()
+                .ok_or_else(|| HostError::BrepIo {
+                    detail: "subtractive target BREP digest is missing".to_string(),
+                })?;
+        read_brep_verified(&target_path, Some((expected_bytes, expected_sha256)))
+            .map_err(|detail| HostError::BrepIo { detail })?;
         request.target_path = Some(target_path);
         request
             .validate()
@@ -4721,9 +4775,10 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeDerivedResult, HostError> {
         let root = root.as_ref();
-        worker.verify_identity().map_err(HostError::from)?;
-        let request = self.resolve_extrude_request(root, request)?;
         let source_snapshot = self.load(root)?;
+        worker.verify_identity().map_err(HostError::from)?;
+        let request =
+            self.resolve_extrude_request(root, request, Some(&source_snapshot.revision_hash))?;
 
         let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
         let stage = Stage::create_fresh(root.join(".derived"), "extrude").map_err(|error| {
@@ -5554,7 +5609,9 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
-        let request = self.resolve_extrude_request(root, request)?;
+        let source_snapshot = self.load(root)?;
+        let request =
+            self.resolve_extrude_request(root, request, Some(&source_snapshot.revision_hash))?;
         let derived = self.stage_occt_result::<ExtrudeResult>(
             root,
             &request,
@@ -5583,7 +5640,9 @@ impl Host {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
-        let request = self.resolve_extrude_request(root, request)?;
+        let source_snapshot = self.load(root)?;
+        let request =
+            self.resolve_extrude_request(root, request, Some(&source_snapshot.revision_hash))?;
         let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
         let derived = self.stage_occt_result_inner::<ExtrudeResult>(
             root,

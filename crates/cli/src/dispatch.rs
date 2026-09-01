@@ -1569,10 +1569,28 @@ fn parse_boolean_pattern(args: &[OsString]) -> DispatchPlan {
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy().into_owned();
+        if !matches!(
+            flag.as_str(),
+            "--bundle"
+                | "--feature-id"
+                | "--base"
+                | "--origin"
+                | "--spacing"
+                | "--columns"
+                | "--rows"
+                | "--diameter"
+        ) {
+            return DispatchPlan::Unknown { arg: flag };
+        }
         let Some(value) = args.get(index + 1) else {
             return DispatchPlan::Unknown { arg: flag };
         };
-        values.insert(flag, value.to_string_lossy().into_owned());
+        if values
+            .insert(flag.clone(), value.to_string_lossy().into_owned())
+            .is_some()
+        {
+            return DispatchPlan::Unknown { arg: flag };
+        }
         index += 2;
     }
     let required = |flag: &str| {

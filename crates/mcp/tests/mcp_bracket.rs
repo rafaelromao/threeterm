@@ -443,7 +443,6 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
 }
 
 #[test]
-#[ignore = "slow: runs real OCCT through the production MCP subprocess"]
 fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
     if OcctWorker::locate().is_err() {
         return;
@@ -470,7 +469,6 @@ fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
 }
 
 #[test]
-#[ignore = "slow: cancels real OCCT through the production MCP subprocess"]
 fn production_mcp_cancels_real_boolean_pattern_before_commit() {
     if OcctWorker::locate().is_err() {
         return;

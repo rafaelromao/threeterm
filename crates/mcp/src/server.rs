@@ -728,9 +728,11 @@ impl McpServer {
                         }
                         handled += 1;
                     }
-                    RunEvent::Request(request)
-                        if !request.is_notification && is_boolean_pattern_call(&request) =>
-                    {
+                    RunEvent::Request(request) if is_boolean_pattern_call(&request) => {
+                        if request.is_notification {
+                            handled += 1;
+                            continue;
+                        }
                         let arguments = request
                             .params
                             .get("arguments")
@@ -860,6 +862,14 @@ impl McpServer {
                             .as_ref()
                             .is_some_and(|request| request.request_key == event_key)
                         {
+                            while let Ok(request) = cancellation_receive.try_recv() {
+                                if cancellation_targets(&request, &event_key)
+                                    && let Some(active) = &active
+                                {
+                                    active.cancel.store(true, Ordering::SeqCst);
+                                }
+                                handled += 1;
+                            }
                             let request_id =
                                 active.take().expect("active request exists").request_key;
                             let response = match response {

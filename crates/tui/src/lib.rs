@@ -1349,7 +1349,7 @@ impl TuiSession {
                 self.finish_transition_with_diagnostic(
                     kind,
                     "restoring after runtime failure",
-                    TransientState::Error,
+                    TransientState::Warning,
                     Some(diagnostic),
                 )
             }

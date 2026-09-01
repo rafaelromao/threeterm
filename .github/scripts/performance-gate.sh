@@ -253,6 +253,8 @@ verify_performance_material() {
         "$signature" != 'not recorded' && "$signature" != 'unknown' && "$owner" == "$signature" ]] \
         || { performance_gate_fail 'six-gate record signature does not identify the owner'; return 1; }
     for gate in 1 2 3 4 5 6; do
+        [[ "$(grep -Ec "^gate_${gate}: " <<<"$block")" == 1 ]] \
+            || { performance_gate_fail "six-gate ${gate} has duplicate or missing status"; return 1; }
         grep -Fxq "gate_${gate}: PASS" <<<"$block" \
             || { performance_gate_fail "six-gate ${gate} did not pass"; return 1; }
         grep -Fxq "gate_${gate}_signature: ${owner}" <<<"$block" \
@@ -263,7 +265,7 @@ verify_performance_material() {
             && { performance_gate_fail "six-gate ${gate} has no owner signature"; return 1; }
     done
 
-    local claims claim id metric unit percentile fixture scale row field
+    local claims claim id metric unit percentile fixture scale row field claim_match_count recorded_n_rc1 recorded_n_rc2
     claims="$(performance_gate_claim_lines <"$material")"
     [[ -n "$claims" ]] || { performance_gate_fail 'performance claim must use the structured claim grammar'; return 1; }
     if performance_gate_claim_language < <(grep -Ev '^ThreeTerm performance claim: ' "$material"); then
@@ -287,23 +289,31 @@ verify_performance_material() {
         record_scale="$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)"
         [[ "${fixture,,}" == "${record_fixture,,}" && "$scale" == "$record_scale" ]] \
             || { performance_gate_fail "performance claim is outside the signed fixture or scale: ${id}"; return 1; }
+        [[ "${record_fixture,,}" == "$(jq -er '.fixture' "$root/$evidence" | tr '[:upper:]' '[:lower:]')" ]] \
+            || { performance_gate_fail 'six-gate fixture disagrees with evidence'; return 1; }
         row_prefix="claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} "
         claim_admitted=0
+        claim_match_count=0
         while IFS= read -r row; do
             [[ "${row#"$row_prefix"}" != "$row" ]] || continue
+            claim_match_count=$((claim_match_count + 1))
             if [[ "${row#"$row_prefix"}" =~ ^n_rc1=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]n_rc2=([3-9][0-9]|[1-9][0-9]{2,})[[:space:]]decision=ADMIT$ ]]; then
                 claim_admitted=1
-                break
+                recorded_n_rc1="${BASH_REMATCH[1]}"
+                recorded_n_rc2="${BASH_REMATCH[2]}"
             fi
         done < <(grep -E '^claim: ' <<<"$block")
+        [[ "$claim_match_count" == 1 ]] \
+            || { performance_gate_fail "performance claim has conflicting decision rows: ${id}"; return 1; }
         (( claim_admitted )) \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }
         [[ "$metric" == timing && "$unit" == ms && "$percentile" =~ ^p(50|95|99)$ ]] \
             || { performance_gate_fail "performance claim metric is unsupported: ${id}"; return 1; }
-        jq -e --arg class "$id" '
+        jq -e --arg class "$id" --argjson expected_rc1 "$recorded_n_rc1" --argjson expected_rc2 "$recorded_n_rc2" '
             [.runs[] | select(.release_candidate == "rc-1" or .release_candidate == "rc-2")
-             | .timings[] | select(.class == $class)
-             | (.sample_count >= 30 and (.samples_ms | length) >= .sample_count
+             | .release_candidate as $candidate | .timings[] | select(.class == $class)
+             | (.sample_count == (if $candidate == "rc-1" then $expected_rc1 else $expected_rc2 end)
+                and .sample_count >= 30 and (.samples_ms | length) == .sample_count
                 and all(.samples_ms[]; type == "number")
                 and (.p50_ms | type == "number") and (.p95_ms | type == "number")
                 and (.p99_ms | type == "number")

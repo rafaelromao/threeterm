@@ -113,6 +113,41 @@ verify_performance_material() {
         "$(grep -E '^step_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented && \
         "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented ]] \
         || { performance_gate_fail 'six-gate two-release comparison evidence is incomplete'; return 1; }
+    for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel \
+        hardware_container hardware_ghostty fixture_name feature_count transaction_count derived_result_count \
+        statistical_method units sample_minimum; do
+        value="$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)"
+        [[ -n "$value" && "$value" != 'not recorded' ]] \
+            || { performance_gate_fail "six-gate field is missing: ${field}"; return 1; }
+    done
+    [[ "$(grep -E '^hardware_threads: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[1-9][0-9]*$ && \
+        "$(grep -E '^hardware_memory_mb: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[1-9][0-9]*$ && \
+        "$(grep -E '^feature_count: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9]+$ && \
+        "$(grep -E '^transaction_count: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9]+$ && \
+        "$(grep -E '^derived_result_count: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9]+$ && \
+        "$(grep -E '^sample_minimum: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[3-9][0-9]$|^[1-9][0-9]{2,}$ ]] \
+        || { performance_gate_fail 'six-gate profile, scale, or sample fields are invalid'; return 1; }
+    [[ "$(grep -E '^statistical_method: ' <<<"$block" | cut -d' ' -f2-)" != 'not-recorded' && \
+        "$(grep -E '^units: ' <<<"$block" | cut -d' ' -f2-)" != 'not-recorded' ]] \
+        || { performance_gate_fail 'six-gate statistical method is incomplete'; return 1; }
+    for field in step_comparison step_comparison_explanation step_claim_impact \
+        three_mf_comparison three_mf_comparison_explanation three_mf_claim_impact; do
+        value="$(grep -E "^${field}: " <<<"$block" | cut -d' ' -f2-)"
+        [[ -n "$value" && "$value" != 'documented' && "$value" != 'not recorded' ]] \
+            || { performance_gate_fail "six-gate comparison field is incomplete: ${field}"; return 1; }
+    done
+    jq -e '.fixture == "l-bracket" and .run_count == 2 and
+        (.release_candidates | sort) == ["rc-1", "rc-2"] and
+        (.runs | length) == 2 and (.comparisons | length) > 0 and
+        (.runs | all(.artifacts | length > 0))' "$root/$evidence" >/dev/null \
+        || { performance_gate_fail 'six-gate rehearsal evidence catalog is incomplete'; return 1; }
+    local evidence_file evidence_digest_record
+    while IFS=$'\t' read -r evidence_file evidence_digest_record; do
+        [[ "$evidence_file" != /* && "$evidence_file" != *..* && -f "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" ]] \
+            || { performance_gate_fail 'six-gate catalog contains an unsafe artifact path'; return 1; }
+        [[ "$(sha256sum "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" | cut -d' ' -f1)" == "$evidence_digest_record" ]] \
+            || { performance_gate_fail "six-gate catalog digest mismatch: ${evidence_file}"; return 1; }
+    done < <(jq -r '.runs[].artifacts[] | [.relative_path, .sha256] | @tsv' "$root/$evidence")
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"

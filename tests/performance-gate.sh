@@ -22,13 +22,30 @@ evidence_path: docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json
 evidence_sha256: ${evidence_sha}
 hardware_profile: pinned-test-profile
 project_scale: L-bracket-small
+hardware_cpu: test-cpu
+hardware_threads: 8
+hardware_memory_mb: 16384
+hardware_kernel: test-kernel
+hardware_container: podman@test-image
+hardware_ghostty: direct-local
+fixture_name: L-bracket
+feature_count: 1
+transaction_count: 1
+derived_result_count: 1
+statistical_method: nearest-rank
+units: ms
+sample_minimum: 30
 limitations_path: docs/release/performance-claim-limitations.md
 limitations_sha256: ${limitations_sha}
 stl_rc1_sha256: 0000000000000000000000000000000000000000000000000000000000000000
 stl_rc2_sha256: 0000000000000000000000000000000000000000000000000000000000000000
 stl_deterministic: YES
-step_comparison: documented
-three_mf_comparison: documented
+step_comparison: equal
+step_comparison_explanation: deterministic-bytes
+step_claim_impact: none
+three_mf_comparison: equal
+three_mf_comparison_explanation: deterministic-bytes
+three_mf_claim_impact: none
 owner: Release Owner
 record_signature: Release Owner
 record_date: ${today}

@@ -3296,6 +3296,47 @@ pub enum TerminalInput {
     Enter,
 }
 
+#[derive(Debug, Default)]
+pub struct TerminalInputDecoder {
+    pending: Vec<u8>,
+}
+
+impl TerminalInputDecoder {
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.pending.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        while let Some(length) = self.next_event_length() {
+            events.push(self.pending.drain(..length).collect());
+        }
+        events
+    }
+
+    fn next_event_length(&self) -> Option<usize> {
+        let first = *self.pending.first()?;
+        if first == 0x1b {
+            let complete: [&[u8]; 5] = [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[13;5u"];
+            if let Some(sequence) = complete
+                .iter()
+                .find(|sequence| self.pending.starts_with(sequence))
+            {
+                return Some(sequence.len());
+            }
+            if complete
+                .iter()
+                .any(|sequence| sequence.starts_with(self.pending.as_slice()))
+            {
+                return None;
+            }
+            return Some(1);
+        }
+        if first.is_ascii_control() {
+            return Some(1);
+        }
+        let text = std::str::from_utf8(&self.pending).ok()?;
+        text.chars().next().map(char::len_utf8)
+    }
+}
+
 /// Decode the small, protocol-neutral keyboard vocabulary used by the
 /// production palette. Kitty's CSI-u encoding is preferred for Ctrl-Enter.
 pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {

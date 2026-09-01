@@ -12,7 +12,7 @@ use threeterm_viewport::{
     ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
 };
 
-use crate::{TuiViewportSession, decode_terminal_input};
+use crate::{TerminalInputDecoder, TuiViewportSession, decode_terminal_input};
 
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
 pub const EXIT_CAPABILITY_FAILURE: i32 = 10;
@@ -287,6 +287,7 @@ fn run_event_loop<W: InteractiveTerminal>(
         .writer_mut()
         .replay_probe_input(replayed_probe_input);
 
+    let mut input_decoder = TerminalInputDecoder::default();
     loop {
         let bytes = session
             .coordinator_mut()
@@ -294,45 +295,44 @@ fn run_event_loop<W: InteractiveTerminal>(
             .writer_mut()
             .read_event()
             .map_err(|error| LaunchError::Runtime(format!("terminal input failed: {error}")))?;
-        if bytes.is_empty() {
-            continue;
-        }
-        if (bytes == b"q" || bytes == b"\x03") && !session.command_input_active() {
-            return Ok(());
-        }
-        if let Some((image_id, _)) = acknowledgement(&bytes) {
-            let Some(active) = session.coordinator().in_flight().cloned() else {
-                return Err(LaunchError::Viewport(ViewportDiagnostic::new(
-                    ViewportDiagnosticCode::AcknowledgementMismatch,
-                    "Kitty acknowledgement arrived with no active frame",
-                    "unknown",
-                    "restore the terminal and retry Interactive Modeling",
-                )));
-            };
-            session
-                .acknowledge(threeterm_viewport::FrameAcknowledgement {
-                    frame_token: active.frame_token,
-                    image_id,
-                })
-                .map_err(LaunchError::Viewport)?;
-            continue;
-        }
-        if decode_terminal_input(&bytes).is_some() {
-            let outcome = session
-                .process_keyboard_input(&bytes, host, root)
-                .map_err(|error| match error {
-                    crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
-                    crate::TuiViewportError::Tui(error) => {
-                        LaunchError::Runtime(format!("{error:?}"))
-                    }
-                })?;
-            let revision = session.state().canonical_revision;
-            let overlay = format!("\r\n{}\r\n", outcome.overlay);
-            session
-                .coordinator_mut()
-                .renderer_mut()
-                .write_control(overlay.as_bytes(), &revision)
-                .map_err(LaunchError::Viewport)?;
+        for event in input_decoder.feed(&bytes) {
+            if (event == b"q" || event == b"\x03") && !session.command_input_active() {
+                return Ok(());
+            }
+            if let Some((image_id, _)) = acknowledgement(&event) {
+                let Some(active) = session.coordinator().in_flight().cloned() else {
+                    return Err(LaunchError::Viewport(ViewportDiagnostic::new(
+                        ViewportDiagnosticCode::AcknowledgementMismatch,
+                        "Kitty acknowledgement arrived with no active frame",
+                        "unknown",
+                        "restore the terminal and retry Interactive Modeling",
+                    )));
+                };
+                session
+                    .acknowledge(threeterm_viewport::FrameAcknowledgement {
+                        frame_token: active.frame_token,
+                        image_id,
+                    })
+                    .map_err(LaunchError::Viewport)?;
+                continue;
+            }
+            if decode_terminal_input(&event).is_some() {
+                let outcome = session.process_keyboard_input(&event, host, root).map_err(
+                    |error| match error {
+                        crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
+                        crate::TuiViewportError::Tui(error) => {
+                            LaunchError::Runtime(format!("{error:?}"))
+                        }
+                    },
+                )?;
+                let revision = session.state().canonical_revision;
+                let overlay = format!("\r\n{}\r\n", outcome.overlay);
+                session
+                    .coordinator_mut()
+                    .renderer_mut()
+                    .write_control(overlay.as_bytes(), &revision)
+                    .map_err(LaunchError::Viewport)?;
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 use serde_json::json;
 use threeterm_protocol::schema::iter;
 use threeterm_tui::{
-    CommandDraftSession, CommandPalette, PaletteDirection, TerminalInput, decode_terminal_input,
+    CommandDraftSession, CommandPalette, PaletteDirection, TerminalInput, TerminalInputDecoder,
+    decode_terminal_input,
 };
 
 #[test]
@@ -95,4 +96,15 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
     );
     assert_eq!(decode_terminal_input(b"\x1b[13;2u"), None);
     assert_eq!(decode_terminal_input(b"\x03"), Some(TerminalInput::Escape));
+
+    let mut decoder = TerminalInputDecoder::default();
+    assert_eq!(
+        decoder.feed(b"extrude"),
+        b"extrude"
+            .iter()
+            .map(|byte| vec![*byte])
+            .collect::<Vec<_>>()
+    );
+    assert!(decoder.feed(b"\x1b[13;").is_empty());
+    assert_eq!(decoder.feed(b"5u"), vec![b"\x1b[13;5u".to_vec()]);
 }

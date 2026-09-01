@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::OcctWorker;
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
@@ -179,12 +179,25 @@ fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
     let root = root("preview");
     Bundle::create(&root).expect("bundle creates");
     let host = Host::new();
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            2.0,
+        )
+        .with_output_path(root.join("seed-stage"), "seed.brep")
+        .with_feature_id("seed"),
+        &_worker,
+    )
+    .expect("canonical seed extrude commits");
     let initial = host
         .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
         .expect("identity executes");
     let revision = initial["revision_hash"].as_str().unwrap().to_string();
     let before_manifest = fs::read(root.join("manifest.json")).unwrap();
     let before_log = fs::read(root.join("transactions.log")).unwrap();
+    let before_brep = fs::read(root.join("brep/seed.brep")).unwrap();
 
     let preview = host
         .preview_domain_command(EXTRUDE_COMMAND_ID, extrude_request(&root, Some(&revision)))
@@ -196,6 +209,7 @@ fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
         before_manifest
     );
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+    assert_eq!(fs::read(root.join("brep/seed.brep")).unwrap(), before_brep);
 
     host.save(&root, "advance", "box")
         .expect("revision advances");

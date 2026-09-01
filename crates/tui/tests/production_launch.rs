@@ -1,8 +1,10 @@
+use std::fs;
 use std::io::{self, Write};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
+use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
 use threeterm_tui::{InteractiveTerminal, LaunchError, launch};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
@@ -340,5 +342,35 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
     assert!(output.contains("[dashed-outline]"));
     assert!(output.contains("[selection-glyph]"));
 
+    let headless_root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-headless-{}",
+        std::process::id()
+    ));
+    let headless_host = Host::new();
+    headless_host
+        .save(&headless_root, "feature-a", "box")
+        .expect("headless project is persisted");
+    let headless_revision = headless_host
+        .identity(&headless_root)
+        .expect("headless identity reads")
+        .revision_hash;
+    headless_host
+        .execute_domain_command(
+            EXTRUDE_COMMAND_ID,
+            json!({
+                "bundle_path": headless_root.to_string_lossy(),
+                "expected_revision": headless_revision,
+                "feature_id": "keyboard-extrude",
+                "profile": [[0, 0], [10, 0], [10, 5], [0, 5]],
+                "height": 3,
+            }),
+        )
+        .expect("headless extrude succeeds");
+    assert_eq!(
+        fs::read(root.join("brep/keyboard-extrude.brep")).expect("interactive BREP reads"),
+        fs::read(headless_root.join("brep/keyboard-extrude.brep")).expect("headless BREP reads")
+    );
+
     std::fs::remove_dir_all(root).expect("project is removed");
+    std::fs::remove_dir_all(headless_root).expect("headless project is removed");
 }

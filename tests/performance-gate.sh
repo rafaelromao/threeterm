@@ -13,6 +13,7 @@ cp -a "${ROOT}/docs/research/rehearsal-evidence/l-bracket" \
 cp "${ROOT}/docs/release/performance-claim-limitations.md" "${source_root}/docs/release/"
 evidence_file="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    .feature_count = 1 | .transaction_count = 1 | .derived_result_count = 1 |
     (.runs[].timings[].sample_count) = 30 |
     (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
     "${evidence_file}" >"${WORK}/evidence.json"
@@ -30,6 +31,10 @@ limitations="${source_root}/docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${limitations}" | cut -d' ' -f1)"
 stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${evidence}")"
 stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${evidence}")"
+step_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${evidence}")"
+step_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${evidence}")"
+three_mf_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${evidence}")"
+three_mf_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${evidence}")"
 record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
 <!-- PERFORMANCE-RECORD:START -->
@@ -46,10 +51,10 @@ hardware_memory_mb: 16384
 hardware_kernel: test-kernel
 hardware_microcode: test-microcode
 hardware_container: podman@test-image
-hardware_container_digest: sha256:test-image
+hardware_container_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 hardware_package_versions: pinned
 hardware_toolchain: rust-1.97.1
-hardware_ghostty: direct-local
+hardware_ghostty: xterm-ghostty/1.3.1
 hardware_term: xterm-ghostty
 hardware_term_program: ghostty
 hardware_topology: direct-local
@@ -65,6 +70,10 @@ limitations_path: docs/release/performance-claim-limitations.md
 limitations_sha256: ${limitations_sha}
 stl_rc1_sha256: ${stl_rc1}
 stl_rc2_sha256: ${stl_rc2}
+step_rc1_sha256: ${step_rc1}
+step_rc2_sha256: ${step_rc2}
+3mf_rc1_sha256: ${three_mf_rc1}
+3mf_rc2_sha256: ${three_mf_rc2}
 stl_deterministic: YES
 step_comparison: equal
 step_comparison_explanation: deterministic-bytes

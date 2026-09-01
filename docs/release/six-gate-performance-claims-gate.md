@@ -336,6 +336,10 @@ limitations_sha256: not recorded
 stl_rc1_sha256: not recorded
 stl_rc2_sha256: not recorded
 stl_deterministic: NO
+step_rc1_sha256: not recorded
+step_rc2_sha256: not recorded
+3mf_rc1_sha256: not recorded
+3mf_rc2_sha256: not recorded
 step_comparison: not recorded
 three_mf_comparison: not recorded
 <!-- PERFORMANCE-RECORD:END -->

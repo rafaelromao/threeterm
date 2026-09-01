@@ -102,6 +102,12 @@ verify_performance_material() {
         "$(grep -E '^project_scale: ' <<<"$block" | cut -d' ' -f2-)" == \
         "$(jq -er '.project_scale' "$root/$evidence")" ]] \
         || { performance_gate_fail 'six-gate profile or project scale disagrees with evidence'; return 1; }
+    [[ "$(grep -E '^hardware_container_digest: ' <<<"$block" | cut -d' ' -f2-)" =~ ^sha256:[0-9a-f]{64}$ && \
+        "$(grep -E '^hardware_ghostty: ' <<<"$block" | cut -d' ' -f2-)" =~ ^xterm-ghostty/[0-9]+\.[0-9]+\.[0-9]+$ && \
+        "$(grep -E '^hardware_term: ' <<<"$block" | cut -d' ' -f2-)" == xterm-ghostty && \
+        "$(grep -E '^hardware_term_program: ' <<<"$block" | cut -d' ' -f2-)" == ghostty && \
+        "$(grep -E '^hardware_topology: ' <<<"$block" | cut -d' ' -f2-)" == direct-local ]] \
+        || { performance_gate_fail 'six-gate hardware identity is incomplete or invalid'; return 1; }
     local limitations limitations_digest committed_limitations_digest
     limitations="$(grep -E '^limitations_path: ' <<<"$block" | cut -d' ' -f2-)"
     limitations_digest="$(grep -E '^limitations_sha256: ' <<<"$block" | cut -d' ' -f2-)"
@@ -133,6 +139,10 @@ verify_performance_material() {
         [[ -n "$value" && "$value" != 'not recorded' ]] \
             || { performance_gate_fail "six-gate field is missing: ${field}"; return 1; }
     done
+    [[ "$(jq -er '.feature_count' "$root/$evidence")" == "$(grep -E '^feature_count: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(jq -er '.transaction_count' "$root/$evidence")" == "$(grep -E '^transaction_count: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(jq -er '.derived_result_count' "$root/$evidence")" == "$(grep -E '^derived_result_count: ' <<<"$block" | cut -d' ' -f2-)" ]] \
+        || { performance_gate_fail 'six-gate project scale disagrees with evidence'; return 1; }
     [[ "$(grep -E '^hardware_threads: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[1-9][0-9]*$ && \
         "$(grep -E '^hardware_memory_mb: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[1-9][0-9]*$ && \
         "$(grep -E '^feature_count: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9]+$ && \
@@ -158,18 +168,42 @@ verify_performance_material() {
     while IFS=$'\t' read -r evidence_file evidence_digest_record; do
         [[ "$evidence_file" != /* && "$evidence_file" != *..* && -f "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" ]] \
             || { performance_gate_fail 'six-gate catalog contains an unsafe artifact path'; return 1; }
+        performance_gate_has_symlink_component "$root" "docs/research/rehearsal-evidence/l-bracket/${evidence_file}" \
+            && { performance_gate_fail "six-gate catalog path contains a symlink: ${evidence_file}"; return 1; }
+        git -C "$root" ls-files --error-unmatch -- "docs/research/rehearsal-evidence/l-bracket/${evidence_file}" >/dev/null 2>&1 \
+            || { performance_gate_fail "six-gate catalog file is not tracked: ${evidence_file}"; return 1; }
         [[ "$(sha256sum "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" | cut -d' ' -f1)" == "$evidence_digest_record" ]] \
             || { performance_gate_fail "six-gate catalog digest mismatch: ${evidence_file}"; return 1; }
     done < <(jq -r '.runs[].artifacts[] | [.relative_path, .sha256] | @tsv' "$root/$evidence")
-    local stl_rc1 stl_rc2 recorded_stl_rc1 recorded_stl_rc2
+    local stl_rc1 stl_rc2 recorded_stl_rc1 recorded_stl_rc2 format format_rc1 format_rc2
     stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
     stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
     recorded_stl_rc1="$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     recorded_stl_rc2="$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$stl_rc1" == "$recorded_stl_rc1" && "$stl_rc2" == "$recorded_stl_rc2" ]] \
         || { performance_gate_fail 'six-gate STL hashes do not match the evidence catalog'; return 1; }
+    for format in step 3mf; do
+        format_rc1="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
+        format_rc2="$(jq -er --arg format "$format" '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket." + $format)) | .sha256' "$root/$evidence")"
+        [[ "$format_rc1" == "$(grep -E "^${format}_rc1_sha256: " <<<"$block" | cut -d' ' -f2-)" && \
+            "$format_rc2" == "$(grep -E "^${format}_rc2_sha256: " <<<"$block" | cut -d' ' -f2-)" ]] \
+            || { performance_gate_fail "six-gate ${format} hashes do not match the evidence catalog"; return 1; }
+    done
     local comparison_class comparison_match comparison comparison_prefix comparison_suffix
     while IFS= read -r comparison_class; do
+        jq -e --arg class "$comparison_class" '
+            [.runs[] | select(.release_candidate == "rc-1" or .release_candidate == "rc-2")
+             | any(.timings[]; .class == $class)] | length == 2 and all(. == true)
+        ' "$root/$evidence" >/dev/null \
+            || { performance_gate_fail "six-gate candidate results are incomplete for ${comparison_class}"; return 1; }
+        jq -e --arg class "$comparison_class" '
+            [.comparisons[] | select(.class == $class)
+             | ((.same_order_of_magnitude == true)
+                and (.run_1.p50_ms | type == "number")
+                and (.run_2.p50_ms | type == "number"))]
+            | length == 1 and all(. == true)
+        ' "$root/$evidence" >/dev/null \
+            || { performance_gate_fail "six-gate comparison values are incomplete for ${comparison_class}"; return 1; }
         comparison_match=0
         while IFS= read -r comparison; do
             comparison_prefix="comparison: class=${comparison_class} "
@@ -249,7 +283,9 @@ verify_performance_material() {
             [.runs[] | select(.release_candidate == "rc-1" or .release_candidate == "rc-2")
              | .timings[] | select(.class == $class)
              | (.sample_count >= 30 and (.samples_ms | length) >= .sample_count
-                and all(.samples_ms[]; type == "number") and has("p50_ms") and has("p95_ms") and has("p99_ms"))]
+                and all(.samples_ms[]; type == "number")
+                and (.p50_ms | type == "number") and (.p95_ms | type == "number")
+                and (.p99_ms | type == "number"))]
             | length == 2 and all(. == true)
         ' "$root/$evidence" >/dev/null \
             || { performance_gate_fail "performance evidence has fewer than 30 samples per release candidate: ${id}"; return 1; }

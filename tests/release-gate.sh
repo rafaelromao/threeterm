@@ -84,12 +84,18 @@ evidence_path="docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
 stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
 stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
+step_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${release_root}/${evidence_path}")"
+step_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${release_root}/${evidence_path}")"
+three_mf_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${release_root}/${evidence_path}")"
+three_mf_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${release_root}/${evidence_path}")"
 limitations_path="docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${release_root}/${limitations_path}" | cut -d' ' -f1)"
 today="$(date -u +%F)"
 awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
     -v evidence_sha="${evidence_sha}" -v limitations="${limitations_path}" \
-    -v limitations_sha="${limitations_sha}" -v stl_rc1="${stl_rc1}" -v stl_rc2="${stl_rc2}" -v today="${today}" '
+    -v limitations_sha="${limitations_sha}" -v stl_rc1="${stl_rc1}" -v stl_rc2="${stl_rc2}" \
+    -v step_rc1="${step_rc1}" -v step_rc2="${step_rc2}" -v three_mf_rc1="${three_mf_rc1}" \
+    -v three_mf_rc2="${three_mf_rc2}" -v today="${today}" '
     /<!-- PERFORMANCE-RECORD:START -->/ {
         print
         print "record_status: SIGNED"
@@ -105,10 +111,10 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "hardware_kernel: test-kernel"
         print "hardware_microcode: test-microcode"
         print "hardware_container: podman@test-image"
-        print "hardware_container_digest: sha256:test-image"
+        print "hardware_container_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000"
         print "hardware_package_versions: pinned"
         print "hardware_toolchain: rust-1.97.1"
-        print "hardware_ghostty: direct-local"
+        print "hardware_ghostty: xterm-ghostty/1.3.1"
         print "hardware_term: xterm-ghostty"
         print "hardware_term_program: ghostty"
         print "hardware_topology: direct-local"
@@ -124,6 +130,10 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "limitations_sha256: " limitations_sha
         print "stl_rc1_sha256: " stl_rc1
         print "stl_rc2_sha256: " stl_rc2
+        print "step_rc1_sha256: " step_rc1
+        print "step_rc2_sha256: " step_rc2
+        print "3mf_rc1_sha256: " three_mf_rc1
+        print "3mf_rc2_sha256: " three_mf_rc2
         print "stl_deterministic: YES"
         print "step_comparison: equal"
         print "step_comparison_explanation: deterministic-bytes"

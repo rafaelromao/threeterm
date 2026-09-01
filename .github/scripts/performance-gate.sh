@@ -107,6 +107,10 @@ verify_performance_material() {
     committed_limitations_digest="$(git -C "$root" show "HEAD:${limitations}" | sha256sum | cut -d' ' -f1)"
     [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
         || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
+    for limitation in fixture renderer terminal 'project-scale' 'warm and cold' 'input-to-photon' 'human-usability'; do
+        grep -Fqi "$limitation" "$root/$limitations" \
+            || { performance_gate_fail "limitations document omits ${limitation} scope"; return 1; }
+    done
     [[ "$(grep -E '^stl_deterministic: ' <<<"$block" | cut -d' ' -f2-)" == YES && \
         "$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
         "$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
@@ -150,6 +154,13 @@ verify_performance_material() {
         [[ "$(sha256sum "$root/docs/research/rehearsal-evidence/l-bracket/$evidence_file" | cut -d' ' -f1)" == "$evidence_digest_record" ]] \
             || { performance_gate_fail "six-gate catalog digest mismatch: ${evidence_file}"; return 1; }
     done < <(jq -r '.runs[].artifacts[] | [.relative_path, .sha256] | @tsv' "$root/$evidence")
+    local stl_rc1 stl_rc2 recorded_stl_rc1 recorded_stl_rc2
+    stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
+    stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "$root/$evidence")"
+    recorded_stl_rc1="$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)"
+    recorded_stl_rc2="$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)"
+    [[ "$stl_rc1" == "$recorded_stl_rc1" && "$stl_rc2" == "$recorded_stl_rc2" ]] \
+        || { performance_gate_fail 'six-gate STL hashes do not match the evidence catalog'; return 1; }
     local resolved_root resolved_evidence
     resolved_root="$(realpath -e "$root")"
     resolved_evidence="$(realpath -e "$root/$evidence")"

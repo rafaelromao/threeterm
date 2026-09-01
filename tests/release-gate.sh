@@ -81,12 +81,14 @@ git -C "${release_root}" commit --quiet -m source-change
 record_commit="$(git -C "${release_root}" rev-parse HEAD)"
 evidence_path="docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
+stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
+stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
 limitations_path="docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${release_root}/${limitations_path}" | cut -d' ' -f1)"
 today="$(date -u +%F)"
 awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
     -v evidence_sha="${evidence_sha}" -v limitations="${limitations_path}" \
-    -v limitations_sha="${limitations_sha}" -v today="${today}" '
+    -v limitations_sha="${limitations_sha}" -v stl_rc1="${stl_rc1}" -v stl_rc2="${stl_rc2}" -v today="${today}" '
     /<!-- PERFORMANCE-RECORD:START -->/ {
         print
         print "record_status: SIGNED"
@@ -111,8 +113,8 @@ awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence
         print "sample_minimum: 30"
         print "limitations_path: " limitations
         print "limitations_sha256: " limitations_sha
-        print "stl_rc1_sha256: 0000000000000000000000000000000000000000000000000000000000000000"
-        print "stl_rc2_sha256: 0000000000000000000000000000000000000000000000000000000000000000"
+        print "stl_rc1_sha256: " stl_rc1
+        print "stl_rc2_sha256: " stl_rc2
         print "stl_deterministic: YES"
         print "step_comparison: equal"
         print "step_comparison_explanation: deterministic-bytes"

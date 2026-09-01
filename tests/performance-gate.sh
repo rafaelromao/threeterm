@@ -27,6 +27,8 @@ evidence="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manif
 evidence_sha="$(sha256sum "${evidence}" | cut -d' ' -f1)"
 limitations="${source_root}/docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${limitations}" | cut -d' ' -f1)"
+stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${evidence}")"
+stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${evidence}")"
 record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
 <!-- PERFORMANCE-RECORD:START -->
@@ -52,8 +54,8 @@ units: ms
 sample_minimum: 30
 limitations_path: docs/release/performance-claim-limitations.md
 limitations_sha256: ${limitations_sha}
-stl_rc1_sha256: 0000000000000000000000000000000000000000000000000000000000000000
-stl_rc2_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+stl_rc1_sha256: ${stl_rc1}
+stl_rc2_sha256: ${stl_rc2}
 stl_deterministic: YES
 step_comparison: equal
 step_comparison_explanation: deterministic-bytes

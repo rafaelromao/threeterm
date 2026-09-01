@@ -94,9 +94,17 @@ release_verified_commit() {
 }
 
 verify_release_material() {
+    local material="${THREETERM_RELEASE_MATERIAL:-}"
+    if [[ -n "$material" ]] && performance_gate_claim_language <"$material"; then
+        local performance_record="${ROOT}/docs/release/six-gate-performance-claims-gate.md"
+        [[ -z "$(git -C "$(release_source_root)" status --porcelain -- "$performance_record")" ]] \
+            || fail 'signed performance record must be committed before publishing'
+        git -C "$(release_source_root)" ls-files --error-unmatch -- "$performance_record" >/dev/null 2>&1 \
+            || fail 'signed performance record must be tracked before publishing'
+    fi
     verify_performance_material \
         "$(release_source_root)" \
-        "${THREETERM_RELEASE_MATERIAL:-}" \
+        "$material" \
         "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
         "$1" "$2"
 }

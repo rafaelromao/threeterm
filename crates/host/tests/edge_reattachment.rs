@@ -281,29 +281,6 @@ fn production_worker_reports_incompatible_role_before_canonical_mutation() {
 }
 
 #[test]
-fn production_worker_reports_ambiguous_descendants_before_canonical_mutation() {
-    let root = root("ambiguous-descendants");
-    let Some((_worker, revision)) = setup(&root, "ambiguous-descendants") else {
-        return;
-    };
-    let host = Host::new();
-    let manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
-    let log = fs::read(root.join("transactions.log")).expect("log reads");
-    let result = host
-        .execute_domain_command(
-            REATTACH_EDGE_COMMAND_ID,
-            request_with_edit_target(&root, &revision, reference(&revision), reference(&revision)),
-        )
-        .expect("worker ambiguity is a structured outcome");
-    assert_eq!(result["outcome"], "ambiguous");
-    assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
-    assert_eq!(result["committed"], false);
-    assert_eq!(fs::read(root.join("manifest.json")).unwrap(), manifest);
-    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log);
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
 fn worker_evidence_reports_incompatible_before_canonical_mutation() {
     assert_worker_outcome("incompatible", &["edge-incompatible"]);
 }

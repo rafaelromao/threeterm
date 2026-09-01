@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
@@ -307,8 +308,12 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
         eprintln!("interactive command slice: OCCT worker unavailable");
         return;
     }
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "threeterm-production-launch-command-{}",
+        "threeterm-production-launch-command-{}-{suffix}",
         std::process::id()
     ));
     let host = Host::new();
@@ -343,7 +348,7 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
     assert!(output.contains("[selection-glyph]"));
 
     let headless_root = std::env::temp_dir().join(format!(
-        "threeterm-production-launch-headless-{}",
+        "threeterm-production-launch-headless-{}-{suffix}",
         std::process::id()
     ));
     let headless_host = Host::new();

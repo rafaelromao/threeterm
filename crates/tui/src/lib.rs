@@ -319,6 +319,7 @@ impl CommandDraftSession {
     pub fn cancel(&mut self) {
         self.preview = None;
         self.draft = None;
+        self.input_text.clear();
     }
 }
 

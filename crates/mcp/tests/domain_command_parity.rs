@@ -672,10 +672,13 @@ fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
             .contains("subtractive extrude target feature is missing: base")
             .then_some("subtractive extrude target feature is missing: base")
     };
+    let cli_diagnostic = normalize(&format!("{cli:?}"));
+    let tui_diagnostic = normalize(&format!("{tui:?}"));
     assert_eq!(
-        normalize(&format!("{cli:?}")),
-        normalize(&format!("{tui:?}"))
+        cli_diagnostic,
+        Some("subtractive extrude target feature is missing: base")
     );
+    assert_eq!(cli_diagnostic, tui_diagnostic);
     assert_eq!(mcp["isError"], true);
     assert_eq!(
         normalize(mcp["content"][0]["text"].as_str().unwrap_or_default()),

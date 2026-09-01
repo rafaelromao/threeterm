@@ -88,3 +88,9 @@ and successful solved coordinates.
 
 **Fit Dimension**:
 A revision-bound relationship between stable sketch dimension constraints associated with a source solid and a target solid. The host derives both values from canonical sketches and validates the target against the source clearance before persisting the relationship.
+
+**Extrusion Mode**:
+The versioned domain input that selects additive prism creation or subtractive prism cutting. The mode is canonical intent, not worker state.
+
+**Semantic Extrusion Target**:
+The stable feature identity of the canonical solid consumed by a subtractive extrusion. The host resolves and authenticates its disposable BREP from canonical provenance; worker paths are never persisted as the target.

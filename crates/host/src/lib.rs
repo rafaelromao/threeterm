@@ -2723,6 +2723,36 @@ impl Host {
                     let _ = stage.discard();
                     return Err(HostError::BrepFileMissing { path });
                 }
+                let target_entry = loaded
+                    .log
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| {
+                        entry.feature_id == *target_feature_id
+                            && entry.brep_byte_count.is_some()
+                            && entry.brep_sha256.is_some()
+                    })
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!(
+                            "extrude replay target has no authenticated geometry: {target_feature_id}"
+                        ),
+                    })?;
+                let expected_bytes = target_entry
+                    .brep_byte_count
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| HostError::BrepIo {
+                        detail: "extrude replay target BREP byte count is invalid".to_string(),
+                    })?;
+                let expected_sha256 =
+                    target_entry
+                        .brep_sha256
+                        .as_deref()
+                        .ok_or_else(|| HostError::BrepIo {
+                            detail: "extrude replay target BREP digest is missing".to_string(),
+                        })?;
+                read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                    .map_err(|detail| HostError::BrepIo { detail })?;
                 Some(path)
             } else {
                 None

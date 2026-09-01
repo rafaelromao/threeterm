@@ -202,39 +202,39 @@ PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
     THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
-    RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
+    RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
-grep -Fq "threeterm-${current_tag}.tar.gz" "${release_root}/gh-args"
-grep -Fq "release-manifest.json" "${release_root}/gh-args"
-grep -Fq "SHA256SUMS" "${release_root}/gh-args"
-grep -Fq "worker-manifest.json" "${release_root}/gh-args"
+grep -Fq "threeterm-${current_tag}.tar.gz" "${tmpdir}/gh-args"
+grep -Fq "release-manifest.json" "${tmpdir}/gh-args"
+grep -Fq "SHA256SUMS" "${tmpdir}/gh-args"
+grep -Fq "worker-manifest.json" "${tmpdir}/gh-args"
 
 performance_material="${tmpdir}/unsupported-performance.md"
 printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' \
     >"${performance_material}"
-PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
+PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
     THREETERM_RELEASE_MATERIAL="${performance_material}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
     THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
-grep -Fq "unsupported-performance.md" "${release_root}/gh-args"
-grep -Fq "six-gate-performance-claims-gate.md" "${release_root}/gh-args"
-grep -Fq "sha256-manifest.json" "${release_root}/gh-args"
-grep -Fq "performance-claim-limitations.md" "${release_root}/gh-args"
+grep -Fq "unsupported-performance.md" "${tmpdir}/gh-args"
+grep -Fq "six-gate-performance-claims-gate.md" "${tmpdir}/gh-args"
+grep -Fq "sha256-manifest.json" "${tmpdir}/gh-args"
+grep -Fq "performance-claim-limitations.md" "${tmpdir}/gh-args"
 
 printf '%s\n' 'The export path is 2x faster.' >"${performance_material}"
-rm -f "${release_root}/gh-args"
+rm -f "${tmpdir}/gh-args"
 expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
     RELEASE_GATE_COMMIT="${verified_commit}" \
-    RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
+    RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
     THREETERM_RELEASE_MATERIAL="${performance_material}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
     THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
-if [[ -e "${release_root}/gh-args" ]]; then
+if [[ -e "${tmpdir}/gh-args" ]]; then
     printf '%s\n' 'GitHub API was called for an unsupported performance claim' >&2
     exit 1
 fi

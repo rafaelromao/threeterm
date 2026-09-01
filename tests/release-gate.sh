@@ -209,6 +209,7 @@ PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
 grep -Fq "unsupported-performance.md" "${release_root}/gh-args"
 grep -Fq "six-gate-performance-claims-gate.md" "${release_root}/gh-args"
 grep -Fq "sha256-manifest.json" "${release_root}/gh-args"
+grep -Fq "performance-claim-limitations.md" "${release_root}/gh-args"
 
 printf '%s\n' 'The export path is 2x faster.' >"${performance_material}"
 rm -f "${release_root}/gh-args"

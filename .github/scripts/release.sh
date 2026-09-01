@@ -339,6 +339,9 @@ case "$action" in
                 evidence_path="$(performance_gate_block "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
                     | grep -E '^evidence_path: ' | cut -d' ' -f2-)"
                 release_args+=("${ROOT}/${evidence_path}")
+                limitations_path="$(performance_gate_block "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
+                    | grep -E '^limitations_path: ' | cut -d' ' -f2-)"
+                release_args+=("${ROOT}/${limitations_path}")
             fi
         fi
         gh release create "${release_args[@]}"

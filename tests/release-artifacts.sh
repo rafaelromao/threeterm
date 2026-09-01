@@ -28,6 +28,7 @@ first="${WORK}/first"
 second="${WORK}/second"
 build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${first}" >/dev/null
 touch "${source_root}/crates/workers/slvs/NOTICE"
+touch "${input}/NOTICE"
 chmod 600 "${input}/NOTICE"
 build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${second}" >/dev/null
 

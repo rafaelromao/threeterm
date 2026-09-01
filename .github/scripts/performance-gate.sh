@@ -199,6 +199,11 @@ verify_performance_material() {
         row_re="^claim: id=${id} metric=${metric} unit=${unit} percentile=${percentile} fixture=${fixture} scale=${scale} n_rc1=([3-9][0-9]|[1-9][0-9]{2,}) n_rc2=([3-9][0-9]|[1-9][0-9]{2,}) decision=ADMIT$"
         grep -Eq "$row_re" <<<"$block" \
             || { performance_gate_fail "performance claim is not admitted by the six-gate record: ${id}"; return 1; }
+        jq -e --arg class "$id" '
+            [.runs[].timings[] | select(.class == $class) | .sample_count]
+            | length == 2 and all(. >= 30)
+        ' "$root/$evidence" >/dev/null \
+            || { performance_gate_fail "performance evidence has fewer than 30 samples per release candidate: ${id}"; return 1; }
     done <<<"$claims"
     printf '%s\n' 'performance claims gate verified'
 }

@@ -60,6 +60,12 @@ fake_bin="${tmpdir}/bin"
 release_artifact="${tmpdir}/release-artifact"
 mkdir -p "${release_root}" "${fake_bin}"
 git archive HEAD | tar -x -C "${release_root}"
+jq '(.runs[].timings[].sample_count) = 30 |
+    (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
+    "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json" \
+    >"${tmpdir}/evidence.json"
+mv "${tmpdir}/evidence.json" \
+    "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 cp "${fixture}" "${release_root}/docs/release/trademark-and-namespace-gate.md"
 git -C "${release_root}" init --quiet
 git -C "${release_root}" config user.email ci@example.invalid

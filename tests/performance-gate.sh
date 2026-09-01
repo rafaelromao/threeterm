@@ -6,11 +6,26 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
 source "${ROOT}/.github/scripts/performance-gate.sh"
-commit="$(git rev-parse HEAD)"
+source_root="${WORK}/source"
+mkdir -p "${source_root}/docs/research/rehearsal-evidence" "${source_root}/docs/release"
+cp -a "${ROOT}/docs/research/rehearsal-evidence/l-bracket" \
+    "${source_root}/docs/research/rehearsal-evidence/"
+cp "${ROOT}/docs/release/performance-claim-limitations.md" "${source_root}/docs/release/"
+evidence_file="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
+jq '(.runs[].timings[].sample_count) = 30 |
+    (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
+    "${evidence_file}" >"${WORK}/evidence.json"
+mv "${WORK}/evidence.json" "${evidence_file}"
+git -C "${source_root}" init --quiet
+git -C "${source_root}" config user.email ci@example.invalid
+git -C "${source_root}" config user.name ci
+git -C "${source_root}" add -A
+git -C "${source_root}" commit --quiet -m evidence
+commit="$(git -C "${source_root}" rev-parse HEAD)"
 today="$(date -u +%F)"
-evidence="${ROOT}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
+evidence="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 evidence_sha="$(sha256sum "${evidence}" | cut -d' ' -f1)"
-limitations="${ROOT}/docs/release/performance-claim-limitations.md"
+limitations="${source_root}/docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${limitations}" | cut -d' ' -f1)"
 record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
@@ -73,23 +88,23 @@ EOF
 material="${WORK}/notes.md"
 printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' >"${material}"
 
-verify_performance_material "${ROOT}" "${material}" "${record}" "${commit}" "v0.1.0-performance"
+verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance"
 
-if verify_performance_material "${ROOT}" "${material}" "${record}" "${commit}" "v0.1.0-other" >/dev/null 2>&1; then
+if verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-other" >/dev/null 2>&1; then
     printf '%s\n' 'performance record with wrong tag was accepted' >&2
     exit 1
 fi
-if verify_performance_material "${ROOT}" "${material}" "${ROOT}/docs/release/six-gate-performance-claims-gate.md" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+if verify_performance_material "${source_root}" "${material}" "${ROOT}/docs/release/six-gate-performance-claims-gate.md" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
     printf '%s\n' 'unsigned current performance record was accepted' >&2
     exit 1
 fi
 printf '%s\n' 'ThreeTerm performance claim: export completed' >"${material}"
-if verify_performance_material "${ROOT}" "${material}" "${record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+if verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
     printf '%s\n' 'unscoped performance claim was accepted' >&2
     exit 1
 fi
 printf '%s\n' 'The export path is 2x faster.' >"${material}"
-if verify_performance_material "${ROOT}" "${material}" "${record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+if verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
     printf '%s\n' 'comparative performance claim was accepted' >&2
     exit 1
 fi

@@ -328,9 +328,9 @@
           "sha256": "c3dd5714d333230188248fd15ed236154fa7c6277120a9dbedc3d4fbdee6d344"
         },
         {
-          "bytes": 815,
+          "bytes": 1501,
           "relative_path": "run-2/project/manifest.json",
-          "sha256": "170d9747274432c66e7d37bfab1c6d48c623ce9c2264d07a2cee057057191e7d"
+          "sha256": "4ff55af3044bb13dc5611fa2dc55c9c9a08356812a53f3974c1b34f157604087"
         },
         {
           "bytes": 3633,

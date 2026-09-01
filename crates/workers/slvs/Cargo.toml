@@ -3,9 +3,21 @@ name = "threeterm-slvs-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "GPL-3.0-only"
 publish.workspace = true
 description = "Disposable libslvs sketch solver worker boundary."
+
+[package.metadata.threeterm.licensing]
+basis = "GPL-3.0-only"
+policy = "../../../licenses/libslvs.json"
+worker_id = "slvs"
+worker_schema_version = "threeterm.workers.slvs/1"
+source_repository = "https://github.com/solvespace/solvespace"
+source_commit = "27b6a080c8b669421bd4d444650c3b8eddec5687"
+source_url = "https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687"
+license_text = "LICENSE-GPL-3.0.txt"
+notice = "NOTICE"
+source_offer = "SOURCE-OFFER.txt"
 
 [dependencies]
 serde = { workspace = true }

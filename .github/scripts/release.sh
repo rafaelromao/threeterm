@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNBOOK="${ROOT}/docs/release/trademark-and-namespace-gate.md"
+LICENSING_SCRIPT="${ROOT}/.github/scripts/licensing.sh"
 readonly ROOT RUNBOOK
 
 readonly -a REQUIRED_ROWS=(
@@ -57,6 +58,27 @@ declare -A REQUIRED_SOURCE_TOKENS=(
 fail() {
     printf 'release gate: %s\n' "$1" >&2
     exit 1
+}
+
+verify_release_artifact() {
+    local artifact_root manifest
+    artifact_root="$(release_artifact_root)"
+    manifest="$(release_artifact_manifest "$artifact_root")"
+    [[ "$(realpath -m "$manifest")" == "$(realpath -m "$artifact_root/manifest.json")" ]] \
+        || fail 'release artifact manifest must be the manifest inside the artifact root'
+    [[ -f "$LICENSING_SCRIPT" ]] || fail "licensing verifier not found: ${LICENSING_SCRIPT}"
+    # shellcheck source=/dev/null
+    source "$LICENSING_SCRIPT"
+    verify_libslvs_artifact "$manifest" "$artifact_root"
+}
+
+release_artifact_root() {
+    printf '%s\n' "${THREETERM_RELEASE_ARTIFACT_ROOT:-${ROOT}/target/libslvs-artifact}"
+}
+
+release_artifact_manifest() {
+    local artifact_root="$1"
+    printf '%s\n' "${THREETERM_RELEASE_ARTIFACT_MANIFEST:-${artifact_root}/manifest.json}"
 }
 
 current_gate() {
@@ -193,6 +215,7 @@ usage() {
     printf '%s\n' \
         'Usage:' \
         '  release.sh verify [runbook-path]' \
+        '  release.sh verify-artifact <manifest> <artifact-root>' \
         '  release.sh tag <annotated-tag>' \
         '  release.sh github-release <tag>' \
         '  release.sh aur-push HEAD:refs/heads/master' \
@@ -202,6 +225,12 @@ usage() {
 action=${1:-}
 shift || true
 case "$action" in
+    verify-artifact)
+        [[ $# == 2 ]] || { usage >&2; exit 2; }
+        # shellcheck source=/dev/null
+        source "${LICENSING_SCRIPT}"
+        verify_libslvs_artifact "$1" "$2"
+        ;;
     verify)
         [[ $# -le 1 ]] || { usage >&2; exit 2; }
         verify_runbook "${1:-$RUNBOOK}"
@@ -210,6 +239,7 @@ case "$action" in
         [[ $# == 1 ]] && valid_tag "$1" || { usage >&2; exit 2; }
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         git tag -a "$1" -m "ThreeTerm $1"
         ;;
     github-release)
@@ -217,14 +247,19 @@ case "$action" in
         verify_checked_in_runbook
         require_committed_runbook
         require_tag_at_head "$1"
+        verify_release_artifact
         command -v gh >/dev/null 2>&1 || fail 'gh is required for GitHub Release'
-        gh release create "$1" --verify-tag --title "$1"
+        artifact_root="$(release_artifact_root)"
+        archive="${artifact_root}.tar.gz"
+        tar -czf "$archive" -C "$artifact_root" .
+        gh release create "$1" --verify-tag --title "$1" "$archive"
         ;;
     aur-push)
         [[ $# == 1 && "$1" != -* ]] || { usage >&2; exit 2; }
         [[ "$1" == 'HEAD:refs/heads/master' ]] || fail 'AUR push is fixed to HEAD:refs/heads/master'
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         git push aur HEAD:refs/heads/master
         ;;
     copr-build)
@@ -232,6 +267,7 @@ case "$action" in
         [[ "$1" == 'threeterm.spec' ]] || fail 'COPR build is fixed to threeterm.spec'
         verify_checked_in_runbook
         require_committed_runbook
+        verify_release_artifact
         command -v copr >/dev/null 2>&1 || fail 'copr is required for COPR build'
         if [[ $# == 2 ]]; then
             copr build threeterm "$1" --nowait

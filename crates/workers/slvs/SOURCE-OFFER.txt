@@ -1,0 +1,24 @@
+ThreeTerm libslvs worker corresponding-source offer
+
+For each recipient who receives the ThreeTerm libslvs worker in object-code
+form, ThreeTerm offers the complete Corresponding Source for the worker,
+including the pinned SolveSpace libslvs source and the scripts needed to build
+the worker, at no charge other than the reasonable cost of delivery.
+
+This written offer is valid for at least three years from the date the worker
+artifact is distributed, and for as long as ThreeTerm offers support for that
+artifact. The Corresponding Source is available from the immutable source
+commit:
+https://github.com/solvespace/solvespace/tree/27b6a080c8b669421bd4d444650c3b8eddec5687
+
+The ThreeTerm worker source and build scripts are distributed with the source
+release at the same revision as the artifact and are maintained at:
+https://github.com/rafaelromao/threeterm
+The artifact itself also includes the complete ThreeTerm source snapshot at
+the immutable revision recorded in manifest.json, in
+source/threeterm-source.tar. The worker source and build files are also
+available unpacked under source/crates/workers/slvs.
+
+The GNU General Public License, version 3, governs this distribution. The
+complete license text is LICENSE-GPL-3.0.txt in the source tree and
+LICENSES/GPL-3.0-only.txt in a staged artifact.

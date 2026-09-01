@@ -51,9 +51,17 @@ fn rectangle(request_id: &str) -> SketchSolveRequest {
 
 #[test]
 fn pinned_libslvs_worker_solves_a_rectangle_with_stable_ids() {
-    let Ok(worker) = SlvsWorker::locate() else {
-        eprintln!("libslvs integration skipped: no configured worker binary");
-        return;
+    let worker = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+                panic!(
+                    "{{\"code\":\"worker_unavailable\",\"worker\":\"libslvs\",\"detail\":\"{error}\"}}"
+                );
+            }
+            eprintln!("libslvs integration skipped: no configured worker binary: {error}");
+            return;
+        }
     };
     let result = worker
         .solve(&rectangle("real-rectangle"))

@@ -7,7 +7,7 @@ in issue #58; this README documents the current module map.
 
 ## Module map
 
-The Rust workspace has exactly twelve member crates, organised per the closed
+The Rust workspace has exactly thirteen member crates, organised per the closed
 OCCT/libslvs architecture decisions (issues #26 and #25). Each member crate
 owns its own per-crate `schema_version()` constant under the spec's
 `Project Manifest` model.
@@ -52,13 +52,39 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Compile every member crate
 cargo check --workspace
 
-# Run every member crate's schema-version test
-cargo test --workspace
+# Run the fast test suite used by CI
+bash .github/scripts/test-suite.sh fast
+
+# Run only the opt-in slow tests
+bash .github/scripts/test-suite.sh slow
 ```
 
 The local acceptance verifier `.github/scripts/acceptance.sh` runs the four
 checks above and additionally asserts the toolchain pin and the exact
-twelve-member workspace contract.
+thirteen-member workspace contract.
+
+## Test suites
+
+`#[ignore = "slow: ..."]` identifies a long-running test. The fast suite is
+the default Cargo test selection and is the only suite CI runs. The slow suite
+runs only those ignored tests, so it is an explicit local opt-in.
+
+The fast suite retains representative coverage for each product boundary:
+
+| Behavior | Fast coverage |
+| --- | --- |
+| Geometric Kernel operations | Small real-OCCT operation tests in `crates/workers/occt/tests/worker_integration.rs` and CLI operation tests |
+| Headless Automation | CLI command, error, save/load, export, and schema tests |
+| Interactive Modeling | TUI interaction, routing, cleanup, and viewport tests |
+| MCP adapter | MCP command and component-instance tests |
+| Canonical Transaction Log and recovery | persistence, host, migration, and historical-recovery tests |
+| Protocol and worker supervision | protocol framing, registry, worker, and supervisor tests |
+| Sketches, fit relationships, and viewport projection | sketch-solve, host fit-dimension, persistence fit-dimension, and viewport tests |
+| Rehearsal contract | registered schema, CLI argument, and fast timing-comparison tests |
+
+The slow suite repeats complete release candidates, cross-worker workflows, and
+native adversarial or exhaustive geometry checks. It adds confidence in their
+composition without delaying every pull request.
 
 ## Continuous integration
 
@@ -73,7 +99,7 @@ request targeting `main`. The workflow:
 
 The CI script installs rustup and the pinned toolchain inside the
 archlinux container, then runs `cargo check`, `cargo fmt --check`,
-`cargo clippy -D warnings`, and `cargo test`.
+`cargo clippy -D warnings`, and `.github/scripts/test-suite.sh fast`.
 
 <a href="https://github.com/rafaelromao/sandman">
   <img src="https://raw.githubusercontent.com/rafaelromao/sandman/main/assets/badge-built-with-sandman.svg" alt="Built with Sandman" width="154" />

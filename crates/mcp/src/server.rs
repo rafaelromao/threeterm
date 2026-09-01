@@ -970,11 +970,15 @@ impl McpServer {
                                             .collect();
                                         last = Some(progress.clone());
                                         emitted += 1;
-                                        let _ = sender.send(RunEvent::Progress {
-                                            request_key: event_key.clone(),
-                                            token: token.clone(),
-                                            progress,
-                                        });
+                                        let _ = send_until_shutdown(
+                                            &sender,
+                                            RunEvent::Progress {
+                                                request_key: event_key.clone(),
+                                                token: token.clone(),
+                                                progress,
+                                            },
+                                            &worker_shutdown,
+                                        );
                                     };
                                 let response = execute_boolean_pattern(
                                     arguments,
@@ -1765,10 +1769,18 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FailingWriter;
+    struct FailingWriter {
+        progress_seen: Arc<AtomicBool>,
+    }
 
     impl Write for FailingWriter {
-        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes
+                .windows(b"notifications/progress".len())
+                .any(|window| window == b"notifications/progress")
+            {
+                self.progress_seen.store(true, Ordering::SeqCst);
+            }
             Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "test writer disconnected",
@@ -2235,9 +2247,11 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
 printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
 read request
 rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+i=0
 while [ "$i" -lt 1000 ]; do
   printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"'$rid'","stage":"boolean_pattern:1/324","percent":1}'
   i=$((i + 1))
+done
 "##,
         )
         .expect("worker script writes");
@@ -2270,8 +2284,11 @@ while [ "$i" -lt 1000 ]; do
         frame.push(b'\n');
         let reader = BlockingReader::new(frame);
         let shutdown = Arc::clone(&reader.shutdown);
+        let progress_seen = Arc::new(AtomicBool::new(false));
         let mut reader = reader;
-        let mut writer = FailingWriter;
+        let mut writer = FailingWriter {
+            progress_seen: Arc::clone(&progress_seen),
+        };
         let started = std::time::Instant::now();
         let error = McpServer::new()
             .with_boolean_pattern_worker(
@@ -2281,6 +2298,7 @@ while [ "$i" -lt 1000 ]; do
             .expect_err("a disconnected output returns an error");
 
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(progress_seen.load(Ordering::SeqCst));
         assert!(shutdown.load(Ordering::SeqCst));
         assert!(started.elapsed() < Duration::from_secs(1));
         let _ = std::fs::remove_dir_all(root);

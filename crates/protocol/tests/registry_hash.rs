@@ -174,6 +174,8 @@ fn extrude_schema_requires_a_semantic_target_for_subtractive_mode() {
     let mut additive = common.clone();
     additive["mode"] = serde_json::json!("additive");
     validate(&extrude.request_schema, &additive).expect("additive mode validates");
+    additive["target_feature_id"] = serde_json::json!("base");
+    assert!(validate(&extrude.request_schema, &additive).is_err());
 
     let mut subtractive = common.clone();
     subtractive["mode"] = serde_json::json!("subtractive");

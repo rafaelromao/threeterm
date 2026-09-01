@@ -624,6 +624,49 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
 }
 
 #[test]
+fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
+    let cli_root = root("invalid-subtractive-cli");
+    let mcp_root = root("invalid-subtractive-mcp");
+    let tui_root = root("invalid-subtractive-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+    }
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&cli_root),
+    )
+    .expect_err("CLI must reject a missing subtractive target");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&tui_root),
+    )
+    .expect_err("TUI must reject a missing subtractive target");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/2",
+            "arguments": subtractive_extrude_request(&mcp_root)
+        }),
+    });
+    let mcp = mcp.result.expect("MCP returns a tool error result");
+    assert!(format!("{cli:?}").contains("target feature is missing"));
+    assert!(format!("{tui:?}").contains("target feature is missing"));
+    assert_eq!(mcp["isError"], true);
+    assert!(
+        mcp["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("target feature is missing"))
+    );
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
 fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
     let cli_root = root("edge-cli");
     let mcp_root = root("edge-mcp");

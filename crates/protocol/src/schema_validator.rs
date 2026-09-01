@@ -18,6 +18,8 @@
 //! - `pattern` enforces a regex on string fields.
 //! - `oneOf` requires exactly one matching alternative.
 //! - `type` may be an array for nullable fields.
+//! - `const` and boolean schemas constrain exact values and reject values
+//!   when the schema is `false`.
 //! - `enum` restricts a value to one of a fixed set of JSON values.
 //!
 //! Anything outside this subset is treated as "no constraint" so the

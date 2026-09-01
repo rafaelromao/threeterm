@@ -351,6 +351,8 @@ pub struct CanonicalExtrudeIntent {
     pub schema_version: String,
     pub command: String,
     pub operation: String,
+    #[serde(default)]
+    pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_feature_id: Option<String>,
     pub request_id: String,
@@ -373,8 +375,18 @@ impl CanonicalExtrudeIntent {
                 "canonical extrude intent identity is invalid".to_string(),
             ));
         }
-        if (self.operation == "additive" && self.target_feature_id.is_some())
-            || (self.operation == "subtractive"
+        let mode = if self.mode.is_empty() {
+            self.operation.as_str()
+        } else {
+            if self.mode != self.operation {
+                return Err(BundleError::Invalid(
+                    "canonical extrude operation and mode do not match".to_string(),
+                ));
+            }
+            self.mode.as_str()
+        };
+        if (mode == "additive" && self.target_feature_id.is_some())
+            || (mode == "subtractive"
                 && self.target_feature_id.as_deref().is_none_or(str::is_empty))
             || (self.schema_version == LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
                 && self.operation != "additive")

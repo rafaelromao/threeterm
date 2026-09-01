@@ -2699,7 +2699,11 @@ impl Host {
                     .collect(),
                 intent.deterministic_inputs.height,
             )
-            .with_mode(parse_extrude_mode_value(&intent.operation)?)
+            .with_mode(parse_extrude_mode_value(if intent.mode.is_empty() {
+                &intent.operation
+            } else {
+                &intent.mode
+            })?)
             .with_optional_target_feature_id(intent.target_feature_id.clone())
             .with_output_path(&stage_root, "replay.brep.partial")
             .with_feature_id(&feature_id);
@@ -6555,6 +6559,7 @@ fn canonical_extrude_intent(
         schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
         command: "extrude".to_string(),
         operation: mode.as_str().to_string(),
+        mode: mode.as_str().to_string(),
         target_feature_id,
         request_id: artifact.request_id.clone(),
         deterministic_inputs: ExtrudeDeterministicInputs { profile, height },

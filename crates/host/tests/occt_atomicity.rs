@@ -415,6 +415,59 @@ fn subtractive_extrude_replays_and_exports_the_same_cut_after_derived_deletion()
 }
 
 #[test]
+fn invalid_subtractive_cut_preserves_the_prior_revision_snapshot() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("subtractive-invalid-cut", "seed", "box");
+    let host = Host::new();
+    let base = host
+        .extrude(
+            &root,
+            rectangle_extrude_request("subtractive-invalid-base")
+                .with_feature_id("base")
+                .with_output_path(root.join("stage"), "base.brep"),
+            &worker,
+        )
+        .expect("base solid commits");
+    let before_manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let before_log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    let before = host.load(&root).expect("prior snapshot loads");
+    let before_brep = fs::read(&base.result.brep_path).expect("base BREP reads");
+
+    let error = host
+        .extrude(
+            &root,
+            ExtrudeRequest::new(
+                "subtractive-invalid-cut",
+                vec![(20.0, 20.0), (22.0, 20.0), (22.0, 22.0), (20.0, 22.0)],
+                3.0,
+            )
+            .with_feature_id("cut")
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("base"),
+            &worker,
+        )
+        .expect_err("disjoint subtractive cut must fail");
+    assert!(matches!(
+        error,
+        HostError::BrepInvalid { .. } | HostError::WorkerFailure { .. }
+    ));
+    assert_eq!(host.load(&root).expect("snapshot reloads"), before);
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+        before_manifest
+    );
+    assert_eq!(
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(),
+        before_log
+    );
+    assert_eq!(fs::read(&base.result.brep_path).unwrap(), before_brep);
+    assert!(!root.join("brep/cut.brep").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn replay_reconstructs_persisted_extrude_inputs_through_a_worker_boundary() {
     let root = temp_root("replay-fake-worker");
     let worker_root = temp_root("replay-fake-worker-bin");
@@ -454,6 +507,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
         schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
         command: "extrude".to_string(),
         operation: "additive".to_string(),
+        mode: "additive".to_string(),
         target_feature_id: None,
         request_id: "replay-request".to_string(),
         deterministic_inputs: ExtrudeDeterministicInputs {

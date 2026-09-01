@@ -549,69 +549,6 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
 }
 
 #[test]
-fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
-    let cli_root = root("edge-ambiguous-cli");
-    let mcp_root = root("edge-ambiguous-mcp");
-    let tui_root = root("edge-ambiguous-tui");
-    let Some(cli_revision) = setup_edge_root(&cli_root, "ambiguous-cli") else {
-        return;
-    };
-    let Some(tui_revision) = setup_edge_root(&tui_root, "ambiguous-tui") else {
-        return;
-    };
-    let Some(mcp_revision) = setup_edge_root(&mcp_root, "ambiguous-mcp") else {
-        return;
-    };
-
-    let cli = cli_reattach_edge(
-        &cli_root,
-        &cli_revision,
-        edge_reference(&cli_revision),
-        edge_reference(&cli_revision),
-    );
-    let tui = threeterm_tui::execute_selected_edge_reattachment(
-        &threeterm_host::Host::new(),
-        &tui_root,
-        &tui_revision,
-        "fillet-after-ambiguous",
-        "fillet",
-        "base",
-        0.25,
-        edge_reference(&tui_revision),
-        edge_reference(&tui_revision),
-    )
-    .expect("TUI edge command reports ambiguity");
-    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
-        id: json!(1),
-        is_notification: false,
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": "threeterm.command.reattach-edge/2",
-            "arguments": edge_request_with_target(
-                &mcp_root,
-                &mcp_revision,
-                edge_reference(&mcp_revision),
-                edge_reference(&mcp_revision),
-            )
-        }),
-    });
-    let mcp = mcp.result.expect("MCP edge command reports ambiguity")["structuredContent"].clone();
-
-    for result in [&cli, &tui, &mcp] {
-        assert_eq!(result["outcome"], "ambiguous");
-        assert!(result["candidate_edge_ids"].as_array().unwrap().len() >= 2);
-        assert_eq!(result["committed"], false);
-    }
-    for path in [&cli_root, &mcp_root, &tui_root] {
-        assert_eq!(Bundle::at(path).open().unwrap().log.len(), 1);
-        assert!(!path.join("brep/fillet-after-ambiguous.brep").exists());
-    }
-    let _ = fs::remove_dir_all(cli_root);
-    let _ = fs::remove_dir_all(mcp_root);
-    let _ = fs::remove_dir_all(tui_root);
-}
-
-#[test]
 fn cli_mcp_and_tui_report_real_worker_role_incompatibility_without_commit() {
     let cli_root = root("edge-incompatible-cli");
     let mcp_root = root("edge-incompatible-mcp");

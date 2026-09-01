@@ -1665,6 +1665,19 @@ fn parse_boolean_pattern(args: &[OsString]) -> DispatchPlan {
         Ok(value) => value,
         Err(error) => return error,
     };
+    if !origin.iter().all(|value| value.is_finite())
+        || !spacing
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        || !(1..=1000).contains(&columns)
+        || !(1..=1000).contains(&rows)
+        || !diameter.is_finite()
+        || diameter <= 0.0
+    {
+        return DispatchPlan::Unknown {
+            arg: "boolean-pattern numeric bounds".to_string(),
+        };
+    }
     DispatchPlan::BooleanPattern {
         bundle,
         feature_id,

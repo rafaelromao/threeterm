@@ -1682,6 +1682,19 @@ impl Host {
                         .ok_or_else(|| HostError::Validation {
                             detail: "invalid boolean pattern diameter".to_string(),
                         })?;
+                    if !origin.iter().all(|value| value.is_finite())
+                        || !spacing
+                            .iter()
+                            .all(|value| value.is_finite() && *value > 0.0)
+                        || !(1..=1000).contains(&columns)
+                        || !(1..=1000).contains(&rows)
+                        || !diameter.is_finite()
+                        || diameter <= 0.0
+                    {
+                        return Err(HostError::Validation {
+                            detail: "invalid boolean pattern numeric bounds".to_string(),
+                        });
+                    }
                     let bundle_path = string_field("bundle_path")?;
                     let feature_id = string_field("feature_id")?;
                     let base_feature_id = string_field("base_feature_id")?;

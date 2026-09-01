@@ -850,6 +850,25 @@ impl McpServer {
                         }
                         handled += 1;
                     }
+                    RunEvent::Request(request)
+                        if active.is_some() && request.method == "tools/call" =>
+                    {
+                        if !request.is_notification {
+                            let response = JsonRpcResponse::success(
+                                request.id,
+                                tool_execution_error(
+                                    "another expensive command is already active".to_string(),
+                                ),
+                            );
+                            if let Err(error) = write_envelope(writer, &response) {
+                                if let Some(active) = &active {
+                                    active.cancel.store(true, Ordering::SeqCst);
+                                }
+                                return Err(error);
+                            }
+                        }
+                        handled += 1;
+                    }
                     RunEvent::Request(request) => {
                         let response = self.handle_request(&request);
                         if !request.is_notification

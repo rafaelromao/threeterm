@@ -61,6 +61,7 @@ release_artifact="${tmpdir}/release-artifact"
 mkdir -p "${release_root}" "${fake_bin}"
 git archive HEAD | tar -x -C "${release_root}"
 jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    .feature_count = 1 | .transaction_count = 1 | .derived_result_count = 1 |
     (.runs[].timings[].sample_count) = 30 |
     (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0])' \
     "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json" \

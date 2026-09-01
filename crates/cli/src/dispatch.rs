@@ -17,13 +17,13 @@ use threeterm_occt_worker::{
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
-    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
-    CommandId, DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
-    find_by_name, iter,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
+    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
@@ -153,6 +153,16 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         tool_feature_id: String,
+    },
+    BooleanPattern {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        origin: [f64; 3],
+        spacing: [f64; 2],
+        columns: u32,
+        rows: u32,
+        diameter: f64,
     },
     Fillet {
         bundle: String,
@@ -518,6 +528,7 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "extrude" => parse_extrude(&args[2..]),
         "fit-dimension" => parse_fit_dimension(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
+        "boolean-pattern" => parse_boolean_pattern(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
         "chamfer" => parse_chamfer(&args[2..]),
         "hole" => parse_hole(&args[2..]),
@@ -697,6 +708,12 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             .iter()
             .all(|value| value.is_finite()),
         DispatchPlan::FitDimension { clearance, .. } => clearance.is_finite(),
+        DispatchPlan::BooleanPattern {
+            origin,
+            spacing,
+            diameter,
+            ..
+        } => origin.iter().chain(spacing).all(|value| value.is_finite()) && diameter.is_finite(),
         DispatchPlan::Registered { .. }
         | DispatchPlan::List
         | DispatchPlan::NewProject { .. }
@@ -1543,6 +1560,133 @@ fn parse_boolean_fuse(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         tool_feature_id,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_boolean_pattern(args: &[OsString]) -> DispatchPlan {
+    let mut values = std::collections::HashMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy().into_owned();
+        if !matches!(
+            flag.as_str(),
+            "--bundle"
+                | "--feature-id"
+                | "--base"
+                | "--origin"
+                | "--spacing"
+                | "--columns"
+                | "--rows"
+                | "--diameter"
+        ) {
+            return DispatchPlan::Unknown { arg: flag };
+        }
+        let Some(value) = args.get(index + 1) else {
+            return DispatchPlan::Unknown { arg: flag };
+        };
+        if values
+            .insert(flag.clone(), value.to_string_lossy().into_owned())
+            .is_some()
+        {
+            return DispatchPlan::Unknown { arg: flag };
+        }
+        index += 2;
+    }
+    let required = |flag: &str| {
+        values
+            .get(flag)
+            .cloned()
+            .ok_or_else(|| DispatchPlan::Unknown {
+                arg: flag.to_string(),
+            })
+    };
+    let parse = |flag: &str| {
+        required(flag).and_then(|value| {
+            value.parse::<f64>().map_err(|_| DispatchPlan::Unknown {
+                arg: format!("{flag} {value}"),
+            })
+        })
+    };
+    let parse_vec = |flag: &str, arity: usize| {
+        required(flag).and_then(|value| {
+            let parts = value.split(',').collect::<Vec<_>>();
+            if parts.len() != arity {
+                return Err(DispatchPlan::Unknown {
+                    arg: format!("{flag} {value}"),
+                });
+            }
+            let mut parsed = Vec::with_capacity(arity);
+            for part in parts {
+                parsed.push(part.parse::<f64>().map_err(|_| DispatchPlan::Unknown {
+                    arg: format!("{flag} {value}"),
+                })?);
+            }
+            Ok(parsed)
+        })
+    };
+    let bundle = match required("--bundle") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let feature_id = match required("--feature-id") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let base_feature_id = match required("--base") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let origin = match parse_vec("--origin", 3) {
+        Ok(value) => [value[0], value[1], value[2]],
+        Err(error) => return error,
+    };
+    let spacing = match parse_vec("--spacing", 2) {
+        Ok(value) => [value[0], value[1]],
+        Err(error) => return error,
+    };
+    let columns = match required("--columns").and_then(|value| {
+        value.parse::<u32>().map_err(|_| DispatchPlan::Unknown {
+            arg: format!("--columns {value}"),
+        })
+    }) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let rows = match required("--rows").and_then(|value| {
+        value.parse::<u32>().map_err(|_| DispatchPlan::Unknown {
+            arg: format!("--rows {value}"),
+        })
+    }) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let diameter = match parse("--diameter") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if !origin.iter().all(|value| value.is_finite())
+        || !spacing
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        || !(1..=1000).contains(&columns)
+        || !(1..=1000).contains(&rows)
+        || !diameter.is_finite()
+        || diameter <= 0.0
+    {
+        return DispatchPlan::Unknown {
+            arg: "boolean-pattern numeric bounds".to_string(),
+        };
+    }
+    DispatchPlan::BooleanPattern {
+        bundle,
+        feature_id,
+        base_feature_id,
+        origin,
+        spacing,
+        columns,
+        rows,
+        diameter,
     }
 }
 
@@ -2897,6 +3041,13 @@ fn execute_handler(
             stdout,
             stderr,
         ),
+        DispatchPlan::BooleanPattern { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, BOOLEAN_PATTERN_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Fillet {
             bundle,
             feature_id,
@@ -3220,7 +3371,7 @@ pub fn dispatch_registered_command(
 ) -> Result<Value, DispatchError> {
     if matches!(
         command,
-        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID
+        IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | EXTRUDE_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)
@@ -4113,6 +4264,25 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id })
         }
+        DispatchPlan::BooleanPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            origin,
+            spacing,
+            columns,
+            rows,
+            diameter,
+        } => json!({
+            "bundle_path": bundle,
+            "feature_id": feature_id,
+            "base_feature_id": base_feature_id,
+            "origin": origin,
+            "spacing": spacing,
+            "columns": columns,
+            "rows": rows,
+            "diameter": diameter,
+        }),
         DispatchPlan::Fillet {
             bundle,
             feature_id,
@@ -5642,24 +5812,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         } => format!(
             "{{\"kind\":\"draft_unknown_outcome\",\"draft_id\":{draft_id:?},\"idempotency_key\":{draft_id:?},\"source_revision\":{source_revision:?},\"current_revision\":{current_revision:?},\"recovery\":{recovery:?}}}"
         ),
-        HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
-            "kind": "worker_terminated",
-            "request_id": record.request_id,
-            "stage": record.stage,
-            "elapsed_ms": record.elapsed.as_millis(),
-            "last_progress": record.last_progress.as_ref().map(|progress| json!({
-                "stage": progress.stage,
-                "percent": progress.percent,
-            })),
-            "last_artifact_error": record.last_artifact_error,
-            "exit_signal": record.exit_signal,
-            "exit_code": record.exit_code,
-            "stderr_tail": record.stderr_tail,
-            "failed_code": record.failed_code,
-            "failed_detail": record.failed_detail,
-            "exit_kind": record.exit_kind.as_str(),
-        }))
-        .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
+        HostError::WorkerTerminated { .. } => host_error_diagnostic(error).arg,
         HostError::DerivedResult { diagnostic } => diagnostic.arg.clone(),
     };
     let (mut diagnostic, exit) = match error {
@@ -5691,6 +5844,56 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
     }
     write_diagnostic(stderr, &diagnostic);
     exit
+}
+
+/// Project a host failure into the same structured diagnostic used by
+/// machine-mode CLI output. MCP uses this projection as tool content rather
+/// than inventing a transport-specific failure taxonomy.
+pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
+    let detail = match error {
+        HostError::WorkerTerminated { record } => serde_json::to_string(&json!({
+            "kind": "worker_terminated",
+            "request_id": record.request_id,
+            "stage": record.stage,
+            "elapsed_ms": record.elapsed.as_millis(),
+            "last_progress": record.last_progress.as_ref().map(|progress| json!({
+                "stage": progress.stage,
+                "percent": progress.percent,
+            })),
+            "last_artifact_error": record.last_artifact_error,
+            "exit_signal": record.exit_signal,
+            "exit_code": record.exit_code,
+            "stderr_tail": record.stderr_tail,
+            "failed_code": record.failed_code,
+            "failed_detail": record.failed_detail,
+            "protocol_diagnostic": record.protocol_diagnostic.as_ref().map(|diagnostic| json!({
+                "code": diagnostic.code.as_str(),
+                "detail": diagnostic.detail,
+            })),
+            "termination_error": record.termination_error,
+            "exit_kind": record.exit_kind.as_str(),
+        }))
+        .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
+        HostError::WorkerFailure { request_id, detail } => request_id
+            .as_deref()
+            .map(|request_id| format!("request_id={request_id}; {detail}"))
+            .unwrap_or_else(|| detail.clone()),
+        _ => error.to_string(),
+    };
+    match error {
+        HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
+            Diagnostic::brep_invalid(&detail)
+        }
+        HostError::UnsupportedGeometry { .. } => Diagnostic::unsupported_geometry(&detail),
+        HostError::WorkerFailure { .. }
+        | HostError::WorkerUnavailable { .. }
+        | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
+        HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
+        HostError::DerivedResult { diagnostic } => diagnostic.clone(),
+        _ => Diagnostic::integrity_failure(&detail),
+    }
 }
 
 fn persistence_error_has_structured_detail(error: &threeterm_persistence::BundleError) -> bool {
@@ -5782,7 +5985,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 36);
+        assert_eq!(commands.len(), 37);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
@@ -5970,6 +6173,24 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "worker_failure");
         assert_eq!(parsed["arg"], "request_id=req-42; foreign completion");
+    }
+
+    #[test]
+    fn host_validation_and_persistence_failures_use_shared_codes() {
+        assert_eq!(
+            host_error_diagnostic(&HostError::Validation {
+                detail: "missing feature_id".to_string(),
+            })
+            .code,
+            threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest
+        );
+        assert_eq!(
+            host_error_diagnostic(&HostError::Persistence(
+                threeterm_persistence::BundleError::Invalid("broken transaction".to_string(),)
+            ))
+            .code,
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure
+        );
     }
 
     #[test]

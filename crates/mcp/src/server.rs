@@ -22,24 +22,29 @@
 //! `Host` and `Bundle` layers).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::{self, BufRead, Read, Write};
+use std::os::fd::AsFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{
-    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command,
+    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command, host_error_diagnostic,
 };
-use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
+use threeterm_host::{BREP_SUBDIR, Host, HostError};
+use threeterm_occt_worker::{BooleanPatternRequest, BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, CommandSchema,
-    IDENTITY_COMMAND_ID, iter,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
+    CommandSchema, IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -51,6 +56,9 @@ pub const ERROR_METHOD_NOT_FOUND: i32 = -32601;
 pub const ERROR_INVALID_PARAMS: i32 = -32602;
 pub const ERROR_INTERNAL: i32 = -32603;
 pub const ERROR_PARSE: i32 = -32700;
+pub const MAX_PROGRESS_NOTIFICATIONS: usize = 100;
+const MAX_PROGRESS_STAGE_CHARS: usize = 256;
+const MAX_PENDING_CANCELLATIONS: usize = 128;
 
 /// Tool descriptor exposed by `tools/list`. The wire shape follows the MCP
 /// tool advertisement convention with `inputSchema` and `outputSchema`
@@ -104,6 +112,100 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
+/// A buffered MCP input source that can be released from a blocking read when
+/// the output side of the session fails.
+pub trait CancellableBufRead: BufRead + Send {
+    fn shutdown_token(&self) -> Arc<AtomicBool>;
+}
+
+impl CancellableBufRead for &[u8] {
+    fn shutdown_token(&self) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+}
+
+/// Polling, shutdown-aware stdin adapter for the production MCP process.
+#[derive(Debug)]
+pub struct CancellableStdin {
+    stdin: io::Stdin,
+    buffered: Vec<u8>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl CancellableStdin {
+    pub fn new() -> Self {
+        Self {
+            stdin: io::stdin(),
+            buffered: Vec::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CancellableStdin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Read for CancellableStdin {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if !self.buffered.is_empty() {
+            let length = output.len().min(self.buffered.len());
+            output[..length].copy_from_slice(&self.buffered[..length]);
+            self.buffered.drain(..length);
+            return Ok(length);
+        }
+        loop {
+            if self.is_shutdown() {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "MCP input was shut down",
+                ));
+            }
+            let mut poll_fds = [PollFd::new(
+                self.stdin.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP,
+            )];
+            poll(&mut poll_fds, PollTimeout::from(100_u16)).map_err(io::Error::other)?;
+            if poll_fds[0]
+                .revents()
+                .is_some_and(|flags| flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP))
+            {
+                return self.stdin.read(output);
+            }
+        }
+    }
+}
+
+impl BufRead for CancellableStdin {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.buffered.is_empty() {
+            let mut chunk = [0_u8; 8192];
+            let length = self.read(&mut chunk)?;
+            self.buffered.extend_from_slice(&chunk[..length]);
+        }
+        Ok(&self.buffered)
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.buffered.drain(..amount.min(self.buffered.len()));
+    }
+}
+
+impl CancellableBufRead for CancellableStdin {
+    fn shutdown_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+}
+
 impl JsonRpcResponse {
     fn success(id: Value, result: Value) -> Self {
         Self {
@@ -131,14 +233,49 @@ struct BracketEditSession {
     worker: OcctWorker,
 }
 
+#[derive(Debug)]
+enum RunEvent {
+    Request(JsonRpcRequest),
+    ParseError(JsonRpcResponse),
+    EndOfInput,
+    Progress {
+        request_key: String,
+        token: Value,
+        progress: threeterm_protocol::supervisor::Progress,
+    },
+    Completed {
+        request_key: String,
+        response: Result<Value, HostError>,
+    },
+}
+
+#[derive(Debug)]
+enum ControlEvent {
+    Cancellation(JsonRpcRequest),
+    ReadError(std::io::Error),
+}
+
+#[derive(Debug)]
+struct ActiveRequest {
+    request_key: String,
+    cancel: Arc<AtomicBool>,
+}
+
 #[derive(Debug, Default)]
 pub struct McpServer {
     bracket_edits: RefCell<HashMap<(PathBuf, String), BracketEditSession>>,
+    boolean_pattern_worker: Option<OcctWorker>,
 }
 
 impl McpServer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn with_boolean_pattern_worker(mut self, worker: OcctWorker) -> Self {
+        self.boolean_pattern_worker = Some(worker);
+        self
     }
 
     /// Build the `tools/list` response payload from the static command
@@ -258,7 +395,10 @@ impl McpServer {
             }
         };
 
-        if matches!(schema_entry.id, IDENTITY_COMMAND_ID | APPLY_COMMAND_ID) {
+        if matches!(
+            schema_entry.id,
+            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
+        ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }
 
@@ -572,67 +712,573 @@ impl McpServer {
     /// `reader` hits EOF or a malformed frame aborts the current chunk; in
     /// the latter case the buffered bytes are dropped so the supervisor
     /// can resync on the next chunk (closed issue #49 contract).
-    pub fn run<R: BufRead, W: Write>(
+    pub fn run<R: CancellableBufRead, W: Write>(
         &self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<usize, std::io::Error> {
-        let mut buffer = Vec::with_capacity(4096);
-        let mut handled = 0usize;
-        loop {
-            buffer.clear();
-            let read = reader.read_until(b'\n', &mut buffer)?;
-            if read == 0 {
-                return Ok(handled);
-            }
-            if buffer.len() > MAX_FRAME_BUFFER {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "frame buffer exceeded maximum size: {} > {}",
-                        buffer.len(),
-                        MAX_FRAME_BUFFER
-                    ),
-                ));
-            }
-            let raw_lines = split_newlines(&buffer);
-            for line in raw_lines {
-                if line.is_empty() {
-                    continue;
-                }
-                let parsed: Result<Value, _> = serde_json::from_slice(line);
-                let value = match parsed {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let response = JsonRpcResponse::error(
-                            Value::Null,
-                            ERROR_PARSE,
-                            format!("frame is not valid JSON: {error}"),
-                        );
-                        write_envelope(writer, &response)?;
-                        continue;
+        let (events, receive) = mpsc::sync_channel(128);
+        let (control_events, control_receive) = mpsc::sync_channel(128);
+        let queued_request_ids = Arc::new(Mutex::new(HashSet::new()));
+        let input_shutdown = reader.shutdown_token();
+        thread::scope(|scope| {
+            let sender = events.clone();
+            let control_sender = control_events.clone();
+            let reader_queued_request_ids = Arc::clone(&queued_request_ids);
+            let reader_shutdown = Arc::clone(&input_shutdown);
+            scope.spawn(move || {
+                let mut buffer = Vec::with_capacity(4096);
+                loop {
+                    if reader_shutdown.load(Ordering::SeqCst) {
+                        return;
                     }
-                };
-                let request = match parse_request(&value) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        let response = JsonRpcResponse::error(
-                            extract_id(&value),
-                            ERROR_INVALID_REQUEST,
-                            error,
-                        );
-                        write_envelope(writer, &response)?;
-                        continue;
+                    buffer.clear();
+                    let read = match read_bounded_frame(reader, &mut buffer) {
+                        Ok(read) => read,
+                        Err(error) => {
+                            let _ = send_until_shutdown(
+                                &control_sender,
+                                ControlEvent::ReadError(error),
+                                &reader_shutdown,
+                            );
+                            return;
+                        }
+                    };
+                    if read == 0 {
+                        let _ =
+                            send_until_shutdown(&sender, RunEvent::EndOfInput, &reader_shutdown);
+                        return;
                     }
-                };
-                let response = self.handle_request(&request);
-                if !request.is_notification {
-                    write_envelope(writer, &response)?;
+                    for line in split_newlines(&buffer) {
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let value: Value = match serde_json::from_slice(line) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if !send_until_shutdown(
+                                    &sender,
+                                    RunEvent::ParseError(JsonRpcResponse::error(
+                                        Value::Null,
+                                        ERROR_PARSE,
+                                        format!("frame is not valid JSON: {error}"),
+                                    )),
+                                    &reader_shutdown,
+                                ) {
+                                    let _ = send_until_shutdown(
+                                        &control_sender,
+                                        ControlEvent::ReadError(std::io::Error::other(
+                                            "MCP event queue is full",
+                                        )),
+                                        &reader_shutdown,
+                                    );
+                                    return;
+                                }
+                                continue;
+                            }
+                        };
+                        let request = match parse_request(&value) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                if !send_until_shutdown(
+                                    &sender,
+                                    RunEvent::ParseError(JsonRpcResponse::error(
+                                        extract_id(&value),
+                                        ERROR_INVALID_REQUEST,
+                                        error,
+                                    )),
+                                    &reader_shutdown,
+                                ) {
+                                    let _ = send_until_shutdown(
+                                        &control_sender,
+                                        ControlEvent::ReadError(std::io::Error::other(
+                                            "MCP event queue is full",
+                                        )),
+                                        &reader_shutdown,
+                                    );
+                                    return;
+                                }
+                                continue;
+                            }
+                        };
+                        if request.method == "notifications/cancelled" {
+                            if !send_until_shutdown(
+                                &control_sender,
+                                ControlEvent::Cancellation(request),
+                                &reader_shutdown,
+                            ) {
+                                return;
+                            }
+                        } else {
+                            if request.method == "tools/call" && !request.is_notification {
+                                reader_queued_request_ids
+                                    .lock()
+                                    .expect("queued request IDs mutex is not poisoned")
+                                    .insert(request_key(&request.id));
+                            }
+                            if !send_until_shutdown(
+                                &sender,
+                                RunEvent::Request(request),
+                                &reader_shutdown,
+                            ) {
+                                let _ = send_until_shutdown(
+                                    &control_sender,
+                                    ControlEvent::ReadError(std::io::Error::other(
+                                        "MCP event queue is full",
+                                    )),
+                                    &reader_shutdown,
+                                );
+                                return;
+                            }
+                        }
+                    }
                 }
-                handled += 1;
+            });
+
+            let mut active: Option<ActiveRequest> = None;
+            let mut handled = 0usize;
+            let mut input_finished = false;
+            let mut read_error = None;
+            let mut pending_cancellations = HashSet::new();
+            loop {
+                while let Ok(control) = control_receive.try_recv() {
+                    match control {
+                        ControlEvent::Cancellation(request) => {
+                            if let Some(active) = &active
+                                && cancellation_targets(&request, &active.request_key)
+                            {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            } else if pending_cancellations.len() < MAX_PENDING_CANCELLATIONS
+                                && let Some(request_id) = request.params.get("requestId")
+                                && queued_request_ids
+                                    .lock()
+                                    .expect("queued request IDs mutex is not poisoned")
+                                    .contains(&request_key(request_id))
+                            {
+                                pending_cancellations.insert(request_key(request_id));
+                            }
+                            handled += 1;
+                        }
+                        ControlEvent::ReadError(error) => {
+                            if let Some(active) = &active {
+                                active.cancel.store(true, Ordering::SeqCst);
+                            }
+                            read_error = Some(error);
+                            input_finished = true;
+                        }
+                    }
+                }
+                if input_finished && active.is_none() {
+                    break match read_error.take() {
+                        Some(error) => Err(error),
+                        None => Ok(handled),
+                    };
+                }
+                let event = match receive.recv_timeout(Duration::from_millis(10)) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(handled),
+                };
+                match event {
+                    RunEvent::Request(request) if request.method == "notifications/cancelled" => {
+                        if let Some(active) = &active
+                            && cancellation_targets(&request, &active.request_key)
+                        {
+                            active.cancel.store(true, Ordering::SeqCst);
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request) if is_boolean_pattern_call(&request) => {
+                        if request.is_notification {
+                            handled += 1;
+                            continue;
+                        }
+                        let arguments = request
+                            .params
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(Default::default()));
+                        if let Err(reason) = validate(
+                            &threeterm_protocol::schema::BOOLEAN_PATTERN_REQUEST_SCHEMA,
+                            &arguments,
+                        ) {
+                            if let Err(error) = write_envelope(
+                                writer,
+                                &JsonRpcResponse::error(
+                                    request.id.clone(),
+                                    ERROR_INVALID_PARAMS,
+                                    format!(
+                                        "tools/call arguments failed request-schema validation: {reason}"
+                                    ),
+                                ),
+                            ) {
+                                abort_active_run(&input_shutdown, &active);
+                                return Err(error);
+                            }
+                            handled += 1;
+                            continue;
+                        }
+                        if active.is_some() {
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key(&request.id));
+                            if let Err(error) = write_envelope(
+                                writer,
+                                &JsonRpcResponse::success(
+                                    request.id.clone(),
+                                    tool_execution_error(
+                                        "another expensive command is already active".to_string(),
+                                    ),
+                                ),
+                            ) {
+                                abort_active_run(&input_shutdown, &active);
+                                return Err(error);
+                            }
+                        } else {
+                            let request_key = request_key(&request.id);
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key);
+                            let cancel = Arc::new(AtomicBool::new(false));
+                            if pending_cancellations.remove(&request_key) {
+                                cancel.store(true, Ordering::SeqCst);
+                            }
+                            let worker_cancel = Arc::clone(&cancel);
+                            let sender = events.clone();
+                            let token = progress_token(&request);
+                            let configured_worker = self.boolean_pattern_worker.clone();
+                            let event_key = request_key.clone();
+                            let worker_shutdown = Arc::clone(&input_shutdown);
+                            scope.spawn(move || {
+                                let mut emitted = 0usize;
+                                let mut last = None;
+                                let mut on_progress =
+                                    |progress: &threeterm_protocol::supervisor::Progress| {
+                                        let Some(token) = &token else { return };
+                                        if emitted >= MAX_PROGRESS_NOTIFICATIONS
+                                            || last.as_ref() == Some(progress)
+                                        {
+                                            return;
+                                        }
+                                        let mut progress = progress.clone();
+                                        progress.stage = progress
+                                            .stage
+                                            .chars()
+                                            .take(MAX_PROGRESS_STAGE_CHARS)
+                                            .collect();
+                                        last = Some(progress.clone());
+                                        emitted += 1;
+                                        let _ = send_until_shutdown(
+                                            &sender,
+                                            RunEvent::Progress {
+                                                request_key: event_key.clone(),
+                                                token: token.clone(),
+                                                progress,
+                                            },
+                                            &worker_shutdown,
+                                        );
+                                    };
+                                let response = execute_boolean_pattern(
+                                    arguments,
+                                    &worker_cancel,
+                                    &mut on_progress,
+                                    configured_worker.as_ref(),
+                                );
+                                let _ = send_until_shutdown(
+                                    &sender,
+                                    RunEvent::Completed {
+                                        request_key: event_key,
+                                        response,
+                                    },
+                                    &worker_shutdown,
+                                );
+                            });
+                            active = Some(ActiveRequest {
+                                request_key,
+                                cancel,
+                            });
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request)
+                        if active.is_some() && request.method == "tools/call" =>
+                    {
+                        if !request.is_notification {
+                            let response = JsonRpcResponse::success(
+                                request.id,
+                                tool_execution_error(
+                                    "another expensive command is already active".to_string(),
+                                ),
+                            );
+                            if let Err(error) = write_envelope(writer, &response) {
+                                abort_active_run(&input_shutdown, &active);
+                                return Err(error);
+                            }
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Request(request) => {
+                        if request.method == "tools/call" && !request.is_notification {
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key(&request.id));
+                        }
+                        let response = self.handle_request(&request);
+                        if !request.is_notification
+                            && let Err(error) = write_envelope(writer, &response)
+                        {
+                            abort_active_run(&input_shutdown, &active);
+                            return Err(error);
+                        }
+                        handled += 1;
+                    }
+                    RunEvent::Progress {
+                        request_key: event_key,
+                        token,
+                        progress,
+                    } => {
+                        if active
+                            .as_ref()
+                            .is_some_and(|request| request.request_key == event_key)
+                            && let Err(error) = write_progress(writer, &token, &progress)
+                        {
+                            abort_active_run(&input_shutdown, &active);
+                            return Err(error);
+                        }
+                    }
+                    RunEvent::Completed {
+                        request_key: event_key,
+                        response,
+                    } => {
+                        if active
+                            .as_ref()
+                            .is_some_and(|request| request.request_key == event_key)
+                        {
+                            while let Ok(control) = control_receive.try_recv() {
+                                match control {
+                                    ControlEvent::Cancellation(request) => {
+                                        if cancellation_targets(&request, &event_key)
+                                            && let Some(active) = &active
+                                        {
+                                            active.cancel.store(true, Ordering::SeqCst);
+                                        }
+                                        handled += 1;
+                                    }
+                                    ControlEvent::ReadError(error) => {
+                                        if let Some(active) = &active {
+                                            active.cancel.store(true, Ordering::SeqCst);
+                                        }
+                                        read_error = Some(error);
+                                        input_finished = true;
+                                    }
+                                }
+                            }
+                            let request_id =
+                                active.take().expect("active request exists").request_key;
+                            let response = match response {
+                                Ok(value) => JsonRpcResponse::success(
+                                    parse_request_id(&request_id),
+                                    tool_result(value, false),
+                                ),
+                                Err(error) => JsonRpcResponse::success(
+                                    parse_request_id(&request_id),
+                                    host_tool_execution_error(&error),
+                                ),
+                            };
+                            if let Err(error) = write_envelope(writer, &response) {
+                                abort_active_run(&input_shutdown, &active);
+                                return Err(error);
+                            }
+                        }
+                    }
+                    RunEvent::ParseError(response) => {
+                        if let Err(error) = write_envelope(writer, &response) {
+                            abort_active_run(&input_shutdown, &active);
+                            return Err(error);
+                        }
+                    }
+                    RunEvent::EndOfInput => {
+                        input_finished = true;
+                        if active.is_none() {
+                            break Ok(handled);
+                        }
+                    }
+                }
+                if input_finished && active.is_none() {
+                    break match read_error.take() {
+                        Some(error) => Err(error),
+                        None => Ok(handled),
+                    };
+                }
             }
-        }
+        })
     }
+}
+
+fn is_boolean_pattern_call(request: &JsonRpcRequest) -> bool {
+    request.method == "tools/call"
+        && request.params.get("name").and_then(Value::as_str)
+            == Some("threeterm.command.boolean-pattern/1")
+}
+
+fn request_key(id: &Value) -> String {
+    serde_json::to_string(id).expect("valid JSON-RPC id serializes")
+}
+
+fn parse_request_id(key: &str) -> Value {
+    serde_json::from_str(key).expect("active JSON-RPC id remains valid JSON")
+}
+
+fn cancellation_targets(request: &JsonRpcRequest, expected_key: &str) -> bool {
+    request
+        .params
+        .get("requestId")
+        .is_some_and(|id| request_key(id) == expected_key)
+}
+
+fn progress_token(request: &JsonRpcRequest) -> Option<Value> {
+    request
+        .params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("progressToken"))
+        .filter(|token| token.is_string() || token.as_i64().is_some() || token.as_u64().is_some())
+        .cloned()
+}
+
+fn valid_feature_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn write_progress<W: Write>(
+    writer: &mut W,
+    token: &Value,
+    progress: &threeterm_protocol::supervisor::Progress,
+) -> std::io::Result<()> {
+    let payload = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress.percent,
+            "total": 100,
+            "message": progress.stage,
+        },
+    });
+    let mut bytes = serde_json::to_vec(&payload).expect("progress serializes");
+    bytes.push(b'\n');
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+fn execute_boolean_pattern(
+    arguments: Value,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    configured_worker: Option<&OcctWorker>,
+) -> Result<Value, HostError> {
+    let bundle = arguments
+        .get("bundle_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing bundle_path".to_string(),
+        })?;
+    let feature_id = arguments
+        .get("feature_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing feature_id".to_string(),
+        })?;
+    let base_feature_id = arguments
+        .get("base_feature_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing base_feature_id".to_string(),
+        })?;
+    let origin: [f64; 3] =
+        serde_json::from_value(arguments["origin"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("invalid origin: {error}"),
+            }
+        })?;
+    let spacing: [f64; 2] =
+        serde_json::from_value(arguments["spacing"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("invalid spacing: {error}"),
+            }
+        })?;
+    let columns = arguments["columns"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid columns".to_string(),
+        })?;
+    let rows = arguments["rows"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid rows".to_string(),
+        })?;
+    let diameter = arguments["diameter"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "invalid diameter".to_string(),
+        })?;
+    if !valid_feature_path_component(feature_id) || !valid_feature_path_component(base_feature_id) {
+        return Err(HostError::Validation {
+            detail: "boolean pattern feature IDs must be plain path components".to_string(),
+        });
+    }
+    let root = Bundle::at(bundle).canonical_root().to_path_buf();
+    let request = BooleanPatternRequest::new(
+        new_request_id(),
+        root.join(BREP_SUBDIR)
+            .join(format!("{base_feature_id}.brep")),
+        origin,
+        spacing,
+        columns,
+        rows,
+        diameter,
+    )
+    .with_output_path(root.join("stage"), "boolean-pattern.brep")
+    .with_feature_id(feature_id);
+    let located_worker;
+    let worker = if let Some(worker) = configured_worker {
+        worker
+    } else {
+        located_worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+            detail: error.to_string(),
+        })?;
+        &located_worker
+    };
+    let value = Host::new()
+        .boolean_pattern_with_cancel_and_progress(bundle, request, worker, cancel, on_progress)?
+        .response_value(threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION);
+    validate(
+        &threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA,
+        &value,
+    )
+    .map_err(|reason| HostError::Validation {
+        detail: format!("boolean pattern response failed schema validation: {reason}"),
+    })?;
+    Ok(value)
+}
+
+fn host_tool_execution_error(error: &HostError) -> Value {
+    let diagnostic =
+        serde_json::to_value(host_error_diagnostic(error)).expect("diagnostic serializes");
+    let text = serde_json::to_string(&diagnostic).expect("diagnostic text serializes");
+    json!({
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": diagnostic,
+        "isError": true,
+    })
 }
 
 fn bracket_edit_failure_response(arguments: &Value, error: &HostError) -> Value {
@@ -964,6 +1610,59 @@ fn is_valid_request_id(value: &Value) -> bool {
     value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
+fn abort_active_run(shutdown: &Arc<AtomicBool>, active: &Option<ActiveRequest>) {
+    shutdown.store(true, Ordering::SeqCst);
+    if let Some(active) = active {
+        active.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+fn send_until_shutdown<T>(
+    sender: &mpsc::SyncSender<T>,
+    mut event: T,
+    shutdown: &AtomicBool,
+) -> bool {
+    loop {
+        match sender.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(next)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    return false;
+                }
+                event = next;
+                thread::yield_now();
+            }
+        }
+    }
+}
+
+fn read_bounded_frame<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(buffer.len());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let length = newline.map_or(available.len(), |index| index + 1);
+        if buffer.len() + length > MAX_FRAME_BUFFER {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "frame buffer exceeded maximum size: {} > {}",
+                    buffer.len() + length,
+                    MAX_FRAME_BUFFER
+                ),
+            ));
+        }
+        buffer.extend_from_slice(&available[..length]);
+        reader.consume(length);
+        if newline.is_some() {
+            return Ok(buffer.len());
+        }
+    }
+}
+
 fn split_newlines(bytes: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut start = 0usize;
@@ -1019,6 +1718,82 @@ pub fn _exit_ok_for_test() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingReader {
+        frame: Vec<u8>,
+        shutdown: Arc<AtomicBool>,
+    }
+
+    impl BlockingReader {
+        fn new(frame: Vec<u8>) -> Self {
+            Self {
+                frame,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let available = self.fill_buf()?;
+            let length = available.len().min(output.len());
+            output[..length].copy_from_slice(&available[..length]);
+            self.consume(length);
+            Ok(length)
+        }
+    }
+
+    impl BufRead for BlockingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if !self.frame.is_empty() {
+                return Ok(&self.frame);
+            }
+            while !self.shutdown.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test reader was shut down",
+            ))
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.frame.drain(..amount.min(self.frame.len()));
+        }
+    }
+
+    impl CancellableBufRead for BlockingReader {
+        fn shutdown_token(&self) -> Arc<AtomicBool> {
+            Arc::clone(&self.shutdown)
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingWriter {
+        progress_seen: Arc<AtomicBool>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes
+                .windows(b"notifications/progress".len())
+                .any(|window| window == b"notifications/progress")
+            {
+                self.progress_seen.store(true, Ordering::SeqCst);
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test writer disconnected",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test writer disconnected",
+            ))
+        }
+    }
 
     fn build_envelope(id: Value, method: &str, params: Value) -> Value {
         let mut object = Map::new();
@@ -1205,6 +1980,35 @@ mod tests {
     }
 
     #[test]
+    fn read_bounded_frame_rejects_an_unterminated_oversized_frame_before_growth() {
+        let input = vec![b'x'; MAX_FRAME_BUFFER + 1];
+        let mut buffer = Vec::new();
+        let error = read_bounded_frame(&mut input.as_slice(), &mut buffer)
+            .expect_err("oversized frame must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(buffer.len() <= MAX_FRAME_BUFFER);
+    }
+
+    #[test]
+    fn boolean_pattern_rejects_feature_ids_that_escape_the_bundle() {
+        let arguments = json!({
+            "bundle_path": "/tmp/project",
+            "feature_id": "pattern",
+            "base_feature_id": "../outside",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        });
+        let cancel = AtomicBool::new(false);
+        let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        let error = execute_boolean_pattern(arguments, &cancel, &mut on_progress, None)
+            .expect_err("path traversal must fail before worker lookup");
+        assert!(matches!(error, HostError::Validation { .. }));
+    }
+
+    #[test]
     fn run_does_not_write_responses_for_notifications() {
         let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}\n";
         let mut output = Vec::new();
@@ -1320,6 +2124,183 @@ mod tests {
         )
         .expect("text content contains JSON");
         assert_eq!(content, result["structuredContent"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_streams_bounded_progress_and_cancels_an_active_boolean_pattern() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("threeterm-mcp-progress-{}", new_request_id()));
+        Bundle::create(&root).expect("bundle creates");
+        let worker_path = root.join("worker.sh");
+        std::fs::write(
+            &worker_path,
+            r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
+read request
+rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"'$rid'","stage":"boolean_pattern:1/324","percent":1}'
+read cancel
+printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","request_id":"'$rid'","reason":"cancelled by client"}'
+"##,
+        )
+        .expect("worker script writes");
+        let mut permissions = std::fs::metadata(&worker_path)
+            .expect("worker metadata reads")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
+
+        let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+        let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+        let call = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.boolean-pattern/1",
+                "_meta": {"progressToken": "progress-1"},
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "feature_id": "pattern",
+                    "base_feature_id": "missing-base",
+                    "origin": [0.0, 0.0, 0.0],
+                    "spacing": [1.0, 1.0],
+                    "columns": 18,
+                    "rows": 18,
+                    "diameter": 1.0
+                }
+            }
+        });
+        let cancel = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "method": "notifications/cancelled",
+            "params": {"requestId": "call-1", "reason": "stop"}
+        });
+        assert_eq!(
+            progress_token(&parse_request(&call).expect("call parses")),
+            Some(json!("progress-1"))
+        );
+        let mut input = serde_json::to_vec(&call).expect("call serializes");
+        input.push(b'\n');
+        input.extend(serde_json::to_vec(&cancel).expect("cancel serializes"));
+        input.push(b'\n');
+        let mut output = Vec::new();
+        McpServer::new()
+            .with_boolean_pattern_worker(
+                OcctWorker::with_binary_path(worker_path).with_expected_worker_id("occt"),
+            )
+            .run(&mut input.as_slice(), &mut output)
+            .expect("MCP run succeeds");
+
+        let responses: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("MCP output is JSON"))
+            .collect();
+        assert!(
+            responses
+                .iter()
+                .any(|response| response["method"] == "notifications/progress"
+                    && response["params"]["progressToken"] == "progress-1"),
+            "active workers must stream progress: {responses:?}"
+        );
+        let result = responses
+            .iter()
+            .find(|response| response["id"] == "call-1")
+            .expect("call has a terminal response");
+        assert_eq!(result["result"]["isError"], true);
+        assert_eq!(
+            result["result"]["structuredContent"]["code"],
+            "worker_failure"
+        );
+        assert!(
+            result["result"]["structuredContent"]["arg"]
+                .as_str()
+                .expect("diagnostic arg is text")
+                .contains("boolean_pattern:1/324")
+        );
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).expect("manifest reads after cancellation"),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::read(root.join("transactions.log")).expect("log reads after cancellation"),
+            log_before
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_shuts_down_a_blocked_input_when_output_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("threeterm-mcp-shutdown-{}", new_request_id()));
+        Bundle::create(&root).expect("bundle creates");
+        let worker_path = root.join("worker.sh");
+        std::fs::write(
+            &worker_path,
+            r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
+read request
+rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+i=0
+while [ "$i" -lt 1000 ]; do
+  printf '%s\n' '{"kind":"progress","schema_version":"threeterm.protocol/1","request_id":"'$rid'","stage":"boolean_pattern:1/324","percent":1}'
+  i=$((i + 1))
+done
+"##,
+        )
+        .expect("worker script writes");
+        let mut permissions = std::fs::metadata(&worker_path)
+            .expect("worker metadata reads")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
+
+        let call = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "threeterm.command.boolean-pattern/1",
+                "_meta": {"progressToken": "progress-1"},
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "feature_id": "pattern",
+                    "base_feature_id": "missing-base",
+                    "origin": [0.0, 0.0, 0.0],
+                    "spacing": [1.0, 1.0],
+                    "columns": 18,
+                    "rows": 18,
+                    "diameter": 1.0
+                }
+            }
+        });
+        let mut frame = serde_json::to_vec(&call).expect("call serializes");
+        frame.push(b'\n');
+        let reader = BlockingReader::new(frame);
+        let shutdown = Arc::clone(&reader.shutdown);
+        let progress_seen = Arc::new(AtomicBool::new(false));
+        let mut reader = reader;
+        let mut writer = FailingWriter {
+            progress_seen: Arc::clone(&progress_seen),
+        };
+        let started = std::time::Instant::now();
+        let error = McpServer::new()
+            .with_boolean_pattern_worker(
+                OcctWorker::with_binary_path(worker_path).with_expected_worker_id("occt"),
+            )
+            .run(&mut reader, &mut writer)
+            .expect_err("a disconnected output returns an error");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(progress_seen.load(Ordering::SeqCst));
+        assert!(shutdown.load(Ordering::SeqCst));
+        assert!(started.elapsed() < Duration::from_secs(1));
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -33,7 +33,8 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID, find,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID,
+    IDENTITY_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -536,6 +537,48 @@ pub struct BooleanPatternCommitView {
     pub snapshot: SnapshotView,
     pub result: BooleanPatternResult,
     pub artifact: Layer1DerivedResult,
+    pub identity: ProjectIdentity,
+}
+
+impl BooleanPatternCommitView {
+    pub fn response_value(&self, schema_version: &str) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.result.status,
+            "operation": self.result.operation,
+            "feature_id": self.result.feature_id,
+            "request_id": self.result.request_id,
+            "cut_count": self.result.cut_count,
+            "source_snapshot": {
+                "feature_graph_hash": self.source_snapshot.feature_graph_hash,
+                "revision_hash": self.source_snapshot.revision_hash,
+            },
+            "generation_id": self.identity.generation_id,
+            "revision_id": self.identity.revision_id,
+            "feature_graph_hash": self.identity.feature_graph_hash,
+            "revision_hash": self.identity.revision_hash,
+            "transaction_count": self.identity.transaction_count,
+            "terminal_log_digest": self.identity.terminal_log_digest,
+            "authoritative": true,
+            "artifact_kind": self.artifact.artifact_kind,
+            "artifact_name": self.artifact.artifact_name,
+            "brep_path": self.result.brep_path,
+            "brep_sha256": self.result.brep_sha256,
+            "brep_bytes": self.result.brep_bytes,
+            "worker_fingerprint": self.artifact.worker_fingerprint,
+            "derived_result": {
+                "request_id": self.artifact.request_id,
+                "operation": self.artifact.operation,
+                "feature_id": self.artifact.feature_id,
+                "source_revision_id": self.artifact.source_revision_id,
+                "worker_fingerprint": self.artifact.worker_fingerprint,
+                "artifact_kind": self.artifact.artifact_kind,
+                "artifact_name": self.artifact.artifact_name,
+                "byte_count": self.artifact.byte_count,
+                "sha256": self.artifact.sha256,
+            },
+            "schema_version": schema_version,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1602,6 +1645,95 @@ impl Host {
                         },
                         "schema_version": find(command).expect("extrude is registered").response_schema_version,
                     }))
+                }
+                BOOLEAN_PATTERN_COMMAND_ID => {
+                    let origin: [f64; 3] =
+                        serde_json::from_value(request.get("origin").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing boolean pattern origin".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid boolean pattern origin: {error}"),
+                        })?;
+                    let spacing: [f64; 2] =
+                        serde_json::from_value(request.get("spacing").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing boolean pattern spacing".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid boolean pattern spacing: {error}"),
+                        })?;
+                    let columns = request
+                        .get("columns")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "invalid boolean pattern columns".to_string(),
+                        })?;
+                    let rows = request
+                        .get("rows")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "invalid boolean pattern rows".to_string(),
+                        })?;
+                    let diameter = request
+                        .get("diameter")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "invalid boolean pattern diameter".to_string(),
+                        })?;
+                    if !origin.iter().all(|value| value.is_finite())
+                        || !spacing
+                            .iter()
+                            .all(|value| value.is_finite() && *value > 0.0)
+                        || !(1..=1000).contains(&columns)
+                        || !(1..=1000).contains(&rows)
+                        || !diameter.is_finite()
+                        || diameter <= 0.0
+                    {
+                        return Err(HostError::Validation {
+                            detail: "invalid boolean pattern numeric bounds".to_string(),
+                        });
+                    }
+                    let bundle_path = string_field("bundle_path")?;
+                    let feature_id = string_field("feature_id")?;
+                    let base_feature_id = string_field("base_feature_id")?;
+                    if !valid_feature_path_component(feature_id)
+                        || !valid_feature_path_component(base_feature_id)
+                    {
+                        return Err(HostError::Validation {
+                            detail: "boolean pattern feature IDs must be plain path components"
+                                .to_string(),
+                        });
+                    }
+                    let root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+                    let base_path = root
+                        .join(BREP_SUBDIR)
+                        .join(format!("{base_feature_id}.brep"));
+                    let request = BooleanPatternRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        origin,
+                        spacing,
+                        columns,
+                        rows,
+                        diameter,
+                    )
+                    .with_output_path(root.join("stage"), "boolean-pattern.brep")
+                    .with_feature_id(feature_id);
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let view = self.boolean_pattern(bundle_path, request, &worker)?;
+                    Ok(view.response_value(
+                        find(command)
+                            .expect("boolean pattern is registered")
+                            .response_schema_version,
+                    ))
                 }
                 APPLY_COMMAND_ID => {
                     let operation = string_field("operation")?;
@@ -5162,6 +5294,23 @@ impl Host {
     /// Run the real sequential Boolean-cut pattern with cooperative
     /// cancellation. A successful result is the only path that can advance
     /// the canonical Revision Snapshot.
+    pub fn boolean_pattern(
+        &self,
+        root: impl AsRef<Path>,
+        request: BooleanPatternRequest,
+        worker: &OcctWorker,
+    ) -> Result<BooleanPatternCommitView, HostError> {
+        let cancel = AtomicBool::new(false);
+        let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        self.boolean_pattern_with_cancel_and_progress(
+            root,
+            request,
+            worker,
+            &cancel,
+            &mut ignore_progress,
+        )
+    }
+
     pub fn boolean_pattern_with_cancel(
         &self,
         root: impl AsRef<Path>,
@@ -5196,13 +5345,42 @@ impl Host {
             cancel,
             on_progress,
         )?;
+        if cancel.load(Ordering::SeqCst) {
+            let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
+            self.layer1_results
+                .borrow_mut()
+                .remove(&derived.artifact.cache_key);
+            if let Some(stage_root) = stage_root {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+            return Err(HostError::WorkerTerminated {
+                record: Box::new(threeterm_protocol::supervisor::TerminationRecord {
+                    request_id: derived.artifact.request_id,
+                    stage: "cancelled_before_promotion".to_string(),
+                    cancel_reason: Some("cancelled by host".to_string()),
+                    elapsed: Duration::ZERO,
+                    last_progress: None,
+                    last_artifact_error: None,
+                    exit_signal: None,
+                    exit_code: Some(0),
+                    stderr_tail: String::new(),
+                    failed_code: None,
+                    failed_detail: None,
+                    protocol_diagnostic: None,
+                    termination_error: None,
+                    exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
+                }),
+            });
+        }
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        let identity = ProjectIdentity::from(&Bundle::at(root).open()?);
         Ok(BooleanPatternCommitView {
             source_snapshot,
             snapshot,
             artifact,
             result,
+            identity,
         })
     }
 

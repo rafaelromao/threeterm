@@ -562,6 +562,7 @@ dependencies = [
 name = "threeterm-mcp"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "serde",
  "serde_json",
  "threeterm-cli",

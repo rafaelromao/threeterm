@@ -1128,6 +1128,9 @@ impl OcctWorker {
             }
         };
         let mut supervisor = Supervisor::new(self.grace, host, stage);
+        if let Some(worker_id) = &self.expected_worker_id {
+            supervisor = supervisor.with_expected_worker_id(worker_id.clone());
+        }
         let local_cancel = std::sync::atomic::AtomicBool::new(false);
         let cancel = cancel.unwrap_or(&local_cancel);
         let outcome = supervisor.request_with_cancel_and_progress(

@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 use crate::worker::MAX_ARTIFACT_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerFingerprint {
     pub worker_kind: String,
     pub worker_schema_version: String,

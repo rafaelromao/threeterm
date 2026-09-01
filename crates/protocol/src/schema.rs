@@ -1512,10 +1512,22 @@ pub static REPLAY_VERIFY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static REPLAY_VERIFY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["deterministic", "fingerprint", "mismatch", "schema_version"],
+        "required": [
+            "deterministic",
+            "fingerprint",
+            "model_state_fingerprint",
+            "geometry_fingerprints",
+            "mismatch",
+            "schema_version"
+        ],
         "properties": {
             "deterministic": { "type": "boolean" },
             "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "model_state_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "geometry_fingerprints": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            },
             "mismatch": { "type": "string" },
             "schema_version": { "type": "string" }
         },

@@ -113,8 +113,11 @@ verify_performance_material() {
     local limitations limitations_digest committed_limitations_digest
     limitations="$(grep -E '^limitations_path: ' <<<"$block" | cut -d' ' -f2-)"
     limitations_digest="$(grep -E '^limitations_sha256: ' <<<"$block" | cut -d' ' -f2-)"
-    [[ "$limitations" == docs/release/* && -f "$root/$limitations" && ! -L "$root/$limitations" ]] \
+    [[ "$limitations" == docs/release/* && "$limitations" != *..* && "$limitations" != /* && \
+        -f "$root/$limitations" && ! -L "$root/$limitations" ]] \
         || { performance_gate_fail 'six-gate limitations document is missing or unsafe'; return 1; }
+    performance_gate_has_symlink_component "$root" "$limitations" \
+        && { performance_gate_fail 'six-gate limitations path contains a symlink'; return 1; }
     git -C "$root" ls-files --error-unmatch -- "$limitations" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate limitations document is not tracked'; return 1; }
     committed_limitations_digest="$(git -C "$root" show "${expected_commit}:${limitations}" | sha256sum | cut -d' ' -f1)"

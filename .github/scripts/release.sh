@@ -257,6 +257,8 @@ require_committed_runbook() {
 
 require_tag_at_head() {
     local tag=$1 tag_commit head_commit
+    [[ "$(git -C "$(release_source_root)" cat-file -t "$tag" 2>/dev/null)" == tag ]] \
+        || fail "release tag is not an annotated tag: ${tag}"
     tag_commit="$(git -C "$(release_source_root)" rev-parse --verify "${tag}^{commit}" 2>/dev/null)" \
         || fail "release tag does not exist: ${tag}"
     head_commit="$(git -C "$(release_source_root)" rev-parse --verify HEAD)" \
@@ -334,8 +336,8 @@ case "$action" in
         )
         if [[ -n "${THREETERM_RELEASE_MATERIAL:-}" ]]; then
             release_args+=("${THREETERM_RELEASE_MATERIAL}")
-            release_args+=("${ROOT}/docs/release/six-gate-performance-claims-gate.md")
             if performance_gate_claim_language <"${THREETERM_RELEASE_MATERIAL}"; then
+                release_args+=("${ROOT}/docs/release/six-gate-performance-claims-gate.md")
                 evidence_path="$(performance_gate_block "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
                     | grep -E '^evidence_path: ' | cut -d' ' -f2-)"
                 release_args+=("${ROOT}/${evidence_path}")

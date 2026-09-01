@@ -89,6 +89,29 @@ fn unsupported_dynamic_feature_encoding_is_rejected_at_the_canonical_boundary() 
 }
 
 #[test]
+fn production_command_feature_kinds_are_accepted_at_the_canonical_boundary() {
+    for (index, kind) in [
+        "linear-pattern",
+        "circular-pattern",
+        "boolean-fuse",
+        "boolean-pattern",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = root(&format!("command-feature-kind-{index}"));
+        let _ = fs::remove_dir_all(&path);
+        write_fresh(&path, ProjectGeneration::with_id("compatibility")).expect("bundle writes");
+
+        Bundle::at(&path)
+            .append_feature(&format!("feature-{index}"), kind)
+            .expect("production command feature kind is supported");
+
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
 fn malformed_dynamic_feature_encodings_are_rejected_at_the_canonical_boundary() {
     for (label, kind) in [
         ("empty-brep", "brep:"),

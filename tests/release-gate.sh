@@ -96,6 +96,7 @@ jq --arg commit "${record_commit}" '.source_commit = $commit' "${release_root}/$
 mv "${tmpdir}/evidence-source.json" "${release_root}/${evidence_path}"
 git -C "${release_root}" add "${evidence_path}"
 git -C "${release_root}" commit --quiet -m evidence-source
+evidence_commit="$(git -C "${release_root}" rev-parse HEAD)"
 evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
 stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
 stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
@@ -106,7 +107,7 @@ three_mf_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifa
 limitations_path="docs/release/performance-claim-limitations.md"
 limitations_sha="$(sha256sum "${release_root}/${limitations_path}" | cut -d' ' -f1)"
 today="$(date -u +%F)"
-awk -v commit="${record_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
+awk -v commit="${evidence_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
     -v evidence_sha="${evidence_sha}" -v limitations="${limitations_path}" \
     -v limitations_sha="${limitations_sha}" -v stl_rc1="${stl_rc1}" -v stl_rc2="${stl_rc2}" \
     -v step_rc1="${step_rc1}" -v step_rc2="${step_rc2}" -v three_mf_rc1="${three_mf_rc1}" \

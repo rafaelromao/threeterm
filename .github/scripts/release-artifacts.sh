@@ -41,7 +41,7 @@ release_artifact_validate_output_root() {
     local source_root="$1"
     local artifact_root="$2"
     local output_root="$3"
-    local source_path artifact_path output_path
+    local source_path artifact_path output_path allowed_target_prefix
     [[ -n "$output_root" && "$output_root" = /* ]] \
         || { release_artifact_fail 'release bundle output root must be an absolute path'; return 1; }
     source_path="$(realpath -e "$source_root")" \
@@ -53,6 +53,9 @@ release_artifact_validate_output_root() {
         || { release_artifact_fail 'release bundle output root is a protected path'; return 1; }
     [[ "$source_path" != "$output_path"/* && "$artifact_path" != "$output_path"/* ]] \
         || { release_artifact_fail 'release bundle output root would remove a protected path'; return 1; }
+    allowed_target_prefix="${source_path}/target/"
+    [[ "$output_path" != "$source_path"/* || "$output_path" = "$allowed_target_prefix"* ]] \
+        || { release_artifact_fail 'release bundle output root is nested in a protected source path'; return 1; }
 }
 
 build_release_bundle() {
@@ -212,7 +215,9 @@ verify_release_bundle() {
     [[ "$archive_files" == "$expected_archive_files" ]] \
         || { release_artifact_fail 'release archive file list is invalid'; return 1; }
     while IFS= read -r path; do
-        actual="$(tar -xOf "$archive" "$path" | sha256sum | cut -d' ' -f1)"
+        [[ "$path" != -* ]] \
+            || { release_artifact_fail "unsafe release archive path: ${path}"; return 1; }
+        actual="$(tar -xOf "$archive" -- "$path" | sha256sum | cut -d' ' -f1)"
         expected="$(release_artifact_sha256 "$root/$path")"
         [[ "$actual" == "$expected" ]] \
             || { release_artifact_fail "release archive content mismatch: ${path}"; return 1; }

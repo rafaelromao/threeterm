@@ -71,8 +71,11 @@ verify_performance_material() {
     record_commit="$(grep -E '^release_commit: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$record_commit" =~ ^[0-9a-f]{40}$ ]] \
         || { performance_gate_fail 'six-gate record commit identity is invalid'; return 1; }
-    [[ "$record_commit" == "$expected_commit" ]] \
-        || { performance_gate_fail 'six-gate record is not bound to the exact release source commit'; return 1; }
+    local expected_parent
+    expected_parent="$(git -C "$root" rev-parse "${expected_commit}^")" \
+        || { performance_gate_fail 'release source commit has no parent for record binding'; return 1; }
+    [[ "$record_commit" == "$expected_parent" ]] \
+        || { performance_gate_fail 'six-gate record is not bound to the release source commit immediately preceding the release record'; return 1; }
     grep -Fxq "release_tag: ${expected_tag}" <<<"$block" \
         || { performance_gate_fail 'six-gate record is bound to a different tag'; return 1; }
     local today
@@ -93,9 +96,12 @@ verify_performance_material() {
         || { performance_gate_fail 'six-gate evidence must be checked-in rehearsal evidence'; return 1; }
     git -C "$root" ls-files --error-unmatch -- "$evidence" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate evidence is not tracked in the source commit'; return 1; }
-    local committed_evidence_digest
-    [[ "$(jq -er '.source_commit' "$root/$evidence")" == "$record_commit" ]] \
-        || { performance_gate_fail 'six-gate evidence source commit disagrees with the signed record'; return 1; }
+    local evidence_source_commit committed_evidence_digest
+    evidence_source_commit="$(jq -er '.source_commit' "$root/$evidence")"
+    [[ "$evidence_source_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || { performance_gate_fail 'six-gate evidence source commit identity is invalid'; return 1; }
+    git -C "$root" merge-base --is-ancestor "$evidence_source_commit" "$record_commit" \
+        || { performance_gate_fail 'six-gate evidence source is not bound to the signed release source history'; return 1; }
     committed_evidence_digest="$(git -C "$root" show "${expected_commit}:${evidence}" | sha256sum | cut -d' ' -f1)"
     [[ "$committed_evidence_digest" == "$evidence_digest" ]] \
         || { performance_gate_fail 'six-gate evidence digest does not match the committed source'; return 1; }

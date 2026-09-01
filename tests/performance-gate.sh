@@ -53,7 +53,7 @@ record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
 <!-- PERFORMANCE-RECORD:START -->
 record_status: SIGNED
-release_commit: ${record_commit}
+release_commit: ${commit}
 release_tag: v0.1.0-performance
 evidence_path: docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json
 evidence_sha256: ${evidence_sha}
@@ -126,6 +126,8 @@ done < <(jq -r '.comparisons[] | [.class, .run_1.p50_ms, .run_2.p50_ms] | @tsv' 
 awk -v comparisons="${WORK}/comparisons" '/^claim: / { while ((getline line < comparisons) > 0) print line } { print }' \
     "${record}" >"${WORK}/record-with-comparisons"
 mv "${WORK}/record-with-comparisons" "${record}"
+git -C "${source_root}" commit --quiet --allow-empty -m release-record
+commit="$(git -C "${source_root}" rev-parse HEAD)"
 material="${WORK}/notes.md"
 printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' >"${material}"
 

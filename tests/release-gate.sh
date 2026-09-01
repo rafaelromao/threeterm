@@ -144,6 +144,17 @@ grep -Fq "worker-manifest.json" "${release_root}/gh-args"
 performance_material="${tmpdir}/unsupported-performance.md"
 printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' \
     >"${performance_material}"
+PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${release_root}/gh-args" \
+    THREETERM_RELEASE_MATERIAL="${performance_material}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${release_root}/release-artifact" \
+    "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+grep -Fq "unsupported-performance.md" "${release_root}/gh-args"
+grep -Fq "six-gate-performance-claims-gate.md" "${release_root}/gh-args"
+grep -Fq "sha256-manifest.json" "${release_root}/gh-args"
+
+printf '%s\n' 'The export path is 2x faster.' >"${performance_material}"
 rm -f "${release_root}/gh-args"
 expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \

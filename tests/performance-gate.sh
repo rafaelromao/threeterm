@@ -131,6 +131,13 @@ printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms perc
 
 verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance"
 
+git -C "${source_root}" commit --quiet --allow-empty -m newer-source
+new_commit="$(git -C "${source_root}" rev-parse HEAD)"
+if verify_performance_material "${source_root}" "${material}" "${record}" "${new_commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+    printf '%s\n' 'stale performance record was accepted for a newer source commit' >&2
+    exit 1
+fi
+
 if verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-other" >/dev/null 2>&1; then
     printf '%s\n' 'performance record with wrong tag was accepted' >&2
     exit 1

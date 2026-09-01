@@ -52,8 +52,13 @@ verify_performance_material() {
     local expected_tag="$5"
     [[ -z "$material" ]] && return 0
     [[ -f "$material" ]] || { performance_gate_fail "release material is missing: ${material}"; return 1; }
-    if ! performance_gate_claim_language <"$material"; then
-        return 0
+    if performance_gate_claim_language <"$material"; then
+        :
+    else
+        local claim_status=$?
+        [[ "$claim_status" -eq 1 ]] && return 0
+        performance_gate_fail "unable to inspect release material: ${material}"
+        return 1
     fi
     [[ -f "$record" ]] || { performance_gate_fail 'performance claim requires a current six-gate record'; return 1; }
 
@@ -66,8 +71,8 @@ verify_performance_material() {
     record_commit="$(grep -E '^release_commit: ' <<<"$block" | cut -d' ' -f2-)"
     [[ "$record_commit" =~ ^[0-9a-f]{40}$ ]] \
         || { performance_gate_fail 'six-gate record commit identity is invalid'; return 1; }
-    git -C "$root" merge-base --is-ancestor "$record_commit" "$expected_commit" \
-        || { performance_gate_fail 'six-gate record is not bound to the release source history'; return 1; }
+    [[ "$record_commit" == "$expected_commit" ]] \
+        || { performance_gate_fail 'six-gate record is not bound to the exact release source commit'; return 1; }
     grep -Fxq "release_tag: ${expected_tag}" <<<"$block" \
         || { performance_gate_fail 'six-gate record is bound to a different tag'; return 1; }
     local today

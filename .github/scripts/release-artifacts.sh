@@ -37,6 +37,24 @@ release_artifact_file_list() {
         done
 }
 
+release_artifact_validate_output_root() {
+    local source_root="$1"
+    local artifact_root="$2"
+    local output_root="$3"
+    local source_path artifact_path output_path
+    [[ -n "$output_root" && "$output_root" = /* ]] \
+        || { release_artifact_fail 'release bundle output root must be an absolute path'; return 1; }
+    source_path="$(realpath -e "$source_root")" \
+        || { release_artifact_fail 'release source root is not resolvable'; return 1; }
+    artifact_path="$(realpath -e "$artifact_root")" \
+        || { release_artifact_fail 'release artifact root is not resolvable'; return 1; }
+    output_path="$(realpath -m "$output_root")"
+    [[ "$output_path" != / && "$output_path" != "$source_path" && "$output_path" != "$artifact_path" ]] \
+        || { release_artifact_fail 'release bundle output root is a protected path'; return 1; }
+    [[ "$source_path" != "$output_path"/* && "$artifact_path" != "$output_path"/* ]] \
+        || { release_artifact_fail 'release bundle output root would remove a protected path'; return 1; }
+}
+
 build_release_bundle() {
     local source_root="$1"
     local tag="$2"
@@ -62,7 +80,8 @@ build_release_bundle() {
     [[ "$(jq -er '.artifact.source_revision' "$worker_manifest")" == "$expected_commit" ]] \
         || { release_artifact_fail 'worker artifact is bound to a different source commit'; return 1; }
 
-    rm -rf "$output_root"
+    release_artifact_validate_output_root "$source_root" "$artifact_root" "$output_root" || return 1
+    rm -rf -- "$output_root"
     mkdir -p "$output_root"
     cp -a "$artifact_root" "$output_root/libslvs-artifact"
     release_artifact_require_safe_tree "$output_root"
@@ -181,10 +200,30 @@ verify_release_bundle() {
             || { release_artifact_fail "checksum catalog mismatch: ${line_path}"; return 1; }
     done <"$root/SHA256SUMS"
 
-    local recreated
+    local archive archive_files expected_archive_files recreated
+    archive="$root/$(jq -er '.archive' "$manifest")"
+    archive_files="$(tar -tzf "$archive" | sed '/\/$/d' | LC_ALL=C sort)"
+    expected_archive_files="$(
+        {
+            printf '%s\n' release-manifest.json
+            jq -r '.files[].path' "$manifest"
+        } | LC_ALL=C sort
+    )"
+    [[ "$archive_files" == "$expected_archive_files" ]] \
+        || { release_artifact_fail 'release archive file list is invalid'; return 1; }
+    while IFS= read -r path; do
+        actual="$(tar -xOf "$archive" "$path" | sha256sum | cut -d' ' -f1)"
+        expected="$(release_artifact_sha256 "$root/$path")"
+        [[ "$actual" == "$expected" ]] \
+            || { release_artifact_fail "release archive content mismatch: ${path}"; return 1; }
+    done <<<"$expected_archive_files"
+
     recreated="$(mktemp)"
-    release_artifact_write_archive "$root" "$recreated"
-    cmp "$recreated" "$root/$(jq -er '.archive' "$manifest")" \
+    LC_ALL=C TZ=UTC tar --sort=name --format=ustar --mtime='1970-01-01 00:00:00Z' \
+        --owner=0 --group=0 --numeric-owner \
+        -cf - -C "$root" release-manifest.json worker-manifest.json libslvs-artifact \
+        | LC_ALL=C TZ=UTC gzip -n -c >"$recreated"
+    cmp "$recreated" "$archive" \
         || { rm -f "$recreated"; release_artifact_fail 'release archive is not reproducible'; return 1; }
     rm -f "$recreated"
     printf '%s\n' 'release artifact bundle verified'

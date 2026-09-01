@@ -20,22 +20,28 @@ git -C "${source_root}" commit --quiet -m fixture
 worker="${WORK}/worker"
 cp /bin/true "${worker}"
 input="${WORK}/libslvs-artifact"
-stage_libslvs_artifact "${source_root}" "${worker}" "${input}" >/dev/null
-
-commit="$(git -C "${source_root}" rev-parse HEAD)"
 tag="v0.1.0-artifacts"
 first="${WORK}/first"
 second="${WORK}/second"
-build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${first}" >/dev/null
 touch "${source_root}/crates/workers/slvs/NOTICE"
+git -C "${source_root}" add crates/workers/slvs/NOTICE
+git -C "${source_root}" commit --quiet -m source-notice
+commit="$(git -C "${source_root}" rev-parse HEAD)"
+stage_libslvs_artifact "${source_root}" "${worker}" "${input}" >/dev/null
 touch "${input}/NOTICE"
 chmod 600 "${input}/NOTICE"
+build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${first}" >/dev/null
 build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${second}" >/dev/null
 
 cmp "${first}/release-manifest.json" "${second}/release-manifest.json"
 cmp "${first}/SHA256SUMS" "${second}/SHA256SUMS"
 cmp "${first}/threeterm-${tag}.tar.gz" "${second}/threeterm-${tag}.tar.gz"
 verify_release_bundle "${first}" "${tag}" "${commit}" >/dev/null
+
+if build_release_bundle "${source_root}" "${tag}" "${commit}" "${input}" "${source_root}" >/dev/null 2>&1; then
+    printf '%s\n' 'protected source root was accepted as release output' >&2
+    exit 1
+fi
 
 jq -e --arg commit "${commit}" --arg tag "${tag}" '
   .schema_version == "threeterm.release/1" and

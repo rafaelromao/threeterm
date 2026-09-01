@@ -32,6 +32,11 @@ git -C "${source_root}" config user.email ci@example.invalid
 git -C "${source_root}" config user.name ci
 git -C "${source_root}" add -A
 git -C "${source_root}" commit --quiet -m evidence
+record_commit="$(git -C "${source_root}" rev-parse HEAD)"
+jq --arg commit "${record_commit}" '.source_commit = $commit' "${evidence_file}" >"${WORK}/evidence.json"
+mv "${WORK}/evidence.json" "${evidence_file}"
+git -C "${source_root}" add "${evidence_file}"
+git -C "${source_root}" commit --quiet -m source-identity
 commit="$(git -C "${source_root}" rev-parse HEAD)"
 today="$(date -u +%F)"
 evidence="${source_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
@@ -48,7 +53,7 @@ record="${WORK}/six-gate.md"
 cat >"${record}" <<EOF
 <!-- PERFORMANCE-RECORD:START -->
 record_status: SIGNED
-release_commit: ${commit}
+release_commit: ${record_commit}
 release_tag: v0.1.0-performance
 evidence_path: docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json
 evidence_sha256: ${evidence_sha}

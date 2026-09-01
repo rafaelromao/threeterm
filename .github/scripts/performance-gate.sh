@@ -89,7 +89,9 @@ verify_performance_material() {
     git -C "$root" ls-files --error-unmatch -- "$evidence" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate evidence is not tracked in the source commit'; return 1; }
     local committed_evidence_digest
-    committed_evidence_digest="$(git -C "$root" show "${record_commit}:${evidence}" | sha256sum | cut -d' ' -f1)"
+    [[ "$(jq -er '.source_commit' "$root/$evidence")" == "$record_commit" ]] \
+        || { performance_gate_fail 'six-gate evidence source commit disagrees with the signed record'; return 1; }
+    committed_evidence_digest="$(git -C "$root" show "${expected_commit}:${evidence}" | sha256sum | cut -d' ' -f1)"
     [[ "$committed_evidence_digest" == "$evidence_digest" ]] \
         || { performance_gate_fail 'six-gate evidence digest does not match the committed source'; return 1; }
     [[ -n "$(grep -E '^hardware_profile: ' <<<"$block" | cut -d' ' -f2-)" && \
@@ -115,7 +117,7 @@ verify_performance_material() {
         || { performance_gate_fail 'six-gate limitations document is missing or unsafe'; return 1; }
     git -C "$root" ls-files --error-unmatch -- "$limitations" >/dev/null 2>&1 \
         || { performance_gate_fail 'six-gate limitations document is not tracked'; return 1; }
-    committed_limitations_digest="$(git -C "$root" show "${record_commit}:${limitations}" | sha256sum | cut -d' ' -f1)"
+    committed_limitations_digest="$(git -C "$root" show "${expected_commit}:${limitations}" | sha256sum | cut -d' ' -f1)"
     [[ "$limitations_digest" =~ ^[0-9a-f]{64}$ && "$committed_limitations_digest" == "$limitations_digest" ]] \
         || { performance_gate_fail 'six-gate limitations digest does not match the committed source'; return 1; }
     for limitation in fixture renderer terminal compositor 'project-scale' 'warm and cold' \

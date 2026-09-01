@@ -91,6 +91,11 @@ git -C "${release_root}" add README.md
 git -C "${release_root}" commit --quiet -m source-change
 record_commit="$(git -C "${release_root}" rev-parse HEAD)"
 evidence_path="docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
+jq --arg commit "${record_commit}" '.source_commit = $commit' "${release_root}/${evidence_path}" \
+    >"${tmpdir}/evidence-source.json"
+mv "${tmpdir}/evidence-source.json" "${release_root}/${evidence_path}"
+git -C "${release_root}" add "${evidence_path}"
+git -C "${release_root}" commit --quiet -m evidence-source
 evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
 stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
 stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"

@@ -110,8 +110,10 @@ verify_performance_material() {
     [[ "$(grep -E '^stl_deterministic: ' <<<"$block" | cut -d' ' -f2-)" == YES && \
         "$(grep -E '^stl_rc1_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
         "$(grep -E '^stl_rc2_sha256: ' <<<"$block" | cut -d' ' -f2-)" =~ ^[0-9a-f]{64}$ && \
-        "$(grep -E '^step_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented && \
-        "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" == documented ]] \
+        -n "$(grep -E '^step_comparison: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(grep -E '^step_comparison: ' <<<"$block" | cut -d' ' -f2-)" != documented && \
+        -n "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" && \
+        "$(grep -E '^three_mf_comparison: ' <<<"$block" | cut -d' ' -f2-)" != documented ]] \
         || { performance_gate_fail 'six-gate two-release comparison evidence is incomplete'; return 1; }
     for field in hardware_cpu hardware_threads hardware_memory_mb hardware_kernel \
         hardware_container hardware_ghostty fixture_name feature_count transaction_count derived_result_count \

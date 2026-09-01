@@ -462,7 +462,7 @@ fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
         .iter()
         .find(|response| response["id"] == "pattern-1")
         .expect("production MCP returns a terminal response");
-    assert_eq!(result["result"]["isError"], false);
+    assert!(result["result"]["isError"].is_null());
     assert_eq!(result["result"]["structuredContent"]["status"], "ok");
     assert!(root.join("brep/pattern-1.brep").is_file());
     let _ = std::fs::remove_dir_all(root);

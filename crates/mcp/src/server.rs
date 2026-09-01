@@ -628,7 +628,7 @@ impl McpServer {
                 let mut buffer = Vec::with_capacity(4096);
                 loop {
                     buffer.clear();
-                    let read = match reader.read_until(b'\n', &mut buffer) {
+                    let read = match read_bounded_frame(reader, &mut buffer) {
                         Ok(read) => read,
                         Err(error) => {
                             let _ = sender.send(RunEvent::ReadError(error));
@@ -637,17 +637,6 @@ impl McpServer {
                     };
                     if read == 0 {
                         let _ = sender.send(RunEvent::EndOfInput);
-                        return;
-                    }
-                    if buffer.len() > MAX_FRAME_BUFFER {
-                        let _ = sender.send(RunEvent::ReadError(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!(
-                                "frame buffer exceeded maximum size: {} > {}",
-                                buffer.len(),
-                                MAX_FRAME_BUFFER
-                            ),
-                        )));
                         return;
                     }
                     for line in split_newlines(&buffer) {
@@ -700,6 +689,7 @@ impl McpServer {
             let mut active: Option<ActiveRequest> = None;
             let mut handled = 0usize;
             let mut input_finished = false;
+            let mut read_error = None;
             let mut pending_cancellations = HashSet::new();
             loop {
                 while let Ok(request) = cancellation_receive.try_recv() {
@@ -892,10 +882,22 @@ impl McpServer {
                             break Ok(handled);
                         }
                     }
-                    RunEvent::ReadError(error) => break Err(error),
+                    RunEvent::ReadError(error) => {
+                        if let Some(active) = &active {
+                            active.cancel.store(true, Ordering::SeqCst);
+                        }
+                        read_error = Some(error);
+                        input_finished = true;
+                        if active.is_none() {
+                            break Err(read_error.take().expect("read error is present"));
+                        }
+                    }
                 }
                 if input_finished && active.is_none() {
-                    break Ok(handled);
+                    break match read_error.take() {
+                        Some(error) => Err(error),
+                        None => Ok(handled),
+                    };
                 }
             }
         })
@@ -1382,6 +1384,32 @@ fn is_valid_request_id(value: &Value) -> bool {
     value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
+fn read_bounded_frame<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(buffer.len());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let length = newline.map_or(available.len(), |index| index + 1);
+        if buffer.len() + length > MAX_FRAME_BUFFER {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "frame buffer exceeded maximum size: {} > {}",
+                    buffer.len() + length,
+                    MAX_FRAME_BUFFER
+                ),
+            ));
+        }
+        buffer.extend_from_slice(&available[..length]);
+        reader.consume(length);
+        if newline.is_some() {
+            return Ok(buffer.len());
+        }
+    }
+}
+
 fn split_newlines(bytes: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut start = 0usize;
@@ -1620,6 +1648,16 @@ mod tests {
         assert_eq!(request.method, "tools/list");
         assert_eq!(request.id, Value::Number(1.into()));
         assert!(!request.is_notification);
+    }
+
+    #[test]
+    fn read_bounded_frame_rejects_an_unterminated_oversized_frame_before_growth() {
+        let input = vec![b'x'; MAX_FRAME_BUFFER + 1];
+        let mut buffer = Vec::new();
+        let error = read_bounded_frame(&mut input.as_slice(), &mut buffer)
+            .expect_err("oversized frame must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(buffer.len() <= MAX_FRAME_BUFFER);
     }
 
     #[test]

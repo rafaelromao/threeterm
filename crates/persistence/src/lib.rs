@@ -2493,12 +2493,10 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
         });
     }
     let (encoded_operation, _) = apply_kind(&entry.kind);
-    let operation_matches_canonical_kind = match (entry.operation.as_deref(), encoded_operation) {
-        (None, None)
-        | (Some("add" | "set" | "remove"), None)
-        | (Some("remove"), Some("remove")) => true,
-        _ => false,
-    };
+    let operation_matches_canonical_kind = matches!(
+        (entry.operation.as_deref(), encoded_operation),
+        (None, None) | (Some("add" | "set" | "remove"), None) | (Some("remove"), Some("remove"))
+    );
     if !operation_matches_canonical_kind {
         return Err(BundleError::CanonicalOperationUnknown {
             log_index: Some(entry.log_index),

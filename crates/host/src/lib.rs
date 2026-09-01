@@ -2136,7 +2136,7 @@ impl Host {
                     .collect(),
                 intent.deterministic_inputs.height,
             )
-            .with_output_path(&stage_root, "replay.brep")
+            .with_output_path(&stage_root, "replay.brep.partial")
             .with_feature_id(&feature_id);
             let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
             binding.source_revision_id = intent.source_revision.clone();

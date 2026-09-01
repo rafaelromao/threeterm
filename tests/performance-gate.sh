@@ -151,5 +151,10 @@ if verify_performance_material "${source_root}" "${material}" "${record}" "${com
     printf '%s\n' 'comparative performance claim was accepted' >&2
     exit 1
 fi
+printf '%s\n' 'The export is fast.' >"${material}"
+if verify_performance_material "${source_root}" "${material}" "${record}" "${commit}" "v0.1.0-performance" >/dev/null 2>&1; then
+    printf '%s\n' 'unstructured fast claim was accepted' >&2
+    exit 1
+fi
 
 printf '%s\n' 'performance claims gate contract satisfied'

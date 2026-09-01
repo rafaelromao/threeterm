@@ -14,7 +14,7 @@ performance_gate_block() {
 }
 
 performance_gate_claim_language() {
-    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|s|sec|secs|second|seconds|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
+    grep -Eiq 'performance|latency|throughput|startup|memory|benchmark|faster|slower|speedup|fast|slow|quick|(^|[^[:alnum:]])[0-9]+([.,][0-9]+)?[[:space:]]*(x|%|s|sec|secs|second|seconds|ms|millisecond|milliseconds|us|microsecond|microseconds|KB|MB|GB|req/s|ops/s)([^[:alnum:]]|$)|(^|[^[:alnum:]])p(50|95|99)([^[:alnum:]]|$)'
 }
 
 performance_gate_claim_lines() {

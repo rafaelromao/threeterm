@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -623,9 +623,11 @@ impl McpServer {
     ) -> Result<usize, std::io::Error> {
         let (events, receive) = mpsc::sync_channel(128);
         let (control_events, control_receive) = mpsc::sync_channel(128);
+        let queued_request_ids = Arc::new(Mutex::new(HashSet::new()));
         thread::scope(|scope| {
             let sender = events.clone();
             let control_sender = control_events.clone();
+            let reader_queued_request_ids = Arc::clone(&queued_request_ids);
             scope.spawn(move || {
                 let mut buffer = Vec::with_capacity(4096);
                 loop {
@@ -690,11 +692,19 @@ impl McpServer {
                             {
                                 return;
                             }
-                        } else if sender.try_send(RunEvent::Request(request)).is_err() {
-                            let _ = control_sender.send(ControlEvent::ReadError(
-                                std::io::Error::other("MCP event queue is full"),
-                            ));
-                            return;
+                        } else {
+                            if request.method == "tools/call" && !request.is_notification {
+                                reader_queued_request_ids
+                                    .lock()
+                                    .expect("queued request IDs mutex is not poisoned")
+                                    .insert(request_key(&request.id));
+                            }
+                            if sender.try_send(RunEvent::Request(request)).is_err() {
+                                let _ = control_sender.send(ControlEvent::ReadError(
+                                    std::io::Error::other("MCP event queue is full"),
+                                ));
+                                return;
+                            }
                         }
                     }
                 }
@@ -715,6 +725,10 @@ impl McpServer {
                                 active.cancel.store(true, Ordering::SeqCst);
                             } else if pending_cancellations.len() < MAX_PENDING_CANCELLATIONS
                                 && let Some(request_id) = request.params.get("requestId")
+                                && queued_request_ids
+                                    .lock()
+                                    .expect("queued request IDs mutex is not poisoned")
+                                    .contains(&request_key(request_id))
                             {
                                 pending_cancellations.insert(request_key(request_id));
                             }
@@ -782,6 +796,10 @@ impl McpServer {
                             continue;
                         }
                         if active.is_some() {
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key(&request.id));
                             if let Err(error) = write_envelope(
                                 writer,
                                 &JsonRpcResponse::success(
@@ -798,6 +816,10 @@ impl McpServer {
                             }
                         } else {
                             let request_key = request_key(&request.id);
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key);
                             let cancel = Arc::new(AtomicBool::new(false));
                             if pending_cancellations.remove(&request_key) {
                                 cancel.store(true, Ordering::SeqCst);
@@ -870,6 +892,12 @@ impl McpServer {
                         handled += 1;
                     }
                     RunEvent::Request(request) => {
+                        if request.method == "tools/call" && !request.is_notification {
+                            queued_request_ids
+                                .lock()
+                                .expect("queued request IDs mutex is not poisoned")
+                                .remove(&request_key(&request.id));
+                        }
                         let response = self.handle_request(&request);
                         if !request.is_notification
                             && let Err(error) = write_envelope(writer, &response)

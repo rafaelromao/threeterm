@@ -3439,6 +3439,8 @@ pub fn dispatch_registered_command(
             return Ok(json!({
                 "deterministic": verification.deterministic,
                 "fingerprint": verification.fingerprint,
+                "model_state_fingerprint": verification.model_state_fingerprint,
+                "geometry_fingerprints": verification.geometry_fingerprints,
                 "mismatch": verification.mismatch.unwrap_or_default(),
                 "schema_version": schema.response_schema_version,
             }));
@@ -5660,7 +5662,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string()),
         HostError::DerivedResult { diagnostic } => diagnostic.arg.clone(),
     };
-    let (diagnostic, exit) = match error {
+    let (mut diagnostic, exit) = match error {
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
         }
@@ -5682,8 +5684,30 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             EXIT_INTEGRITY_FAILURE,
         ),
     };
+    if let HostError::Persistence(error) = error
+        && persistence_error_has_structured_detail(error)
+    {
+        diagnostic.detail = Some(error.to_string());
+    }
     write_diagnostic(stderr, &diagnostic);
     exit
+}
+
+fn persistence_error_has_structured_detail(error: &threeterm_persistence::BundleError) -> bool {
+    match error {
+        threeterm_persistence::BundleError::ManifestFieldUnknown { .. }
+        | threeterm_persistence::BundleError::CompatibilityIdentityMismatch { .. }
+        | threeterm_persistence::BundleError::CompatibilityIdentityMissing { .. }
+        | threeterm_persistence::BundleError::CanonicalFieldUnknown { .. }
+        | threeterm_persistence::BundleError::CanonicalOperationUnknown { .. }
+        | threeterm_persistence::BundleError::FeatureKindUnknown { .. }
+        | threeterm_persistence::BundleError::CanonicalVersionUnsupported { .. }
+        | threeterm_persistence::BundleError::LogBrokenLink { .. } => true,
+        threeterm_persistence::BundleError::Migration { source } => {
+            persistence_error_has_structured_detail(source)
+        }
+        _ => false,
+    }
 }
 
 fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {

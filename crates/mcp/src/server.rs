@@ -23,13 +23,15 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{
@@ -108,6 +110,100 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+}
+
+/// A buffered MCP input source that can be released from a blocking read when
+/// the output side of the session fails.
+pub trait CancellableBufRead: BufRead + Send {
+    fn shutdown_token(&self) -> Arc<AtomicBool>;
+}
+
+impl CancellableBufRead for &[u8] {
+    fn shutdown_token(&self) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+}
+
+/// Polling, shutdown-aware stdin adapter for the production MCP process.
+#[derive(Debug)]
+pub struct CancellableStdin {
+    stdin: io::Stdin,
+    buffered: Vec<u8>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl CancellableStdin {
+    pub fn new() -> Self {
+        Self {
+            stdin: io::stdin(),
+            buffered: Vec::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CancellableStdin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Read for CancellableStdin {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if !self.buffered.is_empty() {
+            let length = output.len().min(self.buffered.len());
+            output[..length].copy_from_slice(&self.buffered[..length]);
+            self.buffered.drain(..length);
+            return Ok(length);
+        }
+        loop {
+            if self.is_shutdown() {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "MCP input was shut down",
+                ));
+            }
+            let mut poll_fds = [PollFd::new(
+                self.stdin.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP,
+            )];
+            poll(&mut poll_fds, PollTimeout::from(100_u16)).map_err(io::Error::other)?;
+            if poll_fds[0]
+                .revents()
+                .is_some_and(|flags| flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP))
+            {
+                return self.stdin.read(output);
+            }
+        }
+    }
+}
+
+impl BufRead for CancellableStdin {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.buffered.is_empty() {
+            let mut chunk = [0_u8; 8192];
+            let length = self.read(&mut chunk)?;
+            self.buffered.extend_from_slice(&chunk[..length]);
+        }
+        Ok(&self.buffered)
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.buffered.drain(..amount.min(self.buffered.len()));
+    }
+}
+
+impl CancellableBufRead for CancellableStdin {
+    fn shutdown_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
 }
 
 impl JsonRpcResponse {
@@ -616,7 +712,7 @@ impl McpServer {
     /// `reader` hits EOF or a malformed frame aborts the current chunk; in
     /// the latter case the buffered bytes are dropped so the supervisor
     /// can resync on the next chunk (closed issue #49 contract).
-    pub fn run<R: BufRead + Send, W: Write>(
+    pub fn run<R: CancellableBufRead, W: Write>(
         &self,
         reader: &mut R,
         writer: &mut W,
@@ -624,23 +720,33 @@ impl McpServer {
         let (events, receive) = mpsc::sync_channel(128);
         let (control_events, control_receive) = mpsc::sync_channel(128);
         let queued_request_ids = Arc::new(Mutex::new(HashSet::new()));
+        let input_shutdown = reader.shutdown_token();
         thread::scope(|scope| {
             let sender = events.clone();
             let control_sender = control_events.clone();
             let reader_queued_request_ids = Arc::clone(&queued_request_ids);
+            let reader_shutdown = Arc::clone(&input_shutdown);
             scope.spawn(move || {
                 let mut buffer = Vec::with_capacity(4096);
                 loop {
+                    if reader_shutdown.load(Ordering::SeqCst) {
+                        return;
+                    }
                     buffer.clear();
                     let read = match read_bounded_frame(reader, &mut buffer) {
                         Ok(read) => read,
                         Err(error) => {
-                            let _ = control_sender.send(ControlEvent::ReadError(error));
+                            let _ = send_until_shutdown(
+                                &control_sender,
+                                ControlEvent::ReadError(error),
+                                &reader_shutdown,
+                            );
                             return;
                         }
                     };
                     if read == 0 {
-                        let _ = sender.send(RunEvent::EndOfInput);
+                        let _ =
+                            send_until_shutdown(&sender, RunEvent::EndOfInput, &reader_shutdown);
                         return;
                     }
                     for line in split_newlines(&buffer) {
@@ -650,17 +756,22 @@ impl McpServer {
                         let value: Value = match serde_json::from_slice(line) {
                             Ok(value) => value,
                             Err(error) => {
-                                if sender
-                                    .try_send(RunEvent::ParseError(JsonRpcResponse::error(
+                                if !send_until_shutdown(
+                                    &sender,
+                                    RunEvent::ParseError(JsonRpcResponse::error(
                                         Value::Null,
                                         ERROR_PARSE,
                                         format!("frame is not valid JSON: {error}"),
-                                    )))
-                                    .is_err()
-                                {
-                                    let _ = control_sender.send(ControlEvent::ReadError(
-                                        std::io::Error::other("MCP event queue is full"),
-                                    ));
+                                    )),
+                                    &reader_shutdown,
+                                ) {
+                                    let _ = send_until_shutdown(
+                                        &control_sender,
+                                        ControlEvent::ReadError(std::io::Error::other(
+                                            "MCP event queue is full",
+                                        )),
+                                        &reader_shutdown,
+                                    );
                                     return;
                                 }
                                 continue;
@@ -669,27 +780,33 @@ impl McpServer {
                         let request = match parse_request(&value) {
                             Ok(request) => request,
                             Err(error) => {
-                                if sender
-                                    .try_send(RunEvent::ParseError(JsonRpcResponse::error(
+                                if !send_until_shutdown(
+                                    &sender,
+                                    RunEvent::ParseError(JsonRpcResponse::error(
                                         extract_id(&value),
                                         ERROR_INVALID_REQUEST,
                                         error,
-                                    )))
-                                    .is_err()
-                                {
-                                    let _ = control_sender.send(ControlEvent::ReadError(
-                                        std::io::Error::other("MCP event queue is full"),
-                                    ));
+                                    )),
+                                    &reader_shutdown,
+                                ) {
+                                    let _ = send_until_shutdown(
+                                        &control_sender,
+                                        ControlEvent::ReadError(std::io::Error::other(
+                                            "MCP event queue is full",
+                                        )),
+                                        &reader_shutdown,
+                                    );
                                     return;
                                 }
                                 continue;
                             }
                         };
                         if request.method == "notifications/cancelled" {
-                            if control_sender
-                                .send(ControlEvent::Cancellation(request))
-                                .is_err()
-                            {
+                            if !send_until_shutdown(
+                                &control_sender,
+                                ControlEvent::Cancellation(request),
+                                &reader_shutdown,
+                            ) {
                                 return;
                             }
                         } else {
@@ -699,10 +816,18 @@ impl McpServer {
                                     .expect("queued request IDs mutex is not poisoned")
                                     .insert(request_key(&request.id));
                             }
-                            if sender.try_send(RunEvent::Request(request)).is_err() {
-                                let _ = control_sender.send(ControlEvent::ReadError(
-                                    std::io::Error::other("MCP event queue is full"),
-                                ));
+                            if !send_until_shutdown(
+                                &sender,
+                                RunEvent::Request(request),
+                                &reader_shutdown,
+                            ) {
+                                let _ = send_until_shutdown(
+                                    &control_sender,
+                                    ControlEvent::ReadError(std::io::Error::other(
+                                        "MCP event queue is full",
+                                    )),
+                                    &reader_shutdown,
+                                );
                                 return;
                             }
                         }
@@ -787,9 +912,7 @@ impl McpServer {
                                     ),
                                 ),
                             ) {
-                                if let Some(active) = &active {
-                                    active.cancel.store(true, Ordering::SeqCst);
-                                }
+                                abort_active_run(&input_shutdown, &active);
                                 return Err(error);
                             }
                             handled += 1;
@@ -809,9 +932,7 @@ impl McpServer {
                                     ),
                                 ),
                             ) {
-                                if let Some(active) = &active {
-                                    active.cancel.store(true, Ordering::SeqCst);
-                                }
+                                abort_active_run(&input_shutdown, &active);
                                 return Err(error);
                             }
                         } else {
@@ -829,6 +950,7 @@ impl McpServer {
                             let token = progress_token(&request);
                             let configured_worker = self.boolean_pattern_worker.clone();
                             let event_key = request_key.clone();
+                            let worker_shutdown = Arc::clone(&input_shutdown);
                             scope.spawn(move || {
                                 let mut emitted = 0usize;
                                 let mut last = None;
@@ -860,10 +982,14 @@ impl McpServer {
                                     &mut on_progress,
                                     configured_worker.as_ref(),
                                 );
-                                let _ = sender.send(RunEvent::Completed {
-                                    request_key: event_key,
-                                    response,
-                                });
+                                let _ = send_until_shutdown(
+                                    &sender,
+                                    RunEvent::Completed {
+                                        request_key: event_key,
+                                        response,
+                                    },
+                                    &worker_shutdown,
+                                );
                             });
                             active = Some(ActiveRequest {
                                 request_key,
@@ -883,9 +1009,7 @@ impl McpServer {
                                 ),
                             );
                             if let Err(error) = write_envelope(writer, &response) {
-                                if let Some(active) = &active {
-                                    active.cancel.store(true, Ordering::SeqCst);
-                                }
+                                abort_active_run(&input_shutdown, &active);
                                 return Err(error);
                             }
                         }
@@ -902,9 +1026,7 @@ impl McpServer {
                         if !request.is_notification
                             && let Err(error) = write_envelope(writer, &response)
                         {
-                            if let Some(active) = &active {
-                                active.cancel.store(true, Ordering::SeqCst);
-                            }
+                            abort_active_run(&input_shutdown, &active);
                             return Err(error);
                         }
                         handled += 1;
@@ -919,9 +1041,7 @@ impl McpServer {
                             .is_some_and(|request| request.request_key == event_key)
                             && let Err(error) = write_progress(writer, &token, &progress)
                         {
-                            if let Some(active) = &active {
-                                active.cancel.store(true, Ordering::SeqCst);
-                            }
+                            abort_active_run(&input_shutdown, &active);
                             return Err(error);
                         }
                     }
@@ -965,18 +1085,14 @@ impl McpServer {
                                 ),
                             };
                             if let Err(error) = write_envelope(writer, &response) {
-                                if let Some(active) = &active {
-                                    active.cancel.store(true, Ordering::SeqCst);
-                                }
+                                abort_active_run(&input_shutdown, &active);
                                 return Err(error);
                             }
                         }
                     }
                     RunEvent::ParseError(response) => {
                         if let Err(error) = write_envelope(writer, &response) {
-                            if let Some(active) = &active {
-                                active.cancel.store(true, Ordering::SeqCst);
-                            }
+                            abort_active_run(&input_shutdown, &active);
                             return Err(error);
                         }
                     }
@@ -1490,6 +1606,33 @@ fn is_valid_request_id(value: &Value) -> bool {
     value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
+fn abort_active_run(shutdown: &Arc<AtomicBool>, active: &Option<ActiveRequest>) {
+    shutdown.store(true, Ordering::SeqCst);
+    if let Some(active) = active {
+        active.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+fn send_until_shutdown<T>(
+    sender: &mpsc::SyncSender<T>,
+    mut event: T,
+    shutdown: &AtomicBool,
+) -> bool {
+    loop {
+        match sender.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(next)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    return false;
+                }
+                event = next;
+                thread::yield_now();
+            }
+        }
+    }
+}
+
 fn read_bounded_frame<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
     loop {
         let available = reader.fill_buf()?;
@@ -1571,6 +1714,74 @@ pub fn _exit_ok_for_test() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingReader {
+        frame: Vec<u8>,
+        shutdown: Arc<AtomicBool>,
+    }
+
+    impl BlockingReader {
+        fn new(frame: Vec<u8>) -> Self {
+            Self {
+                frame,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let available = self.fill_buf()?;
+            let length = available.len().min(output.len());
+            output[..length].copy_from_slice(&available[..length]);
+            self.consume(length);
+            Ok(length)
+        }
+    }
+
+    impl BufRead for BlockingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if !self.frame.is_empty() {
+                return Ok(&self.frame);
+            }
+            while !self.shutdown.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test reader was shut down",
+            ))
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.frame.drain(..amount.min(self.frame.len()));
+        }
+    }
+
+    impl CancellableBufRead for BlockingReader {
+        fn shutdown_token(&self) -> Arc<AtomicBool> {
+            Arc::clone(&self.shutdown)
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test writer disconnected",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test writer disconnected",
+            ))
+        }
+    }
 
     fn build_envelope(id: Value, method: &str, params: Value) -> Value {
         let mut object = Map::new();
@@ -2008,5 +2219,28 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
             log_before
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_shuts_down_a_blocked_input_when_output_fails() {
+        let call = json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": 1,
+            "method": "tools/list"
+        });
+        let mut frame = serde_json::to_vec(&call).expect("call serializes");
+        frame.push(b'\n');
+        let reader = BlockingReader::new(frame);
+        let shutdown = Arc::clone(&reader.shutdown);
+        let mut reader = reader;
+        let mut writer = FailingWriter;
+        let started = std::time::Instant::now();
+        let error = McpServer::new()
+            .run(&mut reader, &mut writer)
+            .expect_err("a disconnected output returns an error");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(shutdown.load(Ordering::SeqCst));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

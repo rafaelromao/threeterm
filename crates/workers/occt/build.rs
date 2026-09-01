@@ -1,12 +1,8 @@
 //! Build script for the disposable OCCT worker binary.
 //!
-//! The build prefers the system OCCT install (cmake `find_package` or
-//! direct header / lib probe) and only vendors OCCT from source when
-//! `THREETERM_OCCT_VENDOR=1` is set. In environments without OCCT (no
-//! pacman `opencascade`, no `THREETERM_OCCT_DIR`, no vendored tree) the
-//! build skips the C++ step and writes a stub path so the Rust side
-//! compiles cleanly; tests that need the binary soft-skip via
-//! `OcctWorker::locate` returning `Err`.
+//! The build uses `THREETERM_OCCT_DIR` when supplied. Local development may
+//! still probe standard prefixes, while immutable CI mode disables that
+//! fallback and requires the checked-out source prefix.
 //!
 //! Environment variables:
 //! * `THREETERM_OCCT_DIR=<dir>` — point at a prebuilt OCCT install with
@@ -14,15 +10,11 @@
 //!   `<dir>/include/opencascade` to the include path.
 //! * `THREETERM_OCCT_VENDOR=1` — fetch the pinned OCCT tag and build it
 //!   from source (multi-hour; not enabled by default).
-//! * `THREETERM_SKIP_OCCTBUILD=1` — skip the C++ build entirely. Tests
-//!   soft-skip.
+//! * `THREETERM_SKIP_OCCTBUILD=1` — skip the C++ build for local test seams;
+//!   immutable CI rejects this setting.
 //! * `THREETERM_OCCTBUILD_WORKER=<path>` — override the output worker
 //!   binary path (used by `OcctWorker::locate` for downstream crates).
 //!
-//! Archlinux provides OCCT 7.x via the community `opencascade` package.
-//! The CI script installs it via `pacman -Syu opencascade` before
-//! `cargo build`.
-
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -51,11 +43,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=THREETERM_SKIP_OCCTBUILD");
     println!("cargo:rerun-if-env-changed=THREETERM_OCCTBUILD_WORKER");
     println!("cargo:rerun-if-env-changed=OCCT_INSTALL_DIR");
+    println!("cargo:rerun-if-env-changed=THREETERM_REQUIRE_IMMUTABLE_WORKERS");
+
+    if env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_some() {
+        assert!(
+            env::var_os("THREETERM_OCCTBUILD_WORKER").is_none(),
+            "canonical CI forbids overriding the source-built OCCT worker"
+        );
+    }
 
     write_worker_metadata(&manifest_dir, &out_dir, &profile);
     emit_worker_path_rs(&out_dir, &worker_bin);
 
     if env::var_os("THREETERM_SKIP_OCCTBUILD").is_some() {
+        assert!(
+            env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_none(),
+            "canonical CI forbids skipping the immutable OCCT worker build"
+        );
         eprintln!("threeterm-occt-worker: THREETERM_SKIP_OCCTBUILD is set; skipping OCCT build.");
         install_worker_at_target_root(&worker_bin);
         return;
@@ -64,6 +68,10 @@ fn main() {
     let occt = match locate_occt() {
         Ok(found) => found,
         Err(detail) => {
+            assert!(
+                env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_none(),
+                "immutable CI OCCT prefix is unavailable: {detail}"
+            );
             eprintln!(
                 "threeterm-occt-worker: OCCT not available ({detail}). Set THREETERM_OCCT_DIR \
                  to a prebuilt tree, THREETERM_OCCT_VENDOR=1 to build from source, or \
@@ -95,6 +103,9 @@ fn main() {
         .arg(&worker_src)
         .arg("-L")
         .arg(occt.lib_dir());
+    // Keep runtime resolution inside the same immutable prefix used at link
+    // time; a compatible library from /usr must not silently take its place.
+    command.arg(format!("-Wl,-rpath,{}", occt.lib_dir().display()));
 
     // OCCT's TKFillet and TKOffset have circular dependencies on one
     // another through TopOpeBRepDS_* and BRepFill_*, so we group the
@@ -155,6 +166,12 @@ fn locate_occt() -> Result<OcctInstall, String> {
     if let Some(dir) = env::var_os("THREETERM_OCCT_DIR") {
         let dir = PathBuf::from(dir);
         return check_occt(&dir);
+    }
+    if env::var_os("THREETERM_REQUIRE_IMMUTABLE_WORKERS").is_some() {
+        return Err(
+            "immutable CI mode requires THREETERM_OCCT_DIR; system OCCT discovery is disabled"
+                .to_string(),
+        );
     }
     for candidate in default_search_paths() {
         if let Ok(found) = check_occt(&candidate) {

@@ -57,13 +57,21 @@ sed \
 
 release_root="${tmpdir}/release-root"
 fake_bin="${tmpdir}/bin"
+release_artifact="${tmpdir}/release-artifact"
+source "${ROOT}/.github/scripts/licensing.sh"
+stage_libslvs_artifact "${ROOT}" /bin/true "${release_artifact}" >/dev/null
 mkdir -p "${release_root}/.github/scripts" "${release_root}/docs/release" "${fake_bin}"
 cp "${RELEASE_SCRIPT}" "${release_root}/.github/scripts/release.sh"
+cp "${ROOT}/.github/scripts/licensing.sh" "${release_root}/.github/scripts/licensing.sh"
 cp "${fixture}" "${release_root}/docs/release/trademark-and-namespace-gate.md"
 cat >"${fake_bin}/git" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == status ]]; then
     exit 0
+fi
+if [[ "${1:-}" == get-tar-commit-id ]]; then
+    /usr/bin/git "$@"
+    exit $?
 fi
 if [[ "${1:-}" == rev-parse ]]; then
     if [[ "$*" == *"${RELEASE_GATE_OLD_TAG}^{commit}"* ]]; then
@@ -86,6 +94,8 @@ old_tag="v0.0.0-release-gate-old-${BASHPID}"
 trap 'rm -rf "${tmpdir}"' EXIT
 PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
     RELEASE_GATE_OLD_TAG="${old_tag}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
 expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \

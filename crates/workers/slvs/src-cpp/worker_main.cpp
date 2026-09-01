@@ -268,7 +268,8 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
         return false;
     }
 
-    constexpr Slvs_hGroup group = 1;
+    constexpr Slvs_hGroup base_group = 1;
+    constexpr Slvs_hGroup group = 2;
     constexpr Slvs_hEntity origin = 1;
     constexpr Slvs_hEntity normal = 2;
     constexpr Slvs_hEntity workplane = 3;
@@ -278,16 +279,16 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
     std::vector<EntityState> other_entities;
     std::map<std::string, Slvs_hEntity> handles;
     std::map<std::string, std::size_t> point_indexes;
-    params.push_back(Slvs_MakeParam(1, group, 0.0));
-    params.push_back(Slvs_MakeParam(2, group, 0.0));
-    params.push_back(Slvs_MakeParam(3, group, 0.0));
-    params.push_back(Slvs_MakeParam(4, group, 1.0));
-    params.push_back(Slvs_MakeParam(5, group, 0.0));
-    params.push_back(Slvs_MakeParam(6, group, 0.0));
-    params.push_back(Slvs_MakeParam(7, group, 0.0));
-    entities.push_back(Slvs_MakePoint3d(origin, group, 1, 2, 3));
-    entities.push_back(Slvs_MakeNormal3d(normal, group, 4, 5, 6, 7));
-    entities.push_back(Slvs_MakeWorkplane(workplane, group, origin, normal));
+    params.push_back(Slvs_MakeParam(1, base_group, 0.0));
+    params.push_back(Slvs_MakeParam(2, base_group, 0.0));
+    params.push_back(Slvs_MakeParam(3, base_group, 0.0));
+    params.push_back(Slvs_MakeParam(4, base_group, 1.0));
+    params.push_back(Slvs_MakeParam(5, base_group, 0.0));
+    params.push_back(Slvs_MakeParam(6, base_group, 0.0));
+    params.push_back(Slvs_MakeParam(7, base_group, 0.0));
+    entities.push_back(Slvs_MakePoint3d(origin, base_group, 1, 2, 3));
+    entities.push_back(Slvs_MakeNormal3d(normal, base_group, 4, 5, 6, 7));
+    entities.push_back(Slvs_MakeWorkplane(workplane, base_group, origin, normal));
 
     Slvs_hEntity next_entity = 10;
     Slvs_hParam next_param = 10;
@@ -370,16 +371,24 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
             if (ref.kind != Json::Kind::String || handles.count(ref.string) == 0) { error = "constraint references an unknown entity"; return false; }
             referenced.push_back(handles[ref.string]);
         }
-        Slvs_Constraint constraint = Slvs_MakeConstraint(next_constraint++, group, type, workplane,
-                                                          number_field(json_constraint, "value"),
-                                                          referenced.size() > 0 ? referenced[0] : 0,
-                                                          referenced.size() > 1 ? referenced[1] : 0,
-                                                          referenced.size() > 0 ? referenced[0] : 0,
-                                                          referenced.size() > 1 ? referenced[1] : 0);
+        Slvs_Constraint constraint = Slvs_MakeConstraint(
+            next_constraint++, group, type, workplane, number_field(json_constraint, "value"),
+            0, 0, 0, 0);
         if (type == SLVS_C_WHERE_DRAGGED && referenced.size() != 1) { error = "fixed requires one point"; return false; }
         if ((type == SLVS_C_HORIZONTAL || type == SLVS_C_VERTICAL) && referenced.size() != 1) { error = kind + " requires one line"; return false; }
         if ((type == SLVS_C_EQUAL_LENGTH_LINES || type == SLVS_C_PARALLEL || type == SLVS_C_PERPENDICULAR) && referenced.size() != 2) { error = kind + " requires two lines"; return false; }
         if ((type == SLVS_C_POINTS_COINCIDENT || type == SLVS_C_PT_PT_DISTANCE) && referenced.size() != 2) { error = kind + " requires two points"; return false; }
+        if (type == SLVS_C_WHERE_DRAGGED) {
+            constraint.ptA = referenced[0];
+        } else if (type == SLVS_C_HORIZONTAL || type == SLVS_C_VERTICAL) {
+            constraint.entityA = referenced[0];
+        } else if (type == SLVS_C_POINTS_COINCIDENT || type == SLVS_C_PT_PT_DISTANCE) {
+            constraint.ptA = referenced[0];
+            constraint.ptB = referenced[1];
+        } else {
+            constraint.entityA = referenced[0];
+            constraint.entityB = referenced[1];
+        }
         constraints.push_back(constraint);
         constraint_ids.push_back(id);
         constraint_names[constraint.h] = id;

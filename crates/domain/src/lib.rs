@@ -344,6 +344,7 @@ fn entity_id(entity: &SketchEntity) -> &String {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LBracketDescriptor {
     pub feature_id: String,
     pub length: f64,
@@ -353,6 +354,7 @@ pub struct LBracketDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentDefinition {
     pub id: String,
     #[serde(default)]
@@ -361,6 +363,7 @@ pub struct ComponentDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentInstance {
     pub id: String,
     pub definition_id: String,
@@ -368,7 +371,7 @@ pub struct ComponentInstance {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "kebab-case")]
+#[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ComponentCommand {
     Define {
         definition: ComponentDefinition,
@@ -399,6 +402,7 @@ pub enum ComponentCommand {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentGraph {
     pub definitions: BTreeMap<String, ComponentDefinition>,
     pub instances: BTreeMap<String, ComponentInstance>,

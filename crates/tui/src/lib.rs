@@ -2973,6 +2973,11 @@ impl<R: Renderer> TuiViewportSession<R> {
                 Ok(self.keyboard_overlay(self.palette_overlay()))
             }
             TerminalInput::Enter => {
+                if matches!(self.tui.state().command_phase, CommandPhase::Outcome { .. }) {
+                    self.tui
+                        .transition_command(CommandEvent::OutcomeDismissed)
+                        .map_err(TuiViewportError::Tui)?;
+                }
                 let Some(command) = self.palette.select() else {
                     return Ok(self.keyboard_overlay(
                         "[error-glyph] Failure: command palette has no matching command"

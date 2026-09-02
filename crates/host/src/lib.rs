@@ -1686,7 +1686,12 @@ impl Host {
                             detail: error.to_string(),
                         })?;
                     let view = if let Some(expected_revision) = expected_revision {
-                        self.extrude_at_revision(bundle_path, extrusion, &worker, &expected_revision)?
+                        self.extrude_at_revision(
+                            bundle_path,
+                            extrusion,
+                            &worker,
+                            &expected_revision,
+                        )?
                     } else {
                         self.extrude(bundle_path, extrusion, &worker)?
                     };

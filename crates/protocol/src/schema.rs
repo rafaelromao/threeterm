@@ -373,7 +373,7 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "profile", "height"],
+        "required": ["bundle_path", "feature_id", "profile", "height", "mode"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
@@ -388,8 +388,23 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 }
             },
             "height": { "type": "number", "exclusiveMinimum": 0 },
-            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "mode": { "enum": ["additive", "subtractive"] },
+            "target_feature_id": { "type": "string", "minLength": 1 }
         },
+        "oneOf": [
+            {
+                "required": ["mode"],
+                "properties": {
+                    "mode": { "const": "additive" },
+                    "target_feature_id": false
+                }
+            },
+            {
+                "required": ["mode", "target_feature_id"],
+                "properties": { "mode": { "const": "subtractive" } }
+            }
+        ],
         "additionalProperties": false
     })
 });
@@ -523,6 +538,84 @@ pub static CHAMFER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+fn edge_evidence_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["midpoint", "tangent", "length"],
+        "properties": {
+            "midpoint": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "tangent": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "length": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn edge_provenance_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["source_feature_id", "source_revision_id", "source_edge_id"],
+        "properties": {
+            "source_feature_id": { "type": "string", "minLength": 1 },
+            "source_revision_id": { "type": "string", "minLength": 1 },
+            "source_edge_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn selected_edge_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["semantic_id", "provenance", "role", "evidence"],
+        "properties": {
+            "semantic_id": { "type": "string", "minLength": 1 },
+            "provenance": edge_provenance_schema(),
+            "role": { "type": "string", "minLength": 1 },
+            "evidence": edge_evidence_schema()
+        },
+        "additionalProperties": false
+    })
+}
+
+pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "expected_revision", "edit_feature_id", "edit_kind", "base_feature_id", "radius", "reference", "edit_target"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "edit_feature_id": { "type": "string", "minLength": 1 },
+            "edit_kind": { "enum": ["fillet", "split"] },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "radius": { "type": "number", "exclusiveMinimum": 0 },
+            "plane_point": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "plane_normal": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+            "reference": selected_edge_schema(),
+            "edit_target": selected_edge_schema(),
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static REATTACH_EDGE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["outcome", "selected_edge_id", "candidate_edge_ids", "committed", "edit_feature_id", "source_revision", "revision_hash", "schema_version"],
+        "properties": {
+            "outcome": { "enum": ["resolved", "ambiguous", "lost", "incompatible"] },
+            "selected_edge_id": { "type": "string" },
+            "candidate_edge_ids": { "type": "array", "items": { "type": "string" } },
+            "committed": { "type": "boolean" },
+            "edit_feature_id": { "type": "string", "minLength": 1 },
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "schema_version": { "type": "string", "const": "threeterm.command.reattach-edge.response/1" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -644,6 +737,8 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "operation",
             "feature_id",
             "request_id",
+            "mode",
+            "target_feature_id",
             "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
@@ -661,6 +756,10 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "request_id": { "type": "string", "minLength": 1 },
+            "mode": { "enum": ["additive", "subtractive"] },
+            "target_feature_id": {
+                "type": ["string", "null"]
+            },
             "source_snapshot": {
                 "type": "object",
                 "required": ["feature_graph_hash", "revision_hash"],
@@ -2056,8 +2155,8 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         CommandSchema {
             id: EXTRUDE_COMMAND_ID,
             name: "extrude",
-            schema_version: "threeterm.command.extrude/1",
-            request_schema_version: "threeterm.command.extrude.request/1",
+            schema_version: "threeterm.command.extrude/2",
+            request_schema_version: EXTRUDE_REQUEST_SCHEMA_VERSION,
             request_schema: EXTRUDE_REQUEST_SCHEMA.clone(),
             response_schema_version: EXTRUDE_RESPONSE_SCHEMA_VERSION,
             response_schema: EXTRUDE_RESPONSE_SCHEMA.clone(),
@@ -2121,6 +2220,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             request_schema: CHAMFER_REQUEST_SCHEMA.clone(),
             response_schema_version: CHAMFER_RESPONSE_SCHEMA_VERSION,
             response_schema: CHAMFER_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        REATTACH_EDGE_COMMAND_ID,
+        CommandSchema {
+            id: REATTACH_EDGE_COMMAND_ID,
+            name: "reattach-edge",
+            schema_version: "threeterm.command.reattach-edge/2",
+            request_schema_version: "threeterm.command.reattach-edge.request/2",
+            request_schema: REATTACH_EDGE_REQUEST_SCHEMA.clone(),
+            response_schema_version: REATTACH_EDGE_RESPONSE_SCHEMA_VERSION,
+            response_schema: REATTACH_EDGE_RESPONSE_SCHEMA.clone(),
         },
     );
     map.insert(
@@ -2263,6 +2374,7 @@ pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
 pub const BOOLEAN_PATTERN_COMMAND_ID: CommandId = CommandId("boolean-pattern");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
 pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
+pub const REATTACH_EDGE_COMMAND_ID: CommandId = CommandId("reattach-edge");
 pub const HOLE_COMMAND_ID: CommandId = CommandId("hole");
 pub const REVOLVE_COMMAND_ID: CommandId = CommandId("revolve");
 pub const MIRROR_COMMAND_ID: CommandId = CommandId("mirror");
@@ -2281,7 +2393,8 @@ pub const REHEARSE_RUN_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.rehear
 pub const LOAD_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.load.response/2";
 pub const BRACKET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket.response/1";
 pub const BRACKET_EDIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.bracket-edit.response/1";
-pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/3";
+pub const EXTRUDE_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.extrude.request/2";
+pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.response/4";
 pub const FIT_DIMENSION_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.fit-dimension.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
@@ -2289,6 +2402,8 @@ pub const BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.boolean-pattern.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
 pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";
+pub const REATTACH_EDGE_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.reattach-edge.response/1";
 pub const HOLE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.hole.response/1";
 pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.response/1";
 pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";

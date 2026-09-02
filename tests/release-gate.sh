@@ -58,47 +58,192 @@ sed \
 release_root="${tmpdir}/release-root"
 fake_bin="${tmpdir}/bin"
 release_artifact="${tmpdir}/release-artifact"
-source "${ROOT}/.github/scripts/licensing.sh"
-stage_libslvs_artifact "${ROOT}" /bin/true "${release_artifact}" >/dev/null
-mkdir -p "${release_root}/.github/scripts" "${release_root}/docs/release" "${fake_bin}"
-cp "${RELEASE_SCRIPT}" "${release_root}/.github/scripts/release.sh"
-cp "${ROOT}/.github/scripts/licensing.sh" "${release_root}/.github/scripts/licensing.sh"
+mkdir -p "${release_root}" "${fake_bin}"
+git archive HEAD | tar -x -C "${release_root}"
+jq '.hardware_profile = "pinned-test-profile" | .project_scale = "small" |
+    .hardware_cpu = "test-cpu" | .hardware_threads = 8 | .hardware_memory_mb = 16384 |
+    .hardware_kernel = "test-kernel" | .hardware_microcode = "test-microcode" |
+    .hardware_container = "podman@test-image" |
+    .hardware_container_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000" |
+    .hardware_package_versions = "rust=1.97.1,occt=pinned,libslvs=pinned,lib3mf=pinned" | .hardware_toolchain = "rust-1.97.1" |
+    .hardware_ghostty = "xterm-ghostty/1.3.1" | .hardware_term = "xterm-ghostty" |
+    .hardware_term_program = "ghostty" | .hardware_topology = "direct-local" |
+    .feature_count = 1 | .transaction_count = 1 | .derived_result_count = 1 |
+    (.runs[].timings[].sample_count) = 30 |
+    (.runs[].timings[].samples_ms) = ([range(0; 30) | . + 1.0]) |
+    (.runs[].timings[].p50_ms) = 15.0 | (.runs[].timings[].p95_ms) = 29.0 |
+    (.runs[].timings[].p99_ms) = 30.0' \
+    "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json" \
+    >"${tmpdir}/evidence.json"
+mv "${tmpdir}/evidence.json" \
+    "${release_root}/docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
 cp "${fixture}" "${release_root}/docs/release/trademark-and-namespace-gate.md"
-cat >"${fake_bin}/git" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1:-}" == status ]]; then
-    exit 0
-fi
-if [[ "${1:-}" == get-tar-commit-id ]]; then
-    /usr/bin/git "$@"
-    exit $?
-fi
-if [[ "${1:-}" == rev-parse ]]; then
-    if [[ "$*" == *"${RELEASE_GATE_OLD_TAG}^{commit}"* ]]; then
-        printf 'old-commit\n'
-    else
-        printf 'current-commit\n'
-    fi
-    exit 0
-fi
-exit 1
-EOF
-cat >"${fake_bin}/gh" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-chmod +x "${fake_bin}/git" "${fake_bin}/gh"
-
+git -C "${release_root}" init --quiet
+git -C "${release_root}" config user.email ci@example.invalid
+git -C "${release_root}" config user.name ci
+git -C "${release_root}" add -A
+git -C "${release_root}" commit --quiet -m signed-gate
 current_tag="v0.0.0-release-gate-current-${BASHPID}"
 old_tag="v0.0.0-release-gate-old-${BASHPID}"
+git -C "${release_root}" tag -a "${old_tag}" -m old
+printf '%s\n' source-change >>"${release_root}/README.md"
+git -C "${release_root}" add README.md
+git -C "${release_root}" commit --quiet -m source-change
+record_commit="$(git -C "${release_root}" rev-parse HEAD)"
+evidence_path="docs/research/rehearsal-evidence/l-bracket/sha256-manifest.json"
+jq --arg commit "${record_commit}" '.source_commit = $commit' "${release_root}/${evidence_path}" \
+    >"${tmpdir}/evidence-source.json"
+mv "${tmpdir}/evidence-source.json" "${release_root}/${evidence_path}"
+git -C "${release_root}" add "${evidence_path}"
+git -C "${release_root}" commit --quiet -m evidence-source
+evidence_commit="$(git -C "${release_root}" rev-parse HEAD)"
+evidence_sha="$(sha256sum "${release_root}/${evidence_path}" | cut -d' ' -f1)"
+stl_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
+stl_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.stl")) | .sha256' "${release_root}/${evidence_path}")"
+step_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${release_root}/${evidence_path}")"
+step_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.step")) | .sha256' "${release_root}/${evidence_path}")"
+three_mf_rc1="$(jq -er '.runs[] | select(.release_candidate == "rc-1") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${release_root}/${evidence_path}")"
+three_mf_rc2="$(jq -er '.runs[] | select(.release_candidate == "rc-2") | .artifacts[] | select(.relative_path | endswith("/export/l-bracket.3mf")) | .sha256' "${release_root}/${evidence_path}")"
+limitations_path="docs/release/performance-claim-limitations.md"
+limitations_sha="$(sha256sum "${release_root}/${limitations_path}" | cut -d' ' -f1)"
+today="$(date -u +%F)"
+awk -v commit="${evidence_commit}" -v tag="${current_tag}" -v evidence="${evidence_path}" \
+    -v evidence_sha="${evidence_sha}" -v limitations="${limitations_path}" \
+    -v limitations_sha="${limitations_sha}" -v stl_rc1="${stl_rc1}" -v stl_rc2="${stl_rc2}" \
+    -v step_rc1="${step_rc1}" -v step_rc2="${step_rc2}" -v three_mf_rc1="${three_mf_rc1}" \
+    -v three_mf_rc2="${three_mf_rc2}" -v today="${today}" '
+    /<!-- PERFORMANCE-RECORD:START -->/ {
+        print
+        print "record_status: SIGNED"
+        print "release_commit: " commit
+        print "release_tag: " tag
+        print "evidence_path: " evidence
+        print "evidence_sha256: " evidence_sha
+        print "hardware_profile: pinned-test-profile"
+        print "project_scale: small"
+        print "hardware_cpu: test-cpu"
+        print "hardware_threads: 8"
+        print "hardware_memory_mb: 16384"
+        print "hardware_kernel: test-kernel"
+        print "hardware_microcode: test-microcode"
+        print "hardware_container: podman@test-image"
+        print "hardware_container_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        print "hardware_package_versions: rust=1.97.1,occt=pinned,libslvs=pinned,lib3mf=pinned"
+        print "hardware_toolchain: rust-1.97.1"
+        print "hardware_ghostty: xterm-ghostty/1.3.1"
+        print "hardware_term: xterm-ghostty"
+        print "hardware_term_program: ghostty"
+        print "hardware_topology: direct-local"
+        print "fixture_name: L-bracket"
+        print "feature_count: 1"
+        print "transaction_count: 1"
+        print "derived_result_count: 1"
+        print "statistical_method: nearest-rank"
+        print "units: ms"
+        print "sample_minimum: 30"
+        print "independent_sample_definition: one-process-run-per-sample"
+        print "limitations_path: " limitations
+        print "limitations_sha256: " limitations_sha
+        print "stl_rc1_sha256: " stl_rc1
+        print "stl_rc2_sha256: " stl_rc2
+        print "step_rc1_sha256: " step_rc1
+        print "step_rc2_sha256: " step_rc2
+        print "3mf_rc1_sha256: " three_mf_rc1
+        print "3mf_rc2_sha256: " three_mf_rc2
+        print "stl_deterministic: YES"
+        print "step_comparison: equal"
+        print "step_comparison_explanation: deterministic-bytes"
+        print "step_claim_impact: none"
+        print "three_mf_comparison: equal"
+        print "three_mf_comparison_explanation: deterministic-bytes"
+        print "three_mf_claim_impact: none"
+        print "owner: Release Owner"
+        print "record_signature: Release Owner"
+        print "record_date: " today
+        for (i = 1; i <= 6; i++) {
+            print "gate_" i ": PASS"
+            print "gate_" i "_signature: Release Owner"
+            print "gate_" i "_date: " today
+        }
+        split("project_create bracket_create edit_open edit_update edit_preview edit_commit reload export catalog", classes, " ")
+        print "claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small n_rc1=30 n_rc2=30 decision=ADMIT"
+        inside = 1
+        next
+    }
+    /<!-- PERFORMANCE-RECORD:END -->/ { inside = 0; print; next }
+    !inside { print }
+' "${release_root}/docs/release/six-gate-performance-claims-gate.md" \
+    >"${tmpdir}/signed-performance.md"
+while IFS=$'\t' read -r class rc1 rc2; do
+    printf 'comparison: class=%s rc1=%s rc2=%s same_order=YES\n' "$class" "$rc1" "$rc2"
+done < <(jq -r '.comparisons[] | [.class, .run_1.p50_ms, .run_2.p50_ms] | @tsv' \
+    "${release_root}/${evidence_path}") >"${tmpdir}/comparisons"
+awk -v comparisons="${tmpdir}/comparisons" '/^claim: / { while ((getline line < comparisons) > 0) print line } { print }' \
+    "${tmpdir}/signed-performance.md" >"${tmpdir}/record-with-comparisons"
+mv "${tmpdir}/record-with-comparisons" "${tmpdir}/signed-performance.md"
+mv "${tmpdir}/signed-performance.md" \
+    "${release_root}/docs/release/six-gate-performance-claims-gate.md"
+git -C "${release_root}" add docs/release/six-gate-performance-claims-gate.md
+git -C "${release_root}" commit --quiet -m performance-record
+git -C "${release_root}" tag -a "${current_tag}" -m current
+source "${ROOT}/.github/scripts/licensing.sh"
+stage_libslvs_artifact "${release_root}" /bin/true "${release_artifact}" >/dev/null
+cat >"${fake_bin}/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"${RELEASE_GATE_GH_ARGS}"
+exit 0
+EOF
+chmod +x "${fake_bin}/gh"
+verified_commit="$(git -C "${release_root}" rev-parse HEAD)"
 trap 'rm -rf "${tmpdir}"' EXIT
 PATH="${fake_bin}:${PATH}" RELEASE_GATE_CURRENT_TAG="${current_tag}" \
     RELEASE_GATE_OLD_TAG="${old_tag}" \
+    RELEASE_GATE_COMMIT="${verified_commit}" \
     THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
     THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
+    RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
     "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+grep -Fq "threeterm-${current_tag}.tar.gz" "${tmpdir}/gh-args"
+grep -Fq "release-manifest.json" "${tmpdir}/gh-args"
+grep -Fq "SHA256SUMS" "${tmpdir}/gh-args"
+grep -Fq "worker-manifest.json" "${tmpdir}/gh-args"
+
+performance_material="${tmpdir}/unsupported-performance.md"
+printf '%s\n' 'ThreeTerm performance claim: id=export metric=timing unit=ms percentile=p50 fixture=L-bracket scale=small' \
+    >"${performance_material}"
+PATH="${fake_bin}:${PATH}" RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
+    THREETERM_RELEASE_MATERIAL="${performance_material}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
+    "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+grep -Fq "unsupported-performance.md" "${tmpdir}/gh-args"
+grep -Fq "six-gate-performance-claims-gate.md" "${tmpdir}/gh-args"
+grep -Fq "sha256-manifest.json" "${tmpdir}/gh-args"
+grep -Fq "performance-claim-limitations.md" "${tmpdir}/gh-args"
+
+printf '%s\n' 'The export path is 2x faster.' >"${performance_material}"
+rm -f "${tmpdir}/gh-args"
 expect_failure env PATH="${fake_bin}:${PATH}" \
     RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
+    RELEASE_GATE_COMMIT="${verified_commit}" \
+    RELEASE_GATE_GH_ARGS="${tmpdir}/gh-args" \
+    THREETERM_RELEASE_MATERIAL="${performance_material}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
+    "${release_root}/.github/scripts/release.sh" github-release "${current_tag}"
+if [[ -e "${tmpdir}/gh-args" ]]; then
+    printf '%s\n' 'GitHub API was called for an unsupported performance claim' >&2
+    exit 1
+fi
+expect_failure env PATH="${fake_bin}:${PATH}" \
+    RELEASE_GATE_CURRENT_TAG="${current_tag}" RELEASE_GATE_OLD_TAG="${old_tag}" \
+    RELEASE_GATE_COMMIT="${verified_commit}" \
+    THREETERM_RELEASE_ARTIFACT_MANIFEST="${release_artifact}/manifest.json" \
+    THREETERM_RELEASE_ARTIFACT_ROOT="${release_artifact}" \
+    THREETERM_RELEASE_BUNDLE_ROOT="${tmpdir}/release-bundle" \
     "${release_root}/.github/scripts/release.sh" github-release "${old_tag}"
 
 stale_fixture="${tmpdir}/stale.md"

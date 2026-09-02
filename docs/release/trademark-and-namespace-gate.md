@@ -181,6 +181,7 @@ before performing the action and do not accept a runbook override:
 
 ```text
 .github/scripts/release.sh verify
+.github/scripts/release.sh build <annotated-tag>
 .github/scripts/release.sh tag <annotated-tag>
 .github/scripts/release.sh github-release <tag>
 .github/scripts/release.sh aur-push HEAD:refs/heads/master
@@ -190,3 +191,15 @@ before performing the action and do not accept a runbook override:
 The canonical release script is the only supported release entry point. Its
 four publication commands fail closed when any current-gate item is unchecked,
 unsigned, stale, blocked, or not explicitly authorized.
+
+When release notes or other publication material is supplied, set
+`THREETERM_RELEASE_MATERIAL` to its exact path before `build`, `tag`,
+`github-release`, `aur-push`, or `copr-build`. If that material contains a
+performance claim, the script verifies the signed
+machine-readable record in `docs/release/six-gate-performance-claims-gate.md`
+before doing any release side effect. GitHub Release attaches the material,
+deterministic archive, release manifest, checksum catalog, and worker manifest.
+For a claimed performance release, it also attaches the signed six-gate record
+and its immutable evidence artifact.
+`aur-push` and `copr-build` additionally require
+`THREETERM_RELEASE_TAG=<tag>` pointing at `HEAD`.

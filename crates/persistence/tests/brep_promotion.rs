@@ -78,6 +78,8 @@ fn extrude_promotion_persists_versioned_deterministic_intent() {
         schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
         command: "extrude".to_string(),
         operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
         request_id: "request-1".to_string(),
         deterministic_inputs: ExtrudeDeterministicInputs {
             profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],

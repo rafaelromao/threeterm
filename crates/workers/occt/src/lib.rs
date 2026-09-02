@@ -11,7 +11,8 @@
 //!   [`BooleanFuseResult`], [`Operation`], [`RevolveRequest`],
 //!   [`RevolveResult`], [`MirrorRequest`], [`MirrorResult`],
 //!   [`ShellRequest`], [`ShellResult`], [`DraftRequest`],
-//!   [`DraftResult`] — the JSON envelopes exchanged with the worker,
+//!   [`DraftResult`], [`SplitRequest`], [`SplitResult`] — the JSON envelopes
+//!   exchanged with the worker,
 //!   with `serde(deny_unknown_fields)` to fail closed on unexpected
 //!   fields.
 //! * [`OcctWorker`] — the boundary struct that spawns the worker
@@ -46,10 +47,11 @@ pub mod envelope;
 pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, ExportRequest, ExportResult, ExtrudeRequest,
-    ExtrudeResult, FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
-    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, Operation,
-    RevolveRequest, RevolveResult, SCHEMA_VERSION, ShellRequest, ShellResult,
+    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
+    ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult,
+    HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult,
+    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
+    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -256,7 +258,7 @@ impl std::fmt::Display for WorkerError {
 impl std::error::Error for WorkerError {}
 
 /// Process-backed OCCT geometry worker. Owns the binary path and
-/// exposes `extrude`, `boolean_fuse`, `fillet`, `chamfer`, `hole`,
+/// exposes `extrude`, `boolean_fuse`, `fillet`, `split`, `chamfer`, `hole`,
 /// `revolve`, `mirror`, `linear_pattern`, `circular_pattern`, `shell`,
 /// and `draft`.
 ///
@@ -752,6 +754,16 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_fillet()
+    }
+
+    /// Split `request` with an explicit OCCT plane.
+    pub fn split(&self, request: &SplitRequest) -> Result<SplitResult, WorkerError> {
+        let bytes = bounded_serialize(request, "split", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_split()
     }
 
     /// Chamfer `request` by spawning the worker process. See module
@@ -1654,6 +1666,10 @@ impl RawResult {
     }
 
     fn into_fillet(self) -> Result<FilletResult, WorkerError> {
+        self.bounded()
+    }
+
+    fn into_split(self) -> Result<SplitResult, WorkerError> {
         self.bounded()
     }
 

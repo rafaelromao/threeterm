@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Canonical ThreeTerm CI script. Invoked by .github/workflows/ci.yml inside a
-# rootless-Podman archlinux container; also runnable locally for inspection.
+# Fast ThreeTerm CI script. Invoked by .github/workflows/ci.yml and also
+# runnable locally for inspection.
 #
-# The script is the single source of truth for the CI contract; the workflow
-# YAML must not duplicate these commands. Each step exits non-zero on failure.
+# Native-worker verification belongs to e2e.sh so pull requests do not wait for
+# a source build of OCCT and libslvs. Each step exits non-zero on failure.
 
 set -euo pipefail
 
@@ -12,30 +12,13 @@ cd "$(dirname "$0")/../.."
 CHANNEL="$(tr -d '[:space:]' < rust-toolchain-channel.txt)"
 echo "==> Pinned Rust toolchain channel: ${CHANNEL}"
 
-if ! command -v rustc >/dev/null 2>&1; then
+if ! command -v rustup >/dev/null 2>&1; then
     echo "==> Installing rustup + pinned toolchain ${CHANNEL}"
-    if command -v pacman >/dev/null 2>&1; then
-        pacman -Syu --noconfirm rustup gcc
-    else
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain "${CHANNEL}" \
-                  --profile minimal --component rustfmt --component clippy
-        # shellcheck source=/dev/null
-        source "${HOME}/.cargo/env"
-    fi
-fi
-
-if ! command -v cc >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
-    echo "==> Installing gcc (C linker) via pacman"
-    pacman -Syu --noconfirm gcc
-fi
-
-# Native dependencies are built from exact upstream commits by the immutable
-# worker contract. Only build tooling is installed from the container package
-# manager; mutable system OCCT/libslvs packages are never accepted.
-if command -v pacman >/dev/null 2>&1; then
-    echo "==> Installing native-worker build tooling via pacman"
-    pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 fontconfig libx11
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain "${CHANNEL}" \
+              --profile minimal --component rustfmt --component clippy
+    # shellcheck source=/dev/null
+    source "${HOME}/.cargo/env"
 fi
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then
@@ -44,25 +27,10 @@ if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then
         --profile minimal --component rustfmt --component clippy
 fi
 
-echo "==> Activating toolchain ${CHANNEL}"
-rustup default "${CHANNEL}" >/dev/null
-
-export CARGO_TARGET_DIR="${PWD}/target"
-# shellcheck source=/dev/null
-source "${PWD}/.github/scripts/native-workers.sh"
-echo "==> Resolving immutable OCCT and libslvs sources"
-prepare_native_workers
-
-echo "==> Building the selected native workers"
-cargo build --workspace
-OCCT_WORKER="$(selected_worker_path occt)"
-SLVS_WORKER="$(selected_worker_path slvs)"
-export THREETERM_OCCT_WORKER_SHA256="$(sha256sum "${OCCT_WORKER}" | cut -d' ' -f1)"
-export THREETERM_SLVS_WORKER_SHA256="$(sha256sum "${SLVS_WORKER}" | cut -d' ' -f1)"
-test -x "${OCCT_WORKER}" || { echo "OCCT worker is not executable: ${OCCT_WORKER}" >&2; exit 1; }
-test -x "${SLVS_WORKER}" || { echo "libslvs worker is not executable: ${SLVS_WORKER}" >&2; exit 1; }
-verify_native_worker_execution "${OCCT_WORKER}" occt
-verify_native_worker_execution "${SLVS_WORKER}" slvs
+export RUSTUP_TOOLCHAIN="${CHANNEL}"
+# Build scripts still compile their Rust boundary, but do not prepare a native
+# worker. Native E2E sets up the immutable workers in e2e.sh.
+export THREETERM_SKIP_OCCTBUILD=1
 
 echo "==> cargo check --workspace"
 cargo check --workspace
@@ -77,28 +45,6 @@ echo "==> test-suite selector contract"
 bash tests/test-test-suite.sh
 
 echo "==> fast test suite"
-THREETERM_REQUIRE_OCCT=1 bash .github/scripts/test-suite.sh fast
-
-echo "==> canonical real-worker integration tests"
-THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \
-    --jobs 1 -- --test-threads=1
-THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test bracket_integration \
-    --jobs 1 -- --test-threads=1
-THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_worker \
-    --jobs 1 -- --test-threads=1
-
-echo "==> Writing native-worker execution manifest"
-finalize_native_worker_manifest "${OCCT_WORKER}" "${SLVS_WORKER}" true
-
-echo "==> Verifying libslvs source and release artifact licensing"
-verify_libslvs_source "${PWD}"
-verify_libslvs_artifact "${CARGO_TARGET_DIR}/libslvs-artifact/manifest.json" \
-    "${CARGO_TARGET_DIR}/libslvs-artifact"
-
-echo "==> trademark and namespace release-gate test"
-bash tests/release-gate.sh
-
-echo "==> native-worker evidence contract test"
-bash tests/native-worker-contract.sh
+bash .github/scripts/test-suite.sh fast
 
 echo "==> CI contract satisfied"

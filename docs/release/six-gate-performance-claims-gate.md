@@ -291,6 +291,69 @@ Reasoning or required follow-up: ______________________________________________
 
 ## Current Pre-Release Run
 
+The release script consumes the machine-readable record delimited below when
+release material is selected with `THREETERM_RELEASE_MATERIAL`. Human prose in
+this runbook is not evidence. Every signed record must bind its commit, tag,
+evidence digest, owner, and admitted claim rows to the exact release.
+The release binding uses three commits: the evidence-producing source revision,
+the signed record commit, and the annotated tag commit. The `release_commit`
+field identifies the immediate first parent of the tagged release commit, which
+is the commit immediately before the signed record commit; the evidence source
+commit must be an ancestor of that release commit. The artifact manifest binds
+the published bytes to the exact tag commit. This permits the signed runbook
+update itself to be committed after the measured source revision without a
+self-referential Git commit.
+The release script currently admits only timing claims expressed in milliseconds
+with a `p50`, `p95`, or `p99` percentile; other performance classes remain
+refused until their evidence schema is added.
+
+<!-- PERFORMANCE-RECORD:START -->
+record_status: UNSIGNED
+release_commit: not recorded
+release_tag: not recorded
+evidence_path: not recorded
+evidence_sha256: not recorded
+owner: not recorded
+record_signature: not recorded
+record_date: not recorded
+gate_1: FAIL
+gate_1_signature: not recorded
+gate_1_date: not recorded
+gate_2: FAIL
+gate_2_signature: not recorded
+gate_2_date: not recorded
+gate_3: FAIL
+gate_3_signature: not recorded
+gate_3_date: not recorded
+gate_4: FAIL
+gate_4_signature: not recorded
+gate_4_date: not recorded
+gate_5: FAIL
+gate_5_signature: not recorded
+gate_5_date: not recorded
+gate_6: FAIL
+gate_6_signature: not recorded
+gate_6_date: not recorded
+claim: none
+hardware_profile: not recorded
+project_scale: not recorded
+limitations_path: not recorded
+limitations_sha256: not recorded
+stl_rc1_sha256: not recorded
+stl_rc2_sha256: not recorded
+stl_deterministic: NO
+step_rc1_sha256: not recorded
+step_rc2_sha256: not recorded
+3mf_rc1_sha256: not recorded
+3mf_rc2_sha256: not recorded
+step_comparison: not recorded
+three_mf_comparison: not recorded
+step_comparison_explanation: not recorded
+step_claim_impact: not recorded
+three_mf_comparison_explanation: not recorded
+three_mf_claim_impact: not recorded
+<!-- PERFORMANCE-RECORD:END -->
+
 Run date: **2026-08-26 UTC**
 
 This run assesses the latest checked-in two-release-candidate artifact at

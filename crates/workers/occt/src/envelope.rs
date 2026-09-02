@@ -43,6 +43,7 @@ pub enum Operation {
     Bracket,
     BooleanFuse,
     Fillet,
+    Split,
     Chamfer,
     Hole,
     Revolve,
@@ -56,6 +57,23 @@ pub enum Operation {
     Export,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtrudeMode {
+    #[default]
+    Additive,
+    Subtractive,
+}
+
+impl ExtrudeMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Additive => "additive",
+            Self::Subtractive => "subtractive",
+        }
+    }
+}
+
 impl Operation {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -63,6 +81,7 @@ impl Operation {
             Self::Bracket => "bracket",
             Self::BooleanFuse => "boolean_fuse",
             Self::Fillet => "fillet",
+            Self::Split => "split",
             Self::Chamfer => "chamfer",
             Self::Hole => "hole",
             Self::Revolve => "revolve",
@@ -276,6 +295,15 @@ pub struct ExtrudeRequest {
     pub profile: Vec<[f64; 2]>,
     /// Prism height along +Z.
     pub height: f64,
+    /// Whether the prism is added as a new solid or cut from a semantic target.
+    pub mode: ExtrudeMode,
+    /// Stable target feature for a subtractive extrusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_feature_id: Option<String>,
+    /// Host-resolved target BREP path. This is disposable worker input, never
+    /// canonical intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<PathBuf>,
     /// Output directory where the worker writes the BREP file.
     pub output_dir: PathBuf,
     /// Output file name (no path separators; the worker appends `.brep`).
@@ -296,6 +324,9 @@ impl ExtrudeRequest {
             operation: Operation::Extrude,
             profile: profile.into_iter().map(|(x, y)| [x, y]).collect(),
             height,
+            mode: ExtrudeMode::Additive,
+            target_feature_id: None,
+            target_path: None,
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
@@ -315,6 +346,31 @@ impl ExtrudeRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_mode(mut self, mode: ExtrudeMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_target_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.target_feature_id = Some(feature_id.into());
+        self
+    }
+
+    pub fn with_optional_target_feature_id(mut self, feature_id: Option<String>) -> Self {
+        self.target_feature_id = feature_id;
+        self
+    }
+
+    pub fn with_target_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.target_path = Some(path.into());
+        self
+    }
+
+    pub fn with_optional_target_path(mut self, path: Option<PathBuf>) -> Self {
+        self.target_path = path;
         self
     }
 
@@ -347,6 +403,31 @@ impl ExtrudeRequest {
         }
         if !self.height.is_finite() || self.height <= 0.0 {
             return Err("extrude height must be a positive finite number".to_string());
+        }
+        match self.mode {
+            ExtrudeMode::Additive => {
+                if self.target_feature_id.is_some() || self.target_path.is_some() {
+                    return Err("additive extrude must not have a target".to_string());
+                }
+            }
+            ExtrudeMode::Subtractive => {
+                if self
+                    .target_feature_id
+                    .as_deref()
+                    .is_none_or(|value| !is_feature_id(value))
+                {
+                    return Err(
+                        "subtractive extrude requires a valid target_feature_id".to_string()
+                    );
+                }
+                if self
+                    .target_path
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err("subtractive extrude requires a resolved target_path".to_string());
+                }
+            }
         }
         if self.output_filename.is_empty() || self.output_filename.contains('/') {
             return Err("output_filename must be a non-empty plain filename".to_string());
@@ -502,6 +583,11 @@ pub struct FilletRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Persistent-reference context for topology-changing edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_target: Option<SelectedEdgeContext>,
 }
 
 impl FilletRequest {
@@ -515,6 +601,8 @@ impl FilletRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            selected_edge: None,
+            edit_target: None,
         }
     }
 
@@ -530,6 +618,16 @@ impl FilletRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_edit_target(mut self, edit_target: SelectedEdgeContext) -> Self {
+        self.edit_target = Some(edit_target);
         self
     }
 
@@ -568,6 +666,35 @@ impl FilletRequest {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedEdgeContext {
+    pub semantic_id: String,
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+    pub role: String,
+    #[serde(default)]
+    pub midpoint: [f64; 3],
+    #[serde(default)]
+    pub tangent: [f64; 3],
+    #[serde(default)]
+    pub length: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeCandidateEvidence {
+    pub semantic_id: String,
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+    pub role: String,
+    pub midpoint: [f64; 3],
+    pub tangent: [f64; 3],
+    pub length: f64,
 }
 
 /// Chamfer request: apply a constant-distance chamfer to every edge of
@@ -680,9 +807,136 @@ pub struct FilletResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 
 impl FilletResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
+/// Split request: divide the BREP at `base_path` with an explicit plane and
+/// write the resulting split shape to `<output_dir>/<output_filename>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
+}
+
+impl SplitRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        plane_point: [f64; 3],
+        plane_normal: [f64; 3],
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Split,
+            base_path: base_path.into(),
+            plane_point,
+            plane_normal,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+            selected_edge: None,
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Split {
+            return Err(format!(
+                "operation must be split for SplitRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self
+            .plane_point
+            .iter()
+            .chain(self.plane_normal.iter())
+            .all(|component| component.is_finite())
+        {
+            return Err("split plane components must be finite".to_string());
+        }
+        let normal_length = self
+            .plane_normal
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>();
+        if normal_length <= f64::EPSILON {
+            return Err("split plane normal must be non-zero".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
+}
+
+impl SplitResult {
     pub fn is_success(&self) -> bool {
         self.status == "ok"
     }
@@ -1985,6 +2239,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_an_explicit_split_plane() {
+        let request =
+            SplitRequest::new("req-1", "/tmp/base.brep", [2.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+                .with_output_path("/tmp", "split.brep")
+                .with_feature_id("split-1");
+
+        request.validate().expect("split envelope is valid");
+        assert_eq!(Operation::Split.as_str(), "split");
+    }
+
+    #[test]
     fn validate_accepts_a_324_cut_boolean_pattern() {
         let request = BooleanPatternRequest::new(
             "req-1",
@@ -2021,6 +2286,26 @@ mod tests {
                 .with_feature_id("box-1");
         request.schema_version = SCHEMA_VERSION.to_string();
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_requires_a_target_only_for_subtractive_extrude() {
+        let additive = ExtrudeRequest::new("req-1", vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)], 1.0)
+            .with_output_path("/tmp", "out.brep")
+            .with_feature_id("box-1");
+        additive
+            .validate()
+            .expect("additive extrude needs no target");
+
+        let subtractive = additive
+            .clone()
+            .with_mode(ExtrudeMode::Subtractive)
+            .with_target_feature_id("base");
+        assert!(subtractive.validate().is_err());
+        subtractive
+            .with_target_path("/tmp/base.brep")
+            .validate()
+            .expect("subtractive extrude needs a resolved target path");
     }
 
     #[test]
@@ -2174,6 +2459,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "fillet-1".to_string(),
+            edge_candidates: Vec::new(),
         };
         assert!(result.is_success());
 

@@ -23,8 +23,9 @@ run_selector() {
     fi
 }
 
-run_selector fast "test --workspace --jobs 1 -- --test-threads=1"
+run_selector fast "test --workspace"
 run_selector slow "test --workspace --jobs 1 -- --ignored --test-threads=1"
+run_selector e2e "test --workspace --jobs 1 -- --include-ignored --test-threads=1"
 
 if PATH="${TEMP_DIR}:${PATH}" bash "${TEST_SUITE}" unsupported >/dev/null 2>&1; then
     echo "unsupported suite unexpectedly succeeded" >&2

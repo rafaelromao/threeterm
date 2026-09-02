@@ -13,6 +13,7 @@ use threeterm_protocol::schema::{
     LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID,
     SHELL_COMMAND_ID, find, registry_hash,
 };
+use threeterm_protocol::schema_validator::validate;
 
 #[test]
 fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
@@ -34,9 +35,34 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "e3ec1f1c6ba091d40eb6135b5c896dd3fe1304790e7f85ca1f958cf8ad3a49fb",
+        "6916e8faf2698290c56ed307a252b5863744560b12423cf9b0710dcb2a7c47d4",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
+    );
+}
+
+#[test]
+fn registry_contains_the_semantic_edge_reattachment_contract() {
+    let edge = find(threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID)
+        .expect("reattach-edge is registered");
+    assert_eq!(edge.name, "reattach-edge");
+    assert_eq!(
+        edge.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "expected_revision",
+            "edit_feature_id",
+            "edit_kind",
+            "base_feature_id",
+            "radius",
+            "reference",
+            "edit_target"
+        ])
+    );
+    assert_eq!(edge.request_schema["additionalProperties"], false);
+    assert_eq!(
+        edge.response_schema["properties"]["outcome"]["enum"],
+        serde_json::json!(["resolved", "ambiguous", "lost", "incompatible"])
     );
 }
 
@@ -110,11 +136,11 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
     let extrude = find(EXTRUDE_COMMAND_ID).expect("extrude is registered");
     assert_eq!(
         extrude.response_schema_version,
-        "threeterm.command.extrude.response/3"
+        "threeterm.command.extrude.response/4"
     );
     assert_eq!(
         extrude.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "profile", "height"])
+        serde_json::json!(["bundle_path", "feature_id", "profile", "height", "mode"])
     );
     assert_eq!(extrude.request_schema["additionalProperties"], false);
 
@@ -133,6 +159,29 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
         ])
     );
     assert_eq!(fuse.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn extrude_schema_requires_a_semantic_target_for_subtractive_mode() {
+    let extrude = find(EXTRUDE_COMMAND_ID).expect("extrude is registered");
+    let common = serde_json::json!({
+        "bundle_path": "/tmp/project",
+        "feature_id": "cut",
+        "profile": [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+        "height": 1.0
+    });
+
+    let mut additive = common.clone();
+    additive["mode"] = serde_json::json!("additive");
+    validate(&extrude.request_schema, &additive).expect("additive mode validates");
+    additive["target_feature_id"] = serde_json::json!("base");
+    assert!(validate(&extrude.request_schema, &additive).is_err());
+
+    let mut subtractive = common.clone();
+    subtractive["mode"] = serde_json::json!("subtractive");
+    assert!(validate(&extrude.request_schema, &subtractive).is_err());
+    subtractive["target_feature_id"] = serde_json::json!("base");
+    validate(&extrude.request_schema, &subtractive).expect("subtractive target validates");
 }
 
 #[test]

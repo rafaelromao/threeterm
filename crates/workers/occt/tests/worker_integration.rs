@@ -1,7 +1,7 @@
 //! Integration tests that exercise the production worker binary through
 //! the Rust boundary.
 //!
-//! Local runs may soft-skip when the worker is unavailable. The canonical CI
+//! Fast CI may soft-skip when the worker is unavailable. The native E2E
 //! contract sets `THREETERM_REQUIRE_REAL_WORKER=1`, which turns that absence
 //! into a structured failure.
 
@@ -62,10 +62,7 @@ fn locate_worker() -> Option<OcctWorker> {
 
 fn required_fixture_worker(test_name: &str) -> Option<OcctWorker> {
     let worker = locate_worker();
-    if worker.is_none()
-        && (std::env::var_os("CI").is_some()
-            || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some())
-    {
+    if worker.is_none() && std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
         panic!("{test_name}: OCCT worker is required in this environment");
     }
     worker

@@ -9,8 +9,8 @@
 //! `Host::current()` is preserved.
 //!
 //! When the worker binary is unavailable the tests soft-skip via
-//! `OcctWorker::locate` returning `Err`; the CI archlinux container
-//! installs `opencascade` so the binary is built and the tests run.
+//! `OcctWorker::locate` returning `Err`; native E2E sets
+//! `THREETERM_REQUIRE_OCCT=1` and requires the production worker.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -56,10 +56,7 @@ fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
 
 fn required_fixture_worker(test_name: &str) -> Option<threeterm_occt_worker::OcctWorker> {
     let worker = locate_worker();
-    if worker.is_none()
-        && (std::env::var_os("CI").is_some()
-            || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some())
-    {
+    if worker.is_none() && std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
         panic!("{test_name}: OCCT worker is required in this environment");
     }
     worker

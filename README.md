@@ -52,11 +52,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Compile every member crate
 cargo check --workspace
 
-# Run the fast test suite used by CI
+# Run the fast test suite used by pull-request CI
 bash .github/scripts/test-suite.sh fast
 
 # Run only the opt-in slow tests
 bash .github/scripts/test-suite.sh slow
+
+# Run every test, including native-worker and slow E2E coverage. This is the
+# same expensive immutable-worker setup used by the manual E2E workflow.
+bash .github/scripts/e2e.sh
 ```
 
 The local acceptance verifier `.github/scripts/acceptance.sh` runs the four
@@ -65,9 +69,11 @@ thirteen-member workspace contract.
 
 ## Test suites
 
-`#[ignore = "slow: ..."]` identifies a long-running test. The fast suite is
-the default Cargo test selection and is the only suite CI runs. The slow suite
-runs only those ignored tests, so it is an explicit local opt-in.
+`#[ignore = "slow: ..."]` identifies a long-running test. Pull-request CI
+runs the fast suite with native worker construction disabled. The manually
+triggered native E2E workflow runs the complete suite, including ignored tests,
+against the immutable OCCT and libslvs workers. The slow suite remains a
+smaller local opt-in that runs only ignored tests.
 
 The fast suite retains representative coverage for each product boundary:
 
@@ -89,17 +95,19 @@ composition without delaying every pull request.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull
-request targeting `main`. The workflow:
+request targeting `main`, with a ten-minute job timeout. The workflow:
 
 1. checks out the workspace,
-2. installs Podman for the runner's default user,
-3. asserts `podman info` reports rootless operation,
-4. runs the canonical CI script `.github/scripts/ci.sh` inside
-   `docker.io/archlinux:latest` via rootless Podman.
+2. restores Cargo dependencies and build artifacts,
+3. runs `.github/scripts/ci.sh` with native worker construction disabled.
 
-The CI script installs rustup and the pinned toolchain inside the
-archlinux container, then runs `cargo check`, `cargo fmt --check`,
-`cargo clippy -D warnings`, and `.github/scripts/test-suite.sh fast`.
+The CI script installs the pinned Rust toolchain when necessary, then runs
+`cargo check`, `cargo fmt --check`, `cargo clippy -D warnings`, and the fast
+test suite.
+
+`.github/workflows/e2e.yml` is manually triggered. It retains the rootless
+Arch container and immutable source-built OCCT/libslvs workers, then runs the
+complete native E2E suite and release contracts without blocking pull requests.
 
 <a href="https://github.com/rafaelromao/sandman">
   <img src="https://raw.githubusercontent.com/rafaelromao/sandman/main/assets/badge-built-with-sandman.svg" alt="Built with Sandman" width="154" />

@@ -48,10 +48,10 @@ pub use envelope::{
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
-    ExportResult, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
-    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
-    MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION, SelectedEdgeContext,
-    ShellRequest, ShellResult, SplitRequest, SplitResult,
+    ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult,
+    HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult,
+    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
+    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
 };
 
 pub fn schema_version() -> &'static str {

@@ -37,7 +37,19 @@ fn extrude_request(root: &std::path::Path) -> Value {
         "bundle_path": root.to_string_lossy(),
         "feature_id": "extrude",
         "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
-        "height": 2.0
+        "height": 2.0,
+        "mode": "additive"
+    })
+}
+
+fn subtractive_extrude_request(root: &std::path::Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "cut",
+        "profile": [[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]],
+        "height": 2.0,
+        "mode": "subtractive",
+        "target_feature_id": "base"
     })
 }
 
@@ -513,7 +525,7 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
         is_notification: false,
         method: "tools/call".to_string(),
         params: json!({
-            "name": "threeterm.command.extrude/1",
+            "name": "threeterm.command.extrude/2",
             "arguments": extrude_request(&mcp_root)
         }),
     });
@@ -545,6 +557,136 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
+    let cli_root = root("subtractive-cli");
+    let mcp_root = root("subtractive-mcp");
+    let tui_root = root("subtractive-tui");
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_subtractive_extrusions")
+    else {
+        let _ = fs::remove_dir_all(&cli_root);
+        let _ = fs::remove_dir_all(&mcp_root);
+        let _ = fs::remove_dir_all(&tui_root);
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+        threeterm_host::Host::new()
+            .extrude(
+                path,
+                ExtrudeRequest::new(
+                    format!("base-{}", path.file_name().unwrap().to_string_lossy()),
+                    vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
+                    2.0,
+                )
+                .with_feature_id("base"),
+                &worker,
+            )
+            .expect("base solid commits");
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&cli_root),
+    )
+    .expect("CLI subtractive extrude executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&tui_root),
+    )
+    .expect("TUI subtractive extrude executes");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/2",
+            "arguments": subtractive_extrude_request(&mcp_root)
+        }),
+    });
+    let mcp = mcp.result.expect("MCP subtractive extrude executes")["structuredContent"].clone();
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["mode"], "subtractive");
+        assert_eq!(result["target_feature_id"], "base");
+        assert_eq!(result["feature_id"], "cut");
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+fn required_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("CI").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("{test_name}: OCCT worker is required: {error}")
+        }
+        Err(_) => None,
+    }
+}
+
+#[test]
+fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
+    let cli_root = root("invalid-subtractive-cli");
+    let mcp_root = root("invalid-subtractive-mcp");
+    let tui_root = root("invalid-subtractive-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+    }
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&cli_root),
+    )
+    .expect_err("CLI must reject a missing subtractive target");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        subtractive_extrude_request(&tui_root),
+    )
+    .expect_err("TUI must reject a missing subtractive target");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/2",
+            "arguments": subtractive_extrude_request(&mcp_root)
+        }),
+    });
+    let mcp = mcp.result.expect("MCP returns a tool error result");
+    let normalize = |diagnostic: &str| {
+        diagnostic
+            .contains("subtractive extrude target feature is missing: base")
+            .then_some("subtractive extrude target feature is missing: base")
+    };
+    let cli_diagnostic = normalize(&format!("{cli:?}"));
+    let tui_diagnostic = normalize(&format!("{tui:?}"));
+    assert_eq!(
+        cli_diagnostic,
+        Some("subtractive extrude target feature is missing: base")
+    );
+    assert_eq!(cli_diagnostic, tui_diagnostic);
+    assert_eq!(mcp["isError"], true);
+    assert_eq!(
+        normalize(mcp["content"][0]["text"].as_str().unwrap_or_default()),
+        Some("subtractive extrude target feature is missing: base")
+    );
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 #[test]

@@ -93,6 +93,8 @@ fn extrude(bin: &str, bundle: &Path, feature_id: &str, profile: &Path, height: &
             profile.to_str().unwrap(),
             "--height",
             height,
+            "--mode",
+            "additive",
         ],
     );
 }

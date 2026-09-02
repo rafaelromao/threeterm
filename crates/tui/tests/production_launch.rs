@@ -1,7 +1,11 @@
+use std::fs;
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use threeterm_host::Host;
+use threeterm_occt_worker::OcctWorker;
+use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
 use threeterm_tui::{InteractiveTerminal, LaunchError, launch};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
@@ -296,4 +300,82 @@ fn production_launch_restores_after_terminal_setup_failure() {
     .expect_err("terminal setup failure refuses launch");
     assert!(matches!(error, LaunchError::Runtime(_)));
     assert_eq!(terminal.events_read, 0);
+}
+
+#[test]
+fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("interactive command slice: OCCT worker unavailable");
+        return;
+    }
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-command-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let request =
+        br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.push(b"\x16".to_vec());
+    script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 2);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("Command Palette"));
+    assert!(output.contains("[outline]"));
+    assert!(output.contains("[dashed-outline]"));
+    assert!(output.contains("[selection-glyph]"));
+
+    let headless_root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-headless-{}-{suffix}",
+        std::process::id()
+    ));
+    let headless_host = Host::new();
+    headless_host
+        .save(&headless_root, "feature-a", "box")
+        .expect("headless project is persisted");
+    let headless_revision = headless_host
+        .identity(&headless_root)
+        .expect("headless identity reads")
+        .revision_hash;
+    headless_host
+        .execute_domain_command(
+            EXTRUDE_COMMAND_ID,
+            json!({
+                "bundle_path": headless_root.to_string_lossy(),
+                "expected_revision": headless_revision,
+                "feature_id": "keyboard-extrude",
+                "profile": [[0, 0], [10, 0], [10, 5], [0, 5]],
+                "height": 3,
+                "mode": "additive",
+            }),
+        )
+        .expect("headless extrude succeeds");
+    assert_eq!(
+        fs::read(root.join("brep/keyboard-extrude.brep")).expect("interactive BREP reads"),
+        fs::read(headless_root.join("brep/keyboard-extrude.brep")).expect("headless BREP reads")
+    );
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+    std::fs::remove_dir_all(headless_root).expect("headless project is removed");
 }

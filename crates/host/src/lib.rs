@@ -33,7 +33,7 @@ use threeterm_persistence::{
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
 };
-use threeterm_protocol::command_execution::{ExecutionError, execute};
+use threeterm_protocol::command_execution::{ExecutionError, execute, validate_request};
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID,
@@ -460,6 +460,15 @@ pub struct ExtrudeDerivedResult {
     pub source_snapshot: SnapshotView,
     pub result: ExtrudeResult,
     pub artifact: Layer1DerivedResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainCommandPreview {
+    pub command: CommandId,
+    pub source_revision: String,
+    pub preview_revision: String,
+    pub input_fingerprint: String,
+    pub geometry_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1621,6 +1630,22 @@ impl Host {
                     }))
                 }
                 EXTRUDE_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?;
+                    let expected_revision = request
+                        .get("expected_revision")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if let Some(expected_revision) = &expected_revision {
+                        let current = self.load(bundle_path)?;
+                        if current.revision_hash != expected_revision.as_str() {
+                            return Err(HostError::Validation {
+                                detail: format!(
+                                    "extrude source revision {expected_revision:?} does not match current revision {:?}",
+                                    current.revision_hash
+                                ),
+                            });
+                        }
+                    }
                     let profile: Vec<[f64; 2]> =
                         serde_json::from_value(request.get("profile").cloned().ok_or_else(
                             || HostError::Validation {
@@ -1660,7 +1685,16 @@ impl Host {
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
                         })?;
-                    let view = self.extrude(bundle_path, extrusion, &worker)?;
+                    let view = if let Some(expected_revision) = expected_revision {
+                        self.extrude_at_revision(
+                            bundle_path,
+                            extrusion,
+                            &worker,
+                            &expected_revision,
+                        )?
+                    } else {
+                        self.extrude(bundle_path, extrusion, &worker)?
+                    };
                     Ok(serde_json::json!({
                         "status": view.result.status,
                         "operation": "extrude",
@@ -1970,6 +2004,121 @@ impl Host {
                     ),
                 }),
             }
+        })
+    }
+
+    /// Evaluate a registered command without publishing its worker result.
+    /// The returned fingerprints are transient and are never added to the
+    /// canonical bundle or presentation cache.
+    pub fn preview_domain_command(
+        &self,
+        command: CommandId,
+        request: serde_json::Value,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        if let Err(error) = validate_request(command, &request) {
+            return Err(match error {
+                ExecutionError::UnknownCommand(command) => ExecutionError::UnknownCommand(command),
+                ExecutionError::InvalidRequest(detail) => ExecutionError::InvalidRequest(detail),
+                ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
+            });
+        }
+        if command != EXTRUDE_COMMAND_ID {
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "command {} is discoverable but has no interactive preview handler",
+                    command.0
+                ),
+            }));
+        }
+
+        let bundle_path = request
+            .get("bundle_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+        let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+        if let Some(expected_revision) = request
+            .get("expected_revision")
+            .and_then(serde_json::Value::as_str)
+            && current.revision_hash != expected_revision
+        {
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "extrude source revision {expected_revision:?} does not match current revision {:?}",
+                    current.revision_hash
+                ),
+            }));
+        }
+
+        let profile: Vec<[f64; 2]> = serde_json::from_value(
+            request
+                .get("profile")
+                .cloned()
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing profile".to_string()))?,
+        )
+        .map_err(|error| {
+            ExecutionError::Handler(HostError::Validation {
+                detail: format!("invalid extrude profile: {error}"),
+            })
+        })?;
+        let height = request
+            .get("height")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing extrude height".to_string()))?;
+        let feature_id = request
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+        let mode = parse_extrude_mode(request.get("mode")).map_err(ExecutionError::Handler)?;
+        let target_feature_id = request
+            .get("target_feature_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let worker = OcctWorker::locate().map_err(|error| {
+            ExecutionError::Handler(HostError::WorkerUnavailable {
+                detail: error.to_string(),
+            })
+        })?;
+        let derived = self
+            .stage_extrude(
+                bundle_path,
+                ExtrudeRequest::new(
+                    threeterm_occt_worker::new_request_id(),
+                    profile.into_iter().map(|[x, y]| (x, y)).collect(),
+                    height,
+                )
+                .with_mode(mode)
+                .with_optional_target_feature_id(target_feature_id)
+                .with_feature_id(feature_id),
+                &worker,
+            )
+            .map_err(ExecutionError::Handler)?;
+        if let Some(expected_revision) = request
+            .get("expected_revision")
+            .and_then(serde_json::Value::as_str)
+            && derived.source_snapshot.revision_hash != expected_revision
+        {
+            let current_revision = derived.source_snapshot.revision_hash.clone();
+            self.discard_extrude_derived(derived);
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "extrude preview source revision changed from {expected_revision:?} to {current_revision:?}"
+                ),
+            }));
+        }
+        let source_revision = derived.source_snapshot.revision_hash.clone();
+        let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+        let geometry_fingerprint = derived.result.brep_sha256.clone();
+        let preview_revision = sha256_hex(
+            format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                .as_bytes(),
+        );
+        self.discard_extrude_derived(derived);
+        Ok(DomainCommandPreview {
+            command,
+            source_revision,
+            preview_revision,
+            input_fingerprint,
+            geometry_fingerprint,
         })
     }
 
@@ -4853,6 +5002,32 @@ impl Host {
         })
     }
 
+    /// Remove a staged extrude after a read-only preview.
+    pub fn discard_extrude_derived(&self, derived: ExtrudeDerivedResult) {
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
+        if let Some(stage_root) = derived.artifact.path.parent() {
+            let _ = fs::remove_dir_all(stage_root);
+            if let Some(derived_root) = stage_root.parent()
+                && derived_root
+                    .file_name()
+                    .is_some_and(|name| name == ".derived")
+            {
+                let _ = fs::remove_dir(derived_root);
+            }
+        }
+    }
+
+    fn discard_staged_occt_result<R>(&self, derived: &StagedOcctResult<R>) {
+        self.layer1_results
+            .borrow_mut()
+            .remove(&derived.artifact.cache_key);
+        if let Some(stage_root) = derived.artifact.path.parent() {
+            let _ = fs::remove_dir_all(stage_root);
+        }
+    }
+
     /// Promote one Host-validated extrude result into the next canonical
     /// Project Generation. The request stage is consumed before persistence
     /// copies the bundle, so transient worker artifacts cannot become part of
@@ -5650,6 +5825,43 @@ impl Host {
             threeterm_occt_worker::Operation::Extrude,
             worker,
         )?;
+        let source_snapshot = derived.source_snapshot.clone();
+        let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
+        Ok(ExtrudeCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            worker_fingerprint: expected_occt_worker_fingerprint(),
+            artifact,
+        })
+    }
+
+    /// Commit an extrude only if the worker was staged from the caller's
+    /// expected source revision. The final promotion still performs its own
+    /// persistence-lock comparison.
+    pub fn extrude_at_revision(
+        &self,
+        root: impl AsRef<Path>,
+        request: ExtrudeRequest,
+        worker: &OcctWorker,
+        expected_revision: &str,
+    ) -> Result<ExtrudeCommitView, HostError> {
+        let root = root.as_ref();
+        let derived = self.stage_occt_result::<ExtrudeResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Extrude,
+            worker,
+        )?;
+        if derived.source_snapshot.revision_hash != expected_revision {
+            let current_revision = derived.source_snapshot.revision_hash.clone();
+            self.discard_staged_occt_result(&derived);
+            return Err(HostError::Validation {
+                detail: format!(
+                    "extrude source revision {expected_revision:?} changed to {current_revision:?}"
+                ),
+            });
+        }
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
         Ok(ExtrudeCommitView {

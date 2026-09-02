@@ -388,6 +388,7 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 }
             },
             "height": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "mode": { "enum": ["additive", "subtractive"] },
             "target_feature_id": { "type": "string", "minLength": 1 }
         },

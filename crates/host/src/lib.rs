@@ -4789,10 +4789,10 @@ impl Host {
         read_brep_verified(&target_path, Some((expected_bytes, expected_sha256)))
             .map_err(|detail| HostError::BrepIo { detail })?;
         request.target_path = Some(target_path);
-        if let Err(detail) = request.validate() {
-            if detail != "output_filename must be a non-empty plain filename" {
-                return Err(HostError::Validation { detail });
-            }
+        if let Err(detail) = request.validate()
+            && detail != "output_filename must be a non-empty plain filename"
+        {
+            return Err(HostError::Validation { detail });
         }
         Ok(request)
     }

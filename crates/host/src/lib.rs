@@ -2068,8 +2068,7 @@ impl Host {
             .get("feature_id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
-        let mode = parse_extrude_mode(request.get("mode"))
-            .map_err(|error| ExecutionError::Handler(error))?;
+        let mode = parse_extrude_mode(request.get("mode")).map_err(ExecutionError::Handler)?;
         let target_feature_id = request
             .get("target_feature_id")
             .and_then(serde_json::Value::as_str)

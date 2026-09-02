@@ -1,0 +1,57 @@
+name: native-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-e2e:
+    name: Native worker end-to-end checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PODMAN_ROOTLESS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Podman (rootless)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              podman uidmap fuse-overlayfs slirp4netns
+          podman --version
+
+      - name: Verify Podman is configured for rootless
+        run: |
+          set -euo pipefail
+          if ! podman info --format '{{.Host.Security.Rootless}}' | grep -qi '^true$'; then
+              echo "ERROR: podman is not running rootless" >&2
+              podman info >&2
+              exit 1
+          fi
+
+      - name: Run native E2E script in Arch container
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.cargo"
+          podman run --rm \
+              --security-opt label=disable \
+              -v "${PWD}:/workspace" \
+              -v "${HOME}/.cargo:/root/.cargo" \
+              -w /workspace \
+              docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
+              bash /workspace/.github/scripts/e2e.sh
+
+      - name: Upload native-worker execution manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-worker-manifest
+          path: |
+            target/native-worker-manifest.json
+            target/libslvs-artifact
+          if-no-files-found: error

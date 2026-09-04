@@ -1,5 +1,5 @@
 //! Atomicity and end-to-end tests for the host's `extrude` and
-//! `boolean_fuse` methods.
+//! `boolean_fuse`/`boolean_cut`/`boolean_common` methods.
 //!
 //! These tests exercise the real worker binary through the
 //! `OcctWorker` boundary so the production code path is the system
@@ -20,9 +20,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
-    DraftRequest, ExtrudeMode, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest,
-    LoftRequest, MirrorRequest, Operation, ShellRequest,
+    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BooleanPatternRequest,
+    ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeMode, ExtrudeRequest,
+    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
+    ShellRequest,
 };
 use threeterm_persistence::{
     Bundle, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -1351,6 +1352,245 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(script);
+}
+
+fn overlapping_box_pair(
+    host: &Host,
+    root: &Path,
+    label: &str,
+    worker: &threeterm_occt_worker::OcctWorker,
+) {
+    let base_request = ExtrudeRequest::new(
+        unique_request_id(&format!("{label}-base")),
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "base.brep")
+    .with_feature_id(format!("{label}-base-1"));
+    let base_view = host
+        .extrude(root, base_request, worker)
+        .expect("base extrude");
+    assert_eq!(base_view.result.status, "ok");
+
+    let tool_request = ExtrudeRequest::new(
+        unique_request_id(&format!("{label}-tool")),
+        vec![(5.0, 0.0), (15.0, 0.0), (15.0, 5.0), (5.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "tool.brep")
+    .with_feature_id(format!("{label}-tool-1"));
+    let tool_view = host
+        .extrude(root, tool_request, worker)
+        .expect("tool extrude");
+    assert_eq!(tool_view.result.status, "ok");
+}
+
+#[test]
+fn boolean_cut_of_two_extrudes_commits_a_cut_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("cut", "box-seed", "box");
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+    overlapping_box_pair(&host, &root, "cut", &worker);
+
+    let cut_request = BooleanCutRequest::new(
+        unique_request_id("cut"),
+        root.join("brep/cut-base-1.brep"),
+        root.join("brep/cut-tool-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "cut.brep")
+    .with_feature_id("cut-1");
+    let cut_request_id = cut_request.request_id.clone();
+    let cut_view = host
+        .boolean_cut(&root, cut_request, &worker)
+        .expect("boolean cut commits");
+
+    assert_eq!(cut_view.result.status, "ok");
+    assert_eq!(cut_view.result.operation, Operation::BooleanCut);
+    assert_eq!(cut_view.artifact.request_id, cut_request_id);
+    assert_eq!(cut_view.artifact.operation, "boolean_cut");
+    assert_eq!(cut_view.artifact.feature_id, "cut-1");
+    assert_eq!(cut_view.artifact.path, root.join("brep/cut-1.brep"));
+    assert_eq!(
+        cut_view.artifact.byte_count,
+        cut_view.result.brep_bytes as u64
+    );
+    assert_eq!(cut_view.artifact.sha256, cut_view.result.brep_sha256);
+    let cut_brep = root.join("brep/cut-1.brep");
+    assert!(cut_brep.is_file(), "cut BREP is on disk at {cut_brep:?}");
+    assert_ne!(cut_view.snapshot.revision_hash, prior_view.revision_hash);
+    let transactions = fs::read_to_string(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    assert!(transactions.contains(&cut_request_id));
+    assert!(transactions.contains("boolean_cut"));
+    assert!(!transactions.contains("/stage/"));
+    assert_eq!(Host::new().load(&root).expect("reloads"), cut_view.snapshot);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_common_of_two_extrudes_commits_a_common_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("common", "box-seed", "box");
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+    overlapping_box_pair(&host, &root, "common", &worker);
+
+    let common_request = BooleanCommonRequest::new(
+        unique_request_id("common"),
+        root.join("brep/common-base-1.brep"),
+        root.join("brep/common-tool-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "common.brep")
+    .with_feature_id("common-1");
+    let common_request_id = common_request.request_id.clone();
+    let common_view = host
+        .boolean_common(&root, common_request, &worker)
+        .expect("boolean common commits");
+
+    assert_eq!(common_view.result.status, "ok");
+    assert_eq!(common_view.result.operation, Operation::BooleanCommon);
+    assert_eq!(common_view.artifact.request_id, common_request_id);
+    assert_eq!(common_view.artifact.operation, "boolean_common");
+    assert_eq!(common_view.artifact.feature_id, "common-1");
+    assert_eq!(common_view.artifact.path, root.join("brep/common-1.brep"));
+    assert_eq!(
+        common_view.artifact.byte_count,
+        common_view.result.brep_bytes as u64
+    );
+    assert_eq!(common_view.artifact.sha256, common_view.result.brep_sha256);
+    let common_brep = root.join("brep/common-1.brep");
+    assert!(
+        common_brep.is_file(),
+        "common BREP is on disk at {common_brep:?}"
+    );
+    assert_ne!(common_view.snapshot.revision_hash, prior_view.revision_hash);
+    let transactions = fs::read_to_string(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    assert!(transactions.contains(&common_request_id));
+    assert!(transactions.contains("boolean_common"));
+    assert!(!transactions.contains("/stage/"));
+    assert_eq!(
+        Host::new().load(&root).expect("reloads"),
+        common_view.snapshot
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_operations_reload_and_recompute_after_derived_results_are_removed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("boolean-replay", "box-seed", "box");
+    let host = Host::new();
+    overlapping_box_pair(&host, &root, "replay", &worker);
+
+    let fuse_view = host
+        .boolean_fuse(
+            &root,
+            BooleanFuseRequest::new(
+                unique_request_id("replay-fuse"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "fused.brep")
+            .with_feature_id("replay-fused-1"),
+            &worker,
+        )
+        .expect("boolean fuse commits");
+    let cut_view = host
+        .boolean_cut(
+            &root,
+            BooleanCutRequest::new(
+                unique_request_id("replay-cut"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "cut.brep")
+            .with_feature_id("replay-cut-1"),
+            &worker,
+        )
+        .expect("boolean cut commits");
+    let common_view = host
+        .boolean_common(
+            &root,
+            BooleanCommonRequest::new(
+                unique_request_id("replay-common"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "common.brep")
+            .with_feature_id("replay-common-1"),
+            &worker,
+        )
+        .expect("boolean common commits");
+
+    let originals = [
+        (
+            "replay-fused-1",
+            fs::read(&fuse_view.result.brep_path).expect("fused BREP reads"),
+        ),
+        (
+            "replay-cut-1",
+            fs::read(&cut_view.result.brep_path).expect("cut BREP reads"),
+        ),
+        (
+            "replay-common-1",
+            fs::read(&common_view.result.brep_path).expect("common BREP reads"),
+        ),
+    ];
+    let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+
+    for (feature_id, _) in &originals {
+        fs::remove_file(root.join("brep").join(format!("{feature_id}.brep")))
+            .expect("derived BREP removes");
+    }
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+    Host::new()
+        .load(&root)
+        .expect("canonical project loads without derived BREPs");
+
+    let replayed = Host::new()
+        .reload_and_recompute_booleans(&root, &worker)
+        .expect("booleans recompute");
+    assert_eq!(
+        replayed.snapshot.revision_hash,
+        common_view.snapshot.revision_hash
+    );
+    assert_eq!(replayed.recomputed, 3);
+    assert_eq!(
+        replayed.feature_ids,
+        ["replay-fused-1", "replay-cut-1", "replay-common-1"]
+    );
+    let expected_fingerprints: Vec<String> = originals
+        .iter()
+        .map(|(_, bytes)| sha256_hex(bytes))
+        .collect();
+    assert_eq!(replayed.geometry_fingerprints, expected_fingerprints);
+    for (feature_id, bytes) in &originals {
+        assert_eq!(
+            fs::read(root.join("brep").join(format!("{feature_id}.brep")))
+                .expect("recomputed BREP reads"),
+            *bytes
+        );
+    }
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).expect("manifest rereads"),
+        manifest
+    );
+    assert_eq!(
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log rereads"),
+        log
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 fn fillet_request(label: &str, feature_id: &str, base_path: &Path) -> FilletRequest {

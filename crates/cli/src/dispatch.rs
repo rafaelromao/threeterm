@@ -198,6 +198,10 @@ enum DispatchPlan {
         position: [f64; 3],
         direction: [f64; 3],
         diameter: f64,
+        hole_kind: String,
+        thread_designation: Option<String>,
+        thread_pitch: Option<f64>,
+        thread_depth: Option<f64>,
     },
     Revolve {
         bundle: String,
@@ -665,6 +669,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
             position,
             direction,
             diameter,
+            thread_pitch,
+            thread_depth,
             ..
         } => {
             position
@@ -672,6 +678,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
                 .chain(direction)
                 .all(|value| value.is_finite())
                 && diameter.is_finite()
+                && thread_pitch.is_none_or(|value| value.is_finite())
+                && thread_depth.is_none_or(|value| value.is_finite())
         }
         DispatchPlan::Revolve {
             axis_point,
@@ -2113,6 +2121,10 @@ fn parse_hole(args: &[OsString]) -> DispatchPlan {
     let mut position: Option<[f64; 3]> = None;
     let mut direction: Option<[f64; 3]> = None;
     let mut diameter: Option<f64> = None;
+    let mut hole_kind: String = "drilled".to_string();
+    let mut thread_designation: Option<String> = None;
+    let mut thread_pitch: Option<f64> = None;
+    let mut thread_depth: Option<f64> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2134,6 +2146,45 @@ fn parse_hole(args: &[OsString]) -> DispatchPlan {
                     index += 2;
                     continue;
                 }
+                "--hole-kind" => {
+                    if !matches!(value_str.as_ref(), "drilled" | "tapped") {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--hole-kind {}", value_str),
+                        };
+                    }
+                    hole_kind = value_str.into_owned();
+                    index += 2;
+                    continue;
+                }
+                "--thread-designation" => {
+                    thread_designation = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--thread-pitch" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        thread_pitch = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--thread-pitch {}", value_str),
+                        };
+                    }
+                },
+                "--thread-depth" => match value_str.parse::<f64>() {
+                    Ok(parsed) => {
+                        thread_depth = Some(parsed);
+                        index += 2;
+                        continue;
+                    }
+                    Err(_) => {
+                        return DispatchPlan::Unknown {
+                            arg: format!("--thread-depth {}", value_str),
+                        };
+                    }
+                },
                 "--position" => match parse_vec3(&value_str, "--position") {
                     Ok(parsed) => {
                         position = Some(parsed);
@@ -2211,6 +2262,10 @@ fn parse_hole(args: &[OsString]) -> DispatchPlan {
         position,
         direction,
         diameter,
+        hole_kind,
+        thread_designation,
+        thread_pitch,
+        thread_depth,
     }
 }
 
@@ -3311,6 +3366,10 @@ fn execute_handler(
             position,
             direction,
             diameter,
+            hole_kind,
+            thread_designation,
+            thread_pitch,
+            thread_depth,
         } => emit_hole(
             &bundle,
             &feature_id,
@@ -3318,6 +3377,10 @@ fn execute_handler(
             position,
             direction,
             diameter,
+            &hole_kind,
+            thread_designation.as_deref(),
+            thread_pitch,
+            thread_depth,
             stdout,
             stderr,
         ),
@@ -4577,8 +4640,33 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             position,
             direction,
             diameter,
+            hole_kind,
+            thread_designation,
+            thread_pitch,
+            thread_depth,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "position": position, "direction": direction, "diameter": diameter })
+            let mut request = serde_json::Map::from_iter([
+                ("bundle_path".to_string(), json!(bundle)),
+                ("feature_id".to_string(), json!(feature_id)),
+                ("base_feature_id".to_string(), json!(base_feature_id)),
+                ("position".to_string(), json!(position)),
+                ("direction".to_string(), json!(direction)),
+                ("diameter".to_string(), json!(diameter)),
+                ("hole_kind".to_string(), json!(hole_kind)),
+            ]);
+            if let Some(thread_designation) = thread_designation {
+                request.insert(
+                    "thread_designation".to_string(),
+                    json!(thread_designation),
+                );
+            }
+            if let Some(thread_pitch) = thread_pitch {
+                request.insert("thread_pitch".to_string(), json!(thread_pitch));
+            }
+            if let Some(thread_depth) = thread_depth {
+                request.insert("thread_depth".to_string(), json!(thread_depth));
+            }
+            Value::Object(request)
         }
         DispatchPlan::Revolve {
             bundle,
@@ -5172,9 +5260,55 @@ fn emit_hole(
     position: [f64; 3],
     direction: [f64; 3],
     diameter: f64,
+    hole_kind: &str,
+    thread_designation: Option<&str>,
+    thread_pitch: Option<f64>,
+    thread_depth: Option<f64>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    if !matches!(hole_kind, "drilled" | "tapped") {
+        write_diagnostic(
+            stderr,
+            &Diagnostic::invalid_request(&format!(
+                "hole kind must be drilled or tapped, got {hole_kind:?}"
+            )),
+        );
+        return EXIT_PERSISTENCE_FAILURE;
+    }
+    if hole_kind == "drilled"
+        && (thread_designation.is_some() || thread_pitch.is_some() || thread_depth.is_some())
+    {
+        write_diagnostic(
+            stderr,
+            &Diagnostic::invalid_request("drilled hole must not carry thread metadata"),
+        );
+        return EXIT_PERSISTENCE_FAILURE;
+    }
+    if hole_kind == "tapped" {
+        let designation = thread_designation.unwrap_or_default();
+        if designation.is_empty() {
+            write_diagnostic(
+                stderr,
+                &Diagnostic::invalid_request("tapped hole requires a thread designation"),
+            );
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+        if thread_pitch.is_none_or(|value| !value.is_finite() || value <= 0.0) {
+            write_diagnostic(
+                stderr,
+                &Diagnostic::invalid_request("tapped hole requires a positive finite thread pitch"),
+            );
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+        if thread_depth.is_none_or(|value| !value.is_finite() || value <= 0.0) {
+            write_diagnostic(
+                stderr,
+                &Diagnostic::invalid_request("tapped hole requires a positive finite thread depth"),
+            );
+            return EXIT_PERSISTENCE_FAILURE;
+        }
+    }
     let base_path = Path::new(bundle)
         .join("brep")
         .join(format!("{base_feature_id}.brep"));
@@ -5199,7 +5333,7 @@ fn emit_hole(
         "{feature_id}-{}.brep",
         threeterm_occt_worker::new_request_id()
     );
-    let request = HoleRequest::new(
+    let mut request = HoleRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
         position,
@@ -5207,7 +5341,16 @@ fn emit_hole(
         diameter,
     )
     .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
+    .with_feature_id(feature_id)
+    .with_hole_kind(hole_kind)
+    .with_base_feature_id(base_feature_id);
+    if hole_kind == "tapped" {
+        request = request.with_thread(
+            thread_designation.unwrap_or_default(),
+            thread_pitch.unwrap_or_default(),
+            thread_depth.unwrap_or_default(),
+        );
+    }
     match Host::new().hole(bundle, request, &worker) {
         Ok(view) => write_hole_view(&view, HOLE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => emit_host_error(&error, stderr),

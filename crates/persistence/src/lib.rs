@@ -71,9 +71,10 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, CanonicalState, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX,
-        LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION,
-        Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
+        Bundle, BundleError, CanonicalHoleIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX,
+        HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
+        LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
+        PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
         PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
         V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
         migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
@@ -98,6 +99,7 @@ pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
 pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
+pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -439,6 +441,121 @@ impl CanonicalExtrudeIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct HoleDeterministicInputs {
+    pub position: [f64; 3],
+    pub direction: [f64; 3],
+    pub diameter: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_pitch: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalHoleIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub hole_kind: String,
+    pub base_feature_id: String,
+    pub request_id: String,
+    pub deterministic_inputs: HoleDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalHoleIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != HOLE_INTENT_SCHEMA_VERSION
+            || self.command != "hole"
+            || !matches!(self.hole_kind.as_str(), "drilled" | "tapped")
+            || self.request_id.is_empty()
+            || self.base_feature_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole intent identity is invalid".to_string(),
+            ));
+        }
+        if !self.deterministic_inputs.position.iter().all(|v| v.is_finite())
+            || !self.deterministic_inputs.direction.iter().all(|v| v.is_finite())
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic placement is invalid".to_string(),
+            ));
+        }
+        let norm: f64 = self
+            .deterministic_inputs
+            .direction
+            .iter()
+            .map(|v| v * v)
+            .sum();
+        if norm <= f64::EPSILON {
+            return Err(BundleError::Invalid(
+                "canonical hole direction must be a non-zero vector".to_string(),
+            ));
+        }
+        if !self.deterministic_inputs.diameter.is_finite()
+            || self.deterministic_inputs.diameter <= 0.0
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic inputs are invalid".to_string(),
+            ));
+        }
+        let is_tapped = self.hole_kind == "tapped";
+        let has_thread = self.deterministic_inputs.thread_designation.is_some()
+            || self.deterministic_inputs.thread_pitch.is_some()
+            || self.deterministic_inputs.thread_depth.is_some();
+        if is_tapped {
+            let designation = self
+                .deterministic_inputs
+                .thread_designation
+                .as_deref()
+                .unwrap_or_default();
+            let pitch = self.deterministic_inputs.thread_pitch.unwrap_or(0.0);
+            let depth = self.deterministic_inputs.thread_depth.unwrap_or(0.0);
+            if designation.is_empty() || !pitch.is_finite() || pitch <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread designation and pitch are invalid".to_string(),
+                ));
+            }
+            if !depth.is_finite() || depth <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread depth is invalid".to_string(),
+                ));
+            }
+        } else if has_thread {
+            return Err(BundleError::Invalid(
+                "canonical drilled hole must not carry thread metadata".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     pub log_index: usize,
     pub previous_digest: String,
@@ -458,6 +575,8 @@ pub struct LogEntry {
     pub idempotency_payload: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<CanonicalExtrudeIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hole_intent: Option<CanonicalHoleIntent>,
     pub terminal_digest: String,
 }
 
@@ -476,6 +595,7 @@ impl LogEntry {
             idempotency_key: None,
             idempotency_payload: None,
             intent: None,
+            hole_intent: None,
             terminal_digest: String::new(),
         };
         entry.terminal_digest = entry.recomputed_digest();
@@ -499,6 +619,12 @@ impl LogEntry {
 
     fn with_intent(mut self, intent: &CanonicalExtrudeIntent) -> Self {
         self.intent = Some(intent.clone());
+        self.terminal_digest = self.recomputed_digest();
+        self
+    }
+
+    fn with_hole_intent(mut self, intent: &CanonicalHoleIntent) -> Self {
+        self.hole_intent = Some(intent.clone());
         self.terminal_digest = self.recomputed_digest();
         self
     }
@@ -565,6 +691,27 @@ impl TransactionLog {
         idempotency_payload: Option<&str>,
         intent: Option<&CanonicalExtrudeIntent>,
     ) {
+        self.append_feature_with_brep_and_hole(
+            feature_id,
+            kind,
+            brep_bytes,
+            idempotency_key,
+            idempotency_payload,
+            intent,
+            None,
+        );
+    }
+
+    fn append_feature_with_brep_and_hole(
+        &mut self,
+        feature_id: &str,
+        kind: &str,
+        brep_bytes: &[u8],
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        intent: Option<&CanonicalExtrudeIntent>,
+        hole_intent: Option<&CanonicalHoleIntent>,
+    ) {
         let previous = self.terminal_digest_hex().to_string();
         let entry =
             LogEntry::new(self.entries.len(), &previous, feature_id, kind).with_brep(brep_bytes);
@@ -572,8 +719,12 @@ impl TransactionLog {
             Some(key) => entry.with_idempotency_key(key, idempotency_payload),
             None => entry,
         };
-        self.entries.push(match intent {
+        let entry = match intent {
             Some(intent) => entry.with_intent(intent),
+            None => entry,
+        };
+        self.entries.push(match hole_intent {
+            Some(hole_intent) => entry.with_hole_intent(hole_intent),
             None => entry,
         });
     }
@@ -1189,6 +1340,7 @@ impl Bundle {
                 true,
                 false,
                 None,
+                None,
             )
         })
     }
@@ -1235,6 +1387,7 @@ impl Bundle {
                 false,
                 false,
                 false,
+                None,
                 None,
             )
         })
@@ -1451,6 +1604,7 @@ impl Bundle {
                 false,
                 false,
                 None,
+                None,
             )
         })
     }
@@ -1482,6 +1636,40 @@ impl Bundle {
                 false,
                 false,
                 Some(intent),
+                None,
+            )
+        })
+    }
+
+    /// Publish one verified hole BREP together with its canonical hole
+    /// intent. The intent and artifact provenance share the same generation.
+    /// `kind` carries the hole discriminator (e.g. `hole:drilled`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_new_feature_with_brep_if_revision_and_hole_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        hole_intent: &CanonicalHoleIntent,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+                false,
+                false,
+                None,
+                Some(hole_intent),
             )
         })
     }
@@ -1508,6 +1696,7 @@ impl Bundle {
                 true,
                 false,
                 false,
+                None,
                 None,
             )
         })
@@ -1681,6 +1870,7 @@ impl Bundle {
                 false,
                 true,
                 None,
+                None,
             )
         })
     }
@@ -1760,6 +1950,7 @@ impl Bundle {
             false,
             false,
             None,
+            None,
         )
     }
 
@@ -1778,6 +1969,7 @@ impl Bundle {
         allow_existing_sketch_update: bool,
         allow_existing_bracket_edit: bool,
         intent: Option<&CanonicalExtrudeIntent>,
+        hole_intent: Option<&CanonicalHoleIntent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1860,6 +2052,54 @@ impl Bundle {
             if intent.source_revision != loaded.revision_hash_hex() {
                 return Err(BundleError::Invalid(
                     "canonical extrude intent source revision does not match the transaction source"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(hole_intent) = hole_intent {
+            if hole_intent.schema_version != HOLE_INTENT_SCHEMA_VERSION {
+                return Err(BundleError::CanonicalVersionUnsupported {
+                    log_index: None,
+                    version: hole_intent.schema_version.clone(),
+                });
+            }
+            if hole_intent.command != "hole"
+                || !matches!(hole_intent.hole_kind.as_str(), "drilled" | "tapped")
+            {
+                return Err(BundleError::CanonicalOperationUnknown {
+                    log_index: None,
+                    operation: format!("{}:{}", hole_intent.command, hole_intent.hole_kind),
+                });
+            }
+            if !loaded.graph.contains_feature(&hole_intent.base_feature_id) {
+                return Err(BundleError::Invalid(format!(
+                    "canonical hole base feature is missing: {}",
+                    hole_intent.base_feature_id
+                )));
+            }
+            if entries.len() != 1 || hole_intent.validate(entries[0].0).is_err() {
+                return Err(BundleError::Invalid(
+                    "canonical hole intent does not match its transaction".to_string(),
+                ));
+            }
+            if idempotency_key != Some(hole_intent.request_id.as_str()) {
+                return Err(BundleError::Invalid(
+                    "canonical hole intent request ID does not match transaction provenance"
+                        .to_string(),
+                ));
+            }
+            if hole_intent.worker_requirements != occt_worker_identity() {
+                return Err(BundleError::CompatibilityIdentityMismatch {
+                    identity: "canonical_hole_worker",
+                    expected: serde_json::to_string(&occt_worker_identity())
+                        .expect("worker identity serializes"),
+                    found: serde_json::to_string(&hole_intent.worker_requirements)
+                        .expect("worker identity serializes"),
+                });
+            }
+            if hole_intent.source_revision != loaded.revision_hash_hex() {
+                return Err(BundleError::Invalid(
+                    "canonical hole intent source revision does not match the transaction source"
                         .to_string(),
                 ));
             }
@@ -1965,13 +2205,14 @@ impl Bundle {
                     if let Some((brep_feature_id, brep_bytes)) = brep
                         && brep_feature_id == *feature_id
                     {
-                        loaded.log.append_feature_with_brep(
+                        loaded.log.append_feature_with_brep_and_hole(
                             feature_id,
                             kind,
                             brep_bytes,
                             Some(idempotency_key),
                             idempotency_payload,
                             intent,
+                            hole_intent,
                         );
                     } else {
                         loaded.log.append_feature_with_idempotency(
@@ -1984,9 +2225,15 @@ impl Bundle {
                 } else if let Some((brep_feature_id, brep_bytes)) = brep
                     && brep_feature_id == *feature_id
                 {
-                    loaded
-                        .log
-                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None, intent);
+                    loaded.log.append_feature_with_brep_and_hole(
+                        feature_id,
+                        kind,
+                        brep_bytes,
+                        None,
+                        None,
+                        intent,
+                        hole_intent,
+                    );
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }
@@ -2311,6 +2558,39 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     log_index: entry.log_index,
                     detail: format!(
                         "canonical extrude target feature is missing: {target_feature_id}"
+                    ),
+                });
+            }
+        }
+        if let Some(hole_intent) = &entry.hole_intent {
+            hole_intent
+                .validate(&entry.feature_id)
+                .map_err(|error| BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: error.to_string(),
+                })?;
+            if entry.idempotency_key.as_deref() != Some(hole_intent.request_id.as_str()) {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail:
+                        "canonical hole intent request ID does not match transaction provenance"
+                            .to_string(),
+                });
+            }
+            if hole_intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail:
+                        "canonical hole intent source revision does not match the log prefix"
+                            .to_string(),
+                });
+            }
+            if !graph.contains_feature(&hole_intent.base_feature_id) {
+                return Err(BundleError::LogBrokenLink {
+                    log_index: entry.log_index,
+                    detail: format!(
+                        "canonical hole base feature is missing: {}",
+                        hole_intent.base_feature_id
                     ),
                 });
             }

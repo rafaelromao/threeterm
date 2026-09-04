@@ -643,8 +643,29 @@ pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "maxItems": 3,
                 "items": { "type": "number" }
             },
-            "diameter": { "type": "number", "exclusiveMinimum": 0 }
+            "diameter": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "hole_kind": { "enum": ["drilled", "tapped"] },
+            "thread_designation": { "type": "string", "minLength": 1 },
+            "thread_pitch": { "type": "number", "exclusiveMinimum": 0 },
+            "thread_depth": { "type": "number", "exclusiveMinimum": 0 }
         },
+        "allOf": [
+            {
+                "if": {
+                    "required": ["hole_kind"],
+                    "properties": { "hole_kind": { "const": "tapped" } }
+                },
+                "then": { "required": ["thread_designation", "thread_pitch", "thread_depth"] },
+                "else": {
+                    "not": { "anyOf": [
+                        { "required": ["thread_designation"] },
+                        { "required": ["thread_pitch"] },
+                        { "required": ["thread_depth"] }
+                    ] }
+                }
+            }
+        ],
         "additionalProperties": false
     })
 });

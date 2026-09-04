@@ -26,9 +26,9 @@ use threeterm_occt_worker::{
     ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
 };
 use threeterm_persistence::{
-    Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
-    ExtrudeDeterministicInputs, LoadPolicy, LoadedBundle, load, load_with_policy,
-    previous_generation_path, replay_canonical_state,
+    Bundle, BundleError, CanonicalExtrudeIntent, CanonicalHoleIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
+    LoadedBundle, load, load_with_policy, previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -36,7 +36,7 @@ use threeterm_protocol::artifact::{
 use threeterm_protocol::command_execution::{ExecutionError, execute, validate_request};
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID,
     IDENTITY_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
@@ -3863,7 +3863,16 @@ impl Host {
             derived,
             |bundle, current, derived, artifact, bytes, provenance| {
                 let feature_id = &artifact.feature_id;
-                let kind = format!("brep:{feature_id}");
+                let kind = if artifact.operation == "hole" {
+                    let hole_kind = derived
+                        .request
+                        .get("hole_kind")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("drilled");
+                    format!("hole:{hole_kind}")
+                } else {
+                    format!("brep:{feature_id}")
+                };
                 if artifact.operation == "extrude" {
                     let intent = canonical_extrude_intent(
                         &derived.request,
@@ -3872,6 +3881,37 @@ impl Host {
                     )
                     .map_err(|error| BundleError::Invalid(error.to_string()))?;
                     bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &intent,
+                        bytes,
+                    )
+                } else if artifact.operation == "hole" {
+                    let base_feature_id = derived
+                        .request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            BundleError::Invalid(
+                                "canonical hole base feature is missing".to_string(),
+                            )
+                        })?;
+                    if !current.graph.contains_feature(base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical hole base feature is missing: {base_feature_id}"
+                        )));
+                    }
+                    let intent = canonical_hole_intent(
+                        &derived.request,
+                        base_feature_id,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_hole_intent(
                         feature_id,
                         &kind,
                         &current.manifest.revision_hash,
@@ -5984,13 +6024,36 @@ impl Host {
 
     /// Hole `request` against the disposable OCCT worker and, on
     /// success, commit the holed BREP into a new revision.
+    ///
+    /// The request must carry its semantic support (`base_feature_id`);
+    /// unknown supports and invalid hole geometry are rejected before the
+    /// worker runs so the prior Revision Snapshot is preserved.
     pub fn hole(
         &self,
         root: impl AsRef<Path>,
         request: HoleRequest,
         worker: &OcctWorker,
     ) -> Result<HoleCommitView, HostError> {
+        request.validate().map_err(|detail| HostError::Validation {
+            detail: format!("hole request is invalid: {detail}"),
+        })?;
         let root = root.as_ref();
+        let base_feature_id = request.base_feature_id.clone().ok_or_else(|| {
+            HostError::Validation {
+                detail: "hole request is missing its semantic support".to_string(),
+            }
+        })?;
+        if base_feature_id.is_empty() {
+            return Err(HostError::Validation {
+                detail: "hole request is missing its semantic support".to_string(),
+            });
+        }
+        let loaded = Bundle::at(root).open()?;
+        if !loaded.graph.contains_feature(&base_feature_id) {
+            return Err(HostError::Validation {
+                detail: format!("hole base feature is missing: {base_feature_id}"),
+            });
+        }
         let derived = self.stage_occt_result::<HoleResult>(
             root,
             &request,
@@ -6866,6 +6929,78 @@ fn canonical_extrude_intent(
         target_feature_id,
         request_id: artifact.request_id.clone(),
         deterministic_inputs: ExtrudeDeterministicInputs { profile, height },
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn parse_hole_kind(value: Option<&serde_json::Value>) -> Result<String, HostError> {
+    match value.and_then(serde_json::Value::as_str) {
+        None => Ok("drilled".to_string()),
+        Some("drilled") => Ok("drilled".to_string()),
+        Some("tapped") => Ok("tapped".to_string()),
+        Some(other) => Err(HostError::Validation {
+            detail: format!("hole kind must be drilled or tapped, got {other:?}"),
+        }),
+    }
+}
+
+fn canonical_hole_intent(
+    request: &serde_json::Value,
+    base_feature_id: &str,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalHoleIntent, HostError> {
+    let position: [f64; 3] =
+        serde_json::from_value(request["position"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("canonical hole position is invalid: {error}"),
+            }
+        })?;
+    let direction: [f64; 3] =
+        serde_json::from_value(request["direction"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("canonical hole direction is invalid: {error}"),
+            }
+        })?;
+    let diameter = request["diameter"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical hole diameter is missing or invalid".to_string(),
+        })?;
+    let hole_kind = parse_hole_kind(request.get("hole_kind"))?;
+    let thread_designation = request
+        .get("thread_designation")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let thread_pitch = request.get("thread_pitch").and_then(serde_json::Value::as_f64);
+    let thread_depth = request.get("thread_depth").and_then(serde_json::Value::as_f64);
+    if base_feature_id.is_empty() {
+        return Err(HostError::Validation {
+            detail: "canonical hole base feature is missing".to_string(),
+        });
+    }
+    let intent = CanonicalHoleIntent {
+        schema_version: HOLE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "hole".to_string(),
+        hole_kind,
+        base_feature_id: base_feature_id.to_string(),
+        request_id: artifact.request_id.clone(),
+        deterministic_inputs: HoleDeterministicInputs {
+            position,
+            direction,
+            diameter,
+            thread_designation,
+            thread_pitch,
+            thread_depth,
+        },
         affected_semantic_ids: vec![artifact.feature_id.clone()],
         source_revision: source_snapshot.revision_hash.clone(),
         worker_requirements: artifact.worker_fingerprint.clone(),

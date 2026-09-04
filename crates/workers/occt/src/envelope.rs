@@ -983,6 +983,26 @@ pub struct HoleRequest {
     pub direction: [f64; 3],
     /// Bore diameter. Must be a positive finite number.
     pub diameter: f64,
+    /// Hole kind discriminator: `drilled` (default) or `tapped`.
+    /// Carried canonically; the v1 worker cuts the same through-cylinder
+    /// for both kinds and ignores thread metadata for geometry.
+    #[serde(default = "default_hole_kind")]
+    pub hole_kind: String,
+    /// Tapped-thread designation (e.g. `M6x1`). Must be present for
+    /// `tapped` holes and absent for `drilled` holes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_designation: Option<String>,
+    /// Tapped-thread pitch. Must be strictly positive when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_pitch: Option<f64>,
+    /// Tapped-thread depth. Must be strictly positive when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<f64>,
+    /// Stable semantic support: the canonical base feature the hole cuts.
+    /// Carried for host provenance; the C++ worker ignores it and reads
+    /// only the disposable `base_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
     /// Requests the optional removed-volume measurement in the result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measure_removed_volume: Option<bool>,
@@ -992,6 +1012,10 @@ pub struct HoleRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+}
+
+fn default_hole_kind() -> String {
+    "drilled".to_string()
 }
 
 impl HoleRequest {
@@ -1010,11 +1034,38 @@ impl HoleRequest {
             position,
             direction,
             diameter,
+            hole_kind: default_hole_kind(),
+            thread_designation: None,
+            thread_pitch: None,
+            thread_depth: None,
+            base_feature_id: None,
             measure_removed_volume: None,
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
         }
+    }
+
+    pub fn with_hole_kind(mut self, hole_kind: impl Into<String>) -> Self {
+        self.hole_kind = hole_kind.into();
+        self
+    }
+
+    pub fn with_thread(
+        mut self,
+        designation: impl Into<String>,
+        pitch: f64,
+        depth: f64,
+    ) -> Self {
+        self.thread_designation = Some(designation.into());
+        self.thread_pitch = Some(pitch);
+        self.thread_depth = Some(depth);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
+        self
     }
 
     pub fn with_output_path(
@@ -1082,8 +1133,39 @@ impl HoleRequest {
         {
             return Err("hole diameter must be a positive finite number".to_string());
         }
+        if !matches!(self.hole_kind.as_str(), "drilled" | "tapped") {
+            return Err("hole kind must be drilled or tapped".to_string());
+        }
+        let has_thread = self.thread_designation.is_some()
+            || self.thread_pitch.is_some()
+            || self.thread_depth.is_some();
+        if self.hole_kind == "tapped" {
+            let designation = self.thread_designation.as_deref().unwrap_or_default();
+            if designation.is_empty() {
+                return Err(
+                    "tapped hole requires a thread designation".to_string(),
+                );
+            }
+            match self.thread_pitch {
+                Some(pitch) if pitch.is_finite() && pitch > 0.0 => {}
+                _ => {
+                    return Err("tapped hole requires a positive finite thread pitch".to_string());
+                }
+            }
+            match self.thread_depth {
+                Some(depth) if depth.is_finite() && depth > 0.0 => {}
+                _ => {
+                    return Err("tapped hole requires a positive finite thread depth".to_string());
+                }
+            }
+        } else if has_thread {
+            return Err("drilled hole must not carry thread metadata".to_string());
+        }
         if self.output_filename.is_empty() || self.output_filename.contains('/') {
             return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        if self.base_feature_id.as_deref().is_some_and(str::is_empty) {
+            return Err("hole base_feature_id must not be empty".to_string());
         }
         Ok(())
     }

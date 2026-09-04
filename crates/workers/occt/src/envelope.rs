@@ -42,6 +42,8 @@ pub enum Operation {
     Extrude,
     Bracket,
     BooleanFuse,
+    BooleanCut,
+    BooleanCommon,
     Fillet,
     Split,
     Chamfer,
@@ -80,6 +82,8 @@ impl Operation {
             Self::Extrude => "extrude",
             Self::Bracket => "bracket",
             Self::BooleanFuse => "boolean_fuse",
+            Self::BooleanCut => "boolean_cut",
+            Self::BooleanCommon => "boolean_common",
             Self::Fillet => "fillet",
             Self::Split => "split",
             Self::Chamfer => "chamfer",
@@ -559,6 +563,194 @@ pub struct BooleanFuseResult {
 }
 
 impl BooleanFuseResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCutRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub tool_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BooleanCutRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        tool_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::BooleanCut,
+            base_path: base_path.into(),
+            tool_path: tool_path.into(),
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::BooleanCut {
+            return Err(format!(
+                "operation must be boolean_cut for BooleanCutRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if self.tool_path.as_os_str().is_empty() {
+            return Err("tool_path must not be empty".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCutResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl BooleanCutResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCommonRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub tool_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BooleanCommonRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        tool_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::BooleanCommon,
+            base_path: base_path.into(),
+            tool_path: tool_path.into(),
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::BooleanCommon {
+            return Err(format!(
+                "operation must be boolean_common for BooleanCommonRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if self.tool_path.as_os_str().is_empty() {
+            return Err("tool_path must not be empty".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCommonResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl BooleanCommonResult {
     pub fn is_success(&self) -> bool {
         self.status == "ok"
     }
@@ -2325,6 +2517,48 @@ mod tests {
             .with_feature_id("fuse-1");
         request.schema_version = SCHEMA_VERSION.to_string();
         request.operation = Operation::Extrude;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_canonical_boolean_cut() {
+        let mut request = BooleanCutRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "cut.brep")
+            .with_feature_id("cut-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("boolean-cut envelope is valid");
+        assert_eq!(Operation::BooleanCut.as_str(), "boolean_cut");
+    }
+
+    #[test]
+    fn validate_rejects_boolean_cut_with_wrong_operation() {
+        let mut request = BooleanCutRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "cut.brep")
+            .with_feature_id("cut-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::BooleanFuse;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_canonical_boolean_common() {
+        let mut request = BooleanCommonRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "common.brep")
+            .with_feature_id("common-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request
+            .validate()
+            .expect("boolean-common envelope is valid");
+        assert_eq!(Operation::BooleanCommon.as_str(), "boolean_common");
+    }
+
+    #[test]
+    fn validate_rejects_boolean_common_with_wrong_operation() {
+        let mut request = BooleanCommonRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "common.brep")
+            .with_feature_id("common-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::BooleanCut;
         assert!(request.validate().is_err());
     }
 

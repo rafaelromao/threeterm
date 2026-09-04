@@ -1808,6 +1808,33 @@ mod tests {
     }
 
     #[test]
+    fn advertise_tools_exposes_the_boolean_cut_and_common_contracts() {
+        use threeterm_protocol::schema::{BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, find};
+
+        let server = McpServer::new();
+        let tools = server.advertise_tools();
+        for command in [BOOLEAN_CUT_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID] {
+            let entry = find(command).expect("boolean command is registered");
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == entry.schema_version)
+                .unwrap_or_else(|| panic!("{command:?} is advertised"));
+            assert!(tool.input_schema.is_object());
+            assert_eq!(
+                tool.input_schema["required"],
+                json!([
+                    "bundle_path",
+                    "feature_id",
+                    "base_feature_id",
+                    "tool_feature_id"
+                ])
+            );
+            assert!(tool.output_schema.as_ref().is_some_and(Value::is_object));
+        }
+        assert_eq!(tools.len(), threeterm_protocol::schema::iter().count());
+    }
+
+    #[test]
     fn advertise_tools_emits_one_entry_per_registered_command() {
         let server = McpServer::new();
         let tools = server.advertise_tools();

@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
+use threeterm_protocol::schema::{
+    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    IDENTITY_COMMAND_ID,
+};
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -891,6 +894,157 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         );
         assert!(!path.join("brep/fillet-after-ambiguous.brep").exists());
     }
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+fn boolean_request(root: &std::path::Path, feature_id: &str) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": feature_id,
+        "base_feature_id": "bool-base",
+        "tool_feature_id": "bool-tool"
+    })
+}
+
+fn setup_boolean_operands(path: &std::path::Path, worker: &OcctWorker) {
+    Bundle::create(path).expect("bundle creates");
+    let host = threeterm_host::Host::new();
+    for (feature_id, x0) in [("bool-base", 0.0), ("bool-tool", 5.0)] {
+        host.extrude(
+            path,
+            ExtrudeRequest::new(
+                format!("bool-seed-{feature_id}"),
+                vec![(x0, 0.0), (x0 + 10.0, 0.0), (x0 + 10.0, 5.0), (x0, 5.0)],
+                3.0,
+            )
+            .with_feature_id(feature_id),
+            worker,
+        )
+        .expect("boolean operand commits");
+    }
+}
+
+fn mcp_boolean(
+    command: threeterm_protocol::schema::CommandId,
+    tool: &str,
+    root: &std::path::Path,
+    feature_id: &str,
+) -> Value {
+    let entry = threeterm_protocol::schema::find(command).expect("boolean command is registered");
+    assert_eq!(entry.schema_version, tool);
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": tool,
+            "arguments": boolean_request(root, feature_id)
+        }),
+    });
+    response.result.expect("MCP boolean executes")["structuredContent"].clone()
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_boolean_cut_solids() {
+    let cli_root = root("booleancut-cli");
+    let mcp_root = root("booleancut-mcp");
+    let tui_root = root("booleancut-tui");
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_boolean_cut_solids")
+    else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        setup_boolean_operands(path, &worker);
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_CUT_COMMAND_ID,
+        boolean_request(&cli_root, "bool-cut"),
+    )
+    .expect("CLI boolean-cut executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_CUT_COMMAND_ID,
+        boolean_request(&tui_root, "bool-cut"),
+    )
+    .expect("TUI boolean-cut executes");
+    let mcp = mcp_boolean(
+        BOOLEAN_CUT_COMMAND_ID,
+        "threeterm.command.boolean-cut/1",
+        &mcp_root,
+        "bool-cut",
+    );
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "boolean_cut");
+        assert_eq!(result["feature_id"], "bool-cut");
+        assert_eq!(
+            result["schema_version"],
+            "threeterm.command.boolean-cut.response/1"
+        );
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_boolean_common_solids() {
+    let cli_root = root("booleancommon-cli");
+    let mcp_root = root("booleancommon-mcp");
+    let tui_root = root("booleancommon-tui");
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_boolean_common_solids")
+    else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        setup_boolean_operands(path, &worker);
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_COMMON_COMMAND_ID,
+        boolean_request(&cli_root, "bool-common"),
+    )
+    .expect("CLI boolean-common executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_COMMON_COMMAND_ID,
+        boolean_request(&tui_root, "bool-common"),
+    )
+    .expect("TUI boolean-common executes");
+    let mcp = mcp_boolean(
+        BOOLEAN_COMMON_COMMAND_ID,
+        "threeterm.command.boolean-common/1",
+        &mcp_root,
+        "bool-common",
+    );
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "boolean_common");
+        assert_eq!(result["feature_id"], "bool-common");
+        assert_eq!(
+            result["schema_version"],
+            "threeterm.command.boolean-common.response/1"
+        );
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);

@@ -20,6 +20,7 @@
 // This file is part of ThreeTerm; see ../NOTICE for upstream provenance
 // and the LGPL-2.1 redistribution obligations.
 
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -1355,6 +1356,160 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
         << "\"request_id\":\"" << json_escape(request_id) << "\","
         << "\"operation\":\"boolean_fuse\","
+        << "\"status\":\"" << json_escape(status) << "\","
+        << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+        << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+        << "\"brep_bytes\":" << bytes.str().size() << ","
+        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+        << "}";
+    g_result_json = out.str();
+    return status == "ok";
+}
+
+bool handle_boolean_cut(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string tool_path_str = get_string(request, "tool_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        tool_path_str.empty() || output_dir.empty() || output_filename.empty()) {
+        error = "boolean_cut request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+
+    TopoDS_Shape base;
+    TopoDS_Shape tool;
+    BRep_Builder builder;
+    if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+        error = "could not read base BREP at " + base_path_str;
+        return false;
+    }
+    if (!BRepTools::Read(tool, tool_path_str.c_str(), builder)) {
+        error = "could not read tool BREP at " + tool_path_str;
+        return false;
+    }
+    if (base.IsNull() || tool.IsNull()) {
+        error = "BREP file produced a null TopoDS_Shape";
+        return false;
+    }
+
+    BRepAlgoAPI_Cut cut(base, tool);
+    cut.SetFuzzyValue(1.0e-6);
+    cut.Build();
+    if (!cut.IsDone()) {
+        error = "BRepAlgoAPI_Cut did not complete";
+        return false;
+    }
+    TopoDS_Shape result = cut.Shape();
+
+    std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+    if (output_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(output_path.parent_path(), ec);
+    }
+    if (!write_brep(result, output_path, error)) {
+        return false;
+    }
+    std::ifstream stream(output_path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << stream.rdbuf();
+    std::string sha = sha256_hex(bytes.str());
+
+    std::string status = "ok";
+    if (!analyze_brep(result)) {
+        error = "brep_invalid: BRepCheck_Analyzer failed";
+        status = "brep_invalid";
+    }
+
+    std::ostringstream out;
+    out << "{"
+        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"operation\":\"boolean_cut\","
+        << "\"status\":\"" << json_escape(status) << "\","
+        << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+        << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+        << "\"brep_bytes\":" << bytes.str().size() << ","
+        << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+        << "}";
+    g_result_json = out.str();
+    return status == "ok";
+}
+
+bool handle_boolean_common(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string tool_path_str = get_string(request, "tool_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        tool_path_str.empty() || output_dir.empty() || output_filename.empty()) {
+        error = "boolean_common request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+
+    TopoDS_Shape base;
+    TopoDS_Shape tool;
+    BRep_Builder builder;
+    if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+        error = "could not read base BREP at " + base_path_str;
+        return false;
+    }
+    if (!BRepTools::Read(tool, tool_path_str.c_str(), builder)) {
+        error = "could not read tool BREP at " + tool_path_str;
+        return false;
+    }
+    if (base.IsNull() || tool.IsNull()) {
+        error = "BREP file produced a null TopoDS_Shape";
+        return false;
+    }
+
+    BRepAlgoAPI_Common common(base, tool);
+    common.SetFuzzyValue(1.0e-6);
+    common.Build();
+    if (!common.IsDone()) {
+        error = "BRepAlgoAPI_Common did not complete";
+        return false;
+    }
+    TopoDS_Shape result = common.Shape();
+
+    std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+    if (output_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(output_path.parent_path(), ec);
+    }
+    if (!write_brep(result, output_path, error)) {
+        return false;
+    }
+    std::ifstream stream(output_path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << stream.rdbuf();
+    std::string sha = sha256_hex(bytes.str());
+
+    std::string status = "ok";
+    if (!analyze_brep(result)) {
+        error = "brep_invalid: BRepCheck_Analyzer failed";
+        status = "brep_invalid";
+    }
+
+    std::ostringstream out;
+    out << "{"
+        << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+        << "\"request_id\":\"" << json_escape(request_id) << "\","
+        << "\"operation\":\"boolean_common\","
         << "\"status\":\"" << json_escape(status) << "\","
         << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
         << "\"brep_sha256\":\"" << json_escape(sha) << "\","
@@ -3375,6 +3530,10 @@ int main() {
         success = handle_bracket(*args, error);
     } else if (command_id == "boolean_fuse") {
         success = handle_boolean_fuse(*args, error);
+    } else if (command_id == "boolean_cut") {
+        success = handle_boolean_cut(*args, error);
+    } else if (command_id == "boolean_common") {
+        success = handle_boolean_common(*args, error);
     } else if (command_id == "fillet") {
         success = handle_fillet(*args, error);
     } else if (command_id == "split") {

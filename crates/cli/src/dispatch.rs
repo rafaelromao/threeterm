@@ -10,9 +10,10 @@ use threeterm_domain::{
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BracketRequest, ChamferRequest, CircularPatternRequest, DraftRequest,
-    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, OcctWorker,
-    Operation, RevolveRequest, ShellRequest, new_request_id,
+    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
+    CircularPatternRequest, DraftRequest, FilletRequest, HoleRequest, LinearPatternRequest,
+    LoftRequest, MirrorRequest, OcctWorker, Operation, RevolveRequest, ShellRequest,
+    new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
@@ -27,6 +28,7 @@ use threeterm_protocol::schema::{
     find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
+    BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
     BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
     CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
@@ -164,6 +166,18 @@ enum DispatchPlan {
         clearance: f64,
     },
     BooleanFuse {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        tool_feature_id: String,
+    },
+    BooleanCut {
+        bundle: String,
+        feature_id: String,
+        base_feature_id: String,
+        tool_feature_id: String,
+    },
+    BooleanCommon {
         bundle: String,
         feature_id: String,
         base_feature_id: String,
@@ -548,6 +562,8 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "reattach-edge" => parse_reattach_edge(&args[2..]),
         "fit-dimension" => parse_fit_dimension(&args[2..]),
         "boolean-fuse" => parse_boolean_fuse(&args[2..]),
+        "boolean-cut" => parse_boolean_cut(&args[2..]),
+        "boolean-common" => parse_boolean_common(&args[2..]),
         "boolean-pattern" => parse_boolean_pattern(&args[2..]),
         "fillet" => parse_fillet(&args[2..]),
         "chamfer" => parse_chamfer(&args[2..]),
@@ -761,6 +777,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::Identity { .. }
         | DispatchPlan::Apply { .. }
         | DispatchPlan::BooleanFuse { .. }
+        | DispatchPlan::BooleanCut { .. }
+        | DispatchPlan::BooleanCommon { .. }
         | DispatchPlan::Component { .. }
         | DispatchPlan::CreateRevision { .. }
         | DispatchPlan::RestoreRevision { .. }
@@ -1787,6 +1805,158 @@ fn parse_boolean_fuse(args: &[OsString]) -> DispatchPlan {
         };
     };
     DispatchPlan::BooleanFuse {
+        bundle,
+        feature_id,
+        base_feature_id,
+        tool_feature_id,
+    }
+}
+
+fn parse_boolean_cut(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "boolean-cut".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut tool_feature_id: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--tool" => {
+                    tool_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(tool_feature_id) = tool_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--tool".to_string(),
+        };
+    };
+    DispatchPlan::BooleanCut {
+        bundle,
+        feature_id,
+        base_feature_id,
+        tool_feature_id,
+    }
+}
+
+fn parse_boolean_common(args: &[OsString]) -> DispatchPlan {
+    if args.is_empty() {
+        return DispatchPlan::Unknown {
+            arg: "boolean-common".to_string(),
+        };
+    }
+    let mut bundle: Option<String> = None;
+    let mut feature_id: Option<String> = None;
+    let mut base_feature_id: Option<String> = None;
+    let mut tool_feature_id: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        if let Some(value) = args.get(index + 1) {
+            let value_str = value.to_string_lossy();
+            match flag.as_ref() {
+                "--bundle" => {
+                    bundle = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--feature-id" => {
+                    feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--base" => {
+                    base_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--tool" => {
+                    tool_feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if bundle.is_none() && !flag.starts_with("--") {
+            bundle = Some(flag.into_owned());
+            index += 1;
+            continue;
+        }
+        return DispatchPlan::Unknown {
+            arg: flag.into_owned(),
+        };
+    }
+    let Some(bundle) = bundle else {
+        return DispatchPlan::Unknown {
+            arg: "--bundle".to_string(),
+        };
+    };
+    let Some(feature_id) = feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--feature-id".to_string(),
+        };
+    };
+    let Some(base_feature_id) = base_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--base".to_string(),
+        };
+    };
+    let Some(tool_feature_id) = tool_feature_id else {
+        return DispatchPlan::Unknown {
+            arg: "--tool".to_string(),
+        };
+    };
+    DispatchPlan::BooleanCommon {
         bundle,
         feature_id,
         base_feature_id,
@@ -3326,6 +3496,32 @@ fn execute_handler(
             stdout,
             stderr,
         ),
+        DispatchPlan::BooleanCut {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => emit_boolean_cut(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            &tool_feature_id,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::BooleanCommon {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => emit_boolean_common(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            &tool_feature_id,
+            stdout,
+            stderr,
+        ),
         DispatchPlan::BooleanPattern { .. } => {
             let host = Host::new();
             match dispatch_registered_command(&host, BOOLEAN_PATTERN_COMMAND_ID, request.clone()) {
@@ -4598,6 +4794,22 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id })
         }
+        DispatchPlan::BooleanCut {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id })
+        }
+        DispatchPlan::BooleanCommon {
+            bundle,
+            feature_id,
+            base_feature_id,
+            tool_feature_id,
+        } => {
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "tool_feature_id": tool_feature_id })
+        }
         DispatchPlan::BooleanPattern {
             bundle,
             feature_id,
@@ -5162,6 +5374,125 @@ fn emit_boolean_fuse(
         Ok(view) => {
             write_boolean_fuse_view(&view, BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, stdout, stderr)
         }
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_boolean_cut(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    tool_feature_id: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    let tool_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{tool_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    if !tool_path.is_file() {
+        let detail = format!(
+            "tool feature {tool_feature_id:?} has no committed BREP at {}",
+            tool_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = BooleanCutRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        &tool_path,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().boolean_cut(bundle, request, &worker) {
+        Ok(view) => {
+            write_boolean_cut_view(&view, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION, stdout, stderr)
+        }
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_boolean_common(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    tool_feature_id: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    let tool_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{tool_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    if !tool_path.is_file() {
+        let detail = format!(
+            "tool feature {tool_feature_id:?} has no committed BREP at {}",
+            tool_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = BooleanCommonRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        &tool_path,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().boolean_common(bundle, request, &worker) {
+        Ok(view) => write_boolean_common_view(
+            &view,
+            BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION,
+            stdout,
+            stderr,
+        ),
         Err(error) => emit_host_error(&error, stderr),
     }
 }
@@ -5822,6 +6153,60 @@ fn write_boolean_fuse_view(
     )
 }
 
+fn write_boolean_cut_view(
+    view: &threeterm_host::BooleanCutCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::BooleanCut.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_boolean_common_view(
+    view: &threeterm_host::BooleanCommonCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::BooleanCommon.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_fillet_view(
     view: &threeterm_host::FilletCommitView,
     schema_version: &str,
@@ -6399,7 +6784,7 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 38);
+        assert_eq!(commands.len(), 40);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")

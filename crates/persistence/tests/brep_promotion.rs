@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_domain::history::HistoryState;
 use threeterm_persistence::{
-    Bundle, BundleError, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    Bundle, BundleError, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
     ExtrudeDeterministicInputs, PublicationFailurePoint, fail_next_publication_at,
 };
 use threeterm_protocol::artifact::WorkerFingerprint;
@@ -100,15 +100,18 @@ fn extrude_promotion_persists_versioned_deterministic_intent() {
             &source_revision,
             "request-1",
             "{}",
-            &intent,
+            &CanonicalIntent::Extrude(intent.clone()),
             b"brep",
         )
         .expect("extrude intent publishes");
     let entry = committed.log.entries().first().expect("transaction exists");
-    assert_eq!(entry.intent.as_ref(), Some(&intent));
+    assert_eq!(
+        entry.intent.as_ref(),
+        Some(&CanonicalIntent::Extrude(intent.clone()))
+    );
     assert_eq!(
         Bundle::at(&root).open().unwrap().log.entries()[0].intent,
-        Some(intent)
+        Some(CanonicalIntent::Extrude(intent))
     );
 
     let _ = fs::remove_dir_all(root);

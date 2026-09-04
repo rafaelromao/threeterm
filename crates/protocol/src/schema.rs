@@ -483,6 +483,34 @@ pub static BOOLEAN_FUSE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static BOOLEAN_CUT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "tool_feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "tool_feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_COMMON_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id", "base_feature_id", "tool_feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "base_feature_id": { "type": "string", "minLength": 1 },
+            "tool_feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static BOOLEAN_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -795,6 +823,64 @@ pub static EXTRUDE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 pub static BOOLEAN_FUSE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_CUT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "operation",
+            "feature_id",
+            "feature_graph_hash",
+            "revision_hash",
+            "brep_path",
+            "brep_sha256",
+            "schema_version"
+        ],
+        "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "operation": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_bytes": { "type": "integer", "minimum": 0 },
+            "derived_result": derived_result_schema(),
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static BOOLEAN_COMMON_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "required": [
@@ -2187,6 +2273,30 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        BOOLEAN_CUT_COMMAND_ID,
+        CommandSchema {
+            id: BOOLEAN_CUT_COMMAND_ID,
+            name: "boolean-cut",
+            schema_version: "threeterm.command.boolean-cut/1",
+            request_schema_version: "threeterm.command.boolean-cut.request/1",
+            request_schema: BOOLEAN_CUT_REQUEST_SCHEMA.clone(),
+            response_schema_version: BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
+            response_schema: BOOLEAN_CUT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        BOOLEAN_COMMON_COMMAND_ID,
+        CommandSchema {
+            id: BOOLEAN_COMMON_COMMAND_ID,
+            name: "boolean-common",
+            schema_version: "threeterm.command.boolean-common/1",
+            request_schema_version: "threeterm.command.boolean-common.request/1",
+            request_schema: BOOLEAN_COMMON_REQUEST_SCHEMA.clone(),
+            response_schema_version: BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION,
+            response_schema: BOOLEAN_COMMON_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         BOOLEAN_PATTERN_COMMAND_ID,
         CommandSchema {
             id: BOOLEAN_PATTERN_COMMAND_ID,
@@ -2371,6 +2481,8 @@ pub const TIMELINE_COMMAND_ID: CommandId = CommandId("timeline");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const FIT_DIMENSION_COMMAND_ID: CommandId = CommandId("fit-dimension");
 pub const BOOLEAN_FUSE_COMMAND_ID: CommandId = CommandId("boolean-fuse");
+pub const BOOLEAN_CUT_COMMAND_ID: CommandId = CommandId("boolean-cut");
+pub const BOOLEAN_COMMON_COMMAND_ID: CommandId = CommandId("boolean-common");
 pub const BOOLEAN_PATTERN_COMMAND_ID: CommandId = CommandId("boolean-pattern");
 pub const FILLET_COMMAND_ID: CommandId = CommandId("fillet");
 pub const CHAMFER_COMMAND_ID: CommandId = CommandId("chamfer");
@@ -2398,6 +2510,9 @@ pub const EXTRUDE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.extrude.res
 pub const FIT_DIMENSION_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.fit-dimension.response/1";
 pub const BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-fuse.response/1";
+pub const BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.boolean-cut.response/1";
+pub const BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION: &str =
+    "threeterm.command.boolean-common.response/1";
 pub const BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.boolean-pattern.response/1";
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";

@@ -98,6 +98,7 @@ pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
 pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
+pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -439,6 +440,111 @@ impl CanonicalExtrudeIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct CanonicalBooleanIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub tool_feature_id: String,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalBooleanIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION
+            || self.command != "boolean"
+            || !matches!(self.operation.as_str(), "fuse" | "cut" | "common")
+            || self.request_id.is_empty()
+            || self.base_feature_id.is_empty()
+            || self.tool_feature_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean intent identity is invalid".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Canonical command intent attached to a transaction. Extrude intents predate
+/// the Boolean family; Boolean fuse/cut/common intents share the same replay
+/// path. Old fuse entries without any intent remain loadable but are not
+/// recomputable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum CanonicalIntent {
+    Extrude(CanonicalExtrudeIntent),
+    Boolean(CanonicalBooleanIntent),
+}
+
+impl CanonicalIntent {
+    pub fn schema_version(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => intent.schema_version.as_str(),
+            Self::Boolean(intent) => intent.schema_version.as_str(),
+        }
+    }
+
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => intent.request_id.as_str(),
+            Self::Boolean(intent) => intent.request_id.as_str(),
+        }
+    }
+
+    pub fn source_revision(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => intent.source_revision.as_str(),
+            Self::Boolean(intent) => intent.source_revision.as_str(),
+        }
+    }
+
+    pub fn worker_requirements(&self) -> &threeterm_protocol::artifact::WorkerFingerprint {
+        match self {
+            Self::Extrude(intent) => &intent.worker_requirements,
+            Self::Boolean(intent) => &intent.worker_requirements,
+        }
+    }
+
+    pub fn affected_semantic_ids(&self) -> &[String] {
+        match self {
+            Self::Extrude(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Boolean(intent) => intent.affected_semantic_ids.as_slice(),
+        }
+    }
+
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        match self {
+            Self::Extrude(intent) => intent.validate(feature_id),
+            Self::Boolean(intent) => intent.validate(feature_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     pub log_index: usize,
     pub previous_digest: String,
@@ -457,7 +563,7 @@ pub struct LogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<CanonicalExtrudeIntent>,
+    pub intent: Option<CanonicalIntent>,
     pub terminal_digest: String,
 }
 
@@ -497,7 +603,7 @@ impl LogEntry {
         self
     }
 
-    fn with_intent(mut self, intent: &CanonicalExtrudeIntent) -> Self {
+    fn with_intent(mut self, intent: &CanonicalIntent) -> Self {
         self.intent = Some(intent.clone());
         self.terminal_digest = self.recomputed_digest();
         self
@@ -563,7 +669,7 @@ impl TransactionLog {
         brep_bytes: &[u8],
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
-        intent: Option<&CanonicalExtrudeIntent>,
+        intent: Option<&CanonicalIntent>,
     ) {
         let previous = self.terminal_digest_hex().to_string();
         let entry =
@@ -1465,7 +1571,7 @@ impl Bundle {
         expected_revision: &str,
         request_id: &str,
         provenance: &str,
-        intent: &CanonicalExtrudeIntent,
+        intent: &CanonicalIntent,
         brep_bytes: &[u8],
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
@@ -1777,7 +1883,7 @@ impl Bundle {
         reject_existing_brep: bool,
         allow_existing_sketch_update: bool,
         allow_existing_bracket_edit: bool,
-        intent: Option<&CanonicalExtrudeIntent>,
+        intent: Option<&CanonicalIntent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1816,52 +1922,110 @@ impl Bundle {
             )));
         }
         if let Some(intent) = intent {
-            if intent.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION {
-                return Err(BundleError::CanonicalVersionUnsupported {
-                    log_index: None,
-                    version: intent.schema_version.clone(),
-                });
-            }
-            if intent.command != "extrude"
-                || !matches!(intent.operation.as_str(), "additive" | "subtractive")
-            {
-                return Err(BundleError::CanonicalOperationUnknown {
-                    log_index: None,
-                    operation: format!("{}:{}", intent.command, intent.operation),
-                });
-            }
-            if let Some(target_feature_id) = &intent.target_feature_id
-                && !loaded.graph.contains_feature(target_feature_id)
-            {
-                return Err(BundleError::Invalid(format!(
-                    "canonical extrude target feature is missing: {target_feature_id}"
-                )));
-            }
-            if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent does not match its transaction".to_string(),
-                ));
-            }
-            if idempotency_key != Some(intent.request_id.as_str()) {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent request ID does not match transaction provenance"
-                        .to_string(),
-                ));
-            }
-            if intent.worker_requirements != occt_worker_identity() {
-                return Err(BundleError::CompatibilityIdentityMismatch {
-                    identity: "canonical_extrude_worker",
-                    expected: serde_json::to_string(&occt_worker_identity())
-                        .expect("worker identity serializes"),
-                    found: serde_json::to_string(&intent.worker_requirements)
-                        .expect("worker identity serializes"),
-                });
-            }
-            if intent.source_revision != loaded.revision_hash_hex() {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent source revision does not match the transaction source"
-                        .to_string(),
-                ));
+            match intent {
+                CanonicalIntent::Extrude(extrude) => {
+                    if extrude.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: extrude.schema_version.clone(),
+                        });
+                    }
+                    if extrude.command != "extrude"
+                        || !matches!(extrude.operation.as_str(), "additive" | "subtractive")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", extrude.command, extrude.operation),
+                        });
+                    }
+                    if let Some(target_feature_id) = &extrude.target_feature_id
+                        && !loaded.graph.contains_feature(target_feature_id)
+                    {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical extrude target feature is missing: {target_feature_id}"
+                        )));
+                    }
+                    if entries.len() != 1 || extrude.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(extrude.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if extrude.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_extrude_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&extrude.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if extrude.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Boolean(boolean) => {
+                    if boolean.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: boolean.schema_version.clone(),
+                        });
+                    }
+                    if boolean.command != "boolean"
+                        || !matches!(boolean.operation.as_str(), "fuse" | "cut" | "common")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", boolean.command, boolean.operation),
+                        });
+                    }
+                    if !loaded.graph.contains_feature(&boolean.base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical boolean base feature is missing: {}",
+                            boolean.base_feature_id
+                        )));
+                    }
+                    if !loaded.graph.contains_feature(&boolean.tool_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical boolean tool feature is missing: {}",
+                            boolean.tool_feature_id
+                        )));
+                    }
+                    if entries.len() != 1 || boolean.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(boolean.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if boolean.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_boolean_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&boolean.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if boolean.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
@@ -2288,31 +2452,53 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     log_index: entry.log_index,
                     detail: error.to_string(),
                 })?;
-            if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
+            if entry.idempotency_key.as_deref() != Some(intent.request_id()) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
-                    detail:
-                        "canonical extrude intent request ID does not match transaction provenance"
-                            .to_string(),
+                    detail: "canonical intent request ID does not match transaction provenance"
+                        .to_string(),
                 });
             }
-            if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
+            if intent.source_revision() != graph.revision_hash_hex(&entry.previous_digest) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
-                    detail:
-                        "canonical extrude intent source revision does not match the log prefix"
-                            .to_string(),
+                    detail: "canonical intent source revision does not match the log prefix"
+                        .to_string(),
                 });
             }
-            if let Some(target_feature_id) = &intent.target_feature_id
-                && !graph.contains_feature(target_feature_id)
-            {
-                return Err(BundleError::LogBrokenLink {
-                    log_index: entry.log_index,
-                    detail: format!(
-                        "canonical extrude target feature is missing: {target_feature_id}"
-                    ),
-                });
+            match intent {
+                CanonicalIntent::Extrude(extrude) => {
+                    if let Some(target_feature_id) = &extrude.target_feature_id
+                        && !graph.contains_feature(target_feature_id)
+                    {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical extrude target feature is missing: {target_feature_id}"
+                            ),
+                        });
+                    }
+                }
+                CanonicalIntent::Boolean(boolean) => {
+                    if !graph.contains_feature(&boolean.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical boolean base feature is missing: {}",
+                                boolean.base_feature_id
+                            ),
+                        });
+                    }
+                    if !graph.contains_feature(&boolean.tool_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical boolean tool feature is missing: {}",
+                                boolean.tool_feature_id
+                            ),
+                        });
+                    }
+                }
             }
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
@@ -2559,31 +2745,60 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
         });
     }
     if let Some(intent) = &entry.intent {
-        if !matches!(
-            intent.schema_version.as_str(),
-            EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
-        ) {
-            return Err(BundleError::CanonicalVersionUnsupported {
-                log_index: Some(entry.log_index),
-                version: intent.schema_version.clone(),
-            });
-        }
-        if intent.command != "extrude"
-            || !matches!(intent.operation.as_str(), "additive" | "subtractive")
-        {
-            return Err(BundleError::CanonicalOperationUnknown {
-                log_index: Some(entry.log_index),
-                operation: format!("{}:{}", intent.command, intent.operation),
-            });
-        }
-        if intent.worker_requirements != occt_worker_identity() {
-            return Err(BundleError::CompatibilityIdentityMismatch {
-                identity: "canonical_extrude_worker",
-                expected: serde_json::to_string(&occt_worker_identity())
-                    .expect("worker identity serializes"),
-                found: serde_json::to_string(&intent.worker_requirements)
-                    .expect("worker identity serializes"),
-            });
+        match intent {
+            CanonicalIntent::Extrude(extrude) => {
+                if !matches!(
+                    extrude.schema_version.as_str(),
+                    EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+                ) {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: extrude.schema_version.clone(),
+                    });
+                }
+                if extrude.command != "extrude"
+                    || !matches!(extrude.operation.as_str(), "additive" | "subtractive")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", extrude.command, extrude.operation),
+                    });
+                }
+                if extrude.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_extrude_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&extrude.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Boolean(boolean) => {
+                if boolean.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: boolean.schema_version.clone(),
+                    });
+                }
+                if boolean.command != "boolean"
+                    || !matches!(boolean.operation.as_str(), "fuse" | "cut" | "common")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", boolean.command, boolean.operation),
+                    });
+                }
+                if boolean.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_boolean_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&boolean.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
         }
     }
     validate_canonical_kind(Some(entry.log_index), &entry.kind)
@@ -2725,10 +2940,14 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "linear-pattern"
             | "circular-pattern"
             | "boolean-fuse"
+            | "boolean-cut"
+            | "boolean-common"
             | "boolean-pattern"
             | "linear_pattern"
             | "circular_pattern"
             | "boolean_fuse"
+            | "boolean_cut"
+            | "boolean_common"
             | "boolean_pattern"
             | "shell"
             | "draft"

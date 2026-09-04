@@ -25,9 +25,9 @@ use threeterm_occt_worker::{
     LoftRequest, MirrorRequest, Operation, ShellRequest,
 };
 use threeterm_persistence::{
-    Bundle, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION, ExtrudeDeterministicInputs,
-    MANIFEST_FILENAME, PublicationFailurePoint, TRANSACTIONS_LOG_FILENAME,
-    fail_next_publication_at,
+    Bundle, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, MANIFEST_FILENAME, PublicationFailurePoint,
+    TRANSACTIONS_LOG_FILENAME, fail_next_publication_at,
 };
 use threeterm_protocol::artifact::sha256_hex;
 
@@ -256,6 +256,9 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .last()
         .expect("extrude transaction exists");
     let intent = entry.intent.as_ref().expect("extrude intent persists");
+    let threeterm_persistence::CanonicalIntent::Extrude(intent) = intent else {
+        panic!("extrude transaction carries an extrude intent");
+    };
     assert_eq!(intent.command, "extrude");
     assert_eq!(intent.operation, "additive");
     assert_eq!(intent.affected_semantic_ids, ["replay-box-1"]);
@@ -530,7 +533,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
             intent.source_revision.as_str(),
             &intent.request_id,
             "{}",
-            &intent,
+            &CanonicalIntent::Extrude(intent.clone()),
             bytes,
         )
         .expect("canonical extrude appends");
@@ -3692,6 +3695,206 @@ fn adversarial_trailing_worker_data_preserves_canonical_host_state() {
         bytes,
         "rejected caller output must be preserved"
     );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn boolean_cut_via_domain_command_rejects_missing_base_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_CUT_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("cut-missing-base", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "cut-1",
+        "base_feature_id": "does-not-exist",
+        "tool_feature_id": "box-seed",
+    });
+    let result = host.execute_domain_command(BOOLEAN_CUT_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("missing boolean base must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_common_via_domain_command_rejects_incompatible_operand_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_COMMON_COMMAND_ID;
+
+    let root = temp_root("common-incompatible");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    bundle
+        .append_feature("solid-1", "brep:solid-1")
+        .expect("solid seed appends");
+    bundle
+        .append_feature("sketch-1", "sketch")
+        .expect("sketch seed appends");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "common-1",
+        "base_feature_id": "solid-1",
+        "tool_feature_id": "sketch-1",
+    });
+    let result = host.execute_domain_command(BOOLEAN_COMMON_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("incompatible boolean operand must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_fuse_via_domain_command_rejects_missing_tool_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("fuse-missing-tool", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "fuse-1",
+        "base_feature_id": "box-seed",
+        "tool_feature_id": "does-not-exist",
+    });
+    let result = host.execute_domain_command(BOOLEAN_FUSE_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("missing boolean tool must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_cut_brep_invalid_preserves_canonical_state() {
+    use threeterm_occt_worker::BooleanCutRequest;
+
+    let Some(_) = locate_worker() else { return };
+    let root = fresh_bundle_with_feature("cut-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-cut-brep-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        format!(
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let cut_request = BooleanCutRequest::new(
+        unique_request_id("cut-brep-invalid"),
+        "/no/such/base.brep",
+        "/no/such/tool.brep",
+    )
+    .with_output_path(root.join("stage"), "cut.brep")
+    .with_feature_id("cut-brep-invalid-1");
+    let result = host.boolean_cut(&root, cut_request, &fake_worker);
+    assert!(is_brep_invalid(&result), "got {result:?}");
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn boolean_common_brep_invalid_preserves_canonical_state() {
+    use threeterm_occt_worker::BooleanCommonRequest;
+
+    let Some(_) = locate_worker() else { return };
+    let root = fresh_bundle_with_feature("common-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-common-brep-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        format!(
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let common_request = BooleanCommonRequest::new(
+        unique_request_id("common-brep-invalid"),
+        "/no/such/base.brep",
+        "/no/such/tool.brep",
+    )
+    .with_output_path(root.join("stage"), "common.brep")
+    .with_feature_id("common-brep-invalid-1");
+    let result = host.boolean_common(&root, common_request, &fake_worker);
+    assert!(is_brep_invalid(&result), "got {result:?}");
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(script);

@@ -45,6 +45,7 @@ use threeterm_protocol::worker::{
 
 pub mod envelope;
 pub use envelope::{
+    BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
@@ -706,6 +707,30 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_boolean_fuse()
+    }
+
+    pub fn boolean_cut(
+        &self,
+        request: &BooleanCutRequest,
+    ) -> Result<BooleanCutResult, WorkerError> {
+        let bytes = bounded_serialize(request, "boolean-cut", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_boolean_cut()
+    }
+
+    pub fn boolean_common(
+        &self,
+        request: &BooleanCommonRequest,
+    ) -> Result<BooleanCommonResult, WorkerError> {
+        let bytes = bounded_serialize(request, "boolean-common", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_boolean_common()
     }
 
     pub fn boolean_pattern(
@@ -1661,6 +1686,14 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_boolean_cut(self) -> Result<BooleanCutResult, WorkerError> {
+        self.bounded()
+    }
+
+    fn into_boolean_common(self) -> Result<BooleanCommonResult, WorkerError> {
+        self.bounded()
+    }
+
     fn into_boolean_pattern(self) -> Result<BooleanPatternResult, WorkerError> {
         self.bounded()
     }
@@ -1734,6 +1767,14 @@ pub fn parse_bracket_request(raw: &str) -> Result<BracketRequest, serde_json::Er
 }
 
 pub fn parse_boolean_fuse_request(raw: &str) -> Result<BooleanFuseRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_boolean_cut_request(raw: &str) -> Result<BooleanCutRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_boolean_common_request(raw: &str) -> Result<BooleanCommonRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
@@ -1989,6 +2030,52 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
         let value = serde_json::to_value(&request).expect("serializes");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["operation"], "boolean_fuse");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["tool_path"], "/tmp/tool.brep");
+    }
+
+    #[test]
+    fn boolean_cut_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "boolean_cut",
+            "base_path": "/tmp/base.brep",
+            "tool_path": "/tmp/tool.brep",
+            "rogue_key": true
+        }"#;
+        assert!(parse_boolean_cut_request(raw).is_err());
+    }
+
+    #[test]
+    fn boolean_cut_envelope_accepts_canonical_shape() {
+        let request = BooleanCutRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "boolean_cut");
+        assert_eq!(value["base_path"], "/tmp/base.brep");
+        assert_eq!(value["tool_path"], "/tmp/tool.brep");
+    }
+
+    #[test]
+    fn boolean_common_envelope_rejects_unknown_top_level_keys() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "boolean_common",
+            "base_path": "/tmp/base.brep",
+            "tool_path": "/tmp/tool.brep",
+            "rogue_key": true
+        }"#;
+        assert!(parse_boolean_common_request(raw).is_err());
+    }
+
+    #[test]
+    fn boolean_common_envelope_accepts_canonical_shape() {
+        let request = BooleanCommonRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+        assert_eq!(value["operation"], "boolean_common");
         assert_eq!(value["base_path"], "/tmp/base.brep");
         assert_eq!(value["tool_path"], "/tmp/tool.brep");
     }

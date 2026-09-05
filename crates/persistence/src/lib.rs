@@ -72,8 +72,9 @@ pub struct V0Bundle {
 pub mod bundle {
         pub use super::{
             BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-        CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
-        CanonicalHoleIntent, CanonicalIntent, CanonicalState, EdgeEvidence, EdgeProvenance,
+        CanonicalChamferIntent, CanonicalEdgeReference, CanonicalExtrudeIntent,
+        CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalLoftIntent,
+        CanonicalShellIntent, CanonicalDraftIntent, CanonicalState, EdgeEvidence, EdgeProvenance,
         EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
         HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
         MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
@@ -105,6 +106,10 @@ pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude
 pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
 pub const FILLET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.fillet/1";
+pub const CHAMFER_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.chamfer/1";
+pub const SHELL_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.shell/1";
+pub const DRAFT_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.draft/1";
+pub const LOFT_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.loft/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -441,6 +446,275 @@ impl CanonicalFilletIntent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalChamferIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub selected_edge: CanonicalEdgeReference,
+    pub distance: f64,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalChamferIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        validate_edge_operation(
+            &self.schema_version,
+            CHAMFER_INTENT_SCHEMA_VERSION,
+            &self.command,
+            "chamfer",
+            &self.base_feature_id,
+            &self.selected_edge,
+            &self.request_id,
+            &self.affected_semantic_ids,
+            &self.source_revision,
+            &self.worker_requirements,
+            feature_id,
+        )?;
+        if !self.distance.is_finite() || !(0.0 < self.distance && self.distance < 1e6) {
+            return Err(BundleError::Invalid(
+                "canonical chamfer distance is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalShellIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub thickness: f64,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalShellIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        validate_solid_operation(
+            &self.schema_version,
+            SHELL_INTENT_SCHEMA_VERSION,
+            &self.command,
+            "shell",
+            &self.base_feature_id,
+            &self.request_id,
+            &self.affected_semantic_ids,
+            &self.source_revision,
+            &self.worker_requirements,
+            feature_id,
+        )?;
+        if !self.thickness.is_finite() || !(0.0 < self.thickness && self.thickness < 1e6) {
+            return Err(BundleError::Invalid(
+                "canonical shell thickness is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalDraftIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub angle: f64,
+    pub pull_direction: [f64; 3],
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalDraftIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        validate_solid_operation(
+            &self.schema_version,
+            DRAFT_INTENT_SCHEMA_VERSION,
+            &self.command,
+            "draft",
+            &self.base_feature_id,
+            &self.request_id,
+            &self.affected_semantic_ids,
+            &self.source_revision,
+            &self.worker_requirements,
+            feature_id,
+        )?;
+        let norm = self
+            .pull_direction
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        if !self.angle.is_finite()
+            || !(0.0 < self.angle && self.angle < std::f64::consts::FRAC_PI_2)
+            || !self.pull_direction.iter().all(|value| value.is_finite())
+            || self.pull_direction.iter().any(|value| value.abs() > 1e9)
+            || !norm.is_finite()
+            || norm <= f64::EPSILON
+        {
+            return Err(BundleError::Invalid(
+                "canonical draft inputs are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalLoftIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub profiles: Vec<Vec<[f64; 3]>>,
+    pub is_solid: bool,
+    pub ruled: bool,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalLoftIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        validate_common_operation(
+            &self.schema_version,
+            LOFT_INTENT_SCHEMA_VERSION,
+            &self.command,
+            "loft",
+            &self.request_id,
+            &self.affected_semantic_ids,
+            &self.source_revision,
+            &self.worker_requirements,
+            feature_id,
+        )?;
+        if !(2..=32).contains(&self.profiles.len())
+            || self.profiles.iter().any(|profile| {
+                !(3..=128).contains(&profile.len())
+                    || profile.iter().flatten().any(|value| !value.is_finite() || value.abs() > 1e9)
+                    || profile.first() == profile.last()
+            })
+        {
+            return Err(BundleError::Invalid(
+                "canonical loft profiles are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_common_operation(
+    schema_version: &str,
+    expected_schema_version: &str,
+    command: &str,
+    operation: &str,
+    request_id: &str,
+    affected_semantic_ids: &[String],
+    source_revision: &str,
+    worker_requirements: &threeterm_protocol::artifact::WorkerFingerprint,
+    feature_id: &str,
+) -> Result<(), BundleError> {
+    if schema_version != expected_schema_version
+        || request_id.is_empty()
+        || affected_semantic_ids != [feature_id.to_string()]
+        || !valid_sha256(source_revision)
+        || worker_requirements.worker_kind != "occt"
+        || worker_requirements.worker_schema_version.is_empty()
+        || worker_requirements.protocol_schema_version.is_empty()
+    {
+        return Err(BundleError::Invalid(format!(
+            "canonical {command} {operation} intent metadata is invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_solid_operation(
+    schema_version: &str,
+    expected_schema_version: &str,
+    command: &str,
+    operation: &str,
+    base_feature_id: &str,
+    request_id: &str,
+    affected_semantic_ids: &[String],
+    source_revision: &str,
+    worker_requirements: &threeterm_protocol::artifact::WorkerFingerprint,
+    feature_id: &str,
+) -> Result<(), BundleError> {
+    validate_common_operation(
+        schema_version,
+        expected_schema_version,
+        command,
+        operation,
+        request_id,
+        affected_semantic_ids,
+        source_revision,
+        worker_requirements,
+        feature_id,
+    )?;
+    if base_feature_id.is_empty() {
+        return Err(BundleError::Invalid(format!(
+            "canonical {command} base feature is missing"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_edge_operation(
+    schema_version: &str,
+    expected_schema_version: &str,
+    command: &str,
+    operation: &str,
+    base_feature_id: &str,
+    selected_edge: &CanonicalEdgeReference,
+    request_id: &str,
+    affected_semantic_ids: &[String],
+    source_revision: &str,
+    worker_requirements: &threeterm_protocol::artifact::WorkerFingerprint,
+    feature_id: &str,
+) -> Result<(), BundleError> {
+    validate_solid_operation(
+        schema_version,
+        expected_schema_version,
+        command,
+        operation,
+        base_feature_id,
+        request_id,
+        affected_semantic_ids,
+        source_revision,
+        worker_requirements,
+        feature_id,
+    )?;
+    if selected_edge.provenance.source_feature_id != base_feature_id
+        || selected_edge.provenance.source_revision_id != source_revision
+        || selected_edge.semantic_id.is_empty()
+        || selected_edge.provenance.source_edge_id.is_empty()
+        || selected_edge.role.is_empty()
+        || !selected_edge.evidence.midpoint.iter().all(|value| value.is_finite())
+        || selected_edge.evidence.midpoint.iter().any(|value| value.abs() > 1e9)
+        || !selected_edge.evidence.tangent.iter().all(|value| value.is_finite())
+        || selected_edge.evidence.tangent.iter().map(|value| value * value).sum::<f64>() <= f64::EPSILON
+        || !selected_edge.evidence.length.is_finite()
+        || !(selected_edge.evidence.length > 0.0 && selected_edge.evidence.length < 1e9)
+    {
+        return Err(BundleError::Invalid(format!(
+            "canonical {command} selected edge is invalid"
+        )));
+    }
+    Ok(())
+}
+
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -731,6 +1005,10 @@ pub enum CanonicalIntent {
     Boolean(CanonicalBooleanIntent),
     Hole(CanonicalHoleIntent),
     Fillet(CanonicalFilletIntent),
+    Chamfer(CanonicalChamferIntent),
+    Shell(CanonicalShellIntent),
+    Draft(CanonicalDraftIntent),
+    Loft(CanonicalLoftIntent),
 }
 
 impl CanonicalIntent {
@@ -740,6 +1018,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => intent.schema_version.as_str(),
             Self::Hole(intent) => intent.schema_version.as_str(),
             Self::Fillet(intent) => intent.schema_version.as_str(),
+            Self::Chamfer(intent) => intent.schema_version.as_str(),
+            Self::Shell(intent) => intent.schema_version.as_str(),
+            Self::Draft(intent) => intent.schema_version.as_str(),
+            Self::Loft(intent) => intent.schema_version.as_str(),
         }
     }
 
@@ -749,6 +1031,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => intent.request_id.as_str(),
             Self::Hole(intent) => intent.request_id.as_str(),
             Self::Fillet(intent) => intent.request_id.as_str(),
+            Self::Chamfer(intent) => intent.request_id.as_str(),
+            Self::Shell(intent) => intent.request_id.as_str(),
+            Self::Draft(intent) => intent.request_id.as_str(),
+            Self::Loft(intent) => intent.request_id.as_str(),
         }
     }
 
@@ -758,6 +1044,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => intent.source_revision.as_str(),
             Self::Hole(intent) => intent.source_revision.as_str(),
             Self::Fillet(intent) => intent.source_revision.as_str(),
+            Self::Chamfer(intent) => intent.source_revision.as_str(),
+            Self::Shell(intent) => intent.source_revision.as_str(),
+            Self::Draft(intent) => intent.source_revision.as_str(),
+            Self::Loft(intent) => intent.source_revision.as_str(),
         }
     }
 
@@ -767,6 +1057,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => &intent.worker_requirements,
             Self::Hole(intent) => &intent.worker_requirements,
             Self::Fillet(intent) => &intent.worker_requirements,
+            Self::Chamfer(intent) => &intent.worker_requirements,
+            Self::Shell(intent) => &intent.worker_requirements,
+            Self::Draft(intent) => &intent.worker_requirements,
+            Self::Loft(intent) => &intent.worker_requirements,
         }
     }
 
@@ -776,6 +1070,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => intent.affected_semantic_ids.as_slice(),
             Self::Hole(intent) => intent.affected_semantic_ids.as_slice(),
             Self::Fillet(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Chamfer(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Shell(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Draft(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Loft(intent) => intent.affected_semantic_ids.as_slice(),
         }
     }
 
@@ -785,6 +1083,10 @@ impl CanonicalIntent {
             Self::Boolean(intent) => intent.validate(feature_id),
             Self::Hole(intent) => intent.validate(feature_id),
             Self::Fillet(intent) => intent.validate(feature_id),
+            Self::Chamfer(intent) => intent.validate(feature_id),
+            Self::Shell(intent) => intent.validate(feature_id),
+            Self::Draft(intent) => intent.validate(feature_id),
+            Self::Loft(intent) => intent.validate(feature_id),
         }
     }
 }
@@ -2393,6 +2695,57 @@ impl Bundle {
                         ));
                     }
                 }
+                CanonicalIntent::Chamfer(chamfer) => {
+                    if !loaded.graph.contains_feature(&chamfer.base_feature_id)
+                        || entries.len() != 1
+                        || chamfer.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(chamfer.request_id.as_str())
+                        || chamfer.worker_requirements != occt_worker_identity()
+                        || chamfer.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical chamfer intent does not match its transaction".to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Shell(shell) => {
+                    if !loaded.graph.contains_feature(&shell.base_feature_id)
+                        || entries.len() != 1
+                        || shell.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(shell.request_id.as_str())
+                        || shell.worker_requirements != occt_worker_identity()
+                        || shell.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical shell intent does not match its transaction".to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Draft(draft) => {
+                    if !loaded.graph.contains_feature(&draft.base_feature_id)
+                        || entries.len() != 1
+                        || draft.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(draft.request_id.as_str())
+                        || draft.worker_requirements != occt_worker_identity()
+                        || draft.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical draft intent does not match its transaction".to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Loft(loft) => {
+                    if entries.len() != 1
+                        || loft.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(loft.request_id.as_str())
+                        || loft.worker_requirements != occt_worker_identity()
+                        || loft.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical loft intent does not match its transaction".to_string(),
+                        ));
+                    }
+                }
             }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
@@ -2888,6 +3241,40 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                         });
                     }
                 }
+                CanonicalIntent::Chamfer(chamfer) => {
+                    if !graph.contains_feature(&chamfer.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical chamfer base feature is missing: {}",
+                                chamfer.base_feature_id
+                            ),
+                        });
+                    }
+                }
+                CanonicalIntent::Shell(shell) => {
+                    if !graph.contains_feature(&shell.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical shell base feature is missing: {}",
+                                shell.base_feature_id
+                            ),
+                        });
+                    }
+                }
+                CanonicalIntent::Draft(draft) => {
+                    if !graph.contains_feature(&draft.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical draft base feature is missing: {}",
+                                draft.base_feature_id
+                            ),
+                        });
+                    }
+                }
+                CanonicalIntent::Loft(_) => {}
             }
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
@@ -3232,6 +3619,86 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                         expected: serde_json::to_string(&occt_worker_identity())
                             .expect("worker identity serializes"),
                         found: serde_json::to_string(&fillet.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Chamfer(chamfer) => {
+                if chamfer.schema_version != CHAMFER_INTENT_SCHEMA_VERSION
+                    || chamfer.command != "chamfer"
+                    || chamfer.operation != "chamfer"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", chamfer.command, chamfer.operation),
+                    });
+                }
+                if chamfer.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_chamfer_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&chamfer.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Shell(shell) => {
+                if shell.schema_version != SHELL_INTENT_SCHEMA_VERSION
+                    || shell.command != "shell"
+                    || shell.operation != "shell"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", shell.command, shell.operation),
+                    });
+                }
+                if shell.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_shell_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&shell.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Draft(draft) => {
+                if draft.schema_version != DRAFT_INTENT_SCHEMA_VERSION
+                    || draft.command != "draft"
+                    || draft.operation != "draft"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", draft.command, draft.operation),
+                    });
+                }
+                if draft.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_draft_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&draft.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Loft(loft) => {
+                if loft.schema_version != LOFT_INTENT_SCHEMA_VERSION
+                    || loft.command != "loft"
+                    || loft.operation != "loft"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", loft.command, loft.operation),
+                    });
+                }
+                if loft.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_loft_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&loft.worker_requirements)
                             .expect("worker identity serializes"),
                     });
                 }

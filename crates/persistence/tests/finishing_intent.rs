@@ -1,6 +1,9 @@
 use threeterm_persistence::{
-    FILLET_INTENT_SCHEMA_VERSION, Bundle, CanonicalEdgeReference, CanonicalFilletIntent,
-    CanonicalIntent, EdgeEvidence, EdgeProvenance, occt_worker_identity, replay_canonical_state,
+    CHAMFER_INTENT_SCHEMA_VERSION, DRAFT_INTENT_SCHEMA_VERSION, FILLET_INTENT_SCHEMA_VERSION,
+    LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION, Bundle, CanonicalChamferIntent,
+    CanonicalEdgeReference, CanonicalFilletIntent, CanonicalIntent, CanonicalLoftIntent,
+    CanonicalShellIntent, CanonicalDraftIntent, EdgeEvidence, EdgeProvenance,
+    occt_worker_identity, replay_canonical_state,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,4 +105,72 @@ fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
     let state = replay_canonical_state(&committed.log).expect("fillet log replays");
     assert!(state.graph.contains_feature("fillet-1"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn finishing_intents_capture_replayable_inputs_for_each_operation() {
+    let revision = "a".repeat(64);
+    let edge = selected_edge();
+    let intents = [
+        CanonicalIntent::Chamfer(CanonicalChamferIntent {
+            schema_version: CHAMFER_INTENT_SCHEMA_VERSION.to_string(),
+            command: "chamfer".to_string(),
+            operation: "chamfer".to_string(),
+            base_feature_id: "base".to_string(),
+            selected_edge: edge,
+            distance: 0.25,
+            request_id: "request-chamfer".to_string(),
+            affected_semantic_ids: vec!["chamfer-1".to_string()],
+            source_revision: revision.clone(),
+            worker_requirements: occt_worker_identity(),
+        }),
+        CanonicalIntent::Shell(CanonicalShellIntent {
+            schema_version: SHELL_INTENT_SCHEMA_VERSION.to_string(),
+            command: "shell".to_string(),
+            operation: "shell".to_string(),
+            base_feature_id: "base".to_string(),
+            thickness: 0.3,
+            request_id: "request-shell".to_string(),
+            affected_semantic_ids: vec!["shell-1".to_string()],
+            source_revision: revision.clone(),
+            worker_requirements: occt_worker_identity(),
+        }),
+        CanonicalIntent::Draft(CanonicalDraftIntent {
+            schema_version: DRAFT_INTENT_SCHEMA_VERSION.to_string(),
+            command: "draft".to_string(),
+            operation: "draft".to_string(),
+            base_feature_id: "base".to_string(),
+            angle: 0.2,
+            pull_direction: [0.0, 0.0, 1.0],
+            request_id: "request-draft".to_string(),
+            affected_semantic_ids: vec!["draft-1".to_string()],
+            source_revision: revision.clone(),
+            worker_requirements: occt_worker_identity(),
+        }),
+        CanonicalIntent::Loft(CanonicalLoftIntent {
+            schema_version: LOFT_INTENT_SCHEMA_VERSION.to_string(),
+            command: "loft".to_string(),
+            operation: "loft".to_string(),
+            profiles: vec![
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+                vec![[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0]],
+            ],
+            is_solid: true,
+            ruled: false,
+            request_id: "request-loft".to_string(),
+            affected_semantic_ids: vec!["loft-1".to_string()],
+            source_revision: revision,
+            worker_requirements: occt_worker_identity(),
+        }),
+    ];
+
+    for (intent, feature_id) in intents.iter().zip(["chamfer-1", "shell-1", "draft-1", "loft-1"])
+    {
+        intent.validate(feature_id).expect("finishing intent validates");
+        let encoded = serde_json::to_string(intent).expect("intent serializes");
+        assert_eq!(
+            serde_json::from_str::<CanonicalIntent>(&encoded).expect("intent deserializes"),
+            *intent
+        );
+    }
 }

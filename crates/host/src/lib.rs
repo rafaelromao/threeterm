@@ -29,8 +29,9 @@ use threeterm_occt_worker::{
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
     CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
-    ExtrudeDeterministicInputs, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
-    LoadedBundle, load, load_with_policy, previous_generation_path, replay_canonical_state,
+    ExtrudeDeterministicInputs, HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement,
+    HoleDeterministicInputs, LoadPolicy, LoadedBundle, load, load_with_policy,
+    previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -3145,13 +3146,16 @@ impl Host {
     /// Commit one history event and recompute the committed geometry that
     /// moved with it.
     ///
-    /// Worker recomputation runs before the sealed publication: a worker
-    /// failure rejects the operation atomically with no history transaction
-    /// and no BREP change, so committed geometry can never silently lag the
-    /// active Revision Snapshot. Only families whose parameters changed and
-    /// are all current-valid recompute; clean families keep byte-identical
-    /// results and degraded families keep last-valid bytes under the stale
-    /// geometry gate.
+    /// Worker recomputation stages before the sealed publication, and the
+    /// history event plus every staged BREP replacement publish as one
+    /// conditional bundle transaction: a worker failure rejects the
+    /// operation with nothing committed, and a failed promotion or an
+    /// intervening writer commits neither geometry nor history, so the
+    /// active Revision Snapshot and current geometry cannot drift out of
+    /// sync. Only families whose parameters changed and are all
+    /// current-valid recompute; clean families keep byte-identical results
+    /// and degraded families keep last-valid bytes under the stale geometry
+    /// gate.
     fn commit_history_event_with_geometry(
         &self,
         root: &Path,
@@ -3161,38 +3165,52 @@ impl Host {
     ) -> Result<HistoryCommitView, HostError> {
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
+        let expected_revision = loaded.revision_hash_hex().to_string();
+        let ordinal = loaded.history.event_ordinal() + 1;
         let staged = self.stage_changed_bracket_families(
             root,
             loaded.history.active_snapshot(),
             &event.active,
-            loaded.revision_hash_hex(),
+            &expected_revision,
         )?;
-        let updated = bundle.append_features_with_history(&[], &event)?;
-        let expected_revision = updated.revision_hash_hex().to_string();
-        let ordinal = updated.history.event_ordinal();
-        for staged in staged {
-            let kind = bracket_kind(&staged.request);
-            let payload = history_recompute_idempotency_payload(
-                operation,
-                ordinal,
-                &staged.family,
-                &staged.request,
-                &staged.source_brep_sha256,
-                &staged.source_revision,
-                &staged.result_sha256,
-            );
-            self.promote_brep_bytes(
-                root,
-                &staged.family,
-                &kind,
+        let updated = if staged.is_empty() {
+            bundle.append_features_with_history(&[], &event)?
+        } else {
+            let key = format!("history-{operation}-{ordinal}");
+            let kinds = staged
+                .iter()
+                .map(|staged| bracket_kind(&staged.request))
+                .collect::<Vec<_>>();
+            let payloads = staged
+                .iter()
+                .map(|staged| {
+                    history_recompute_idempotency_payload(
+                        &staged.family,
+                        &staged.request,
+                        &staged.source_brep_sha256,
+                        &staged.source_revision,
+                        &staged.result_sha256,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let families = staged
+                .iter()
+                .enumerate()
+                .map(|(index, staged)| HistoryBrepReplacement {
+                    feature_id: staged.family.as_str(),
+                    kind: kinds[index].as_str(),
+                    brep_bytes: staged.bytes.as_slice(),
+                    expected_source_sha256: staged.source_brep_sha256.as_str(),
+                    idempotency_key: key.as_str(),
+                    idempotency_payload: payloads[index].as_str(),
+                })
+                .collect::<Vec<_>>();
+            bundle.replace_bracket_families_with_history_if_revision(
+                &families,
                 &expected_revision,
-                &staged.bytes,
-                Some(&staged.source_brep_sha256),
-                Some(&payload.key),
-                Some(&payload.payload),
-            )?;
-        }
-        let updated = bundle.open()?;
+                &event,
+            )?
+        };
         let snapshot = SnapshotView::from(&updated);
         let history = updated.history.clone();
         self.current.replace(Some(updated));
@@ -7725,20 +7743,13 @@ struct StagedBracketFamily {
     source_revision: String,
 }
 
-struct HistoryRecomputeIdempotency {
-    key: String,
-    payload: String,
-}
-
 fn history_recompute_idempotency_payload(
-    operation: &str,
-    ordinal: u64,
     family: &str,
     request: &BracketRequest,
     source_brep_sha256: &str,
     source_revision: &str,
     result_sha256: &str,
-) -> HistoryRecomputeIdempotency {
+) -> String {
     let semantic = serde_json::json!({
         "bracket_id": family,
         "height": format!("{:.17}", request.height),
@@ -7761,16 +7772,13 @@ fn history_recompute_idempotency_payload(
     });
     let input_bytes = serde_json::to_vec(&input).expect("history recompute input serializes");
     let input_fingerprint = format!("{:x}", Sha256::digest(input_bytes));
-    HistoryRecomputeIdempotency {
-        key: format!("history-{operation}-{ordinal}-{family}"),
-        payload: serde_json::json!({
-            "input_fingerprint": input_fingerprint,
-            "result_sha256": result_sha256,
-            "semantic_fingerprint": semantic_fingerprint,
-            "source_revision": source_revision,
-        })
-        .to_string(),
-    }
+    serde_json::json!({
+        "input_fingerprint": input_fingerprint,
+        "result_sha256": result_sha256,
+        "semantic_fingerprint": semantic_fingerprint,
+        "source_revision": source_revision,
+    })
+    .to_string()
 }
 
 fn parse_ascii_stl(path: &Path, feature_id: &str) -> Result<Vec<SceneTriangle>, HostError> {

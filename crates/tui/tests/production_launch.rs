@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::OcctWorker;
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
 use threeterm_tui::{InteractiveTerminal, LaunchError, launch};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
@@ -378,4 +378,62 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
 
     std::fs::remove_dir_all(root).expect("project is removed");
     std::fs::remove_dir_all(headless_root).expect("headless project is removed");
+}
+
+#[test]
+fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
+    if OcctWorker::locate().is_err() {
+        eprintln!("interactive command slice: OCCT worker unavailable");
+        return;
+    }
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-hole-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+    let worker = OcctWorker::locate().expect("OCCT worker is available");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "hole-launch-base",
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            3.0,
+        )
+        .with_feature_id("base-1"),
+        &worker,
+    )
+    .expect("base solid extrudes");
+
+    let request = br#"{"feature_id":"interactive-hole","base_feature_id":"base-1","position":[1.5,1.5,0.0],"direction":[0.0,0.0,1.0],"diameter":1.0,"hole_kind":"drilled"}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"hole".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.push(b"\x16".to_vec());
+    script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production hole palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 3);
+    assert!(root.join("brep/interactive-hole.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("command committed"));
+    assert!(output.contains("[selection-glyph]"));
+
+    let _ = fs::remove_dir_all(root);
 }

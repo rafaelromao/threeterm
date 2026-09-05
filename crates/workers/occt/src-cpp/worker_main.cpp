@@ -2071,6 +2071,11 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
     auto position = get_vec3(request, "position");
     auto direction = get_vec3(request, "direction");
     double diameter = get_number(request, "diameter");
+    std::string hole_kind = get_string(request, "hole_kind");
+    if (hole_kind.empty()) hole_kind = "drilled";
+    std::string thread_designation = get_string(request, "thread_designation");
+    double thread_pitch = get_number(request, "thread_pitch");
+    double thread_depth = get_number(request, "thread_depth");
     bool measure_removed_volume = get_bool(request, "measure_removed_volume", false, error);
     if (!error.empty()) return false;
 
@@ -2106,6 +2111,21 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
         error = "hole direction must be a non-zero vector";
         return false;
     }
+    if (hole_kind != "drilled" && hole_kind != "tapped") {
+        error = "hole kind must be drilled or tapped";
+        return false;
+    }
+    if (hole_kind == "tapped" &&
+        (thread_designation.empty() || !(thread_pitch > 0.0) || !std::isfinite(thread_pitch) ||
+         !(thread_depth > 0.0) || !std::isfinite(thread_depth))) {
+        error = "tapped hole thread metadata must be valid";
+        return false;
+    }
+    if (hole_kind == "drilled" &&
+        (!thread_designation.empty() || thread_pitch != 0.0 || thread_depth != 0.0)) {
+        error = "drilled hole must not carry thread metadata";
+        return false;
+    }
 
     try {
         TopoDS_Shape base;
@@ -2137,6 +2157,13 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
 
         double norm = std::sqrt(direction_norm_squared);
         gp_Dir axis_dir(direction[0] / norm, direction[1] / norm, direction[2] / norm);
+        const double through_depth = std::abs(axis_dir.X()) * (xmax - xmin) +
+                                     std::abs(axis_dir.Y()) * (ymax - ymin) +
+                                     std::abs(axis_dir.Z()) * (zmax - zmin);
+        if (hole_kind == "tapped" && thread_depth > through_depth + 1.0e-9) {
+            error = "tapped hole thread depth exceeds the support through-depth";
+            return false;
+        }
         gp_Pnt cutter_start(
             position[0] - axis_dir.X() * diagonal,
             position[1] - axis_dir.Y() * diagonal,

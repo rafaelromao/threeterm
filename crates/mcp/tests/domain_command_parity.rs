@@ -339,6 +339,66 @@ fn mcp_apply(root: &std::path::Path, revision: &str) -> Value {
     response.result.expect("MCP has result")["structuredContent"].clone()
 }
 
+fn mcp_cursor_move(root: &std::path::Path, tool: &str) -> Value {
+    let server = McpServer::new();
+    let response = server.handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": tool,
+            "arguments": json!({ "bundle_path": root.to_string_lossy() })
+        }),
+    });
+    assert!(
+        response.error.is_none(),
+        "MCP {tool} failed: {:?}",
+        response.error
+    );
+    response.result.expect("MCP has result")["structuredContent"].clone()
+}
+
+#[test]
+fn mcp_undo_and_redo_move_the_active_snapshot_like_the_cli() {
+    let path = root("cursor");
+    let host = threeterm_host::Host::new();
+    host.save_bracket(&path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("history initializes");
+    host.historical_edit(&path, "l-bracket-base", "length", 61.0)
+        .expect("historical edit commits");
+
+    let undone = mcp_cursor_move(&path, "threeterm.command.undo/1");
+    assert_eq!(undone["active_revision"], "history-revision-1");
+    let redone = mcp_cursor_move(&path, "threeterm.command.redo/1");
+    assert_eq!(redone["active_revision"], "history-revision-2");
+    assert_eq!(
+        redone["active_revision"],
+        host.history(&path)
+            .expect("history reloads")
+            .active_snapshot()
+            .revision_id
+    );
+
+    let tui_host = threeterm_host::Host::new();
+    let tui_undone = threeterm_tui::execute_domain_command(
+        &tui_host,
+        threeterm_protocol::schema::UNDO_COMMAND_ID,
+        json!({ "bundle_path": path.to_string_lossy() }),
+    )
+    .expect("TUI undo moves through the shared host boundary");
+    assert_eq!(tui_undone["active_revision"], "history-revision-1");
+    assert_eq!(tui_undone["operation"], "undo");
+    let tui_redone = threeterm_tui::execute_domain_command(
+        &tui_host,
+        threeterm_protocol::schema::REDO_COMMAND_ID,
+        json!({ "bundle_path": path.to_string_lossy() }),
+    )
+    .expect("TUI redo moves through the shared host boundary");
+    assert_eq!(tui_redone["active_revision"], "history-revision-2");
+
+    let _ = fs::remove_dir_all(path);
+}
+
 #[test]
 fn cli_mcp_and_tui_apply_the_same_versioned_request() {
     let cli_root = root("cli");

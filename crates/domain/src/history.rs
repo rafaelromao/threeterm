@@ -95,6 +95,16 @@ pub enum HistoryOperation {
         name: String,
         displaced_name: Option<String>,
     },
+    Undo {
+        restored_ordinal: u64,
+        restored_revision_id: String,
+        preserved_name: String,
+    },
+    Redo {
+        restored_ordinal: u64,
+        restored_revision_id: String,
+        preserved_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +116,8 @@ pub enum HistoryError {
     NamedRevisionNotFound(String),
     FeatureNotInNamedRevision { feature_id: String, name: String },
     InvalidValue,
+    NothingToUndo,
+    NothingToRedo,
 }
 
 impl std::fmt::Display for HistoryError {
@@ -123,6 +135,8 @@ impl std::fmt::Display for HistoryError {
                 "feature {feature_id} is not present in named revision {name}"
             ),
             Self::InvalidValue => formatter.write_str("historical edit value must be finite"),
+            Self::NothingToUndo => formatter.write_str("history has nothing to undo"),
+            Self::NothingToRedo => formatter.write_str("history has nothing to redo"),
         }
     }
 }
@@ -420,6 +434,137 @@ impl HistoryState {
         self.restore_named_revision(name)
     }
 
+    /// Move the active Revision Snapshot back one sealed transaction.
+    ///
+    /// Undo is a compensating transaction, never a log rewrite: the target
+    /// past snapshot becomes active with its original revision ID, while the
+    /// displaced snapshot is preserved as a Named Revision so a later redo
+    /// or new divergent work never silently drops the undone future.
+    pub fn undo(&self, events: &[HistoryEvent]) -> Result<HistoryEvent, HistoryError> {
+        let (ordinal, snapshot) = self.cursor_target(events, CursorDirection::Undo)?;
+        let next_ordinal = self.event_ordinal + 1;
+        let preserved_name = format!("recovered-before-undo-{next_ordinal}");
+        if self.named_revisions.contains_key(&preserved_name) {
+            return Err(HistoryError::DuplicateName(preserved_name));
+        }
+        let mut named_revisions = self.named_revisions.clone();
+        named_revisions.insert(
+            preserved_name.clone(),
+            NamedRevision {
+                name: preserved_name.clone(),
+                snapshot: self.active.clone(),
+                provenance: "undo".to_string(),
+            },
+        );
+        Ok(self.event(
+            HistoryOperation::Undo {
+                restored_ordinal: ordinal,
+                restored_revision_id: snapshot.revision_id.clone(),
+                preserved_name,
+            },
+            snapshot,
+            named_revisions,
+        ))
+    }
+
+    /// Move the active Revision Snapshot forward over undone transactions.
+    ///
+    /// Redo is valid only while trailing undo depth remains; like undo it is
+    /// a new sealed transaction that preserves the displaced snapshot.
+    pub fn redo(&self, events: &[HistoryEvent]) -> Result<HistoryEvent, HistoryError> {
+        let (ordinal, snapshot) = self.cursor_target(events, CursorDirection::Redo)?;
+        let next_ordinal = self.event_ordinal + 1;
+        let preserved_name = format!("recovered-before-redo-{next_ordinal}");
+        if self.named_revisions.contains_key(&preserved_name) {
+            return Err(HistoryError::DuplicateName(preserved_name));
+        }
+        let mut named_revisions = self.named_revisions.clone();
+        named_revisions.insert(
+            preserved_name.clone(),
+            NamedRevision {
+                name: preserved_name.clone(),
+                snapshot: self.active.clone(),
+                provenance: "redo".to_string(),
+            },
+        );
+        Ok(self.event(
+            HistoryOperation::Redo {
+                restored_ordinal: ordinal,
+                restored_revision_id: snapshot.revision_id.clone(),
+                preserved_name,
+            },
+            snapshot,
+            named_revisions,
+        ))
+    }
+
+    /// Resolve the cursor target over sealed transactions.
+    ///
+    /// Only non-cursor events establish timeline positions; trailing undo and
+    /// redo events move the effective cursor back and forward from the latest
+    /// position. Duplicate active snapshots (for example named-revision
+    /// creation) are stepped over so cursor movement always changes state.
+    fn cursor_target(
+        &self,
+        events: &[HistoryEvent],
+        direction: CursorDirection,
+    ) -> Result<(u64, HistorySnapshot), HistoryError> {
+        if events
+            .last()
+            .is_some_and(|event| event.ordinal != self.event_ordinal)
+            || (events.is_empty() && self.event_ordinal != 0)
+        {
+            return Err(HistoryError::InvalidEvent(
+                "history event log does not end at the active ordinal".to_string(),
+            ));
+        }
+        let genesis = HistoryState::default().active;
+        let mut positions = Vec::with_capacity(events.len() + 1);
+        positions.push((0_u64, &genesis));
+        for event in events {
+            if !matches!(
+                event.operation,
+                HistoryOperation::Undo { .. } | HistoryOperation::Redo { .. }
+            ) {
+                positions.push((event.ordinal, &event.active));
+            }
+        }
+        let mut cursor = positions.len() as i64 - 1;
+        for event in events.iter().rev() {
+            match &event.operation {
+                HistoryOperation::Undo { .. } => cursor -= 1,
+                HistoryOperation::Redo { .. } => cursor += 1,
+                _ => break,
+            }
+        }
+        if cursor < 0 || cursor as usize >= positions.len() {
+            return Err(HistoryError::InvalidEvent(
+                "history cursor left the sealed timeline".to_string(),
+            ));
+        }
+        let cursor = cursor as usize;
+        if positions[cursor].1 != &self.active {
+            return Err(HistoryError::InvalidEvent(
+                "history event log does not reproduce the active snapshot".to_string(),
+            ));
+        }
+        let target = match direction {
+            CursorDirection::Undo => (0..cursor)
+                .rev()
+                .find(|index| positions[*index].1 != &self.active),
+            CursorDirection::Redo => {
+                ((cursor + 1)..positions.len()).find(|index| positions[*index].1 != &self.active)
+            }
+        };
+        let Some(target) = target else {
+            return Err(match direction {
+                CursorDirection::Undo => HistoryError::NothingToUndo,
+                CursorDirection::Redo => HistoryError::NothingToRedo,
+            });
+        };
+        Ok((positions[target].0, positions[target].1.clone()))
+    }
+
     pub fn fingerprint(&self) -> String {
         fingerprint_bytes(&serde_json::to_vec(self).expect("history state serializes"))
     }
@@ -438,6 +583,12 @@ impl HistoryState {
             named_revisions,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorDirection {
+    Undo,
+    Redo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -529,6 +680,7 @@ pub fn project_feature_timeline(
                 ..
             } => edited_feature == feature_id || dirty_features.iter().any(|id| id == feature_id),
             HistoryOperation::CreateNamedRevision { .. } => false,
+            HistoryOperation::Undo { .. } | HistoryOperation::Redo { .. } => active_changed,
             HistoryOperation::RestoreNamedRevision { name, .. } => {
                 before_feature.is_some()
                     || after_feature.is_some()
@@ -582,6 +734,8 @@ fn history_operation_name(operation: &HistoryOperation) -> &'static str {
         HistoryOperation::HistoricalEdit { .. } => "historical-edit",
         HistoryOperation::CreateNamedRevision { .. } => "create-named-revision",
         HistoryOperation::RestoreNamedRevision { .. } => "restore-named-revision",
+        HistoryOperation::Undo { .. } => "undo",
+        HistoryOperation::Redo { .. } => "redo",
     }
 }
 
@@ -863,6 +1017,26 @@ fn validate_event(event: &HistoryEvent) -> Result<(), HistoryError> {
                 ));
             }
         }
+        HistoryOperation::Undo {
+            restored_ordinal,
+            restored_revision_id,
+            preserved_name,
+        }
+        | HistoryOperation::Redo {
+            restored_ordinal,
+            restored_revision_id,
+            preserved_name,
+        } => {
+            if *restored_ordinal >= event.ordinal
+                || restored_revision_id.is_empty()
+                || restored_revision_id != &event.active.revision_id
+                || !event.named_revisions.contains_key(preserved_name)
+            {
+                return Err(HistoryError::InvalidEvent(
+                    "cursor movement references missing state".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -877,6 +1051,197 @@ fn fingerprint_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_moves_the_active_snapshot_back_one_sealed_transaction() {
+        let mut state = HistoryState::default();
+        let first = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&first).expect("initial event applies");
+        let (second, _) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("edit event");
+        state.apply_event(&second).expect("edit applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-2");
+
+        let undo = state.undo(&[first, second]).expect("undo event");
+        state.apply_event(&undo).expect("undo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-1");
+        assert_eq!(state.active_snapshot().features["l-base"].input_value, 10.0);
+    }
+
+    #[test]
+    fn redo_moves_the_active_snapshot_forward_over_undone_work() {
+        let mut state = HistoryState::default();
+        let first = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&first).expect("initial event applies");
+        let (second, _) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("edit event");
+        state.apply_event(&second).expect("edit applies");
+
+        let undo = state.undo(&[first.clone(), second.clone()]).expect("undo");
+        state.apply_event(&undo).expect("undo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-1");
+
+        let events = vec![first, second, undo];
+        let redo = state.redo(&events).expect("redo");
+        state.apply_event(&redo).expect("redo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-2");
+        assert_eq!(state.active_snapshot().features["l-base"].input_value, 12.0);
+    }
+
+    #[test]
+    fn cursor_movement_without_a_target_is_rejected_atomically() {
+        let state = HistoryState::default();
+        assert_eq!(state.undo(&[]), Err(HistoryError::NothingToUndo));
+        assert_eq!(state.redo(&[]), Err(HistoryError::NothingToRedo));
+
+        let mut state = state;
+        let first = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&first).expect("initial event applies");
+        assert_eq!(
+            state.redo(std::slice::from_ref(&first)),
+            Err(HistoryError::NothingToRedo)
+        );
+
+        let undo = state
+            .undo(std::slice::from_ref(&first))
+            .expect("undo to genesis");
+        state.apply_event(&undo).expect("undo applies");
+        assert!(state.active_snapshot().features.is_empty());
+        let events = vec![first.clone(), undo];
+        assert_eq!(state.undo(&events), Err(HistoryError::NothingToUndo));
+        let redo = state.redo(&events).expect("redo restores the bracket");
+        state.apply_event(&redo).expect("redo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-1");
+        let events = vec![first, events[1].clone(), redo];
+        assert_eq!(state.redo(&events), Err(HistoryError::NothingToRedo));
+    }
+
+    #[test]
+    fn consecutive_undo_then_redo_walks_the_sealed_timeline() {
+        let mut state = HistoryState::default();
+        let first = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&first).expect("initial event applies");
+        let (second, _) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("first edit");
+        state.apply_event(&second).expect("first edit applies");
+        let (third, _) = state
+            .historical_edit("l-bend", "width", 7.0)
+            .expect("second edit");
+        state.apply_event(&third).expect("second edit applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-3");
+
+        let mut events = vec![first, second, third];
+        let undo = state.undo(&events).expect("first undo");
+        state.apply_event(&undo).expect("first undo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-2");
+        events.push(undo);
+        let undo = state.undo(&events).expect("second undo");
+        state.apply_event(&undo).expect("second undo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-1");
+        events.push(undo);
+
+        let redo = state.redo(&events).expect("first redo");
+        state.apply_event(&redo).expect("first redo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-2");
+        events.push(redo);
+        let redo = state.redo(&events).expect("second redo");
+        state.apply_event(&redo).expect("second redo applies");
+        assert_eq!(state.active_snapshot().revision_id, "history-revision-3");
+        assert_eq!(state.active_snapshot().features["l-bend"].input_value, 7.0);
+    }
+
+    #[test]
+    fn new_work_after_undo_preserves_the_undone_future_as_a_named_revision() {
+        let mut state = HistoryState::default();
+        let first = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&first).expect("initial event applies");
+        let (second, _) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("edit event");
+        state.apply_event(&second).expect("edit applies");
+
+        let mut events = vec![first, second];
+        let undo = state.undo(&events).expect("undo");
+        state.apply_event(&undo).expect("undo applies");
+        events.push(undo);
+        assert!(
+            state
+                .named_revisions()
+                .contains_key("recovered-before-undo-3")
+        );
+
+        let (diverged, _) = state
+            .historical_edit("l-base", "length", 20.0)
+            .expect("divergent edit");
+        state
+            .apply_event(&diverged)
+            .expect("divergent edit applies");
+        events.push(diverged);
+        assert_eq!(state.active_snapshot().features["l-base"].input_value, 20.0);
+        assert_eq!(state.redo(&events), Err(HistoryError::NothingToRedo));
+        let preserved = state
+            .named_revisions()
+            .get("recovered-before-undo-3")
+            .expect("undone future is preserved");
+        assert_eq!(
+            preserved.snapshot.features["l-base"].input_value, 12.0,
+            "the undone future remains addressable instead of being dropped"
+        );
+    }
+
+    #[test]
+    fn feature_timeline_records_cursor_movement_with_named_markers() {
+        let mut state = HistoryState::default();
+        let mut events = Vec::new();
+        let event = state
+            .initialize_l_bracket("l", 10.0, 5.0, 3.0, 1.0)
+            .expect("bracket event");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+        let (event, _) = state
+            .historical_edit("l-base", "length", 12.0)
+            .expect("edit event");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+        let event = state.undo(&events).expect("undo event");
+        state.apply_event(&event).expect("event applies");
+        events.push(event);
+
+        let timeline = project_feature_timeline(&events, "l-base").expect("timeline");
+        assert_eq!(
+            timeline
+                .revisions
+                .iter()
+                .map(|entry| (entry.ordinal, entry.operation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "initialize-l-bracket"),
+                (2, "historical-edit"),
+                (3, "undo"),
+            ]
+        );
+        assert_eq!(timeline.active_revision, "history-revision-1");
+        assert!(
+            timeline
+                .named_revisions
+                .iter()
+                .any(|revision| revision.name == "recovered-before-undo-3"
+                    && revision.provenance == "undo")
+        );
+    }
 
     #[test]
     fn historical_failure_stops_only_the_affected_dependency_path() {

@@ -1000,6 +1000,43 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
 }
 
 #[test]
+fn session_undo_and_redo_commit_through_the_canonical_host() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+    host.historical_edit(&root, "l-base", "length", 12.0)
+        .expect("historical edit commits");
+
+    let mut session = TuiSession::new([], "history-revision-2");
+    let undone = session
+        .apply_history_cursor(&host, &root, HistoryDirection::Undo)
+        .expect("session undo commits through the host");
+    assert_eq!(
+        undone.history.active_snapshot().revision_id,
+        "history-revision-1"
+    );
+    assert_eq!(session.state().canonical_revision, "history-revision-1");
+
+    let redone = session
+        .apply_history_cursor(&host, &root, HistoryDirection::Redo)
+        .expect("session redo commits through the host");
+    assert_eq!(
+        redone.history.active_snapshot().revision_id,
+        "history-revision-2"
+    );
+    assert_eq!(session.state().canonical_revision, "history-revision-2");
+
+    let rejected = session
+        .apply_history_cursor(&host, &root, HistoryDirection::Redo)
+        .expect_err("redo with no undone work is rejected without leaving Applying");
+    assert_eq!(rejected.code, TuiDiagnosticCode::HistoryRejected);
+    assert_eq!(session.state().canonical_revision, "history-revision-2");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn interaction_axis_has_an_explicit_public_handler() {
     let mut session = TuiSession::new([], "revision-interaction-axis");
 

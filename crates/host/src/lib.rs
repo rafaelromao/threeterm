@@ -4525,14 +4525,54 @@ impl Host {
                 }
             }
         }
+        let prior_replay_artifacts = replay_artifacts
+            .iter()
+            .map(|(feature_id, _)| {
+                let path = committed_brep_path(root, feature_id);
+                let prior = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        Some(fs::read(&path).map_err(|error| HostError::BrepIo {
+                            detail: format!("read prior replay BREP failed: {error}"),
+                        })?)
+                    }
+                    Ok(_) => {
+                        return Err(HostError::BrepIo {
+                            detail: format!("prior replay BREP is not a regular file: {path:?}"),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(HostError::BrepIo {
+                            detail: format!("stat prior replay BREP failed: {error}"),
+                        });
+                    }
+                };
+                Ok((feature_id.clone(), prior))
+            })
+            .collect::<Result<Vec<_>, HostError>>()?;
         Bundle::at(root)
             .restore_derived_breps_if_revision(&source_snapshot.revision_hash, &replay_artifacts)?;
         replay_stage.discard();
-        let reloaded = Bundle::at(root).open()?;
+        let reloaded = match Bundle::at(root).open() {
+            Ok(reloaded) => reloaded,
+            Err(error) => {
+                rollback_replay_artifacts(
+                    root,
+                    &source_snapshot.revision_hash,
+                    &prior_replay_artifacts,
+                )?;
+                return Err(error.into());
+            }
+        };
         let snapshot = SnapshotView::from(&reloaded);
         if snapshot.revision_hash != source_snapshot.revision_hash
             || canonical_model_fingerprint(&reloaded) != source_model_state
         {
+            rollback_replay_artifacts(
+                root,
+                &source_snapshot.revision_hash,
+                &prior_replay_artifacts,
+            )?;
             return Err(HostError::Validation {
                 detail: "geometry replay changed the canonical model state".to_string(),
             });
@@ -8160,6 +8200,41 @@ fn stage_replay_artifact(
         detail: format!("stage replayed BREP failed: {error}"),
     })?;
     Ok(path)
+}
+
+fn rollback_replay_artifacts(
+    root: &Path,
+    expected_revision: &str,
+    prior_artifacts: &[(String, Option<Vec<u8>>)],
+) -> Result<(), HostError> {
+    let prior = prior_artifacts
+        .iter()
+        .filter_map(|(feature_id, bytes)| {
+            bytes
+                .as_ref()
+                .map(|bytes| (feature_id.clone(), bytes.clone()))
+        })
+        .collect::<Vec<_>>();
+    if !prior.is_empty() {
+        Bundle::at(root)
+            .restore_derived_breps_if_revision(expected_revision, &prior)
+            .map_err(HostError::from)?;
+    }
+    for (feature_id, bytes) in prior_artifacts {
+        if bytes.is_none() {
+            let path = committed_brep_path(root, feature_id);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(HostError::BrepIo {
+                        detail: format!("remove replay BREP during rollback failed: {error}"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn replay_finishing_geometry(

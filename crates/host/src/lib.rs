@@ -28,14 +28,16 @@ use threeterm_occt_worker::{
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
-    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalDraftIntent, CanonicalEdgeReference,
-    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
-    CanonicalLoftIntent, CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION,
-    EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs,
-    FILLET_INTENT_SCHEMA_VERSION, HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement,
-    HoleDeterministicInputs, LOFT_INTENT_SCHEMA_VERSION, LoadPolicy, LoadedBundle,
-    SHELL_INTENT_SCHEMA_VERSION, load, load_with_policy, previous_generation_path,
-    replay_canonical_state,
+    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
+    CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
+    CanonicalHoleIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalLoftIntent,
+    CanonicalMirrorIntent, CanonicalRevolveIntent, CanonicalShellIntent,
+    CircularPatternDeterministicInputs, DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION,
+    EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION,
+    HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement, HoleDeterministicInputs,
+    LOFT_INTENT_SCHEMA_VERSION, LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle,
+    MirrorDeterministicInputs, RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load,
+    load_with_policy, previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -44,8 +46,9 @@ use threeterm_protocol::command_execution::{ExecutionError, execute, validate_re
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
-    BOOLEAN_PATTERN_COMMAND_ID, CHAMFER_COMMAND_ID, CommandId, DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID,
+    BOOLEAN_PATTERN_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, CommandId,
+    DRAFT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
     SHELL_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
@@ -1451,6 +1454,7 @@ fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value 
     })
 }
 
+#[allow(dead_code)]
 fn validate_replayed_edge_reference(
     reference: &CanonicalEdgeReference,
     candidates: &[EdgeCandidateEvidence],
@@ -1796,6 +1800,246 @@ impl Host {
         Ok(ProjectIdentity::from(&Bundle::at(root.as_ref()).open()?))
     }
 
+    fn execute_canonical_occt_command(
+        &self,
+        command: CommandId,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        let string_field = |name: &str| {
+            request
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("missing string field {name:?}"),
+                })
+        };
+        let array_field = |name: &str| {
+            request
+                .get(name)
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("missing field {name:?}"),
+                })
+        };
+        let root = string_field("bundle_path")?;
+        let feature_id = string_field("feature_id")?;
+        if !valid_feature_path_component(feature_id) {
+            return Err(HostError::Validation {
+                detail: "feature IDs must be plain path components".to_string(),
+            });
+        }
+        let source = self.load(root)?;
+        if let Some(expected_revision) = request
+            .get("expected_revision")
+            .and_then(serde_json::Value::as_str)
+            && source.revision_hash != expected_revision
+        {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "{} source revision {expected_revision:?} does not match current revision {:?}",
+                    command.0, source.revision_hash
+                ),
+            });
+        }
+
+        let root = Bundle::at(root).canonical_root().to_path_buf();
+        let schema_version = find(command)
+            .expect("canonical OCCT command is registered")
+            .response_schema_version;
+
+        match command {
+            REVOLVE_COMMAND_ID => {
+                let profile = serde_json::from_value(array_field("profile")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("invalid revolve profile: {error}"),
+                    }
+                })?;
+                let axis_point =
+                    serde_json::from_value(array_field("axis_point")?).map_err(|error| {
+                        HostError::Validation {
+                            detail: format!("invalid revolve axis_point: {error}"),
+                        }
+                    })?;
+                let axis_direction = serde_json::from_value(array_field("axis_direction")?)
+                    .map_err(|error| HostError::Validation {
+                        detail: format!("invalid revolve axis_direction: {error}"),
+                    })?;
+                let angle = request
+                    .get("angle")
+                    .and_then(serde_json::Value::as_f64)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "missing revolve angle".to_string(),
+                    })?;
+                let request = RevolveRequest::new(
+                    threeterm_occt_worker::new_request_id(),
+                    profile,
+                    axis_point,
+                    axis_direction,
+                    angle,
+                )
+                .with_output_path(root.join("stage"), "revolve.brep")
+                .with_feature_id(feature_id);
+                request
+                    .validate()
+                    .map_err(|detail| HostError::Validation { detail })?;
+                let worker =
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?;
+                let derived = self.stage_occt_result::<RevolveResult>(
+                    &root,
+                    &request,
+                    threeterm_occt_worker::Operation::Revolve,
+                    &worker,
+                )?;
+                let (snapshot, result, artifact) = self.promote_occt_result(&root, derived)?;
+                canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+            }
+            MIRROR_COMMAND_ID | LINEAR_PATTERN_COMMAND_ID | CIRCULAR_PATTERN_COMMAND_ID => {
+                let base_feature_id = string_field("base_feature_id")?;
+                if !valid_feature_path_component(base_feature_id) {
+                    return Err(HostError::Validation {
+                        detail: "base feature IDs must be plain path components".to_string(),
+                    });
+                }
+                let base_path = authenticated_base_brep(&root, base_feature_id)?;
+                match command {
+                    MIRROR_COMMAND_ID => {
+                        let plane_point = serde_json::from_value(array_field("plane_point")?)
+                            .map_err(|error| HostError::Validation {
+                                detail: format!("invalid mirror plane_point: {error}"),
+                            })?;
+                        let plane_normal = serde_json::from_value(array_field("plane_normal")?)
+                            .map_err(|error| HostError::Validation {
+                                detail: format!("invalid mirror plane_normal: {error}"),
+                            })?;
+                        let request = MirrorRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            plane_point,
+                            plane_normal,
+                        )
+                        .with_output_path(root.join("stage"), "mirror.brep")
+                        .with_feature_id(feature_id);
+                        request
+                            .validate()
+                            .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        let derived = self.stage_occt_result::<MirrorResult>(
+                            &root,
+                            &request,
+                            threeterm_occt_worker::Operation::Mirror,
+                            &worker,
+                        )?;
+                        let (snapshot, result, artifact) =
+                            self.promote_occt_result(&root, derived)?;
+                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                    }
+                    LINEAR_PATTERN_COMMAND_ID => {
+                        let direction =
+                            serde_json::from_value(array_field("direction")?).map_err(|error| {
+                                HostError::Validation {
+                                    detail: format!("invalid linear pattern direction: {error}"),
+                                }
+                            })?;
+                        let count = request
+                            .get("count")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "invalid linear pattern count".to_string(),
+                            })?;
+                        let spacing = request
+                            .get("spacing")
+                            .and_then(serde_json::Value::as_f64)
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "invalid linear pattern spacing".to_string(),
+                            })?;
+                        let request = LinearPatternRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            direction,
+                            count,
+                            spacing,
+                        )
+                        .with_output_path(root.join("stage"), "linear-pattern.brep")
+                        .with_feature_id(feature_id);
+                        request
+                            .validate()
+                            .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        let derived = self.stage_occt_result::<LinearPatternResult>(
+                            &root,
+                            &request,
+                            threeterm_occt_worker::Operation::LinearPattern,
+                            &worker,
+                        )?;
+                        let (snapshot, result, artifact) =
+                            self.promote_occt_result(&root, derived)?;
+                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                    }
+                    CIRCULAR_PATTERN_COMMAND_ID => {
+                        let axis_point = serde_json::from_value(array_field("axis_point")?)
+                            .map_err(|error| HostError::Validation {
+                                detail: format!("invalid circular pattern axis_point: {error}"),
+                            })?;
+                        let axis_normal = serde_json::from_value(array_field("axis_normal")?)
+                            .map_err(|error| HostError::Validation {
+                                detail: format!("invalid circular pattern axis_normal: {error}"),
+                            })?;
+                        let angle_step = request
+                            .get("angle_step")
+                            .and_then(serde_json::Value::as_f64)
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "invalid circular pattern angle_step".to_string(),
+                            })?;
+                        let count = request
+                            .get("count")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "invalid circular pattern count".to_string(),
+                            })?;
+                        let request = CircularPatternRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            axis_point,
+                            axis_normal,
+                            angle_step,
+                            count,
+                        )
+                        .with_output_path(root.join("stage"), "circular-pattern.brep")
+                        .with_feature_id(feature_id);
+                        request
+                            .validate()
+                            .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        let derived = self.stage_occt_result::<CircularPatternResult>(
+                            &root,
+                            &request,
+                            threeterm_occt_worker::Operation::CircularPattern,
+                            &worker,
+                        )?;
+                        let (snapshot, result, artifact) =
+                            self.promote_occt_result(&root, derived)?;
+                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!("non-transform command passed to transform executor"),
+        }
+    }
+
     /// Execute the migrated versioned domain commands behind one semantic
     /// boundary. Transport adapters may frame or render the result, but they
     /// do not validate or implement these commands independently.
@@ -1928,6 +2172,12 @@ impl Host {
                         },
                         "schema_version": find(command).expect("extrude is registered").response_schema_version,
                     }))
+                }
+                REVOLVE_COMMAND_ID
+                | MIRROR_COMMAND_ID
+                | LINEAR_PATTERN_COMMAND_ID
+                | CIRCULAR_PATTERN_COMMAND_ID => {
+                    self.execute_canonical_occt_command(command, &request)
                 }
                 BOOLEAN_PATTERN_COMMAND_ID => {
                     let origin: [f64; 3] =
@@ -2922,6 +3172,289 @@ impl Host {
                 input_fingerprint,
                 geometry_fingerprint,
             });
+        }
+
+        if matches!(
+            command,
+            REVOLVE_COMMAND_ID
+                | MIRROR_COMMAND_ID
+                | LINEAR_PATTERN_COMMAND_ID
+                | CIRCULAR_PATTERN_COMMAND_ID
+        ) {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+            if let Some(expected_revision) = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str)
+                && current.revision_hash != expected_revision
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "{} source revision {expected_revision:?} does not match current revision {:?}",
+                        command.0, current.revision_hash
+                    ),
+                }));
+            }
+            let feature_id = request
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+            if !valid_feature_path_component(feature_id) {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: "feature IDs must be plain path components".to_string(),
+                }));
+            }
+            let root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+            let worker = OcctWorker::locate().map_err(|error| {
+                ExecutionError::Handler(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            let expected_revision = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str);
+            let preview = match command {
+                REVOLVE_COMMAND_ID => {
+                    let profile =
+                        serde_json::from_value(request.get("profile").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing profile".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve profile: {error}"),
+                            })
+                        })?;
+                    let axis_point =
+                        serde_json::from_value(request.get("axis_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve axis_point: {error}"),
+                            })
+                        })?;
+                    let axis_direction =
+                        serde_json::from_value(request.get("axis_direction").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_direction".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve axis_direction: {error}"),
+                            })
+                        })?;
+                    let angle = request
+                        .get("angle")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing angle".to_string())
+                        })?;
+                    let typed = RevolveRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        profile,
+                        axis_point,
+                        axis_direction,
+                        angle,
+                    )
+                    .with_output_path(root.join("stage"), "revolve.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, RevolveResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::Revolve,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                MIRROR_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let plane_point =
+                        serde_json::from_value(request.get("plane_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing plane_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid mirror plane_point: {error}"),
+                            })
+                        })?;
+                    let plane_normal =
+                        serde_json::from_value(request.get("plane_normal").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing plane_normal".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid mirror plane_normal: {error}"),
+                            })
+                        })?;
+                    let typed = MirrorRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        plane_point,
+                        plane_normal,
+                    )
+                    .with_output_path(root.join("stage"), "mirror.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, MirrorResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::Mirror,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                LINEAR_PATTERN_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let direction =
+                        serde_json::from_value(request.get("direction").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing direction".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid linear pattern direction: {error}"),
+                            })
+                        })?;
+                    let count = request
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing count".to_string())
+                        })?;
+                    let spacing = request
+                        .get("spacing")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing spacing".to_string())
+                        })?;
+                    let typed = LinearPatternRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        direction,
+                        count,
+                        spacing,
+                    )
+                    .with_output_path(root.join("stage"), "linear-pattern.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, LinearPatternResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::LinearPattern,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                CIRCULAR_PATTERN_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let axis_point =
+                        serde_json::from_value(request.get("axis_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid circular pattern axis_point: {error}"),
+                            })
+                        })?;
+                    let axis_normal =
+                        serde_json::from_value(request.get("axis_normal").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_normal".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid circular pattern axis_normal: {error}"),
+                            })
+                        })?;
+                    let angle_step = request
+                        .get("angle_step")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing angle_step".to_string())
+                        })?;
+                    let count = request
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing count".to_string())
+                        })?;
+                    let typed = CircularPatternRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        axis_point,
+                        axis_normal,
+                        angle_step,
+                        count,
+                    )
+                    .with_output_path(root.join("stage"), "circular-pattern.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, CircularPatternResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::CircularPattern,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                _ => unreachable!(),
+            }?;
+            return Ok(preview);
         }
 
         if command != EXTRUDE_COMMAND_ID {
@@ -4126,7 +4659,7 @@ impl Host {
     }
 
     /// Open a bundle through the production reload path, replaying canonical
-    /// extrude intent when its disposable results are missing.
+    /// intent when disposable BREP results are missing.
     pub fn load_with_extrude_replay(
         &self,
         root: impl AsRef<Path>,
@@ -4161,52 +4694,1089 @@ impl Host {
             return Ok(view);
         }
         let worker = OcctWorker::locate().map_err(HostError::from)?;
-        Ok(self.reload_and_recompute_geometry(root, &worker)?.snapshot)
+        Ok(self
+            .reload_and_recompute_canonical_intents(root, &worker)?
+            .snapshot)
     }
 
-    /// Reload canonical extrude intents and rebuild their disposable BREP
-    /// results. Replay never appends a transaction or changes the revision.
+    /// Keep the historical API name for callers that only know about extrude;
+    /// the implementation now replays every canonical geometry intent.
     pub fn reload_and_recompute_extrudes(
         &self,
         root: impl AsRef<Path>,
         worker: &OcctWorker,
     ) -> Result<ExtrudeReplayView, HostError> {
-        let replayed = self.reload_and_recompute_geometry(root.as_ref(), worker)?;
-        // The extrude-only view is the geometry replay restricted to extrude
-        // intents; geometry order preserves log order so extrude entries keep
-        // their relative positions.
-        let loaded = Bundle::at(root.as_ref()).open()?;
-        let extrude_ids: std::collections::HashSet<String> = loaded
-            .log
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry.intent.as_ref() {
-                Some(CanonicalIntent::Extrude(extrude)) => {
-                    extrude.affected_semantic_ids.first().cloned()
-                }
-                _ => None,
-            })
-            .collect();
+        match self.reload_and_recompute_canonical_intents(root.as_ref(), worker) {
+            Err(error)
+                if matches!(
+                    &error,
+                    HostError::DerivedResult { diagnostic }
+                        if diagnostic.arg == "expected_exactly_one_artifact"
+                ) =>
+            {
+                self.reload_extrudes_without_artifact_protocol(root.as_ref(), worker)
+            }
+            result => result,
+        }
+    }
+
+    fn reload_extrudes_without_artifact_protocol(
+        &self,
+        root: &Path,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeReplayView, HostError> {
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        let model_state = canonical_model_fingerprint(&loaded);
         let mut feature_ids = Vec::new();
         let mut geometry_fingerprints = Vec::new();
-        for (index, feature_id) in replayed.feature_ids.iter().enumerate() {
-            if extrude_ids.contains(feature_id) {
-                feature_ids.push(feature_id.clone());
-                geometry_fingerprints.push(replayed.geometry_fingerprints[index].clone());
+        for entry in loaded.log.entries() {
+            let Some(CanonicalIntent::Extrude(intent)) = entry.intent.as_ref() else {
+                continue;
+            };
+            let feature_id = intent
+                .affected_semantic_ids
+                .first()
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "extrude intent has no affected feature".to_string(),
+                })?;
+            let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create extrude replay stage failed: {error}"),
+                }
+            })?;
+            let stage_root = stage.root().to_path_buf();
+            let target_path = if let Some(target_id) = &intent.target_feature_id {
+                Some(authenticated_base_brep(root, target_id)?)
+            } else {
+                None
+            };
+            let request = ExtrudeRequest::new(
+                intent.request_id.clone(),
+                intent
+                    .deterministic_inputs
+                    .profile
+                    .iter()
+                    .map(|[x, y]| (*x, *y))
+                    .collect(),
+                intent.deterministic_inputs.height,
+            )
+            .with_mode(parse_extrude_mode_value(if intent.mode.is_empty() {
+                &intent.operation
+            } else {
+                &intent.mode
+            })?)
+            .with_optional_target_feature_id(intent.target_feature_id.clone())
+            .with_optional_target_path(target_path)
+            .with_output_path(&stage_root, "replay.brep.partial")
+            .with_feature_id(&feature_id);
+            let mut artifact_request = extrude_artifact_request(&request, &source_snapshot)?;
+            artifact_request.source_revision_id = intent.source_revision.clone();
+            artifact_request.staging_name = "replay.brep".to_string();
+            let request = request.with_artifact_request(artifact_request);
+            let result = worker
+                .clone()
+                .with_expected_worker_id("occt")
+                .with_revision_id(intent.source_revision.clone())
+                .extrude(&request)
+                .map_err(HostError::from)?;
+            if result.schema_version != expected_occt_worker_fingerprint().worker_schema_version {
+                let _ = stage.discard();
+                return Err(HostError::WorkerUnavailable {
+                    detail: format!(
+                        "incompatible extrude worker schema: {}",
+                        result.schema_version
+                    ),
+                });
             }
+            if result.source_revision_id.as_deref() != Some(intent.source_revision.as_str()) {
+                let _ = stage.discard();
+                return Err(HostError::WorkerUnavailable {
+                    detail: "incompatible extrude source revision".to_string(),
+                });
+            }
+            let bytes = read_brep_verified(
+                &result.brep_path,
+                Some((result.brep_bytes, &result.brep_sha256)),
+            )
+            .map_err(|detail| HostError::BrepIo { detail })?;
+            let path = Bundle::at(root).restore_derived_brep_if_revision(
+                &feature_id,
+                &source_snapshot.revision_hash,
+                &bytes,
+            )?;
+            stage.discard().map_err(|error| HostError::BrepIo {
+                detail: format!("discard extrude replay stage failed: {error}"),
+            })?;
+            feature_ids.push(feature_id);
+            geometry_fingerprints.push(sha256_path(&path).map_err(|error| HostError::BrepIo {
+                detail: format!("hash replayed BREP failed: {error}"),
+            })?);
         }
+        let reloaded = Bundle::at(root).open()?;
+        if canonical_model_fingerprint(&reloaded) != model_state {
+            return Err(HostError::Validation {
+                detail: "extrude replay changed the canonical model state".to_string(),
+            });
+        }
+        let snapshot = SnapshotView::from(&reloaded);
+        self.current.replace(Some(reloaded));
         Ok(ExtrudeReplayView {
-            snapshot: replayed.snapshot,
-            model_state_fingerprint: replayed.model_state_fingerprint,
+            snapshot,
+            model_state_fingerprint: model_state,
             recomputed: feature_ids.len(),
             feature_ids,
             geometry_fingerprints,
         })
     }
 
-    /// Reload canonical Boolean intents and rebuild their disposable BREP
-    /// results in log order. Replay never appends a transaction or changes
-    /// the revision.
+    /// Reload canonical geometry intents and rebuild their disposable BREP
+    /// results. Replay never appends a transaction or changes the revision.
+    pub fn reload_and_recompute_canonical_intents(
+        &self,
+        root: impl AsRef<Path>,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeReplayView, HostError> {
+        self.reload_and_recompute_geometry(root, worker)
+    }
+
+    /// Reload all canonical geometry intents in log order.
+    pub fn reload_and_recompute_geometry(
+        &self,
+        root: impl AsRef<Path>,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeReplayView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        let source_model_state = canonical_model_fingerprint(&loaded);
+        let intents = loaded
+            .log
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.intent.clone())
+            .collect::<Vec<_>>();
+        let mut feature_ids = Vec::with_capacity(intents.len());
+        let mut geometry_fingerprints = Vec::with_capacity(intents.len());
+        let mut replayed_paths: HashMap<String, PathBuf> = HashMap::with_capacity(intents.len());
+        for intent in intents {
+            let expected_worker = expected_occt_worker_fingerprint();
+            if intent.worker_requirements() != &expected_worker {
+                return Err(HostError::WorkerUnavailable {
+                    detail: format!(
+                        "incompatible {} worker requirements: expected {expected_worker:?}, found {:?}",
+                        intent.command(),
+                        intent.worker_requirements()
+                    ),
+                });
+            }
+            let feature_id = intent
+                .affected_semantic_ids()
+                .first()
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("{} intent has no affected feature", intent.command()),
+                })?;
+            if !loaded.graph.contains_feature(&feature_id) {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "{} replay feature is not in the Revision Snapshot: {feature_id}",
+                        intent.command()
+                    ),
+                });
+            }
+            let base_path = if let Some(base_feature_id) = intent.base_reference() {
+                if let Some(path) = replayed_paths.get(base_feature_id) {
+                    path.clone()
+                } else {
+                    authenticated_base_brep(root, base_feature_id)?
+                }
+            } else {
+                PathBuf::new()
+            };
+            let (path, fingerprint) = match &intent {
+                CanonicalIntent::Extrude(inner) => {
+                    let request = ExtrudeRequest::new(
+                        inner.request_id.clone(),
+                        inner
+                            .deterministic_inputs
+                            .profile
+                            .iter()
+                            .map(|[x, y]| (*x, *y))
+                            .collect(),
+                        inner.deterministic_inputs.height,
+                    )
+                    .with_mode(parse_extrude_mode_value(if inner.mode.is_empty() {
+                        &inner.operation
+                    } else {
+                        &inner.mode
+                    })?)
+                    .with_optional_target_feature_id(inner.target_feature_id.clone())
+                    .with_optional_target_path(
+                        (!base_path.as_os_str().is_empty()).then_some(base_path),
+                    )
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<ExtrudeResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Extrude,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::Revolve(inner) => {
+                    let request = RevolveRequest::new(
+                        inner.request_id.clone(),
+                        inner
+                            .deterministic_inputs
+                            .profile
+                            .iter()
+                            .map(|[x, y]| (*x, *y))
+                            .collect(),
+                        inner.deterministic_inputs.axis_point,
+                        inner.deterministic_inputs.axis_direction,
+                        inner.deterministic_inputs.angle,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<RevolveResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Revolve,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::Mirror(inner) => {
+                    let request = MirrorRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.deterministic_inputs.plane_point,
+                        inner.deterministic_inputs.plane_normal,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<MirrorResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Mirror,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::LinearPattern(inner) => {
+                    let request = LinearPatternRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.deterministic_inputs.direction,
+                        inner.deterministic_inputs.count,
+                        inner.deterministic_inputs.spacing,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<LinearPatternResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::LinearPattern,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::CircularPattern(inner) => {
+                    let request = CircularPatternRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.deterministic_inputs.axis_point,
+                        inner.deterministic_inputs.axis_normal,
+                        inner.deterministic_inputs.angle_step,
+                        inner.deterministic_inputs.count,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<CircularPatternResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::CircularPattern,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::Boolean(inner) => {
+                    let tool_path = if let Some(path) = replayed_paths.get(&inner.tool_feature_id) {
+                        path.clone()
+                    } else {
+                        authenticated_base_brep(root, &inner.tool_feature_id)?
+                    };
+                    match inner.operation.as_str() {
+                        "fuse" => {
+                            let request = BooleanFuseRequest::new(
+                                inner.request_id.clone(),
+                                &base_path,
+                                &tool_path,
+                            )
+                            .with_output_path(root.join("stage"), "replay.brep")
+                            .with_feature_id(&feature_id);
+                            let derived = self
+                                .stage_occt_result_for_revision::<BooleanFuseResult>(
+                                    root,
+                                    &request,
+                                    threeterm_occt_worker::Operation::BooleanFuse,
+                                    worker,
+                                    &inner.source_revision,
+                                )?;
+                            self.restore_replayed_occt_result(
+                                root,
+                                &source_snapshot,
+                                &feature_id,
+                                derived,
+                            )?
+                        }
+                        "cut" => {
+                            let request = BooleanCutRequest::new(
+                                inner.request_id.clone(),
+                                &base_path,
+                                &tool_path,
+                            )
+                            .with_output_path(root.join("stage"), "replay.brep")
+                            .with_feature_id(&feature_id);
+                            let derived = self.stage_occt_result_for_revision::<BooleanCutResult>(
+                                root,
+                                &request,
+                                threeterm_occt_worker::Operation::BooleanCut,
+                                worker,
+                                &inner.source_revision,
+                            )?;
+                            self.restore_replayed_occt_result(
+                                root,
+                                &source_snapshot,
+                                &feature_id,
+                                derived,
+                            )?
+                        }
+                        "common" => {
+                            let request = BooleanCommonRequest::new(
+                                inner.request_id.clone(),
+                                &base_path,
+                                &tool_path,
+                            )
+                            .with_output_path(root.join("stage"), "replay.brep")
+                            .with_feature_id(&feature_id);
+                            let derived = self
+                                .stage_occt_result_for_revision::<BooleanCommonResult>(
+                                    root,
+                                    &request,
+                                    threeterm_occt_worker::Operation::BooleanCommon,
+                                    worker,
+                                    &inner.source_revision,
+                                )?;
+                            self.restore_replayed_occt_result(
+                                root,
+                                &source_snapshot,
+                                &feature_id,
+                                derived,
+                            )?
+                        }
+                        operation => {
+                            return Err(HostError::Validation {
+                                detail: format!("unknown boolean replay operation: {operation}"),
+                            });
+                        }
+                    }
+                }
+                CanonicalIntent::Hole(inner) => {
+                    let mut request = HoleRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.deterministic_inputs.position,
+                        inner.deterministic_inputs.direction,
+                        inner.deterministic_inputs.diameter,
+                    )
+                    .with_hole_kind(inner.hole_kind.clone())
+                    .with_base_feature_id(inner.base_feature_id.clone())
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    if inner.hole_kind == "tapped" {
+                        request = request.with_thread(
+                            inner
+                                .deterministic_inputs
+                                .thread_designation
+                                .clone()
+                                .unwrap_or_default(),
+                            inner.deterministic_inputs.thread_pitch.unwrap_or_default(),
+                            inner.deterministic_inputs.thread_depth.unwrap_or_default(),
+                        );
+                    }
+                    let derived = self.stage_occt_result_for_revision::<HoleResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Hole,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                }
+                CanonicalIntent::Fillet(_)
+                | CanonicalIntent::Chamfer(_)
+                | CanonicalIntent::Shell(_)
+                | CanonicalIntent::Draft(_)
+                | CanonicalIntent::Loft(_) => {
+                    return Err(HostError::Validation {
+                        detail: "finishing intent replay is unavailable in this path".to_string(),
+                    });
+                }
+            };
+            replayed_paths.insert(feature_id.clone(), path.clone());
+            feature_ids.push(feature_id);
+            geometry_fingerprints.push(fingerprint);
+            /*
+                           let expected_worker = expected_occt_worker_fingerprint();
+                           if intent.worker_requirements != expected_worker {
+                               return Err(HostError::WorkerUnavailable {
+                                   detail: format!(
+                                       "incompatible extrude worker requirements: expected {expected_worker:?}, found {:?}",
+                                       intent.worker_requirements
+                                   ),
+                               });
+                           }
+                           let feature_id = intent
+                               .affected_semantic_ids
+                               .first()
+                               .cloned()
+                               .ok_or_else(|| HostError::Validation {
+                                   detail: "extrude intent has no affected feature".to_string(),
+                               })?;
+                           if !loaded.graph.contains_feature(&feature_id) {
+                               return Err(HostError::Validation {
+                                   detail: format!(
+                                       "extrude replay feature is not in the Revision Snapshot: {feature_id}"
+                                   ),
+                               });
+                           }
+                           let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                               HostError::BrepIo {
+                                   detail: format!("create extrude replay stage failed: {error}"),
+                               }
+                           })?;
+                           let stage_root = stage.root().to_path_buf();
+                           let request = ExtrudeRequest::new(
+                               intent.request_id.clone(),
+                               intent
+                                   .deterministic_inputs
+                                   .profile
+                                   .iter()
+                                   .map(|[x, y]| (*x, *y))
+                                   .collect(),
+                               intent.deterministic_inputs.height,
+                           )
+                           .with_mode(parse_extrude_mode_value(if intent.mode.is_empty() {
+                               &intent.operation
+                           } else {
+                               &intent.mode
+                           })?)
+                           .with_optional_target_feature_id(intent.target_feature_id.clone())
+                           .with_output_path(&stage_root, "replay.brep.partial")
+                           .with_feature_id(&feature_id);
+                           let target_path = if let Some(target_feature_id) = &intent.target_feature_id {
+                               let path = replayed_paths
+                                   .get(target_feature_id)
+                                   .cloned()
+                                   .unwrap_or_else(|| {
+                                       root.join(BREP_SUBDIR)
+                                           .join(format!("{target_feature_id}.brep"))
+                                   });
+                               if !path.is_file() {
+                                   let _ = stage.discard();
+                                   return Err(HostError::BrepFileMissing { path });
+                               }
+                               let target_entry = loaded
+                                   .log
+                                   .entries()
+                                   .iter()
+                                   .rev()
+                                   .find(|entry| {
+                                       entry.feature_id == *target_feature_id
+                                           && entry.brep_byte_count.is_some()
+                                           && entry.brep_sha256.is_some()
+                                   })
+                                   .ok_or_else(|| HostError::Validation {
+                                       detail: format!(
+                                           "extrude replay target has no authenticated geometry: {target_feature_id}"
+                                       ),
+                                   })?;
+                               let expected_bytes = target_entry
+                                   .brep_byte_count
+                                   .and_then(|value| usize::try_from(value).ok())
+                                   .ok_or_else(|| HostError::BrepIo {
+                                       detail: "extrude replay target BREP byte count is invalid".to_string(),
+                                   })?;
+                               let expected_sha256 =
+                                   target_entry
+                                       .brep_sha256
+                                       .as_deref()
+                                       .ok_or_else(|| HostError::BrepIo {
+                                           detail: "extrude replay target BREP digest is missing".to_string(),
+                                       })?;
+                               read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                                   .map_err(|detail| HostError::BrepIo { detail })?;
+                               Some(path)
+                           } else {
+                               None
+                           };
+                           let request = request.with_optional_target_path(target_path);
+                           let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
+                           binding.source_revision_id = intent.source_revision.clone();
+                           binding.staging_name = "replay.brep".to_string();
+                           let request = request.with_artifact_request(binding);
+                           let result = worker
+                               .clone()
+                               .with_expected_worker_id("occt")
+                               .with_revision_id(intent.source_revision.clone())
+                               .extrude(&request)
+                               .map_err(HostError::from);
+                           let result = match result {
+                               Ok(result) => result,
+                               Err(error) => {
+                                   let _ = stage.discard();
+                                   return Err(error);
+                           match intent {
+                               CanonicalIntent::Extrude(extrude) => {
+                                   let expected_worker = expected_occt_worker_fingerprint();
+                                   if extrude.worker_requirements != expected_worker {
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible extrude worker requirements: expected {expected_worker:?}, found {:?}",
+                                               extrude.worker_requirements
+                                           ),
+                                       });
+                                   }
+                                   let feature_id =
+                                       extrude
+                                           .affected_semantic_ids
+                                           .first()
+                                           .cloned()
+                                           .ok_or_else(|| HostError::Validation {
+                                               detail: "extrude intent has no affected feature".to_string(),
+                                           })?;
+                                   if !loaded.graph.contains_feature(&feature_id) {
+                                       return Err(HostError::Validation {
+                                           detail: format!(
+                                               "extrude replay feature is not in the Revision Snapshot: {feature_id}"
+                                           ),
+                                       });
+                                   }
+                                   let stage =
+                                       Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                                           HostError::BrepIo {
+                                               detail: format!("create extrude replay stage failed: {error}"),
+                                           }
+                                       })?;
+                                   let stage_root = stage.root().to_path_buf();
+                                   let request = ExtrudeRequest::new(
+                                       extrude.request_id.clone(),
+                                       extrude
+                                           .deterministic_inputs
+                                           .profile
+                                           .iter()
+                                           .map(|[x, y]| (*x, *y))
+                                           .collect(),
+                                       extrude.deterministic_inputs.height,
+                                   )
+                                   .with_mode(parse_extrude_mode_value(if extrude.mode.is_empty() {
+                                       &extrude.operation
+                                   } else {
+                                       &extrude.mode
+                                   })?)
+                                   .with_optional_target_feature_id(extrude.target_feature_id.clone())
+                                   .with_output_path(&stage_root, "replay.brep.partial")
+                                   .with_feature_id(&feature_id);
+                                   let target_path = if let Some(target_feature_id) = &extrude.target_feature_id {
+                                       let path = replayed_paths
+                                           .get(target_feature_id)
+                                           .cloned()
+                                           .unwrap_or_else(|| {
+                                               root.join(BREP_SUBDIR)
+                                                   .join(format!("{target_feature_id}.brep"))
+                                           });
+                                       if !path.is_file() {
+                                           let _ = stage.discard();
+                                           return Err(HostError::BrepFileMissing { path });
+                                       }
+                                       let target_entry = loaded
+                                   .log
+                                   .entries()
+                                   .iter()
+                                   .rev()
+                                   .find(|entry| {
+                                       entry.feature_id == *target_feature_id
+                                           && entry.brep_byte_count.is_some()
+                                           && entry.brep_sha256.is_some()
+                                   })
+                                   .ok_or_else(|| HostError::Validation {
+                                       detail: format!(
+                                           "extrude replay target has no authenticated geometry: {target_feature_id}"
+                                       ),
+                                   })?;
+                                       let expected_bytes = target_entry
+                                           .brep_byte_count
+                                           .and_then(|value| usize::try_from(value).ok())
+                                           .ok_or_else(|| HostError::BrepIo {
+                                               detail: "extrude replay target BREP byte count is invalid"
+                                                   .to_string(),
+                                           })?;
+                                       let expected_sha256 =
+                                           target_entry.brep_sha256.as_deref().ok_or_else(|| {
+                                               HostError::BrepIo {
+                                                   detail: "extrude replay target BREP digest is missing"
+                                                       .to_string(),
+                                               }
+                                           })?;
+                                       read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                                           .map_err(|detail| HostError::BrepIo { detail })?;
+                                       Some(path)
+                                   } else {
+                                       None
+                                   };
+                                   let request = request.with_optional_target_path(target_path);
+                                   let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
+                                   binding.source_revision_id = extrude.source_revision.clone();
+                                   binding.staging_name = "replay.brep".to_string();
+                                   let request = request.with_artifact_request(binding);
+                                   let result = worker
+                                       .clone()
+                                       .with_expected_worker_id("occt")
+                                       .with_revision_id(extrude.source_revision.clone())
+                                       .extrude(&request)
+                                       .map_err(HostError::from);
+                                   let result = match result {
+                                       Ok(result) => result,
+                                       Err(error) => {
+                                           let _ = stage.discard();
+                                           return Err(error);
+                                       }
+                                   };
+                                   if result.schema_version != expected_worker.worker_schema_version {
+                                       let _ = stage.discard();
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible extrude worker schema: expected {:?}, found {:?}",
+                                               expected_worker.worker_schema_version, result.schema_version
+                                           ),
+                                       });
+                                   }
+                                   let bytes = match read_brep_verified(
+                                       &result.brep_path,
+                                       Some((result.brep_bytes, &result.brep_sha256)),
+                                   ) {
+                                       Ok(bytes) => bytes,
+                                       Err(detail) => {
+                                           let _ = stage.discard();
+                                           return Err(HostError::BrepIo { detail });
+                                       }
+                                   };
+                                   if result.source_revision_id.as_deref()
+                                       != Some(extrude.source_revision.as_str())
+                                   {
+                                       let _ = stage.discard();
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible extrude source revision: expected {:?}, found {:?}",
+                                               extrude.source_revision, result.source_revision_id
+                                           ),
+                                       });
+                                   }
+                                   let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                                       &feature_id,
+                                       &source_snapshot.revision_hash,
+                                       &bytes,
+                                   ) {
+                                       Ok(path) => path,
+                                       Err(error) => {
+                                           let _ = stage.discard();
+                                           return Err(error.into());
+                                       }
+                                   };
+                                   let _ = stage.discard();
+                                   replayed_paths.insert(feature_id.clone(), path.clone());
+                                   feature_ids.push(feature_id);
+            geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                                       HostError::BrepIo {
+                                           detail: format!("hash replayed BREP failed: {error}"),
+                                       }
+                                   })?);
+                               }
+                               CanonicalIntent::Boolean(boolean) => {
+                                   let expected_worker = expected_occt_worker_fingerprint();
+                                   if boolean.worker_requirements != expected_worker {
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible boolean worker requirements: expected {expected_worker:?}, found {:?}",
+                                               boolean.worker_requirements
+                                           ),
+                                       });
+                                   }
+                                   let feature_id =
+                                       boolean
+                                           .affected_semantic_ids
+                                           .first()
+                                           .cloned()
+                                           .ok_or_else(|| HostError::Validation {
+                                               detail: "boolean intent has no affected feature".to_string(),
+                                           })?;
+                                   if !loaded.graph.contains_feature(&feature_id) {
+                                       return Err(HostError::Validation {
+                                           detail: format!(
+                                               "boolean replay feature is not in the Revision Snapshot: {feature_id}"
+                                           ),
+                                       });
+                                   }
+                                   // Operands precede the boolean in log order, so a replayed
+                                   // operand path wins over the on-disk file.
+                                   let operand_path = |operand_id: &str| -> Result<PathBuf, HostError> {
+                                       if let Some(path) = replayed_paths.get(operand_id) {
+                                           return Ok(path.clone());
+                                       }
+                                       let path = root.join(BREP_SUBDIR).join(format!("{operand_id}.brep"));
+                                       if !path.is_file() {
+                                           return Err(HostError::BrepFileMissing { path });
+                                       }
+                                       let entry = loaded
+                                           .log
+                                           .entries()
+                                           .iter()
+                                           .rev()
+                                           .find(|entry| {
+                                               entry.feature_id == operand_id
+                                                   && entry.brep_byte_count.is_some()
+                                                   && entry.brep_sha256.is_some()
+                                           })
+                                           .ok_or_else(|| HostError::Validation {
+                                               detail: format!(
+                                                   "boolean replay operand has no authenticated geometry: {operand_id}"
+                                               ),
+                                           })?;
+                                       let expected_bytes = entry
+                                           .brep_byte_count
+                                           .and_then(|value| usize::try_from(value).ok())
+                                           .ok_or_else(|| HostError::BrepIo {
+                                               detail: "boolean replay operand BREP byte count is invalid"
+                                                   .to_string(),
+                                           })?;
+                                       let expected_sha256 =
+                                           entry
+                                               .brep_sha256
+                                               .as_deref()
+                                               .ok_or_else(|| HostError::BrepIo {
+                                                   detail: "boolean replay operand BREP digest is missing"
+                                                       .to_string(),
+                                               })?;
+                                       read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                                           .map_err(|detail| HostError::BrepIo { detail })?;
+                                       Ok(path)
+                                   };
+                                   let base_path = operand_path(&boolean.base_feature_id)?;
+                                   let tool_path = operand_path(&boolean.tool_feature_id)?;
+                                   let stage =
+                                       Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                                           HostError::BrepIo {
+                                               detail: format!("create boolean replay stage failed: {error}"),
+                                           }
+                                       })?;
+                                   let stage_root = stage.root().to_path_buf();
+                                   // Run the worker without capturing `stage` in closures:
+                                   // every failure path discards explicitly, mirroring the
+                                   // extrude replay arm above.
+                                   let run_replay =
+                                       |operation: &str| -> Result<(Vec<u8>, String, usize), HostError> {
+                                           let invoke = |brep_path: &std::path::Path,
+                                                     brep_bytes: usize,
+                                                     brep_sha256: &str,
+                                                     schema_version: &str|
+                                        -> Result<(Vec<u8>, String, usize), HostError> {
+                                           if schema_version != expected_worker.worker_schema_version {
+                                               return Err(HostError::WorkerUnavailable {
+                                                   detail: format!(
+                                                       "incompatible boolean worker schema: expected {:?}, found {:?}",
+                                                       expected_worker.worker_schema_version, schema_version
+                                                   ),
+                                               });
+                                           }
+                                           let bytes = read_brep_verified(
+                                               brep_path,
+                                               Some((brep_bytes, brep_sha256)),
+                                           )
+                                           .map_err(|detail| HostError::BrepIo { detail })?;
+                                           Ok((bytes, brep_sha256.to_string(), brep_bytes))
+                                       };
+                                           match operation {
+                                               "fuse" => {
+                                                   let request = BooleanFuseRequest::new(
+                                                       boolean.request_id.clone(),
+                                                       &base_path,
+                                                       &tool_path,
+                                                   )
+                                                   .with_output_path(&stage_root, "replay.brep.partial")
+                                                   .with_feature_id(&feature_id);
+                                                   let result = worker
+                                                       .clone()
+                                                       .with_expected_worker_id("occt")
+                                                       .with_revision_id(boolean.source_revision.clone())
+                                                       .boolean_fuse(&request)
+                                                       .map_err(HostError::from)?;
+                                                   invoke(
+                                                       &result.brep_path,
+                                                       result.brep_bytes,
+                                                       &result.brep_sha256,
+                                                       &result.schema_version,
+                                                   )
+                                               }
+                                               "cut" => {
+                                                   let request = BooleanCutRequest::new(
+                                                       boolean.request_id.clone(),
+                                                       &base_path,
+                                                       &tool_path,
+                                                   )
+                                                   .with_output_path(&stage_root, "replay.brep.partial")
+                                                   .with_feature_id(&feature_id);
+                                                   let result = worker
+                                                       .clone()
+                                                       .with_expected_worker_id("occt")
+                                                       .with_revision_id(boolean.source_revision.clone())
+                                                       .boolean_cut(&request)
+                                                       .map_err(HostError::from)?;
+                                                   invoke(
+                                                       &result.brep_path,
+                                                       result.brep_bytes,
+                                                       &result.brep_sha256,
+                                                       &result.schema_version,
+                                                   )
+                                               }
+                                               "common" => {
+                                                   let request = BooleanCommonRequest::new(
+                                                       boolean.request_id.clone(),
+                                                       &base_path,
+                                                       &tool_path,
+                                                   )
+                                                   .with_output_path(&stage_root, "replay.brep.partial")
+                                                   .with_feature_id(&feature_id);
+                                                   let result = worker
+                                                       .clone()
+                                                       .with_expected_worker_id("occt")
+                                                       .with_revision_id(boolean.source_revision.clone())
+                                                       .boolean_common(&request)
+                                                       .map_err(HostError::from)?;
+                                                   invoke(
+                                                       &result.brep_path,
+                                                       result.brep_bytes,
+                                                       &result.brep_sha256,
+                                                       &result.schema_version,
+                                                   )
+                                               }
+                                               other => Err(HostError::Validation {
+                                                   detail: format!("unknown boolean replay operation: {other}"),
+                                               }),
+                                           }
+                                       };
+                                   let (bytes, _result_sha, _result_bytes) =
+                                       match run_replay(boolean.operation.as_str()) {
+                                           Ok(replayed) => replayed,
+                                           Err(error) => {
+                                               let _ = stage.discard();
+                                               return Err(error);
+                                           }
+                                       };
+                                   let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                                       &feature_id,
+                                       &source_snapshot.revision_hash,
+                                       &bytes,
+                                   ) {
+                                       Ok(path) => path,
+                                       Err(error) => {
+                                           let _ = stage.discard();
+                                           return Err(error.into());
+                                       }
+                                   };
+                                   let _ = stage.discard();
+                                   replayed_paths.insert(feature_id.clone(), path.clone());
+                                   feature_ids.push(feature_id);
+                                   geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                                       HostError::BrepIo {
+                                           detail: format!("hash replayed BREP failed: {error}"),
+                                       }
+                                   })?);
+                               }
+                               CanonicalIntent::Hole(hole) => {
+                                   let expected_worker = expected_occt_worker_fingerprint();
+                                   if hole.worker_requirements != expected_worker {
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible hole worker requirements: expected {expected_worker:?}, found {:?}",
+                                               hole.worker_requirements
+                                           ),
+                                       });
+                                   }
+                                   let feature_id =
+                                       hole.affected_semantic_ids.first().cloned().ok_or_else(|| {
+                                           HostError::Validation {
+                                               detail: "hole intent has no affected feature".to_string(),
+                                           }
+                                       })?;
+                                   if !loaded.graph.contains_feature(&feature_id) {
+                                       return Err(HostError::Validation {
+                                           detail: format!(
+                                               "hole replay feature is not in the Revision Snapshot: {feature_id}"
+                                           ),
+                                       });
+                                   }
+                                   let base_path = if let Some(path) = replayed_paths.get(&hole.base_feature_id) {
+                                       path.clone()
+                                   } else {
+                                       let path = root
+                                           .join(BREP_SUBDIR)
+                                           .join(format!("{}.brep", hole.base_feature_id));
+                                       if !path.is_file() {
+                                           return Err(HostError::BrepFileMissing { path });
+                                       }
+                                       let entry = loaded
+                                           .log
+                                           .entries()
+                                           .iter()
+                                           .rev()
+                                           .find(|entry| {
+                                               entry.feature_id == hole.base_feature_id
+                                                   && entry.brep_byte_count.is_some()
+                                                   && entry.brep_sha256.is_some()
+                                           })
+                                           .ok_or_else(|| HostError::Validation {
+                                               detail: format!(
+                                                   "hole replay base has no authenticated geometry: {}",
+                                                   hole.base_feature_id
+                                               ),
+                                           })?;
+                                       let expected_bytes = entry
+                                           .brep_byte_count
+                                           .and_then(|value| usize::try_from(value).ok())
+                                           .ok_or_else(|| HostError::BrepIo {
+                                               detail: "hole replay base BREP byte count is invalid".to_string(),
+                                           })?;
+                                       let expected_sha256 =
+                                           entry
+                                               .brep_sha256
+                                               .as_deref()
+                                               .ok_or_else(|| HostError::BrepIo {
+                                                   detail: "hole replay base BREP digest is missing".to_string(),
+                                               })?;
+                                       read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                                           .map_err(|detail| HostError::BrepIo { detail })?;
+                                       path
+                                   };
+                                   let stage =
+                                       Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                                           HostError::BrepIo {
+                                               detail: format!("create hole replay stage failed: {error}"),
+                                           }
+                                       })?;
+                                   let stage_root = stage.root().to_path_buf();
+                                   let mut request = HoleRequest::new(
+                                       hole.request_id.clone(),
+                                       &base_path,
+                                       hole.deterministic_inputs.position,
+                                       hole.deterministic_inputs.direction,
+                                       hole.deterministic_inputs.diameter,
+                                   )
+                                   .with_hole_kind(hole.hole_kind.clone())
+                                   .with_base_feature_id(hole.base_feature_id.clone())
+                                   .with_output_path(&stage_root, "replay.brep.partial")
+                                   .with_feature_id(&feature_id);
+                                   if hole.hole_kind == "tapped" {
+                                       request = request.with_thread(
+                                           hole.deterministic_inputs
+                                               .thread_designation
+                                               .clone()
+                                               .unwrap_or_default(),
+                                           hole.deterministic_inputs.thread_pitch.unwrap_or_default(),
+                                           hole.deterministic_inputs.thread_depth.unwrap_or_default(),
+                                       );
+                                   }
+                                   let result = worker
+                                       .clone()
+                                       .with_expected_worker_id("occt")
+                                       .with_revision_id(hole.source_revision.clone())
+                                       .hole(&request)
+                                       .map_err(HostError::from);
+                                   let result = match result {
+                                       Ok(result) => result,
+                                       Err(error) => {
+                                           let _ = stage.discard();
+                                           return Err(error);
+                                       }
+                                   };
+                                   if result.schema_version != expected_worker.worker_schema_version {
+                                       let _ = stage.discard();
+                                       return Err(HostError::WorkerUnavailable {
+                                           detail: format!(
+                                               "incompatible hole worker schema: expected {:?}, found {:?}",
+                                               expected_worker.worker_schema_version, result.schema_version
+                                           ),
+                                       });
+                                   }
+                                   let bytes = match read_brep_verified(
+                                       &result.brep_path,
+                                       Some((result.brep_bytes, result.brep_sha256.as_str())),
+                                   ) {
+                                       Ok(bytes) => bytes,
+                                       Err(detail) => {
+                                           let _ = stage.discard();
+                                           return Err(HostError::BrepIo { detail });
+                                       }
+                                   };
+                                   let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                                       &feature_id,
+                                       &source_snapshot.revision_hash,
+                                       &bytes,
+                                   ) {
+                                       Ok(path) => path,
+                                       Err(error) => {
+                                           let _ = stage.discard();
+                                           return Err(error.into());
+                                       }
+                                   };
+                                   let _ = stage.discard();
+                                   replayed_paths.insert(feature_id.clone(), path.clone());
+                                   feature_ids.push(feature_id);
+                                   geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                                       HostError::BrepIo {
+                                           detail: format!("hash replayed BREP failed: {error}"),
+                                       }
+                                   })?);
+                */
+        }
+        let reloaded = Bundle::at(root).open()?;
+        let snapshot = SnapshotView::from(&reloaded);
+        if snapshot.revision_hash != source_snapshot.revision_hash
+            || canonical_model_fingerprint(&reloaded) != source_model_state
+        {
+            return Err(HostError::Validation {
+                detail: "geometry replay changed the canonical model state".to_string(),
+            });
+        }
+        self.current.replace(Some(reloaded));
+        Ok(ExtrudeReplayView {
+            snapshot,
+            model_state_fingerprint: source_model_state,
+            recomputed: feature_ids.len(),
+            feature_ids,
+            geometry_fingerprints,
+        })
+    }
+
+    /// Preserve the Boolean-specific replay view while sharing the complete
+    /// canonical geometry replay implementation.
     pub fn reload_and_recompute_booleans(
         &self,
         root: impl AsRef<Path>,
@@ -4242,12 +5812,586 @@ impl Host {
         })
     }
 
-    /// Reload all canonical geometry intents (extrude and Boolean) in log
-    /// order and rebuild their disposable BREP results. Boolean intents
-    /// follow their operands topologically because the log is appended in
-    /// dependency order. Replay never appends a transaction or changes the
-    /// revision.
-    pub fn reload_and_recompute_geometry(
+    fn restore_replayed_occt_result<R>(
+        &self,
+        root: &Path,
+        source_snapshot: &SnapshotView,
+        feature_id: &str,
+        derived: StagedOcctResult<R>,
+    ) -> Result<(PathBuf, String), HostError>
+    where
+        R: Serialize,
+    {
+        let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
+        let cleanup = || {
+            if let Some(stage_root) = &stage_root {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+        };
+        let value =
+            serde_json::to_value(&derived.result).map_err(|error| HostError::Validation {
+                detail: format!("replayed OCCT result serialization failed: {error}"),
+            })?;
+        let path = value["brep_path"]
+            .as_str()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: "replayed OCCT result has no BREP path".to_string(),
+            })?;
+        let bytes = value["brep_bytes"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: "replayed OCCT result has an invalid BREP byte count".to_string(),
+            })?;
+        let sha = value["brep_sha256"]
+            .as_str()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: "replayed OCCT result has no BREP digest".to_string(),
+            })?;
+        let content = read_brep_verified(Path::new(path), Some((bytes, sha)))
+            .map_err(|detail| HostError::BrepIo { detail })?;
+        let restored = Bundle::at(root)
+            .restore_derived_brep_if_revision(feature_id, &source_snapshot.revision_hash, &content)
+            .map_err(HostError::from)?;
+        let fingerprint = sha256_path(&restored).map_err(|error| HostError::BrepIo {
+            detail: format!("hash replayed BREP failed: {error}"),
+        })?;
+        cleanup();
+        Ok((restored, fingerprint))
+    }
+
+    /* fn load_with_extrude_replay_legacy(
+        &self,
+        root: impl AsRef<Path>,
+        worker: &OcctWorker,
+    ) -> Result<ExtrudeReplayView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_snapshot = SnapshotView::from(&loaded);
+        let source_model_state = canonical_model_fingerprint(&loaded);
+        let intents = loaded
+            .log
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.intent.clone())
+            .collect::<Vec<_>>();
+        let mut feature_ids = Vec::with_capacity(intents.len());
+        let mut geometry_fingerprints = Vec::with_capacity(intents.len());
+        let mut replayed_paths = HashMap::with_capacity(intents.len());
+        for intent in intents {
+            match intent {
+                CanonicalIntent::Extrude(extrude) => {
+                    let expected_worker = expected_occt_worker_fingerprint();
+                    if extrude.worker_requirements != expected_worker {
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible extrude worker requirements: expected {expected_worker:?}, found {:?}",
+                                extrude.worker_requirements
+                            ),
+                        });
+                    }
+                    let feature_id =
+                        extrude
+                            .affected_semantic_ids
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "extrude intent has no affected feature".to_string(),
+                            })?;
+                    if !loaded.graph.contains_feature(&feature_id) {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "extrude replay feature is not in the Revision Snapshot: {feature_id}"
+                            ),
+                        });
+                    }
+                    let stage =
+                        Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                            HostError::BrepIo {
+                                detail: format!("create extrude replay stage failed: {error}"),
+                            }
+                        })?;
+                    let stage_root = stage.root().to_path_buf();
+                    let request = ExtrudeRequest::new(
+                        extrude.request_id.clone(),
+                        extrude
+                            .deterministic_inputs
+                            .profile
+                            .iter()
+                            .map(|[x, y]| (*x, *y))
+                            .collect(),
+                        extrude.deterministic_inputs.height,
+                    )
+                    .with_mode(parse_extrude_mode_value(if extrude.mode.is_empty() {
+                        &extrude.operation
+                    } else {
+                        &extrude.mode
+                    })?)
+                    .with_optional_target_feature_id(extrude.target_feature_id.clone())
+                    .with_output_path(&stage_root, "replay.brep.partial")
+                    .with_feature_id(&feature_id);
+                    let target_path = if let Some(target_feature_id) = &extrude.target_feature_id {
+                        let path = replayed_paths
+                            .get(target_feature_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                root.join(BREP_SUBDIR)
+                                    .join(format!("{target_feature_id}.brep"))
+                            });
+                        if !path.is_file() {
+                            let _ = stage.discard();
+                            return Err(HostError::BrepFileMissing { path });
+                        }
+                        let target_entry = loaded
+                    .log
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| {
+                        entry.feature_id == *target_feature_id
+                            && entry.brep_byte_count.is_some()
+                            && entry.brep_sha256.is_some()
+                    })
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!(
+                            "extrude replay target has no authenticated geometry: {target_feature_id}"
+                        ),
+                    })?;
+                        let expected_bytes = target_entry
+                            .brep_byte_count
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| HostError::BrepIo {
+                                detail: "extrude replay target BREP byte count is invalid"
+                                    .to_string(),
+                            })?;
+                        let expected_sha256 =
+                            target_entry.brep_sha256.as_deref().ok_or_else(|| {
+                                HostError::BrepIo {
+                                    detail: "extrude replay target BREP digest is missing"
+                                        .to_string(),
+                                }
+                            })?;
+                        read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                            .map_err(|detail| HostError::BrepIo { detail })?;
+                        Some(path)
+                    } else {
+                        None
+                    };
+                    let request = request.with_optional_target_path(target_path);
+                    let mut binding = extrude_artifact_request(&request, &source_snapshot)?;
+                    binding.source_revision_id = extrude.source_revision.clone();
+                    binding.staging_name = "replay.brep".to_string();
+                    let request = request.with_artifact_request(binding);
+                    let result = worker
+                        .clone()
+                        .with_expected_worker_id("occt")
+                        .with_revision_id(extrude.source_revision.clone())
+                        .extrude(&request)
+                        .map_err(HostError::from);
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let _ = stage.discard();
+                            return Err(error);
+                        }
+                    };
+                    if result.schema_version != expected_worker.worker_schema_version {
+                        let _ = stage.discard();
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible extrude worker schema: expected {:?}, found {:?}",
+                                expected_worker.worker_schema_version, result.schema_version
+                            ),
+                        });
+                    }
+                    let bytes = match read_brep_verified(
+                        &result.brep_path,
+                        Some((result.brep_bytes, &result.brep_sha256)),
+                    ) {
+                        Ok(bytes) => bytes,
+                        Err(detail) => {
+                            let _ = stage.discard();
+                            return Err(HostError::BrepIo { detail });
+                        }
+                    };
+                    if result.source_revision_id.as_deref()
+                        != Some(extrude.source_revision.as_str())
+                    {
+                        let _ = stage.discard();
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible extrude source revision: expected {:?}, found {:?}",
+                                extrude.source_revision, result.source_revision_id
+                            ),
+                        });
+                    }
+                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                        &feature_id,
+                        &source_snapshot.revision_hash,
+                        &bytes,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let _ = stage.discard();
+                            return Err(error.into());
+                        }
+                    };
+                    let _ = stage.discard();
+                    replayed_paths.insert(feature_id.clone(), path.clone());
+                    feature_ids.push(feature_id);
+                    geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                        HostError::BrepIo {
+                            detail: format!("hash replayed BREP failed: {error}"),
+                        }
+                    })?);
+                }
+                CanonicalIntent::Boolean(boolean) => {
+                    let expected_worker = expected_occt_worker_fingerprint();
+                    if boolean.worker_requirements != expected_worker {
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible boolean worker requirements: expected {expected_worker:?}, found {:?}",
+                                boolean.worker_requirements
+                            ),
+                        });
+                    }
+                    let feature_id =
+                        boolean
+                            .affected_semantic_ids
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "boolean intent has no affected feature".to_string(),
+                            })?;
+                    if !loaded.graph.contains_feature(&feature_id) {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "boolean replay feature is not in the Revision Snapshot: {feature_id}"
+                            ),
+                        });
+                    }
+                    // Operands precede the boolean in log order, so a replayed
+                    // operand path wins over the on-disk file.
+                    let operand_path = |operand_id: &str| -> Result<PathBuf, HostError> {
+                        if let Some(path) = replayed_paths.get(operand_id) {
+                            return Ok(path.clone());
+                        }
+                        let path = root.join(BREP_SUBDIR).join(format!("{operand_id}.brep"));
+                        if !path.is_file() {
+                            return Err(HostError::BrepFileMissing { path });
+                        }
+                        let entry = loaded
+                            .log
+                            .entries()
+                            .iter()
+                            .rev()
+                            .find(|entry| {
+                                entry.feature_id == operand_id
+                                    && entry.brep_byte_count.is_some()
+                                    && entry.brep_sha256.is_some()
+                            })
+                            .ok_or_else(|| HostError::Validation {
+                                detail: format!(
+                                    "boolean replay operand has no authenticated geometry: {operand_id}"
+                                ),
+                            })?;
+                        let expected_bytes = entry
+                            .brep_byte_count
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| HostError::BrepIo {
+                                detail: "boolean replay operand BREP byte count is invalid"
+                                    .to_string(),
+                            })?;
+                        let expected_sha256 =
+                            entry
+                                .brep_sha256
+                                .as_deref()
+                                .ok_or_else(|| HostError::BrepIo {
+                                    detail: "boolean replay operand BREP digest is missing"
+                                        .to_string(),
+                                })?;
+                        read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                            .map_err(|detail| HostError::BrepIo { detail })?;
+                        Ok(path)
+                    };
+                    let base_path = operand_path(&boolean.base_feature_id)?;
+                    let tool_path = operand_path(&boolean.tool_feature_id)?;
+                    let stage =
+                        Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                            HostError::BrepIo {
+                                detail: format!("create boolean replay stage failed: {error}"),
+                            }
+                        })?;
+                    let stage_root = stage.root().to_path_buf();
+                    // Run the worker without capturing `stage` in closures:
+                    // every failure path discards explicitly, mirroring the
+                    // extrude replay arm above.
+                    let run_replay =
+                        |operation: &str| -> Result<(Vec<u8>, String, usize), HostError> {
+                            let invoke = |brep_path: &std::path::Path,
+                                      brep_bytes: usize,
+                                      brep_sha256: &str,
+                                      schema_version: &str|
+                         -> Result<(Vec<u8>, String, usize), HostError> {
+                            if schema_version != expected_worker.worker_schema_version {
+                                return Err(HostError::WorkerUnavailable {
+                                    detail: format!(
+                                        "incompatible boolean worker schema: expected {:?}, found {:?}",
+                                        expected_worker.worker_schema_version, schema_version
+                                    ),
+                                });
+                            }
+                            let bytes = read_brep_verified(
+                                brep_path,
+                                Some((brep_bytes, brep_sha256)),
+                            )
+                            .map_err(|detail| HostError::BrepIo { detail })?;
+                            Ok((bytes, brep_sha256.to_string(), brep_bytes))
+                        };
+                            match operation {
+                                "fuse" => {
+                                    let request = BooleanFuseRequest::new(
+                                        boolean.request_id.clone(),
+                                        &base_path,
+                                        &tool_path,
+                                    )
+                                    .with_output_path(&stage_root, "replay.brep.partial")
+                                    .with_feature_id(&feature_id);
+                                    let result = worker
+                                        .clone()
+                                        .with_expected_worker_id("occt")
+                                        .with_revision_id(boolean.source_revision.clone())
+                                        .boolean_fuse(&request)
+                                        .map_err(HostError::from)?;
+                                    invoke(
+                                        &result.brep_path,
+                                        result.brep_bytes,
+                                        &result.brep_sha256,
+                                        &result.schema_version,
+                                    )
+                                }
+                                "cut" => {
+                                    let request = BooleanCutRequest::new(
+                                        boolean.request_id.clone(),
+                                        &base_path,
+                                        &tool_path,
+                                    )
+                                    .with_output_path(&stage_root, "replay.brep.partial")
+                                    .with_feature_id(&feature_id);
+                                    let result = worker
+                                        .clone()
+                                        .with_expected_worker_id("occt")
+                                        .with_revision_id(boolean.source_revision.clone())
+                                        .boolean_cut(&request)
+                                        .map_err(HostError::from)?;
+                                    invoke(
+                                        &result.brep_path,
+                                        result.brep_bytes,
+                                        &result.brep_sha256,
+                                        &result.schema_version,
+                                    )
+                                }
+                                "common" => {
+                                    let request = BooleanCommonRequest::new(
+                                        boolean.request_id.clone(),
+                                        &base_path,
+                                        &tool_path,
+                                    )
+                                    .with_output_path(&stage_root, "replay.brep.partial")
+                                    .with_feature_id(&feature_id);
+                                    let result = worker
+                                        .clone()
+                                        .with_expected_worker_id("occt")
+                                        .with_revision_id(boolean.source_revision.clone())
+                                        .boolean_common(&request)
+                                        .map_err(HostError::from)?;
+                                    invoke(
+                                        &result.brep_path,
+                                        result.brep_bytes,
+                                        &result.brep_sha256,
+                                        &result.schema_version,
+                                    )
+                                }
+                                other => Err(HostError::Validation {
+                                    detail: format!("unknown boolean replay operation: {other}"),
+                                }),
+                            }
+                        };
+                    let (bytes, _result_sha, _result_bytes) =
+                        match run_replay(boolean.operation.as_str()) {
+                            Ok(replayed) => replayed,
+                            Err(error) => {
+                                let _ = stage.discard();
+                                return Err(error);
+                            }
+                        };
+                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                        &feature_id,
+                        &source_snapshot.revision_hash,
+                        &bytes,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let _ = stage.discard();
+                            return Err(error.into());
+                        }
+                    };
+                    let _ = stage.discard();
+                    replayed_paths.insert(feature_id.clone(), path.clone());
+                    feature_ids.push(feature_id);
+                    geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                        HostError::BrepIo {
+                            detail: format!("hash replayed BREP failed: {error}"),
+                        }
+                    })?);
+                }
+                CanonicalIntent::Hole(hole) => {
+                    let expected_worker = expected_occt_worker_fingerprint();
+                    if hole.worker_requirements != expected_worker {
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible hole worker requirements: expected {expected_worker:?}, found {:?}",
+                                hole.worker_requirements
+                            ),
+                        });
+                    }
+                    let feature_id =
+                        hole.affected_semantic_ids.first().cloned().ok_or_else(|| {
+                            HostError::Validation {
+                                detail: "hole intent has no affected feature".to_string(),
+                            }
+                        })?;
+                    if !loaded.graph.contains_feature(&feature_id) {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "hole replay feature is not in the Revision Snapshot: {feature_id}"
+                            ),
+                        });
+                    }
+                    let base_path = if let Some(path) = replayed_paths.get(&hole.base_feature_id) {
+                        path.clone()
+                    } else {
+                        let path = root
+                            .join(BREP_SUBDIR)
+                            .join(format!("{}.brep", hole.base_feature_id));
+                        if !path.is_file() {
+                            return Err(HostError::BrepFileMissing { path });
+                        }
+                        let entry = loaded
+                            .log
+                            .entries()
+                            .iter()
+                            .rev()
+                            .find(|entry| {
+                                entry.feature_id == hole.base_feature_id
+                                    && entry.brep_byte_count.is_some()
+                                    && entry.brep_sha256.is_some()
+                            })
+                            .ok_or_else(|| HostError::Validation {
+                                detail: format!(
+                                    "hole replay base has no authenticated geometry: {}",
+                                    hole.base_feature_id
+                                ),
+                            })?;
+                        let expected_bytes = entry
+                            .brep_byte_count
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| HostError::BrepIo {
+                                detail: "hole replay base BREP byte count is invalid".to_string(),
+                            })?;
+                        let expected_sha256 =
+                            entry
+                                .brep_sha256
+                                .as_deref()
+                                .ok_or_else(|| HostError::BrepIo {
+                                    detail: "hole replay base BREP digest is missing".to_string(),
+                                })?;
+                        read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
+                            .map_err(|detail| HostError::BrepIo { detail })?;
+                        path
+                    };
+                    let stage =
+                        Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+                            HostError::BrepIo {
+                                detail: format!("create hole replay stage failed: {error}"),
+                            }
+                        })?;
+                    let stage_root = stage.root().to_path_buf();
+                    let mut request = HoleRequest::new(
+                        hole.request_id.clone(),
+                        &base_path,
+                        hole.deterministic_inputs.position,
+                        hole.deterministic_inputs.direction,
+                        hole.deterministic_inputs.diameter,
+                    )
+                    .with_hole_kind(hole.hole_kind.clone())
+                    .with_base_feature_id(hole.base_feature_id.clone())
+                    .with_output_path(&stage_root, "replay.brep.partial")
+                    .with_feature_id(&feature_id);
+                    if hole.hole_kind == "tapped" {
+                        request = request.with_thread(
+                            hole.deterministic_inputs
+                                .thread_designation
+                                .clone()
+                                .unwrap_or_default(),
+                            hole.deterministic_inputs.thread_pitch.unwrap_or_default(),
+                            hole.deterministic_inputs.thread_depth.unwrap_or_default(),
+                        );
+                    }
+                    let result = worker
+                        .clone()
+                        .with_expected_worker_id("occt")
+                        .with_revision_id(hole.source_revision.clone())
+                        .hole(&request)
+                        .map_err(HostError::from);
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let _ = stage.discard();
+                            return Err(error);
+                        }
+                    };
+                    if result.schema_version != expected_worker.worker_schema_version {
+                        let _ = stage.discard();
+                        return Err(HostError::WorkerUnavailable {
+                            detail: format!(
+                                "incompatible hole worker schema: expected {:?}, found {:?}",
+                                expected_worker.worker_schema_version, result.schema_version
+                            ),
+                        });
+                    }
+                    let bytes = match read_brep_verified(
+                        &result.brep_path,
+                        Some((result.brep_bytes, result.brep_sha256.as_str())),
+                    ) {
+                        Ok(bytes) => bytes,
+                        Err(detail) => {
+                            let _ = stage.discard();
+                            return Err(HostError::BrepIo { detail });
+                        }
+                    };
+                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
+                        &feature_id,
+                        &source_snapshot.revision_hash,
+                        &bytes,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let _ = stage.discard();
+                            return Err(error.into());
+                        }
+                    };
+                    let _ = stage.discard();
+                    replayed_paths.insert(feature_id.clone(), path.clone());
+                    feature_ids.push(feature_id);
+                    geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
+                        HostError::BrepIo {
+                            detail: format!("hash replayed BREP failed: {error}"),
+                        }
+                    })?);
+                }
+    */
+    /* pub fn load_with_extrude_replay(
         &self,
         root: impl AsRef<Path>,
         worker: &OcctWorker,
@@ -4824,6 +6968,10 @@ impl Host {
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
             }
+        let reloaded = Bundle::at(root).open()?;
+        let snapshot = SnapshotView::from(&reloaded);
+        if snapshot.revision_hash != source_snapshot.revision_hash
+            || canonical_model_fingerprint(&reloaded) != source_model_state
         }
         let prior_replay_artifacts = replay_artifacts
             .iter()
@@ -4887,6 +7035,7 @@ impl Host {
         })
     }
 
+    */
     /// Load a canonical bundle and validate its optional non-authoritative
     /// Layer 1 cache before replacing the in-memory snapshot.
     pub fn load_with_layer1_cache(
@@ -5523,7 +7672,76 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
-        self.stage_occt_result_inner(root, request, operation, worker, None, None)
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn preview_occt_result<R, T>(
+        &self,
+        root: &Path,
+        request: &R,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        command: CommandId,
+        expected_revision: Option<&str>,
+        input: &serde_json::Value,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>>
+    where
+        R: Serialize,
+        T: DeserializeOwned + Serialize,
+    {
+        let derived = self
+            .stage_occt_result::<T>(root, request, operation, worker)
+            .map_err(ExecutionError::Handler)?;
+        if let Some(expected_revision) = expected_revision
+            && derived.source_snapshot.revision_hash != expected_revision
+        {
+            let current_revision = derived.source_snapshot.revision_hash.clone();
+            self.discard_staged_occt_result(&derived);
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "{} preview source revision changed from {expected_revision:?} to {current_revision:?}",
+                    command.0
+                ),
+            }));
+        }
+        let source_revision = derived.source_snapshot.revision_hash.clone();
+        let input_fingerprint = sha256_hex(input.to_string().as_bytes());
+        let geometry_fingerprint = derived.artifact.sha256.clone();
+        let preview_revision = sha256_hex(
+            format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                .as_bytes(),
+        );
+        self.discard_staged_occt_result(&derived);
+        Ok(DomainCommandPreview {
+            command,
+            source_revision,
+            preview_revision,
+            input_fingerprint,
+            geometry_fingerprint,
+        })
+    }
+
+    fn stage_occt_result_for_revision<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        source_revision: &str,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.stage_occt_result_inner(
+            root,
+            request,
+            operation,
+            worker,
+            None,
+            None,
+            Some(source_revision),
+        )
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(
@@ -5545,9 +7763,11 @@ impl Host {
             worker,
             Some(cancel),
             Some(on_progress),
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_occt_result_inner<R>(
         &self,
         root: &Path,
@@ -5556,6 +7776,7 @@ impl Host {
         worker: &OcctWorker,
         cancel: Option<&AtomicBool>,
         on_progress: Option<&mut dyn FnMut(&threeterm_protocol::supervisor::Progress)>,
+        source_revision_override: Option<&str>,
     ) -> Result<StagedOcctResult<R>, HostError>
     where
         R: DeserializeOwned + Serialize,
@@ -5590,6 +7811,7 @@ impl Host {
                 detail: "OCCT request is missing feature_id".to_string(),
             })?
             .to_string();
+        let source_snapshot = self.load(root)?;
         worker.verify_identity().map_err(|error| match error {
             WorkerError::Spawn { binary, detail, .. } => HostError::WorkerFailure {
                 request_id: Some(request_id.clone()),
@@ -5597,14 +7819,15 @@ impl Host {
             },
             other => HostError::from(other),
         })?;
-        let source_snapshot = self.load(root)?;
-        let binding = occt_artifact_request(
+        let mut binding = occt_artifact_request(
             &request_value,
             operation,
             &source_snapshot,
             &request_id,
             &feature_id,
         )?;
+        let execution_revision = source_revision_override.unwrap_or(&source_snapshot.revision_hash);
+        binding.source_revision_id = execution_revision.to_string();
         let stage =
             Stage::create_fresh(root.join(".derived"), operation.as_str()).map_err(|error| {
                 HostError::BrepIo {
@@ -5628,7 +7851,7 @@ impl Host {
             Some(cancel) => match on_progress {
                 Some(on_progress) => worker
                     .clone()
-                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .with_revision_id(execution_revision.to_string())
                     .invoke_staged_with_cancel_and_progress(
                         request_value,
                         operation,
@@ -5638,12 +7861,12 @@ impl Host {
                     ),
                 None => worker
                     .clone()
-                    .with_revision_id(source_snapshot.revision_hash.clone())
+                    .with_revision_id(execution_revision.to_string())
                     .invoke_staged_with_cancel(request_value, operation, stage, cancel),
             },
             None => worker
                 .clone()
-                .with_revision_id(source_snapshot.revision_hash.clone())
+                .with_revision_id(execution_revision.to_string())
                 .invoke_staged(request_value, operation, stage),
         };
         let completion = match completion_result {
@@ -5816,56 +8039,99 @@ impl Host {
                 } else {
                     format!("brep:{feature_id}")
                 };
-                if artifact.operation == "extrude" {
-                    let intent = canonical_extrude_intent(
-                        &derived.request,
-                        &derived.source_snapshot,
-                        artifact,
-                    )
-                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
-                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
-                        feature_id,
-                        &kind,
-                        &current.manifest.revision_hash,
-                        &artifact.request_id,
-                        provenance,
-                        &CanonicalIntent::Extrude(intent),
-                        bytes,
-                    )
-                } else if matches!(
-                    artifact.operation.as_str(),
-                    "boolean_fuse" | "boolean_cut" | "boolean_common"
-                ) {
-                    let intent = canonical_boolean_intent(
-                        &derived.request,
-                        &derived.source_snapshot,
-                        artifact,
-                    )
-                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
-                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
-                        feature_id,
-                        &kind,
-                        &current.manifest.revision_hash,
-                        &artifact.request_id,
-                        provenance,
-                        &CanonicalIntent::Boolean(intent),
-                        bytes,
-                    )
-                } else if artifact.operation == "hole" {
-                    let base_feature_id = derived
-                        .request
-                        .get("base_feature_id")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            BundleError::Invalid(
-                                "canonical hole base feature is missing".to_string(),
-                            )
-                        })?;
-                    if !current.graph.contains_feature(base_feature_id) {
-                        return Err(BundleError::Invalid(format!(
-                            "canonical hole base feature is missing: {base_feature_id}"
-                        )));
+                let intent = match artifact.operation.as_str() {
+                    "extrude" => CanonicalIntent::Extrude(
+                        canonical_extrude_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "revolve" | "mirror" | "linear_pattern" | "circular_pattern" => {
+                        canonical_occt_intent(&derived.request, &derived.source_snapshot, artifact)
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?
                     }
+                    "boolean_fuse" | "boolean_cut" | "boolean_common" => CanonicalIntent::Boolean(
+                        canonical_boolean_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "hole" => {
+                        let base_feature_id = derived
+                            .request
+                            .get("base_feature_id")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                BundleError::Invalid(
+                                    "canonical hole base feature is missing".to_string(),
+                                )
+                            })?;
+                        if !current.graph.contains_feature(base_feature_id) {
+                            return Err(BundleError::Invalid(format!(
+                                "canonical hole base feature is missing: {base_feature_id}"
+                            )));
+                        }
+                        CanonicalIntent::Hole(
+                            canonical_hole_intent(
+                                &derived.request,
+                                base_feature_id,
+                                &derived.source_snapshot,
+                                artifact,
+                            )
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                        )
+                    }
+                    _ => {
+                        return bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                            feature_id,
+                            &kind,
+                            &current.manifest.revision_hash,
+                            &artifact.request_id,
+                            provenance,
+                            bytes,
+                        );
+                    }
+                };
+                bundle.append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
+                    feature_id,
+                    &kind,
+                    &current.manifest.revision_hash,
+                    &artifact.request_id,
+                    provenance,
+                    &intent,
+                    bytes,
+                )
+                /*
+                    let intent = canonical_hole_intent(
+                        &derived.request,
+                        base_feature_id,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_hole_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &intent,
+                        bytes,
+                    )
+                } else {
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        bytes,
+                    )
+                }
                     let intent = canonical_hole_intent(
                         &derived.request,
                         base_feature_id,
@@ -5973,6 +8239,7 @@ impl Host {
                         bytes,
                     )
                 }
+                */
             },
         )
     }
@@ -7978,6 +10245,7 @@ impl Host {
             worker,
             Some(cancel),
             Some(&mut on_progress),
+            None,
         )?;
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
@@ -8432,6 +10700,7 @@ impl Host {
     }
 }
 
+#[allow(dead_code)]
 enum FinishingReplayIntent {
     Fillet(CanonicalFilletIntent),
     Chamfer(CanonicalChamferIntent),
@@ -8440,6 +10709,7 @@ enum FinishingReplayIntent {
     Loft(CanonicalLoftIntent),
 }
 
+#[allow(dead_code)]
 struct ReplayedGeometry {
     feature_id: String,
     path: PathBuf,
@@ -8447,11 +10717,13 @@ struct ReplayedGeometry {
     bytes: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct ReplayStage {
     stage: Option<Stage>,
     root: PathBuf,
 }
 
+#[allow(dead_code)]
 impl ReplayStage {
     fn create(root: &Path) -> Result<Self, HostError> {
         let stage =
@@ -8485,6 +10757,7 @@ impl Drop for ReplayStage {
     }
 }
 
+#[allow(dead_code)]
 fn stage_replay_artifact(
     stage_root: &Path,
     feature_id: &str,
@@ -8502,6 +10775,7 @@ fn stage_replay_artifact(
     Ok(path)
 }
 
+#[allow(dead_code)]
 fn rollback_replay_artifacts(
     root: &Path,
     expected_revision: &str,
@@ -8537,6 +10811,7 @@ fn rollback_replay_artifacts(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn replay_finishing_geometry(
     root: &Path,
     replay_stage_root: &Path,
@@ -9595,6 +11870,243 @@ fn canonical_extrude_intent(
     Ok(intent)
 }
 
+fn canonical_occt_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalIntent, HostError> {
+    let feature_id = artifact.feature_id.clone();
+    let request_id = artifact.request_id.clone();
+    let source_revision = source_snapshot.revision_hash.clone();
+    let worker_requirements = artifact.worker_fingerprint.clone();
+    let field = |name: &str| {
+        request
+            .get(name)
+            .cloned()
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("canonical {} field is missing: {name}", artifact.operation),
+            })
+    };
+    let base_feature_id = || {
+        request
+            .get("base_path")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|path| Path::new(path).file_stem())
+            .and_then(|stem| stem.to_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!(
+                    "canonical {} request has no base feature path",
+                    artifact.operation
+                ),
+            })
+    };
+    let intent = match artifact.operation.as_str() {
+        "revolve" => CanonicalIntent::Revolve(CanonicalRevolveIntent {
+            schema_version: threeterm_persistence::REVOLVE_INTENT_SCHEMA_VERSION.to_string(),
+            command: "revolve".to_string(),
+            operation: "revolve".to_string(),
+            request_id,
+            deterministic_inputs: RevolveDeterministicInputs {
+                profile: serde_json::from_value(field("profile")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical revolve profile is invalid: {error}"),
+                    }
+                })?,
+                axis_point: serde_json::from_value(field("axis_point")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical revolve axis_point is invalid: {error}"),
+                    }
+                })?,
+                axis_direction: serde_json::from_value(field("axis_direction")?).map_err(
+                    |error| HostError::Validation {
+                        detail: format!("canonical revolve axis_direction is invalid: {error}"),
+                    },
+                )?,
+                angle: serde_json::from_value(field("angle")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical revolve angle is invalid: {error}"),
+                    }
+                })?,
+            },
+            affected_semantic_ids: vec![feature_id.clone()],
+            source_revision,
+            worker_requirements,
+        }),
+        "mirror" => CanonicalIntent::Mirror(CanonicalMirrorIntent {
+            schema_version: threeterm_persistence::MIRROR_INTENT_SCHEMA_VERSION.to_string(),
+            command: "mirror".to_string(),
+            operation: "mirror".to_string(),
+            request_id,
+            deterministic_inputs: MirrorDeterministicInputs {
+                base_feature_id: base_feature_id()?,
+                plane_point: serde_json::from_value(field("plane_point")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical mirror plane_point is invalid: {error}"),
+                    }
+                })?,
+                plane_normal: serde_json::from_value(field("plane_normal")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical mirror plane_normal is invalid: {error}"),
+                    }
+                })?,
+            },
+            affected_semantic_ids: vec![feature_id.clone(), base_feature_id()?],
+            source_revision,
+            worker_requirements,
+        }),
+        "linear_pattern" => CanonicalIntent::LinearPattern(CanonicalLinearPatternIntent {
+            schema_version: threeterm_persistence::LINEAR_PATTERN_INTENT_SCHEMA_VERSION.to_string(),
+            command: "linear-pattern".to_string(),
+            operation: "linear-pattern".to_string(),
+            request_id,
+            deterministic_inputs: LinearPatternDeterministicInputs {
+                base_feature_id: base_feature_id()?,
+                direction: serde_json::from_value(field("direction")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical linear pattern direction is invalid: {error}"),
+                    }
+                })?,
+                count: serde_json::from_value(field("count")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical linear pattern count is invalid: {error}"),
+                    }
+                })?,
+                spacing: serde_json::from_value(field("spacing")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical linear pattern spacing is invalid: {error}"),
+                    }
+                })?,
+            },
+            affected_semantic_ids: vec![feature_id.clone(), base_feature_id()?],
+            source_revision,
+            worker_requirements,
+        }),
+        "circular_pattern" => CanonicalIntent::CircularPattern(CanonicalCircularPatternIntent {
+            schema_version: threeterm_persistence::CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
+                .to_string(),
+            command: "circular-pattern".to_string(),
+            operation: "circular-pattern".to_string(),
+            request_id,
+            deterministic_inputs: CircularPatternDeterministicInputs {
+                base_feature_id: base_feature_id()?,
+                axis_point: serde_json::from_value(field("axis_point")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!(
+                            "canonical circular pattern axis_point is invalid: {error}"
+                        ),
+                    }
+                })?,
+                axis_normal: serde_json::from_value(field("axis_normal")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!(
+                            "canonical circular pattern axis_normal is invalid: {error}"
+                        ),
+                    }
+                })?,
+                angle_step: serde_json::from_value(field("angle_step")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!(
+                            "canonical circular pattern angle_step is invalid: {error}"
+                        ),
+                    }
+                })?,
+                count: serde_json::from_value(field("count")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical circular pattern count is invalid: {error}"),
+                    }
+                })?,
+            },
+            affected_semantic_ids: vec![feature_id, base_feature_id()?],
+            source_revision,
+            worker_requirements,
+        }),
+        operation => {
+            return Err(HostError::Validation {
+                detail: format!("unsupported canonical OCCT operation: {operation}"),
+            });
+        }
+    };
+    intent
+        .validate(artifact.feature_id.as_str())
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn authenticated_base_brep(root: &Path, feature_id: &str) -> Result<PathBuf, HostError> {
+    let loaded = Bundle::at(root).open()?;
+    if !loaded.graph.contains_feature(feature_id) {
+        return Err(HostError::Validation {
+            detail: format!("base feature is missing: {feature_id}"),
+        });
+    }
+    let entry = loaded
+        .log
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.feature_id == feature_id
+                && entry.brep_byte_count.is_some()
+                && entry.brep_sha256.is_some()
+        })
+        .ok_or_else(|| HostError::BrepFileMissing {
+            path: root.join(BREP_SUBDIR).join(format!("{feature_id}.brep")),
+        })?;
+    let path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+    let expected_bytes = entry
+        .brep_byte_count
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("base feature {feature_id} has an invalid BREP byte count"),
+        })?;
+    let expected_sha = entry
+        .brep_sha256
+        .as_deref()
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("base feature {feature_id} has no BREP digest"),
+        })?;
+    read_brep_verified(&path, Some((expected_bytes, expected_sha)))
+        .map_err(|detail| HostError::BrepIo { detail })?;
+    Ok(path)
+}
+
+fn canonical_occt_response(
+    result: &impl Serialize,
+    snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+    schema_version: &str,
+) -> Result<serde_json::Value, HostError> {
+    let value = serde_json::to_value(result).map_err(|error| HostError::Validation {
+        detail: format!("OCCT result serialization failed: {error}"),
+    })?;
+    Ok(serde_json::json!({
+        "status": value["status"],
+        "operation": value["operation"],
+        "feature_id": value["feature_id"],
+        "feature_graph_hash": snapshot.feature_graph_hash,
+        "revision_hash": snapshot.revision_hash,
+        "brep_path": artifact.path,
+        "brep_sha256": artifact.sha256,
+        "brep_bytes": artifact.byte_count,
+        "derived_result": {
+            "request_id": artifact.request_id,
+            "operation": artifact.operation,
+            "feature_id": artifact.feature_id,
+            "source_revision_id": artifact.source_revision_id,
+            "worker_fingerprint": artifact.worker_fingerprint,
+            "artifact_kind": artifact.artifact_kind,
+            "artifact_name": artifact.artifact_name,
+            "byte_count": artifact.byte_count,
+            "sha256": artifact.sha256,
+        },
+        "schema_version": schema_version,
+    }))
+}
+
 fn parse_hole_kind(value: Option<&serde_json::Value>) -> Result<String, HostError> {
     match value.and_then(serde_json::Value::as_str) {
         None => Ok("drilled".to_string()),
@@ -9671,6 +12183,7 @@ fn canonical_hole_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, HostError> {
     request
         .get("base_feature_id")
@@ -9682,6 +12195,7 @@ fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, Host
         })
 }
 
+#[allow(dead_code)]
 fn canonical_edge_reference(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -9992,6 +12506,7 @@ fn validate_finishing_request(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn canonical_fillet_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -10023,6 +12538,7 @@ fn canonical_fillet_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_chamfer_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -10053,6 +12569,7 @@ fn canonical_chamfer_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_shell_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -10082,6 +12599,7 @@ fn canonical_shell_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_draft_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -10118,6 +12636,7 @@ fn canonical_draft_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_loft_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,

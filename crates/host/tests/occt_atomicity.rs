@@ -257,8 +257,8 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .last()
         .expect("extrude transaction exists");
     let intent = entry.intent.as_ref().expect("extrude intent persists");
-    let threeterm_persistence::CanonicalIntent::Extrude(intent) = intent else {
-        panic!("extrude transaction carries an extrude intent");
+    let CanonicalIntent::Extrude(intent) = intent else {
+        panic!("expected extrude intent");
     };
     assert_eq!(intent.command, "extrude");
     assert_eq!(intent.operation, "additive");

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, Write};
@@ -10,33 +12,36 @@ use threeterm_domain::{
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
-    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest,
-    CircularPatternRequest, LinearPatternRequest, MirrorRequest, OcctWorker, Operation,
-    RevolveRequest, new_request_id,
+    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
+    CircularPatternRequest, FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest,
+    OcctWorker, Operation, RevolveRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
     BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
-    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
-    DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
     EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
+    REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID,
+    SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
     TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-    BRACKET_RESPONSE_SCHEMA_VERSION, CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
-    EXTRUDE_RESPONSE_SCHEMA_VERSION, FIT_DIMENSION_RESPONSE_SCHEMA_VERSION,
+    BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
+    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION,
+    FILLET_RESPONSE_SCHEMA_VERSION, FIT_DIMENSION_RESPONSE_SCHEMA_VERSION,
     HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
     LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
-    MIRROR_RESPONSE_SCHEMA_VERSION, REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION,
-    REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
+    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
+    REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
+    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
@@ -233,6 +238,7 @@ enum DispatchPlan {
         axis_point: [f64; 3],
         axis_direction: [f64; 3],
         angle: f64,
+        expected_revision: Option<String>,
     },
     Mirror {
         bundle: String,
@@ -240,6 +246,7 @@ enum DispatchPlan {
         base_feature_id: String,
         plane_point: [f64; 3],
         plane_normal: [f64; 3],
+        expected_revision: Option<String>,
     },
     LinearPattern {
         bundle: String,
@@ -248,6 +255,7 @@ enum DispatchPlan {
         direction: [f64; 3],
         count: u32,
         spacing: f64,
+        expected_revision: Option<String>,
     },
     CircularPattern {
         bundle: String,
@@ -257,6 +265,7 @@ enum DispatchPlan {
         axis_normal: [f64; 3],
         angle_step: f64,
         count: u32,
+        expected_revision: Option<String>,
     },
     Shell {
         bundle: String,
@@ -2520,6 +2529,7 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
     let mut axis_point: Option<[f64; 3]> = None;
     let mut axis_direction: Option<[f64; 3]> = None;
     let mut angle: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2533,6 +2543,11 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2618,6 +2633,7 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
         axis_point,
         axis_direction,
         angle,
+        expected_revision,
     }
 }
 
@@ -2632,6 +2648,7 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut plane_point: Option<[f64; 3]> = None;
     let mut plane_normal: Option<[f64; 3]> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2645,6 +2662,11 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2712,6 +2734,7 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         plane_point,
         plane_normal,
+        expected_revision,
     }
 }
 
@@ -2727,6 +2750,7 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
     let mut direction: Option<[f64; 3]> = None;
     let mut count: Option<u32> = None;
     let mut spacing: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2740,6 +2764,11 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2829,6 +2858,7 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
         direction,
         count,
         spacing,
+        expected_revision,
     }
 }
 
@@ -2845,6 +2875,7 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
     let mut axis_normal: Option<[f64; 3]> = None;
     let mut angle_step: Option<f64> = None;
     let mut count: Option<u32> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2858,6 +2889,11 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2961,6 +2997,7 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
         axis_normal,
         angle_step,
         count,
+        expected_revision,
     }
 }
 
@@ -3636,74 +3673,34 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Revolve {
-            bundle,
-            feature_id,
-            axis_point,
-            axis_direction,
-            angle,
-            ..
-        } => emit_revolve(
-            &bundle,
-            &feature_id,
-            profile_from_request(request),
-            axis_point,
-            axis_direction,
-            angle,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Mirror {
-            bundle,
-            feature_id,
-            base_feature_id,
-            plane_point,
-            plane_normal,
-        } => emit_mirror(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            plane_point,
-            plane_normal,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::LinearPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            direction,
-            count,
-            spacing,
-        } => emit_linear_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            direction,
-            count,
-            spacing,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::CircularPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-        } => emit_circular_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Revolve { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, REVOLVE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::Mirror { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, MIRROR_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::LinearPattern { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, LINEAR_PATTERN_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::CircularPattern { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, CIRCULAR_PATTERN_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Shell { .. } => {
             emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
         }
@@ -3897,6 +3894,10 @@ pub fn dispatch_registered_command(
         IDENTITY_COMMAND_ID
             | APPLY_COMMAND_ID
             | EXTRUDE_COMMAND_ID
+            | REVOLVE_COMMAND_ID
+            | MIRROR_COMMAND_ID
+            | LINEAR_PATTERN_COMMAND_ID
+            | CIRCULAR_PATTERN_COMMAND_ID
             | BOOLEAN_PATTERN_COMMAND_ID
             | BOOLEAN_FUSE_COMMAND_ID
             | BOOLEAN_CUT_COMMAND_ID
@@ -4578,6 +4579,10 @@ fn execute_registered_with_observer(
     if matches!(
         command,
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+            | threeterm_protocol::schema::REVOLVE_COMMAND_ID
+            | threeterm_protocol::schema::MIRROR_COMMAND_ID
+            | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
+            | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
             | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
@@ -4903,8 +4908,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_point,
             axis_direction,
             angle,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::Mirror {
             bundle,
@@ -4912,8 +4922,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             base_feature_id,
             plane_point,
             plane_normal,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::LinearPattern {
             bundle,
@@ -4922,8 +4937,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             direction,
             count,
             spacing,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::CircularPattern {
             bundle,
@@ -4933,8 +4953,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_normal,
             angle_step,
             count,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::Shell {
             bundle,
@@ -5342,6 +5367,13 @@ fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: 
     })
 }
 
+#[allow(dead_code)]
+fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
+    serde_json::from_value(request["profiles"].clone())
+        .expect("registered loft schema guarantees profile triples")
+}
+
+#[allow(dead_code)]
 fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
     serde_json::from_value(request["profile"].clone())
         .expect("registered profile schema guarantees coordinate pairs")
@@ -5524,6 +5556,282 @@ fn emit_boolean_common(
     }
 }
 
+#[allow(dead_code)]
+fn emit_fillet(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    radius: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().fillet(bundle, request, &worker) {
+        Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code)]
+fn emit_chamfer(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    distance: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = ChamferRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        distance,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().chamfer(bundle, request, &worker) {
+        Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_hole(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    position: [f64; 3],
+    direction: [f64; 3],
+    diameter: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = HoleRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        position,
+        direction,
+        diameter,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().hole(bundle, request, &worker) {
+        Ok(view) => write_hole_view(&view, HOLE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+/*
+fn emit_hole(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    position: [f64; 3],
+    direction: [f64; 3],
+    diameter: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = HoleRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        position,
+        direction,
+        diameter,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().hole(bundle, request, &worker) {
+        Ok(view) => write_hole_view(&view, HOLE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_fillet(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    radius: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().fillet(bundle, request, &worker) {
+        Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_chamfer(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    distance: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = ChamferRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        distance,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().chamfer(bundle, request, &worker) {
+        Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn emit_revolve(
     bundle: &str,
@@ -5563,7 +5871,7 @@ fn emit_revolve(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn emit_mirror(
     bundle: &str,
     feature_id: &str,
@@ -5611,7 +5919,7 @@ fn emit_mirror(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn emit_linear_pattern(
     bundle: &str,
     feature_id: &str,
@@ -5666,7 +5974,206 @@ fn emit_linear_pattern(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_circular_pattern(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    axis_point: [f64; 3],
+    axis_normal: [f64; 3],
+    angle_step: f64,
+    count: u32,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = CircularPatternRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        axis_point,
+        axis_normal,
+        angle_step,
+        count,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().circular_pattern(bundle, request, &worker) {
+        Ok(view) => write_circular_pattern_view(
+            &view,
+            CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            stdout,
+            stderr,
+        ),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+ */
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_revolve(
+    bundle: &str,
+    feature_id: &str,
+    profile: Vec<(f64, f64)>,
+    axis_point: [f64; 3],
+    axis_direction: [f64; 3],
+    angle: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = RevolveRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        profile,
+        axis_point,
+        axis_direction,
+        angle,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().revolve(bundle, request, &worker) {
+        Ok(view) => write_revolve_view(&view, REVOLVE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_mirror(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    plane_point: [f64; 3],
+    plane_normal: [f64; 3],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = MirrorRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        plane_point,
+        plane_normal,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().mirror(bundle, request, &worker) {
+        Ok(view) => write_mirror_view(&view, MIRROR_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn emit_linear_pattern(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    direction: [f64; 3],
+    count: u32,
+    spacing: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = LinearPatternRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        direction,
+        count,
+        spacing,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().linear_pattern(bundle, request, &worker) {
+        Ok(view) => write_linear_pattern_view(
+            &view,
+            LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+            stdout,
+            stderr,
+        ),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
 fn emit_circular_pattern(
     bundle: &str,
     feature_id: &str,
@@ -5915,6 +6422,285 @@ fn write_boolean_common_view(
     )
 }
 
+#[allow(dead_code)]
+fn write_fillet_view(
+    view: &threeterm_host::FilletCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Fillet.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[allow(dead_code)]
+fn write_chamfer_view(
+    view: &threeterm_host::ChamferCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Chamfer.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[allow(dead_code)]
+fn write_hole_view(
+    view: &threeterm_host::HoleCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Hole.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+/*
+fn write_hole_view(
+    view: &threeterm_host::HoleCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Hole.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+*/
+#[allow(dead_code)]
+fn write_revolve_view(
+    view: &threeterm_host::RevolveCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Revolve.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[allow(dead_code)]
+fn write_mirror_view(
+    view: &threeterm_host::MirrorCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Mirror.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[allow(dead_code)]
+fn write_linear_pattern_view(
+    view: &threeterm_host::LinearPatternCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::LinearPattern.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[allow(dead_code)]
+fn write_circular_pattern_view(
+    view: &threeterm_host::CircularPatternCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::CircularPattern.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+/*
+fn write_fillet_view(
+    view: &threeterm_host::FilletCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Fillet.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_chamfer_view(
+    view: &threeterm_host::ChamferCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Chamfer.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_revolve_view(
     view: &threeterm_host::RevolveCommitView,
     schema_version: &str,
@@ -6007,6 +6793,175 @@ fn write_circular_pattern_view(
         &serde_json::json!({
             "status": view.result.status,
             "operation": Operation::CircularPattern.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+*/
+#[cfg(any())]
+#[allow(dead_code)]
+fn write_shell_view(
+    view: &threeterm_host::ShellCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Shell.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[cfg(any())]
+#[allow(dead_code)]
+fn write_draft_view(
+    view: &threeterm_host::DraftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Draft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                view.source_snapshot.as_ref(),
+                view.artifact.as_ref(),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[cfg(any())]
+#[allow(dead_code)]
+fn write_loft_view(
+    view: &threeterm_host::LoftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Loft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_shell_view(
+    view: &threeterm_host::ShellCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Shell.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_draft_view(
+    view: &threeterm_host::DraftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Draft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                view.source_snapshot.as_ref(),
+                view.artifact.as_ref(),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_loft_view(
+    view: &threeterm_host::LoftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Loft.as_str(),
             "feature_id": view.result.feature_id,
             "feature_graph_hash": view.snapshot.feature_graph_hash,
             "revision_hash": view.snapshot.revision_hash,

@@ -2027,8 +2027,35 @@ pub static SKETCH_SOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "operation": { "const": "sketch_solve" },
             "feature_id": { "type": "string", "minLength": 1 },
             "reattachment_outcome": { "type": "string", "enum": ["resolved", "ambiguous", "lost", "incompatible"] },
-            "support": { "type": "object" },
-            "placement": { "type": "object" },
+            "support": {
+                "type": "object", "required": ["semantic_id", "provenance", "role", "evidence"],
+                "properties": {
+                    "semantic_id": { "type": "string", "minLength": 1 },
+                    "role": { "type": "string", "minLength": 1 },
+                    "provenance": { "type": "object", "required": ["source_feature_id", "source_revision_id", "source_face_id"], "properties": {
+                        "source_feature_id": { "type": "string", "minLength": 1 },
+                        "source_revision_id": { "type": "string", "minLength": 1 },
+                        "source_face_id": { "type": "string", "minLength": 1 }
+                    }, "additionalProperties": false },
+                    "evidence": { "type": "object", "required": ["topology_kind", "origin", "normal", "x_axis", "y_axis", "adjacent_feature_ids"], "properties": {
+                        "topology_kind": { "const": "planar_face" },
+                        "origin": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                        "normal": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                        "x_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                        "y_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                        "adjacent_feature_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+                    }, "additionalProperties": false }
+                }, "additionalProperties": false
+            },
+            "placement": {
+                "type": "object", "required": ["origin", "normal", "x_axis", "y_axis"],
+                "properties": {
+                    "origin": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                    "normal": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                    "x_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                    "y_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } }
+                }, "additionalProperties": false
+            },
             "revision_hash": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false

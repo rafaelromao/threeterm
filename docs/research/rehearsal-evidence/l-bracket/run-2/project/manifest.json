@@ -10,9 +10,9 @@
   "terminal_log_digest": "ac56325b178a25b6f36a256f1ed8aeb9b36110e7d8989d7248923b3617b04f1d",
   "feature_graph_hash": "0028edce8f60a73cedaeb8c05a23546be113c8f79e1dcdb8b70a7962e8e6a7b9",
   "revision_hash": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
-  "canonical_root_sha256": "5dbb9c7fdf29d15a0778cb3b887baf1ccfb40213181c25125cacc2111856712b",
-  "seal_sha256": "d392e60f99f81c61f9840186fa179df8f78c63511545b7084155ac109fcaf7fc",
-  "command_registry_hash": "775a1c9efa6879cffcc0783b6d8d2efb6260e93ca0ddc2d579db7b18bd1ae9a8",
+  "canonical_root_sha256": "fa9afcfd87111ded162689a3eecaa93086e4de964c1227bbad9b719d0f7f8546",
+  "seal_sha256": "5bd217de626ee407365977bf75ccc034496e186aa6ef82894af1c7269e2482ca",
+  "command_registry_hash": "f31897fd9b4afd137f1214a2a9a8e738d9d102f9b146949bc06f61e0856dfe8f",
   "feature_schema_version": "threeterm.domain/1",
   "protocol_schema_version": "threeterm.protocol/1",
   "occt_worker": {

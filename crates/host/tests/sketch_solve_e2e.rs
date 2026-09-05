@@ -2,7 +2,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::json;
-use threeterm_domain::ProjectGeneration;
+use threeterm_domain::{
+    PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference, ProjectGeneration,
+    SketchPlacement,
+};
 use threeterm_host::Host;
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_slvs_worker::{
@@ -25,6 +28,39 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
     };
     let path = root();
     write_fresh(&path, ProjectGeneration::with_id("sketch-e2e")).expect("fresh bundle");
+    let baseline = Bundle::at(&path).open().expect("fresh bundle opens");
+    Bundle::at(&path)
+        .append_feature("solid", "brep")
+        .expect("solid support feature appends");
+    let support_revision = Bundle::at(&path)
+        .open()
+        .expect("solid bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let evidence = PlanarFaceEvidence {
+        topology_kind: "planar_face".to_string(),
+        origin: [0.0, 0.0, 2.0],
+        normal: [0.0, 1.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 0.0, -1.0],
+        adjacent_feature_ids: Vec::new(),
+    };
+    let support = PlanarFaceReference {
+        semantic_id: "solid/vertical-face".to_string(),
+        provenance: PlanarFaceProvenance {
+            source_feature_id: "solid".to_string(),
+            source_revision_id: support_revision,
+            source_face_id: "solid/vertical-face".to_string(),
+        },
+        role: "sketch-support".to_string(),
+        evidence,
+    };
+    let placement = SketchPlacement {
+        origin: [0.0, 0.0, 2.0],
+        normal: [0.0, 1.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 0.0, -1.0],
+    };
     let request = SketchSolveRequest::new(
         "host-rectangle",
         "rectangle",
@@ -79,7 +115,8 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
                 value: None,
             })
             .collect(),
-    );
+    )
+    .with_attachment(support, placement);
     let host = Host::new();
     let committed = host
         .commit_sketch_solve_with_worker(&path, &request, &worker)
@@ -94,7 +131,7 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
         scene
             .features
             .iter()
-            .any(|feature| feature.kind.starts_with("sketch-segment:"))
+            .any(|feature| feature.kind.starts_with("sketch-segment3:"))
     );
     let frame = ProtocolNeutralViewport::project(
         &scene,
@@ -114,6 +151,11 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
             .any(|pixel| pixel == [105, 220, 190])
     );
     assert_eq!(committed.snapshot.revision_hash, loaded.revision_hash_hex());
+    assert_ne!(baseline.revision_hash_hex(), loaded.revision_hash_hex());
+    let reloaded = host
+        .reload_sketch_with_worker(&path, "host-rectangle", &worker)
+        .expect("canonical attachment reloads through the real worker");
+    assert_eq!(reloaded.reattachment_outcome.as_deref(), Some("resolved"));
     let _ = fs::remove_dir_all(path);
 }
 

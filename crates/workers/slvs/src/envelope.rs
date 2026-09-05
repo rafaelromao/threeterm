@@ -271,6 +271,19 @@ impl SketchSolveResponse {
         if self.status != "solved" && self.solved_coordinates.is_some() {
             return Err("failed worker response must not include coordinates".to_string());
         }
+        if self.support.is_some() != self.placement.is_some() {
+            return Err(
+                "worker response support and placement must be provided together".to_string(),
+            );
+        }
+        if let (Some(support), Some(placement)) = (&self.support, &self.placement)
+            && (support.evidence.origin != placement.origin
+                || support.evidence.normal != placement.normal
+                || support.evidence.x_axis != placement.x_axis
+                || support.evidence.y_axis != placement.y_axis)
+        {
+            return Err("worker response placement does not match support frame".to_string());
+        }
         if self.entity_ids
             != request
                 .entities

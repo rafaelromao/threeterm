@@ -1028,7 +1028,17 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
               [](const Candidate& left, const Candidate& right) {
                   if (left.origin.X() != right.origin.X()) return left.origin.X() < right.origin.X();
                   if (left.origin.Y() != right.origin.Y()) return left.origin.Y() < right.origin.Y();
-                  return left.origin.Z() < right.origin.Z();
+                  if (left.origin.Z() != right.origin.Z()) return left.origin.Z() < right.origin.Z();
+                  const auto direction_less = [](const gp_Dir& a, const gp_Dir& b) {
+                      if (a.X() != b.X()) return a.X() < b.X();
+                      if (a.Y() != b.Y()) return a.Y() < b.Y();
+                      return a.Z() < b.Z();
+                  };
+                  if (direction_less(left.normal, right.normal)) return true;
+                  if (direction_less(right.normal, left.normal)) return false;
+                  if (direction_less(left.x_axis, right.x_axis)) return true;
+                  if (direction_less(right.x_axis, left.x_axis)) return false;
+                  return direction_less(left.y_axis, right.y_axis);
               });
     std::ostringstream out;
     out << std::setprecision(17);

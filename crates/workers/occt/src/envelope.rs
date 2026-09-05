@@ -226,6 +226,17 @@ impl PlanarFaceEvidenceResult {
             {
                 return Err("planar face evidence frame is not orthonormal".to_string());
             }
+            let cross = [
+                candidate.x_axis[1] * candidate.y_axis[2]
+                    - candidate.x_axis[2] * candidate.y_axis[1],
+                candidate.x_axis[2] * candidate.y_axis[0]
+                    - candidate.x_axis[0] * candidate.y_axis[2],
+                candidate.x_axis[0] * candidate.y_axis[1]
+                    - candidate.x_axis[1] * candidate.y_axis[0],
+            ];
+            if dot(cross, candidate.normal) < 1.0 - 1e-6 {
+                return Err("planar face evidence frame is not right-handed".to_string());
+            }
         }
         Ok(())
     }

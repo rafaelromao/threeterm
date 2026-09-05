@@ -39,6 +39,34 @@ fn temp_root() -> std::path::PathBuf {
 }
 
 #[test]
+fn replay_rejects_feature_ids_that_escape_the_brep_directory() {
+    let root = temp_root();
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+
+    let error = bundle
+        .restore_derived_breps_if_revision(
+            &revision,
+            &[("../outside".to_string(), b"not-a-brep".to_vec())],
+        )
+        .expect_err("path traversal feature ID is rejected");
+    assert!(error.to_string().contains("plain path component"));
+    assert!(
+        !root
+            .parent()
+            .expect("root has parent")
+            .join("outside.brep")
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn fillet_intent_round_trips_selected_semantic_edge() {
     let intent = CanonicalFilletIntent {
         schema_version: FILLET_INTENT_SCHEMA_VERSION.to_string(),

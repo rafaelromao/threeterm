@@ -1544,6 +1544,29 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
+std::string edge_role(const TopoDS_Edge& edge) {
+    return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter"
+                                                              : "fillet-transition";
+}
+
+std::string edge_semantic_id(const TopoDS_Edge& edge) {
+    GProp_GProps properties;
+    BRepGProp::LinearProperties(edge, properties);
+    TopoDS_Vertex first_vertex;
+    TopoDS_Vertex last_vertex;
+    TopExp::Vertices(edge, first_vertex, last_vertex);
+    const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
+    const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
+    const gp_Pnt midpoint(
+        (first_point.X() + last_point.X()) / 2.0,
+        (first_point.Y() + last_point.Y()) / 2.0,
+        (first_point.Z() + last_point.Z()) / 2.0);
+    std::ostringstream identity;
+    identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
+             << properties.Mass();
+    return "edge-" + sha256_hex(identity.str());
+}
+
 void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Edge>& edges,
                             const JsonParser::Value& request) {
     const auto* selected = find_field(request, "selected_edge");
@@ -1575,23 +1598,52 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         // A candidate role is evidence about the returned edge, not a copy
         // of the caller's claim. Preserve the MVP perimeter role for linear
         // edges and expose a distinct role for curved edit results.
-        const std::string role =
-            BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter" : "fillet-transition";
-        std::ostringstream identity;
-        identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
-                 << properties.Mass();
         if (!first) out << ',';
         first = false;
-        out << "{\"semantic_id\":\"edge-" << sha256_hex(identity.str()) << "\","
+        out << "{\"semantic_id\":\"" << edge_semantic_id(edge) << "\","
             << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
             << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
             << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
-            << "\"role\":\"" << json_escape(role) << "\","
+            << "\"role\":\"" << json_escape(edge_role(edge)) << "\","
             << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
             << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"
             << "\"length\":" << properties.Mass() << "}";
     }
     out << ']';
+}
+
+bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) {
+    const std::string request_id = get_string(request, "request_id");
+    const std::string feature_id = get_string(request, "feature_id");
+    const std::string base_path = get_string(request, "base_path");
+    if (request_id.empty() || feature_id.empty() || base_path.empty()) {
+        error = "edge inspection request is missing required fields";
+        return false;
+    }
+    try {
+        TopoDS_Shape shape;
+        BRep_Builder builder;
+        if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) {
+            error = "could not read base BREP at " + base_path;
+            return false;
+        }
+        std::vector<TopoDS_Edge> edges;
+        for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            edges.push_back(TopoDS::Edge(explorer.Current()));
+        }
+        std::ostringstream out;
+        out << "{\"schema_version\":\"" << kSchemaVersion
+            << "\",\"request_id\":\"" << json_escape(request_id)
+            << "\",\"operation\":\"inspect_edges\",\"status\":\"ok\",\"feature_id\":\""
+            << json_escape(feature_id) << "\"";
+        append_edge_candidates(out, edges, request);
+        out << '}';
+        g_result_json = out.str();
+        return true;
+    } catch (const Standard_Failure& exception) {
+        error = std::string("OCCT edge inspection failed: ") + exception.GetMessageString();
+        return false;
+    }
 }
 
 TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
@@ -1602,6 +1654,8 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
     const auto midpoint = get_vec3(*selected, "midpoint");
     const auto tangent = get_vec3(*selected, "tangent");
     const double length = get_number(*selected, "length");
+    const std::string semantic_id = get_string(*selected, "semantic_id");
+    const std::string role = get_string(*selected, "role");
     const double tangent_length = std::sqrt(
         tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
@@ -1629,7 +1683,8 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
              edge_tangent.Z() * tangent[2]) /
             (edge_tangent_length * tangent_length);
         if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
-            1.0 - std::abs(tangent_dot) <= 1e-6) {
+            1.0 - std::abs(tangent_dot) <= 1e-6 && semantic_id == edge_semantic_id(edge) &&
+            role == edge_role(edge)) {
             if (!match.IsNull()) {
                 return {};
             }
@@ -3546,6 +3601,8 @@ int main() {
         success = handle_boolean_common(*args, error);
     } else if (command_id == "fillet") {
         success = handle_fillet(*args, error);
+    } else if (command_id == "inspect_edges") {
+        success = handle_inspect_edges(*args, error);
     } else if (command_id == "split") {
         success = handle_split(*args, error);
     } else if (command_id == "chamfer") {

@@ -1301,6 +1301,32 @@ fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeC
         .collect()
 }
 
+fn validate_replayed_edge_reference(
+    reference: &CanonicalEdgeReference,
+    candidates: &[EdgeCandidateEvidence],
+) -> Result<(), HostError> {
+    let selected = SelectedEdgeReference {
+        semantic_id: reference.semantic_id.clone(),
+        provenance: threeterm_domain::EdgeProvenance {
+            source_feature_id: reference.provenance.source_feature_id.clone(),
+            source_revision_id: reference.provenance.source_revision_id.clone(),
+            source_edge_id: reference.provenance.source_edge_id.clone(),
+        },
+        role: reference.role.clone(),
+        evidence: threeterm_domain::EdgeGeometricEvidence {
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        },
+    };
+    match resolve_edge_reference(&selected, domain_edge_candidates(candidates)) {
+        EdgeReattachmentOutcome::Resolved { .. } => Ok(()),
+        outcome => Err(HostError::Validation {
+            detail: format!("replayed semantic edge selection failed: {outcome:?}"),
+        }),
+    }
+}
+
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn export(
@@ -2334,6 +2360,23 @@ impl Host {
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
                         })?;
+                    let mut request = request;
+                    if matches!(command, FILLET_COMMAND_ID | CHAMFER_COMMAND_ID) {
+                        let base = base_feature_id.as_deref().expect("validated base feature");
+                        let selected = request.get("selected_edge").cloned().ok_or_else(|| {
+                            HostError::Validation {
+                                detail: "edge finishing operation requires selected_edge"
+                                    .to_string(),
+                            }
+                        })?;
+                        request["selected_edge"] = resolve_selected_edge_with_worker(
+                            &worker,
+                            base_path.clone().expect("validated base path"),
+                            base,
+                            &current.revision_hash,
+                            selected,
+                        )?;
+                    }
                     let schema_version = find(command)
                         .expect("finishing command is registered")
                         .response_schema_version;
@@ -2373,6 +2416,7 @@ impl Host {
                                 &view.result.brep_sha256,
                                 view.result.brep_bytes,
                                 &view.artifact,
+                                Some(&view.result.edge_candidates),
                                 schema_version,
                             ))
                         }
@@ -2411,6 +2455,7 @@ impl Host {
                                 &view.result.brep_sha256,
                                 view.result.brep_bytes,
                                 &view.artifact,
+                                Some(&view.result.edge_candidates),
                                 schema_version,
                             ))
                         }
@@ -2441,6 +2486,7 @@ impl Host {
                                 &view.result.brep_sha256,
                                 view.result.brep_bytes,
                                 &view.artifact,
+                                None,
                                 schema_version,
                             ))
                         }
@@ -2487,6 +2533,7 @@ impl Host {
                                 &view.result.brep_sha256,
                                 view.result.brep_bytes,
                                 view.artifact.as_ref().expect("draft artifact exists"),
+                                None,
                                 schema_version,
                             ))
                         }
@@ -2505,8 +2552,16 @@ impl Host {
                             })?;
                             let request =
                                 LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
-                                    .with_solid(request["is_solid"].as_bool().unwrap_or(true))
-                                    .with_ruled(request["ruled"].as_bool().unwrap_or(false))
+                                    .with_solid(request["is_solid"].as_bool().ok_or_else(|| {
+                                        HostError::Validation {
+                                            detail: "missing loft is_solid".to_string(),
+                                        }
+                                    })?)
+                                    .with_ruled(request["ruled"].as_bool().ok_or_else(|| {
+                                        HostError::Validation {
+                                            detail: "missing loft ruled".to_string(),
+                                        }
+                                    })?)
                                     .with_output_path(output_dir, output_name)
                                     .with_feature_id(feature_id);
                             let view = self.loft(&bundle_path, request, &worker)?;
@@ -2520,6 +2575,7 @@ impl Host {
                                 &view.result.brep_sha256,
                                 view.result.brep_bytes,
                                 &view.artifact,
+                                None,
                                 schema_version,
                             ))
                         }
@@ -2850,6 +2906,23 @@ impl Host {
                 detail: error.to_string(),
             })
         })?;
+        let mut request = request.clone();
+        if matches!(command, FILLET_COMMAND_ID | CHAMFER_COMMAND_ID) {
+            let base = base_feature_id.expect("validated base feature");
+            let selected = request.get("selected_edge").cloned().ok_or_else(|| {
+                ExecutionError::Handler(HostError::Validation {
+                    detail: "edge finishing operation requires selected_edge".to_string(),
+                })
+            })?;
+            request["selected_edge"] = resolve_selected_edge_with_worker(
+                &worker,
+                base_path.clone().expect("validated base path"),
+                base,
+                expected_revision,
+                selected,
+            )
+            .map_err(ExecutionError::Handler)?;
+        }
         match command {
             FILLET_COMMAND_ID => {
                 let base_path = base_path.ok_or_else(|| {
@@ -2882,7 +2955,7 @@ impl Host {
                         &worker,
                     )
                     .map_err(ExecutionError::Handler)?;
-                self.preview_staged_result(command, request, typed)
+                self.preview_staged_result(command, &request, typed)
             }
             CHAMFER_COMMAND_ID => {
                 let base_path = base_path.ok_or_else(|| {
@@ -2915,7 +2988,7 @@ impl Host {
                         &worker,
                     )
                     .map_err(ExecutionError::Handler)?;
-                self.preview_staged_result(command, request, typed)
+                self.preview_staged_result(command, &request, typed)
             }
             SHELL_COMMAND_ID => {
                 let base_path = base_path.ok_or_else(|| {
@@ -2939,7 +3012,7 @@ impl Host {
                         &worker,
                     )
                     .map_err(ExecutionError::Handler)?;
-                self.preview_staged_result(command, request, typed)
+                self.preview_staged_result(command, &request, typed)
             }
             DRAFT_COMMAND_ID => {
                 let base_path = base_path.ok_or_else(|| {
@@ -2969,7 +3042,7 @@ impl Host {
                         &worker,
                     )
                     .map_err(ExecutionError::Handler)?;
-                self.preview_staged_result(command, request, typed)
+                self.preview_staged_result(command, &request, typed)
             }
             LOFT_COMMAND_ID => {
                 let profiles =
@@ -2981,14 +3054,18 @@ impl Host {
                     .stage_occt_result::<LoftResult>(
                         Path::new(bundle_path),
                         &LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
-                            .with_solid(request["is_solid"].as_bool().unwrap_or(true))
-                            .with_ruled(request["ruled"].as_bool().unwrap_or(false))
+                            .with_solid(request["is_solid"].as_bool().ok_or_else(|| {
+                                ExecutionError::InvalidRequest("missing is_solid".to_string())
+                            })?)
+                            .with_ruled(request["ruled"].as_bool().ok_or_else(|| {
+                                ExecutionError::InvalidRequest("missing ruled".to_string())
+                            })?)
                             .with_feature_id(feature_id),
                         threeterm_occt_worker::Operation::Loft,
                         &worker,
                     )
                     .map_err(ExecutionError::Handler)?;
-                self.preview_staged_result(command, request, typed)
+                self.preview_staged_result(command, &request, typed)
             }
             _ => unreachable!(),
         }
@@ -7998,6 +8075,11 @@ fn stage_replay_artifact(
     feature_id: &str,
     bytes: &[u8],
 ) -> Result<PathBuf, HostError> {
+    if !valid_feature_path_component(feature_id) {
+        return Err(HostError::Validation {
+            detail: "replayed feature_id must be a plain path component".to_string(),
+        });
+    }
     let path = stage_root.join(format!("{feature_id}.brep"));
     fs::write(&path, bytes).map_err(|error| HostError::BrepIo {
         detail: format!("stage replayed BREP failed: {error}"),
@@ -8060,6 +8142,13 @@ fn replay_finishing_geometry(
     }
 
     let dependency_path = |dependency: &str| -> Result<PathBuf, HostError> {
+        if !valid_feature_path_component(dependency) {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "finishing replay dependency is not a plain feature ID: {dependency}"
+                ),
+            });
+        }
         if let Some(path) = replayed_paths.get(dependency) {
             return Ok(path.clone());
         }
@@ -8091,7 +8180,7 @@ fn replay_finishing_geometry(
     };
 
     macro_rules! read_result {
-        ($result:expr) => {{
+        ($result:expr, $validate:expr) => {{
             let result = $result.map_err(HostError::from)?;
             if result.status != "ok" {
                 return Err(HostError::BrepInvalid {
@@ -8099,6 +8188,7 @@ fn replay_finishing_geometry(
                     detail: format!("finishing replay returned status {}", result.status),
                 });
             }
+            $validate(&result)?;
             let bytes = read_brep_verified(
                 &result.brep_path,
                 Some((result.brep_bytes, result.brep_sha256.as_str())),
@@ -8111,15 +8201,17 @@ fn replay_finishing_geometry(
     let bytes = match intent {
         FinishingReplayIntent::Fillet(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;
+            let edge_reference = value.selected_edge.clone();
+            let replay_reference = edge_reference.clone();
             let edge = SelectedEdgeContext {
-                semantic_id: value.selected_edge.semantic_id,
-                source_feature_id: value.selected_edge.provenance.source_feature_id,
-                source_revision_id: value.selected_edge.provenance.source_revision_id,
-                source_edge_id: value.selected_edge.provenance.source_edge_id,
-                role: value.selected_edge.role,
-                midpoint: value.selected_edge.evidence.midpoint,
-                tangent: value.selected_edge.evidence.tangent,
-                length: value.selected_edge.evidence.length,
+                semantic_id: edge_reference.semantic_id,
+                source_feature_id: edge_reference.provenance.source_feature_id,
+                source_revision_id: edge_reference.provenance.source_revision_id,
+                source_edge_id: edge_reference.provenance.source_edge_id,
+                role: edge_reference.role,
+                midpoint: edge_reference.evidence.midpoint,
+                tangent: edge_reference.evidence.tangent,
+                length: edge_reference.evidence.length,
             };
             let request = FilletRequest::new(value.request_id, base_path, value.radius)
                 .with_output_path(
@@ -8132,20 +8224,25 @@ fn replay_finishing_geometry(
                 worker
                     .clone()
                     .with_revision_id(source_revision)
-                    .fillet(&request)
+                    .fillet(&request),
+                |result: &FilletResult| {
+                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
+                }
             )
         }
         FinishingReplayIntent::Chamfer(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;
+            let edge_reference = value.selected_edge.clone();
+            let replay_reference = edge_reference.clone();
             let edge = SelectedEdgeContext {
-                semantic_id: value.selected_edge.semantic_id,
-                source_feature_id: value.selected_edge.provenance.source_feature_id,
-                source_revision_id: value.selected_edge.provenance.source_revision_id,
-                source_edge_id: value.selected_edge.provenance.source_edge_id,
-                role: value.selected_edge.role,
-                midpoint: value.selected_edge.evidence.midpoint,
-                tangent: value.selected_edge.evidence.tangent,
-                length: value.selected_edge.evidence.length,
+                semantic_id: edge_reference.semantic_id,
+                source_feature_id: edge_reference.provenance.source_feature_id,
+                source_revision_id: edge_reference.provenance.source_revision_id,
+                source_edge_id: edge_reference.provenance.source_edge_id,
+                role: edge_reference.role,
+                midpoint: edge_reference.evidence.midpoint,
+                tangent: edge_reference.evidence.tangent,
+                length: edge_reference.evidence.length,
             };
             let request = ChamferRequest::new(value.request_id, base_path, value.distance)
                 .with_output_path(
@@ -8158,7 +8255,10 @@ fn replay_finishing_geometry(
                 worker
                     .clone()
                     .with_revision_id(source_revision)
-                    .chamfer(&request)
+                    .chamfer(&request),
+                |result: &ChamferResult| {
+                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
+                }
             )
         }
         FinishingReplayIntent::Shell(value) => {
@@ -8173,7 +8273,8 @@ fn replay_finishing_geometry(
                 worker
                     .clone()
                     .with_revision_id(source_revision)
-                    .shell(&request)
+                    .shell(&request),
+                |_result: &ShellResult| Ok::<(), HostError>(())
             )
         }
         FinishingReplayIntent::Draft(value) => {
@@ -8193,7 +8294,8 @@ fn replay_finishing_geometry(
                 worker
                     .clone()
                     .with_revision_id(source_revision)
-                    .draft(&request)
+                    .draft(&request),
+                |_result: &DraftResult| Ok::<(), HostError>(())
             )
         }
         FinishingReplayIntent::Loft(value) => {
@@ -8209,7 +8311,8 @@ fn replay_finishing_geometry(
                 worker
                     .clone()
                     .with_revision_id(source_revision)
-                    .loft(&request)
+                    .loft(&request),
+                |_result: &LoftResult| Ok::<(), HostError>(())
             )
         }
     };
@@ -8810,9 +8913,10 @@ fn finishing_response_value(
     brep_sha256: &str,
     brep_bytes: usize,
     artifact: &Layer1DerivedResult,
+    edge_candidates: Option<&[EdgeCandidateEvidence]>,
     schema_version: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut response = serde_json::json!({
         "status": status,
         "operation": operation,
         "feature_id": feature_id,
@@ -8831,7 +8935,31 @@ fn finishing_response_value(
         "brep_bytes": brep_bytes,
         "derived_result": boolean_derived_result_json(artifact),
         "schema_version": schema_version,
-    })
+    });
+    if let Some(edge_candidates) = edge_candidates {
+        response["edge_candidates"] = serde_json::Value::Array(
+            domain_edge_candidates(edge_candidates)
+                .into_iter()
+                .map(|candidate| {
+                    serde_json::json!({
+                        "semantic_id": candidate.semantic_id,
+                        "provenance": {
+                            "source_feature_id": candidate.provenance.source_feature_id,
+                            "source_revision_id": candidate.provenance.source_revision_id,
+                            "source_edge_id": candidate.provenance.source_edge_id,
+                        },
+                        "role": candidate.role,
+                        "evidence": {
+                            "midpoint": candidate.evidence.midpoint,
+                            "tangent": candidate.evidence.tangent,
+                            "length": candidate.evidence.length,
+                        }
+                    })
+                })
+                .collect(),
+        );
+    }
+    response
 }
 
 fn canonical_boolean_intent(
@@ -9001,18 +9129,9 @@ fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, Host
         .get("base_feature_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
-        .or_else(|| {
-            request["base_path"].as_str().and_then(|path| {
-                Path::new(path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| name.strip_suffix(".brep"))
-                    .map(str::to_string)
-            })
-        })
         .filter(|id| !id.is_empty())
         .ok_or_else(|| HostError::Validation {
-            detail: "canonical operation base feature is missing".to_string(),
+            detail: "canonical operation requires base_feature_id".to_string(),
         })
 }
 
@@ -9075,6 +9194,78 @@ fn selected_edge_context_from_request(
     })
 }
 
+fn selected_edge_reference_from_value(
+    selected: serde_json::Value,
+) -> Result<SelectedEdgeReference, HostError> {
+    let reference: CanonicalEdgeReference =
+        serde_json::from_value(selected).map_err(|error| HostError::Validation {
+            detail: format!("invalid selected edge reference: {error}"),
+        })?;
+    Ok(SelectedEdgeReference {
+        semantic_id: reference.semantic_id,
+        provenance: threeterm_domain::EdgeProvenance {
+            source_feature_id: reference.provenance.source_feature_id,
+            source_revision_id: reference.provenance.source_revision_id,
+            source_edge_id: reference.provenance.source_edge_id,
+        },
+        role: reference.role,
+        evidence: threeterm_domain::EdgeGeometricEvidence {
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        },
+    })
+}
+
+fn resolve_selected_edge_with_worker(
+    worker: &OcctWorker,
+    base_path: PathBuf,
+    base_feature_id: &str,
+    source_revision: &str,
+    selected: serde_json::Value,
+) -> Result<serde_json::Value, HostError> {
+    let reference = selected_edge_reference_from_value(selected.clone())?;
+    let inspection = worker
+        .inspect_edges(
+            threeterm_occt_worker::new_request_id(),
+            base_path,
+            base_feature_id,
+            source_revision,
+            selected,
+        )
+        .map_err(HostError::from)?;
+    let outcome = resolve_edge_reference(
+        &reference,
+        domain_edge_candidates(&inspection.edge_candidates),
+    );
+    let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
+        return Err(HostError::Validation {
+            detail: format!("semantic edge selection failed: {outcome:?}"),
+        });
+    };
+    let candidate = inspection
+        .edge_candidates
+        .iter()
+        .find(|candidate| candidate.semantic_id == semantic_id)
+        .ok_or_else(|| HostError::Validation {
+            detail: "resolved semantic edge candidate is missing".to_string(),
+        })?;
+    Ok(serde_json::json!({
+        "semantic_id": candidate.semantic_id.clone(),
+        "provenance": {
+            "source_feature_id": candidate.source_feature_id.clone(),
+            "source_revision_id": candidate.source_revision_id.clone(),
+            "source_edge_id": candidate.source_edge_id.clone(),
+        },
+        "role": candidate.role.clone(),
+        "evidence": {
+            "midpoint": candidate.midpoint,
+            "tangent": candidate.tangent,
+            "length": candidate.length,
+        }
+    }))
+}
+
 fn validate_finishing_request(
     command: CommandId,
     loaded: &LoadedBundle,
@@ -9102,7 +9293,11 @@ fn validate_finishing_request(
                 detail: "finishing base_feature_id is invalid".to_string(),
             });
         }
-        if !loaded.graph.contains_feature(base) {
+        let is_brep_feature = loaded
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == base && feature.kind.starts_with("brep:"));
+        if !is_brep_feature {
             return Err(HostError::Validation {
                 detail: format!("finishing base feature is missing: {base}"),
             });
@@ -9140,9 +9335,16 @@ fn validate_finishing_request(
                 || context.source_edge_id.is_empty()
                 || context.role.is_empty()
                 || !context.midpoint.iter().all(|value| value.is_finite())
+                || context.midpoint.iter().any(|value| value.abs() > 1e9)
                 || !context.tangent.iter().all(|value| value.is_finite())
+                || context
+                    .tangent
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    <= f64::EPSILON
                 || !context.length.is_finite()
-                || context.length <= 0.0
+                || !(0.0 < context.length && context.length < 1e9)
             {
                 return Err(HostError::Validation {
                     detail:

@@ -36,7 +36,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "ce9678fbc4c082f2996c755ef901ed56ec690d2c93aa438edabe8586a852ef5d",
+        "d174d41f446e8eba86616cf0792527e93b7ce7c9a9f9ab6d3feb8e6b2d97473b",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -513,7 +513,14 @@ fn registry_contains_versioned_loft_contract() {
     );
     assert_eq!(
         loft.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "profiles", "expected_revision"])
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "profiles",
+            "expected_revision",
+            "is_solid",
+            "ruled"
+        ])
     );
     assert_eq!(loft.request_schema["additionalProperties"], false);
 }

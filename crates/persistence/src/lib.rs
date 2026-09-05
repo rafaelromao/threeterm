@@ -267,12 +267,15 @@ static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 struct ReplayPublicationCleanup {
     staging: PathBuf,
     backup: PathBuf,
+    preserve_backup: bool,
 }
 
 impl Drop for ReplayPublicationCleanup {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.staging);
-        let _ = fs::remove_dir_all(&self.backup);
+        if !self.preserve_backup {
+            let _ = fs::remove_dir_all(&self.backup);
+        }
     }
 }
 
@@ -765,10 +768,25 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn canonical_geometry_feature_exists(log: &TransactionLog, feature_id: &str) -> bool {
-    log.entries()
-        .iter()
-        .any(|entry| entry.feature_id == feature_id && entry.intent.is_some())
+fn valid_feature_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn canonical_geometry_feature_exists(
+    graph: &FeatureGraph,
+    log: &TransactionLog,
+    feature_id: &str,
+) -> bool {
+    graph
+        .features()
+        .any(|feature| feature.id.as_str() == feature_id && feature.kind.starts_with("brep:"))
+        && log
+            .entries()
+            .iter()
+            .any(|entry| entry.feature_id == feature_id && entry.intent.is_some())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1736,6 +1754,11 @@ impl Bundle {
         expected_revision: &str,
         brep_bytes: &[u8],
     ) -> Result<PathBuf, BundleError> {
+        if !valid_feature_path_component(feature_id) {
+            return Err(BundleError::Invalid(
+                "derived result feature ID must be a plain path component".to_string(),
+            ));
+        }
         with_bundle_write_lock(&self.root, || {
             let loaded = self.open_locked()?;
             if loaded.revision_hash_hex() != expected_revision {
@@ -1793,6 +1816,11 @@ impl Bundle {
 
             let mut feature_ids = std::collections::BTreeSet::new();
             for (feature_id, bytes) in artifacts {
+                if !valid_feature_path_component(feature_id) {
+                    return Err(BundleError::Invalid(
+                        "derived result feature ID must be a plain path component".to_string(),
+                    ));
+                }
                 if !feature_ids.insert(feature_id) {
                     return Err(BundleError::Invalid(format!(
                         "duplicate replay artifact feature: {feature_id}"
@@ -1827,9 +1855,10 @@ impl Bundle {
                 derived_root.join(format!("replay-backup-{}-{sequence}", std::process::id()));
             fs::create_dir_all(&staging)?;
             fs::create_dir_all(&backup)?;
-            let _cleanup = ReplayPublicationCleanup {
+            let mut cleanup = ReplayPublicationCleanup {
                 staging: staging.clone(),
                 backup: backup.clone(),
+                preserve_backup: false,
             };
             let brep_root = self.root.join("brep");
             fs::create_dir_all(&brep_root)?;
@@ -1880,6 +1909,9 @@ impl Bundle {
                     }
                 }
                 if !rollback_errors.is_empty() {
+                    // Preserve any surviving backups for recovery when the
+                    // best-effort rollback could not restore every file.
+                    cleanup.preserve_backup = true;
                     return Err(BundleError::Io(format!(
                         "replay promotion failed: {error}; rollback failed: {}",
                         rollback_errors.join("; ")
@@ -2837,7 +2869,11 @@ impl Bundle {
                         });
                     }
                     if !loaded.graph.contains_feature(&fillet.base_feature_id)
-                        || !canonical_geometry_feature_exists(&loaded.log, &fillet.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &fillet.base_feature_id,
+                        )
                     {
                         return Err(BundleError::Invalid(format!(
                             "canonical fillet base feature is missing: {}",
@@ -2873,7 +2909,11 @@ impl Bundle {
                 }
                 CanonicalIntent::Chamfer(chamfer) => {
                     if !loaded.graph.contains_feature(&chamfer.base_feature_id)
-                        || !canonical_geometry_feature_exists(&loaded.log, &chamfer.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &chamfer.base_feature_id,
+                        )
                         || entries.len() != 1
                         || chamfer.validate(entries[0].0).is_err()
                         || idempotency_key != Some(chamfer.request_id.as_str())
@@ -2887,7 +2927,11 @@ impl Bundle {
                 }
                 CanonicalIntent::Shell(shell) => {
                     if !loaded.graph.contains_feature(&shell.base_feature_id)
-                        || !canonical_geometry_feature_exists(&loaded.log, &shell.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &shell.base_feature_id,
+                        )
                         || entries.len() != 1
                         || shell.validate(entries[0].0).is_err()
                         || idempotency_key != Some(shell.request_id.as_str())
@@ -2901,7 +2945,11 @@ impl Bundle {
                 }
                 CanonicalIntent::Draft(draft) => {
                     if !loaded.graph.contains_feature(&draft.base_feature_id)
-                        || !canonical_geometry_feature_exists(&loaded.log, &draft.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &draft.base_feature_id,
+                        )
                         || entries.len() != 1
                         || draft.validate(entries[0].0).is_err()
                         || idempotency_key != Some(draft.request_id.as_str())

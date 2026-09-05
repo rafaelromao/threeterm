@@ -4584,33 +4584,20 @@ fn execute_registered_with_observer(
         Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
-    let request = if matches!(
+    if matches!(
         command,
         threeterm_protocol::schema::FILLET_COMMAND_ID
             | threeterm_protocol::schema::CHAMFER_COMMAND_ID
             | threeterm_protocol::schema::SHELL_COMMAND_ID
             | threeterm_protocol::schema::DRAFT_COMMAND_ID
             | threeterm_protocol::schema::LOFT_COMMAND_ID
-    ) {
-        let Some(bundle_path) = request.get("bundle_path").and_then(Value::as_str) else {
-            return emit_internal_error("finishing command is missing bundle_path", stderr);
-        };
-        let snapshot = match Host::new().load(bundle_path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return emit_dispatch_error(&DispatchError::from(error), stderr),
-        };
-        let mut request = request;
-        if request
-            .get("expected_revision")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            request["expected_revision"] = Value::String(snapshot.revision_hash);
-        }
-        request
-    } else {
-        request
-    };
+    ) && request
+        .get("expected_revision")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return emit_internal_error("finishing command requires --expected-revision", stderr);
+    }
     if matches!(
         command,
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID

@@ -57,6 +57,7 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    InspectEdges,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +98,7 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::InspectEdges => "inspect_edges",
         }
     }
 }
@@ -889,6 +891,17 @@ pub struct EdgeCandidateEvidence {
     pub length: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeInspectionResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
+}
+
 /// Chamfer request: apply a constant-distance chamfer to every edge of
 /// the BREP at `base_path` and write the result to
 /// `<output_dir>/<output_filename>`.
@@ -1154,6 +1167,8 @@ pub struct ChamferResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 
 impl ChamferResult {
@@ -2796,6 +2811,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "chamfer-1".to_string(),
+            edge_candidates: Vec::new(),
         };
         assert!(result.is_success());
 

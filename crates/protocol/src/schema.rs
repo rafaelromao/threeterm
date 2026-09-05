@@ -610,6 +610,13 @@ fn selected_edge_schema() -> Value {
     })
 }
 
+fn edge_candidates_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": selected_edge_schema()
+    })
+}
+
 pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1005,6 +1012,7 @@ pub static FILLET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path",
             "brep_sha256",
             "brep_bytes",
+            "edge_candidates",
             "derived_result",
             "schema_version"
         ],
@@ -1030,6 +1038,7 @@ pub static FILLET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "edge_candidates": edge_candidates_schema(),
             "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
@@ -1054,6 +1063,7 @@ pub static CHAMFER_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path",
             "brep_sha256",
             "brep_bytes",
+            "edge_candidates",
             "derived_result",
             "schema_version"
         ],
@@ -1079,6 +1089,7 @@ pub static CHAMFER_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "edge_candidates": edge_candidates_schema(),
             "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
@@ -1485,7 +1496,9 @@ pub static LOFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path",
             "feature_id",
             "profiles",
-            "expected_revision"
+            "expected_revision",
+            "is_solid",
+            "ruled"
         ],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },

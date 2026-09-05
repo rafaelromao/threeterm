@@ -288,3 +288,52 @@ fn unknown_intent_command_fails_closed_on_decode() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn unsupported_intent_version_and_worker_fail_before_mutation() {
+    let root = temp_root("unsupported-intent");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
+
+    for mutation in ["version", "worker"] {
+        let mut intent = revolve_intent("req-unsupported", &revision, "unsupported");
+        let CanonicalIntent::Revolve(inner) = &mut intent else {
+            unreachable!("revolve intent");
+        };
+        if mutation == "version" {
+            inner.schema_version = "threeterm.intent.revolve/99".to_string();
+        } else {
+            inner.worker_requirements.worker_schema_version =
+                "threeterm.workers.occt/99".to_string();
+        }
+        assert!(
+            bundle
+                .append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
+                    "unsupported",
+                    "brep:unsupported",
+                    &revision,
+                    "req-unsupported",
+                    "{}",
+                    &intent,
+                    b"unsupported",
+                )
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::read(root.join("transactions.log")).unwrap(),
+            log_before
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

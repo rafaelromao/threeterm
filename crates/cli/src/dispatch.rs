@@ -10,10 +10,9 @@ use threeterm_domain::{
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
-    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
-    CircularPatternRequest, DraftRequest, FilletRequest, LinearPatternRequest, LoftRequest,
-    MirrorRequest, OcctWorker, Operation, RevolveRequest, SelectedEdgeContext, ShellRequest,
-    new_request_id,
+    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest,
+    CircularPatternRequest, LinearPatternRequest, MirrorRequest, OcctWorker, Operation,
+    RevolveRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
@@ -32,14 +31,12 @@ use threeterm_protocol::schema::{
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-    BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
-    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
-    EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
-    FIT_DIMENSION_RESPONSE_SCHEMA_VERSION, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
-    HOLE_RESPONSE_SCHEMA_VERSION, LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
-    REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
-    SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
+    BRACKET_RESPONSE_SCHEMA_VERSION, CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION,
+    EXTRUDE_RESPONSE_SCHEMA_VERSION, FIT_DIMENSION_RESPONSE_SCHEMA_VERSION,
+    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
+    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
+    MIRROR_RESPONSE_SCHEMA_VERSION, REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION,
+    REVOLVE_RESPONSE_SCHEMA_VERSION, SAVE_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
 use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
@@ -3587,38 +3584,12 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Fillet {
-            bundle,
-            feature_id,
-            base_feature_id,
-            radius,
-            selected_edge_file,
-            ..
-        } => emit_fillet(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            radius,
-            selected_edge_file.as_deref(),
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Chamfer {
-            bundle,
-            feature_id,
-            base_feature_id,
-            distance,
-            selected_edge_file,
-            ..
-        } => emit_chamfer(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            distance,
-            selected_edge_file.as_deref(),
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Fillet { .. } => {
+            emit_registered_domain_handler(FILLET_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Chamfer { .. } => {
+            emit_registered_domain_handler(CHAMFER_COMMAND_ID, request, stdout, stderr)
+        }
         DispatchPlan::Hole { .. } => {
             let host = Host::new();
             match dispatch_registered_command(&host, HOLE_COMMAND_ID, request.clone()) {
@@ -3694,51 +3665,15 @@ fn execute_handler(
             stdout,
             stderr,
         ),
-        DispatchPlan::Shell {
-            bundle,
-            feature_id,
-            base_feature_id,
-            thickness,
-            ..
-        } => emit_shell(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            thickness,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Draft {
-            bundle,
-            feature_id,
-            base_feature_id,
-            angle,
-            pull_direction,
-            ..
-        } => emit_draft(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            angle,
-            pull_direction,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Loft {
-            bundle,
-            feature_id,
-            is_solid,
-            ruled,
-            ..
-        } => emit_loft(
-            &bundle,
-            &feature_id,
-            profiles_from_request(request),
-            is_solid,
-            ruled,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Shell { .. } => {
+            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Draft { .. } => {
+            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Loft { .. } => {
+            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
+        }
         DispatchPlan::Export {
             bundle,
             feature_id,
@@ -3901,6 +3836,18 @@ pub fn dispatch_lua_session<R: BufRead>(
 
 /// Dispatch semantic JSON through the versioned command registry while
 /// retaining the caller's Host context for canonical-state preservation.
+fn emit_registered_domain_handler(
+    command: CommandId,
+    request: &Value,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match dispatch_registered_command(&Host::new(), command, request.clone()) {
+        Ok(response) => write_success(stdout, &response, stderr),
+        Err(error) => emit_dispatch_error(&error, stderr),
+    }
+}
+
 pub fn dispatch_registered_command(
     host: &Host,
     command: CommandId,
@@ -5434,11 +5381,6 @@ fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
         .expect("registered profile schema guarantees coordinate pairs")
 }
 
-fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
-    serde_json::from_value(request["profiles"].clone())
-        .expect("registered loft schema guarantees profile triples")
-}
-
 fn emit_boolean_fuse(
     bundle: &str,
     feature_id: &str,
@@ -5612,141 +5554,6 @@ fn emit_boolean_common(
             stdout,
             stderr,
         ),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-fn emit_fillet(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    radius: f64,
-    selected_edge_file: Option<&str>,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let mut request =
-        FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
-            .with_output_path(&staging_dir, &output_filename)
-            .with_feature_id(feature_id);
-    if let Some(path) = selected_edge_file {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                write_diagnostic(
-                    stderr,
-                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
-                );
-                return EXIT_UNKNOWN_COMMAND;
-            }
-        };
-        let selected: SelectedEdgeContext = match serde_json::from_slice(&bytes) {
-            Ok(selected) => selected,
-            Err(error) => {
-                write_diagnostic(
-                    stderr,
-                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
-                );
-                return EXIT_UNKNOWN_COMMAND;
-            }
-        };
-        request = request.with_selected_edge(selected);
-    }
-    match Host::new().fillet(bundle, request, &worker) {
-        Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-fn emit_chamfer(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    distance: f64,
-    selected_edge_file: Option<&str>,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let mut request = ChamferRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        distance,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
-    if let Some(path) = selected_edge_file {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                write_diagnostic(
-                    stderr,
-                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
-                );
-                return EXIT_UNKNOWN_COMMAND;
-            }
-        };
-        let selected: SelectedEdgeContext = match serde_json::from_slice(&bytes) {
-            Ok(selected) => selected,
-            Err(error) => {
-                write_diagnostic(
-                    stderr,
-                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
-                );
-                return EXIT_UNKNOWN_COMMAND;
-            }
-        };
-        request = request.with_selected_edge(selected);
-    }
-    match Host::new().chamfer(bundle, request, &worker) {
-        Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => emit_host_error(&error, stderr),
     }
 }
@@ -5950,134 +5757,6 @@ fn emit_circular_pattern(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_shell(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    thickness: f64,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = ShellRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        thickness,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
-    match Host::new().shell(bundle, request, &worker) {
-        Ok(view) => write_shell_view(&view, SHELL_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_draft(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    angle: f64,
-    pull_direction: [f64; 3],
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = DraftRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        angle,
-        pull_direction,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
-    match Host::new().draft(bundle, request, &worker) {
-        Ok(view) => write_draft_view(&view, DRAFT_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_loft(
-    bundle: &str,
-    feature_id: &str,
-    profiles: Vec<Vec<[f64; 3]>>,
-    is_solid: bool,
-    ruled: bool,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
-        .with_solid(is_solid)
-        .with_ruled(ruled)
-        .with_output_path(&staging_dir, &output_filename)
-        .with_feature_id(feature_id);
-    match Host::new().loft(bundle, request, &worker) {
-        Ok(view) => write_loft_view(&view, LOFT_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
 fn read_profile(profile_file: &str) -> Result<Vec<(f64, f64)>, String> {
     let raw = std::fs::read_to_string(profile_file)
         .map_err(|error| format!("profile file read failed: {error}"))?;
@@ -6270,60 +5949,6 @@ fn write_boolean_common_view(
     )
 }
 
-fn write_fillet_view(
-    view: &threeterm_host::FilletCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Fillet.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_chamfer_view(
-    view: &threeterm_host::ChamferCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Chamfer.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
 fn write_revolve_view(
     view: &threeterm_host::RevolveCommitView,
     schema_version: &str,
@@ -6416,87 +6041,6 @@ fn write_circular_pattern_view(
         &serde_json::json!({
             "status": view.result.status,
             "operation": Operation::CircularPattern.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_shell_view(
-    view: &threeterm_host::ShellCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Shell.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_draft_view(
-    view: &threeterm_host::DraftCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Draft.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                view.source_snapshot.as_ref(),
-                view.artifact.as_ref(),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_loft_view(
-    view: &threeterm_host::LoftCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Loft.as_str(),
             "feature_id": view.result.feature_id,
             "feature_graph_hash": view.snapshot.feature_graph_hash,
             "revision_hash": view.snapshot.revision_hash,

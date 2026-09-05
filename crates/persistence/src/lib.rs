@@ -613,6 +613,11 @@ impl CanonicalLoftIntent {
             &self.worker_requirements,
             feature_id,
         )?;
+        if self.command != "loft" || self.operation != "loft" {
+            return Err(BundleError::Invalid(
+                "canonical loft command identity is invalid".to_string(),
+            ));
+        }
         if !(2..=32).contains(&self.profiles.len())
             || self.profiles.iter().any(|profile| {
                 !(3..=128).contains(&profile.len())
@@ -682,7 +687,7 @@ fn validate_solid_operation(
         worker_requirements,
         feature_id,
     )?;
-    if base_feature_id.is_empty() {
+    if command != operation || base_feature_id.is_empty() {
         return Err(BundleError::Invalid(format!(
             "canonical {command} base feature is missing"
         )));

@@ -3878,8 +3878,21 @@ pub fn dispatch_lua_session<R: BufRead>(
 pub fn dispatch_registered_command(
     host: &Host,
     command: CommandId,
-    request: Value,
+    mut request: Value,
 ) -> Result<Value, DispatchError> {
+    if command == SKETCH_SOLVE_COMMAND_ID
+        && request.get("phase").and_then(Value::as_str) != Some("preview")
+        && request.get("preview_revision").is_none()
+    {
+        let mut preview_request = request.clone();
+        preview_request["phase"] = Value::String("preview".to_string());
+        let preview = host
+            .preview_domain_command(command, preview_request)
+            .map_err(|error| {
+                DispatchError::Validation(format!("sketch preview failed: {error:?}"))
+            })?;
+        request["preview_revision"] = Value::String(preview.preview_revision);
+    }
     if matches!(
         command,
         IDENTITY_COMMAND_ID

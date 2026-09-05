@@ -50,6 +50,7 @@ fn sketch(feature_id: &str, dimension_id: &str, value: f64) -> SketchPayload {
         solved_coordinates: None,
         support: None,
         placement: None,
+        reattachment_outcome: None,
     }
 }
 

@@ -1317,6 +1317,11 @@ fn sketch_payload(
         solved_coordinates,
         support: request.support.clone(),
         placement: request.placement,
+        reattachment_outcome: request.support.as_ref().map(|support| {
+            PlanarFaceReattachmentOutcome::Resolved {
+                semantic_id: support.semantic_id.clone(),
+            }
+        }),
     };
     payload
         .validate()
@@ -1453,10 +1458,9 @@ fn resolve_sketch_support(
             semantic_id: String::new(),
         });
     };
-    if reference.provenance.source_revision_id != loaded.revision_hash_hex()
-        || !loaded
-            .graph
-            .contains_feature(&reference.provenance.source_feature_id)
+    if !loaded
+        .graph
+        .contains_feature(&reference.provenance.source_feature_id)
     {
         return Ok(PlanarFaceReattachmentOutcome::Lost);
     }
@@ -1909,6 +1913,47 @@ impl Host {
         Ok(result)
     }
 
+    /// Build a presentation scene from a freshly recomputed sketch result.
+    /// This keeps reload independent from any discarded canonical solve cache.
+    pub fn presentation_viewport_scene_after_sketch_reload(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<ViewportScene, HostError> {
+        let root = root.as_ref();
+        let result = self.reload_sketch(root, feature_id)?;
+        if !result.is_success() {
+            return Err(HostError::Validation {
+                detail: serde_json::to_string(&result).expect("sketch reload response serializes"),
+            });
+        }
+        let loaded = Bundle::at(root).open()?;
+        let feature = loaded
+            .graph
+            .features()
+            .find(|feature| feature.id.as_str() == feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch feature is missing: {feature_id}"),
+            })?;
+        let existing = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(existing, loaded.revision_hash_hex())?;
+        let payload = sketch_payload(&request, &result)?;
+        let mut graph = loaded.graph.clone();
+        graph
+            .add_sketch(feature, payload)
+            .map_err(|detail| HostError::Validation { detail })?;
+        Ok(ViewportScene::from_feature_graph(
+            loaded.revision_hash_hex(),
+            &graph,
+            None,
+        ))
+    }
+
     pub fn commit_sketch_solve_with_worker(
         &self,
         root: impl AsRef<Path>,
@@ -2052,16 +2097,19 @@ impl Host {
                             None,
                         ),
                         "commit" => {
-                            let preview = self.preview_sketch_solve(bundle_path, &typed_request)?;
-                            if let Some(expected_preview) = request
+                            let expected_preview = request
                                 .get("preview_revision")
                                 .and_then(serde_json::Value::as_str)
-                                && expected_preview
-                                    != sketch_preview_revision(
-                                        &request,
-                                        loaded.revision_hash_hex(),
-                                        &preview,
-                                    )
+                                .ok_or_else(|| HostError::Validation {
+                                    detail: "sketch commit requires a current preview".to_string(),
+                                })?;
+                            let preview = self.preview_sketch_solve(bundle_path, &typed_request)?;
+                            if expected_preview
+                                != sketch_preview_revision(
+                                    &request,
+                                    loaded.revision_hash_hex(),
+                                    &preview,
+                                )
                             {
                                 return Err(HostError::Validation {
                                     detail:

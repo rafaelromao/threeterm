@@ -136,10 +136,26 @@ impl ViewportScene {
                         let edge = sketch_radius_point(sketch.placement.as_ref(), center, *radius);
                         features.push(SceneFeature {
                             id: format!("{}/circle/{id}", feature.id.as_str()),
-                            kind: format!(
-                                "sketch-circle3:{},{},{},{},{},{}",
-                                center[0], center[1], center[2], edge[0], edge[1], edge[2]
-                            ),
+                            kind: {
+                                let y_edge = sketch_axis_point(
+                                    sketch.placement.as_ref(),
+                                    center,
+                                    *radius,
+                                    1,
+                                );
+                                format!(
+                                    "sketch-circle3:{},{},{},{},{},{},{},{},{}",
+                                    center[0],
+                                    center[1],
+                                    center[2],
+                                    edge[0],
+                                    edge[1],
+                                    edge[2],
+                                    y_edge[0],
+                                    y_edge[1],
+                                    y_edge[2]
+                                )
+                            },
                         });
                     }
                     SketchEntity::Arc {
@@ -375,15 +391,16 @@ impl ProtocolNeutralViewport {
 
         draw_solids(&mut rgb, width, height, scene, &request);
 
+        let sketch_scale = f64::from(request.camera.zoom_percent) / 100.0 * min_dimension / 8.0;
         for feature in &scene.features {
-            if let Some((center, edge)) = sketch_circle_coordinates(&feature.kind) {
+            if let Some((center, x_edge, y_edge)) = sketch_circle_coordinates(&feature.kind) {
                 draw_sketch_polyline(
                     &mut rgb,
                     width,
-                    circle_points(center, edge),
+                    circle_points(center, x_edge, y_edge),
                     width as f64 / 2.0,
                     height as f64 / 2.0,
-                    scale,
+                    sketch_scale,
                     request.camera,
                 );
                 continue;
@@ -395,7 +412,7 @@ impl ProtocolNeutralViewport {
                     arc_points(center, start, end),
                     width as f64 / 2.0,
                     height as f64 / 2.0,
-                    scale,
+                    sketch_scale,
                     request.camera,
                 );
                 continue;
@@ -403,7 +420,7 @@ impl ProtocolNeutralViewport {
             let Some(points) = sketch_primitive_coordinates(&feature.kind) else {
                 continue;
             };
-            let scale = f64::from(request.camera.zoom_percent) / 100.0 * min_dimension / 8.0;
+            let scale = sketch_scale;
             let center_x = width as f64 / 2.0;
             let center_y = height as f64 / 2.0;
             for pair in points.windows(2) {
@@ -434,11 +451,12 @@ impl ProtocolNeutralViewport {
     }
 }
 
-fn sketch_circle_coordinates(kind: &str) -> Option<([f64; 3], [f64; 3])> {
-    let values = parse_sketch_values(kind, "sketch-circle3:", 6)?;
+fn sketch_circle_coordinates(kind: &str) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let values = parse_sketch_values(kind, "sketch-circle3:", 9)?;
     Some((
         [values[0], values[1], values[2]],
         [values[3], values[4], values[5]],
+        [values[6], values[7], values[8]],
     ))
 }
 
@@ -461,23 +479,20 @@ fn parse_sketch_values(kind: &str, prefix: &str, length: usize) -> Option<Vec<f6
     (values.len() == length).then_some(values)
 }
 
-fn circle_points(center: [f64; 3], edge: [f64; 3]) -> Vec<[f64; 3]> {
-    let radius = sub(edge, center);
-    let first = normalize(radius);
-    let reference = if first[0].abs() < 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let second = normalize(cross(first, reference));
+fn circle_points(center: [f64; 3], x_edge: [f64; 3], y_edge: [f64; 3]) -> Vec<[f64; 3]> {
+    let x_radius = sub(x_edge, center);
+    let y_radius = sub(y_edge, center);
+    let first = normalize(x_radius);
+    let second = normalize(y_radius);
+    let radius = radius_norm(x_radius);
     (0..=24)
         .map(|index| {
             let angle = std::f64::consts::TAU * f64::from(index) / 24.0;
             add(
                 center,
                 add(
-                    scale_vector(first, radius_norm(radius) * angle.cos()),
-                    scale_vector(second, radius_norm(radius) * angle.sin()),
+                    scale_vector(first, radius * angle.cos()),
+                    scale_vector(second, radius * angle.sin()),
                 ),
             )
         })
@@ -535,14 +550,6 @@ fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 
 fn scale_vector(vector: [f64; 3], scale: f64) -> [f64; 3] {
     [vector[0] * scale, vector[1] * scale, vector[2] * scale]
-}
-
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
 }
 
 fn radius_norm(vector: [f64; 3]) -> f64 {
@@ -764,6 +771,29 @@ fn sketch_radius_point(
             center[2] + radius * placement.x_axis[2],
         ]
     })
+}
+
+fn sketch_axis_point(
+    placement: Option<&SketchPlacement>,
+    center: [f64; 3],
+    radius: f64,
+    axis: usize,
+) -> [f64; 3] {
+    let direction = placement.map_or(
+        if axis == 0 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        },
+        |placement| {
+            if axis == 0 {
+                placement.x_axis
+            } else {
+                placement.y_axis
+            }
+        },
+    );
+    add(center, scale_vector(direction, radius))
 }
 
 fn sketch_primitive_coordinates(kind: &str) -> Option<Vec<[f64; 3]>> {

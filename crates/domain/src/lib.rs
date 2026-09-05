@@ -388,6 +388,8 @@ pub struct SketchPayload {
     pub support: Option<PlanarFaceReference>,
     #[serde(default)]
     pub placement: Option<SketchPlacement>,
+    #[serde(default)]
+    pub reattachment_outcome: Option<PlanarFaceReattachmentOutcome>,
 }
 
 impl Eq for SketchPayload {}
@@ -399,6 +401,9 @@ impl SketchPayload {
         }
         if self.support.is_some() != self.placement.is_some() {
             return Err("sketch support and placement must be provided together".to_string());
+        }
+        if self.support.is_none() && self.reattachment_outcome.is_some() {
+            return Err("unattached sketches must not carry a reattachment outcome".to_string());
         }
         if let Some(support) = &self.support {
             if support.evidence.validate().is_err()
@@ -414,6 +419,16 @@ impl SketchPayload {
                 .as_ref()
                 .expect("support and placement presence checked")
                 .validate()?;
+            if self.reattachment_outcome.is_none() {
+                return Err("attached sketches require a reattachment outcome".to_string());
+            }
+            if !matches!(
+                self.reattachment_outcome.as_ref(),
+                Some(PlanarFaceReattachmentOutcome::Resolved { semantic_id })
+                    if semantic_id == &support.semantic_id
+            ) {
+                return Err("attached sketches require a resolved support outcome".to_string());
+            }
         }
         if self.dof < 0 {
             return Err("sketch dof must not be negative".to_string());

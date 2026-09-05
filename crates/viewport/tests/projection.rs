@@ -1,6 +1,6 @@
 use threeterm_domain::{
-    Feature, FeatureGraph, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference,
-    SketchEntity, SketchPayload, SketchPlacement, SolvedCoordinate,
+    Feature, FeatureGraph, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReattachmentOutcome,
+    PlanarFaceReference, SketchEntity, SketchPayload, SketchPlacement, SolvedCoordinate,
 };
 use threeterm_viewport::{
     CameraState, ProtocolNeutralViewport, SceneSolid, SceneTriangle, ViewportRequest, ViewportScene,
@@ -204,6 +204,9 @@ fn attached_sketch_primitives_are_projected_in_their_face_frame() {
                     },
                 }),
                 placement: Some(placement),
+                reattachment_outcome: Some(PlanarFaceReattachmentOutcome::Resolved {
+                    semantic_id: "solid/face".into(),
+                }),
             },
         )
         .expect("attached sketch is valid");

@@ -132,6 +132,7 @@ fn lost_planar_face_support_is_explicit_and_does_not_mutate_the_bundle() {
             json!({
                 "bundle_path": path,
                 "feature_id": "sketch-1",
+                "phase": "preview",
                 "entities": [{"kind": "point", "id": "p0", "x": 0.0, "y": 0.0}],
                 "constraints": [],
                 "support": {

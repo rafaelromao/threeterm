@@ -471,9 +471,27 @@ impl McpServer {
         &self,
         request: &JsonRpcRequest,
         command: threeterm_protocol::schema::CommandId,
-        arguments: Value,
+        mut arguments: Value,
     ) -> JsonRpcResponse {
-        match Host::new().execute_domain_command(command, arguments) {
+        let host = Host::new();
+        if command == SKETCH_SOLVE_COMMAND_ID
+            && arguments.get("phase").and_then(Value::as_str) != Some("preview")
+            && arguments.get("preview_revision").is_none()
+        {
+            let mut preview_arguments = arguments.clone();
+            preview_arguments["phase"] = Value::String("preview".to_string());
+            let preview = match host.preview_domain_command(command, preview_arguments) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    return JsonRpcResponse::success(
+                        request.id.clone(),
+                        tool_execution_error(format!("sketch preview failed: {error:?}")),
+                    );
+                }
+            };
+            arguments["preview_revision"] = Value::String(preview.preview_revision);
+        }
+        match host.execute_domain_command(command, arguments) {
             Ok(value) => {
                 if let Some(schema) = find(command)
                     && let Err(reason) = validate(&schema.response_schema, &value)

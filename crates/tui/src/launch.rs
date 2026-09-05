@@ -172,7 +172,7 @@ pub fn launch<W: InteractiveTerminal>(
         ));
     }
 
-    if let Err(error) = host.load(root) {
+    if let Err(error) = host.load_with_geometry_replay(root) {
         return Err(with_restore_error(
             LaunchError::Project(error.to_string()),
             terminal.restore(),

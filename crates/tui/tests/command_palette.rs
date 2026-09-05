@@ -71,6 +71,24 @@ fn one_draft_replaces_transient_input_and_cancels_without_mutation() {
 }
 
 #[test]
+fn finishing_commands_open_the_same_revision_bound_draft_path() {
+    for command in [
+        threeterm_protocol::schema::FILLET_COMMAND_ID,
+        threeterm_protocol::schema::CHAMFER_COMMAND_ID,
+        threeterm_protocol::schema::SHELL_COMMAND_ID,
+        threeterm_protocol::schema::DRAFT_COMMAND_ID,
+        threeterm_protocol::schema::LOFT_COMMAND_ID,
+    ] {
+        let mut drafts = CommandDraftSession::new();
+        let draft = drafts
+            .open(command, "a".repeat(64))
+            .expect("finishing command opens a draft");
+        drafts.replace_input(json!({"expected_revision": draft.source_revision}));
+        assert_eq!(drafts.draft().expect("draft remains").command, command);
+    }
+}
+
+#[test]
 fn terminal_decoder_covers_the_palette_vocabulary() {
     assert_eq!(
         decode_terminal_input(b"x"),

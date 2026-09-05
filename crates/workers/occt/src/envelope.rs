@@ -175,6 +175,60 @@ impl PlanarFaceEvidenceResult {
     pub fn is_success(&self) -> bool {
         self.status == "ok"
     }
+
+    pub fn validate_for(&self, request: &PlanarFaceEvidenceRequest) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION
+            || self.request_id != request.request_id
+            || self.operation != Operation::PlanarFaceEvidence
+            || self.feature_id != request.feature_id
+            || self.source_revision_id != request.source_revision_id
+            || self.status != "ok"
+        {
+            return Err("planar face evidence response identity is invalid".to_string());
+        }
+        for candidate in &self.candidates {
+            if candidate.topology_kind != "planar_face"
+                || candidate
+                    .origin
+                    .into_iter()
+                    .chain(candidate.normal)
+                    .chain(candidate.x_axis)
+                    .chain(candidate.y_axis)
+                    .any(|value| !value.is_finite())
+                || candidate.adjacent_feature_ids.len() > 32
+                || candidate.adjacent_feature_ids.iter().any(|id| {
+                    id.is_empty()
+                        || id.len() > 128
+                        || !id.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || matches!(character, '-' | '_' | '.' | '/')
+                        })
+                })
+            {
+                return Err("planar face evidence candidate is malformed".to_string());
+            }
+            let norm = |vector: [f64; 3]| {
+                vector
+                    .into_iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt()
+            };
+            let dot = |left: [f64; 3], right: [f64; 3]| {
+                left.into_iter().zip(right).map(|(a, b)| a * b).sum::<f64>()
+            };
+            if (norm(candidate.normal) - 1.0).abs() > 1e-6
+                || (norm(candidate.x_axis) - 1.0).abs() > 1e-6
+                || (norm(candidate.y_axis) - 1.0).abs() > 1e-6
+                || dot(candidate.normal, candidate.x_axis).abs() > 1e-6
+                || dot(candidate.normal, candidate.y_axis).abs() > 1e-6
+                || dot(candidate.x_axis, candidate.y_axis).abs() > 1e-6
+            {
+                return Err("planar face evidence frame is not orthonormal".to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Construct an L-bracket from its semantic dimensions. The horizontal plate

@@ -232,13 +232,32 @@ pub enum PlanarFaceReattachmentOutcome {
     Incompatible { candidate_ids: Vec<String> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SketchPlacement {
     pub origin: [f64; 3],
     pub x_axis: [f64; 3],
     pub y_axis: [f64; 3],
     pub normal: [f64; 3],
+}
+
+impl PartialEq for SketchPlacement {
+    fn eq(&self, other: &Self) -> bool {
+        self.origin
+            .into_iter()
+            .chain(self.x_axis)
+            .chain(self.y_axis)
+            .chain(self.normal)
+            .zip(
+                other
+                    .origin
+                    .into_iter()
+                    .chain(other.x_axis)
+                    .chain(other.y_axis)
+                    .chain(other.normal),
+            )
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+    }
 }
 
 impl SketchPlacement {
@@ -270,11 +289,7 @@ impl PlanarFaceReference {
     pub fn validate_placement(&self, placement: &SketchPlacement) -> Result<(), String> {
         self.validate()?;
         placement.validate()?;
-        if self.evidence.origin != placement.origin
-            || self.evidence.normal != placement.normal
-            || self.evidence.x_axis != placement.x_axis
-            || self.evidence.y_axis != placement.y_axis
-        {
+        if !frame_matches_placement(&self.evidence, placement) {
             return Err("sketch placement must match the selected planar face frame".to_string());
         }
         Ok(())
@@ -403,25 +418,25 @@ fn candidate_ids(candidates: &[impl std::borrow::Borrow<PlanarFaceCandidate>]) -
 }
 
 fn frame_matches(left: &PlanarFaceEvidence, right: &PlanarFaceEvidence) -> bool {
+    frame_matches_placement(
+        left,
+        &SketchPlacement {
+            origin: right.origin,
+            x_axis: right.x_axis,
+            y_axis: right.y_axis,
+            normal: right.normal,
+        },
+    )
+}
+
+fn frame_matches_placement(left: &PlanarFaceEvidence, right: &SketchPlacement) -> bool {
     left.origin
         .into_iter()
         .zip(right.origin)
+        .chain(left.normal.into_iter().zip(right.normal))
+        .chain(left.x_axis.into_iter().zip(right.x_axis))
+        .chain(left.y_axis.into_iter().zip(right.y_axis))
         .all(|(a, b)| (a - b).abs() <= 1e-6)
-        && left
-            .normal
-            .into_iter()
-            .zip(right.normal)
-            .all(|(a, b)| (a - b).abs() <= 1e-6)
-        && left
-            .x_axis
-            .into_iter()
-            .zip(right.x_axis)
-            .all(|(a, b)| (a - b).abs() <= 1e-6)
-        && left
-            .y_axis
-            .into_iter()
-            .zip(right.y_axis)
-            .all(|(a, b)| (a - b).abs() <= 1e-6)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

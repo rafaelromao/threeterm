@@ -90,6 +90,7 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <limits>
@@ -1030,6 +1031,7 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
                   return left.origin.Z() < right.origin.Z();
               });
     std::ostringstream out;
+    out << std::setprecision(17);
     out << "{\"schema_version\":\"" << json_escape(kSchemaVersion)
         << "\",\"request_id\":\"" << json_escape(request_id)
         << "\",\"operation\":\"planar_face_evidence\",\"status\":\"ok\",\"feature_id\":\""

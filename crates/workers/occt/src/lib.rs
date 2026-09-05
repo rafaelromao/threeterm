@@ -941,7 +941,8 @@ impl OcctWorker {
         request
             .validate()
             .map_err(|detail| WorkerError::Malformed { detail })?;
-        self.invoke(&bytes, None)?.into_planar_face_evidence()
+        self.invoke(&bytes, None)?
+            .into_planar_face_evidence(request)
     }
 
     fn invoke(
@@ -1797,13 +1798,21 @@ impl RawResult {
         self.bounded()
     }
 
-    fn into_planar_face_evidence(self) -> Result<PlanarFaceEvidenceResult, WorkerError> {
-        serde_json::from_value(self.value).map_err(|error| {
-            malformed_for_request(
-                &self.request_id,
-                format!("planar face evidence response could not be parsed: {error}"),
-            )
-        })
+    fn into_planar_face_evidence(
+        self,
+        request: &PlanarFaceEvidenceRequest,
+    ) -> Result<PlanarFaceEvidenceResult, WorkerError> {
+        let result: PlanarFaceEvidenceResult =
+            serde_json::from_value(self.value).map_err(|error| {
+                malformed_for_request(
+                    &self.request_id,
+                    format!("planar face evidence response could not be parsed: {error}"),
+                )
+            })?;
+        result
+            .validate_for(request)
+            .map_err(|detail| malformed_for_request(&self.request_id, detail))?;
+        Ok(result)
     }
 }
 

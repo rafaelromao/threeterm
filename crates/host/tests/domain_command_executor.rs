@@ -283,6 +283,11 @@ fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
 fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
     let Some(_worker) = OcctWorker::locate().ok() else {
         eprintln!("canonical transform tracer: OCCT worker unavailable");
+        assert_ne!(
+            std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
+            Some("1"),
+            "canonical transform tracer requires OCCT in the native integration environment"
+        );
         return;
     };
     let root = root("canonical-transform-tracer");
@@ -339,14 +344,45 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
         fs::read(root.join("brep").join(format!("{feature_id}.brep"))).expect("BREP reads")
     })
     .collect();
+    let formats = vec!["stl".to_string(), "step".to_string()];
+    let export_before_dir = root.join("export-before");
+    fs::create_dir_all(&export_before_dir).expect("export directory creates");
+    let exported_before = host
+        .export(
+            &root,
+            "circular-feature",
+            &formats,
+            &export_before_dir,
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("pre-replay export succeeds");
+    let export_bytes: Vec<_> = exported_before
+        .artifacts
+        .iter()
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_owned(),
+                fs::read(path).expect("pre-replay export reads"),
+            )
+        })
+        .collect();
     fs::remove_dir_all(root.join("brep")).expect("derived BREPs delete");
 
     let before = Bundle::at(&root).open().expect("bundle reopens");
+    let log_before = fs::read(root.join("transactions.log")).expect("log snapshot reads");
     let replayed = host
         .load_with_extrude_replay(&root)
         .expect("canonical transforms replay");
     assert_eq!(replayed.revision_hash, before.revision_hash_hex());
     assert_eq!(Bundle::at(&root).open().unwrap().log.entries().len(), 4);
+    assert_eq!(
+        fs::read(root.join("transactions.log")).unwrap(),
+        log_before,
+        "replay does not append a transaction"
+    );
     for (feature_id, original) in [
         "revolve-feature",
         "mirror-feature",
@@ -362,6 +398,31 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
             "replayed geometry for {feature_id}"
         );
     }
+    let export_after_dir = root.join("export-after");
+    fs::create_dir_all(&export_after_dir).expect("second export directory creates");
+    let exported_after = host
+        .export(
+            &root,
+            "circular-feature",
+            &formats,
+            &export_after_dir,
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("post-replay export succeeds");
+    let export_after_bytes: Vec<_> = exported_after
+        .artifacts
+        .iter()
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_owned(),
+                fs::read(path).expect("post-replay export reads"),
+            )
+        })
+        .collect();
+    assert_eq!(export_after_bytes, export_bytes, "replayed export bytes");
 
     let _ = fs::remove_dir_all(&root);
 }

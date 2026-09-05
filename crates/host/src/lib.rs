@@ -1643,9 +1643,6 @@ impl Host {
         }
 
         let root = Bundle::at(root).canonical_root().to_path_buf();
-        let worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-            detail: error.to_string(),
-        })?;
         let schema_version = find(command)
             .expect("canonical OCCT command is registered")
             .response_schema_version;
@@ -1685,6 +1682,10 @@ impl Host {
                 request
                     .validate()
                     .map_err(|detail| HostError::Validation { detail })?;
+                let worker =
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?;
                 let derived = self.stage_occt_result::<RevolveResult>(
                     &root,
                     &request,
@@ -1723,6 +1724,10 @@ impl Host {
                         request
                             .validate()
                             .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
                         let derived = self.stage_occt_result::<MirrorResult>(
                             &root,
                             &request,
@@ -1765,6 +1770,10 @@ impl Host {
                         request
                             .validate()
                             .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
                         let derived = self.stage_occt_result::<LinearPatternResult>(
                             &root,
                             &request,
@@ -1810,6 +1819,10 @@ impl Host {
                         request
                             .validate()
                             .map_err(|detail| HostError::Validation { detail })?;
+                        let worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
                         let derived = self.stage_occt_result::<CircularPatternResult>(
                             &root,
                             &request,
@@ -3242,28 +3255,58 @@ impl Host {
     where
         R: Serialize,
     {
-        let value =
-            serde_json::to_value(&derived.result).map_err(|error| HostError::Validation {
-                detail: format!("replayed OCCT result serialization failed: {error}"),
-            })?;
-        let path = value["brep_path"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP path".to_string(),
-            })?;
-        let bytes = value["brep_bytes"]
+        let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
+        let cleanup = || {
+            if let Some(stage_root) = &stage_root {
+                let _ = fs::remove_dir_all(stage_root);
+            }
+        };
+        let value = match serde_json::to_value(&derived.result) {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup();
+                return Err(HostError::Validation {
+                    detail: format!("replayed OCCT result serialization failed: {error}"),
+                });
+            }
+        };
+        let path = match value["brep_path"].as_str() {
+            Some(path) => path,
+            None => {
+                cleanup();
+                return Err(HostError::BrepIo {
+                    detail: "replayed OCCT result has no BREP path".to_string(),
+                });
+            }
+        };
+        let bytes = match value["brep_bytes"]
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has an invalid BREP byte count".to_string(),
-            })?;
-        let sha = value["brep_sha256"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP digest".to_string(),
-            })?;
-        let content = read_brep_verified(Path::new(path), Some((bytes, sha)))
-            .map_err(|detail| HostError::BrepIo { detail })?;
+        {
+            Some(bytes) => bytes,
+            None => {
+                cleanup();
+                return Err(HostError::BrepIo {
+                    detail: "replayed OCCT result has an invalid BREP byte count".to_string(),
+                });
+            }
+        };
+        let sha = match value["brep_sha256"].as_str() {
+            Some(sha) => sha,
+            None => {
+                cleanup();
+                return Err(HostError::BrepIo {
+                    detail: "replayed OCCT result has no BREP digest".to_string(),
+                });
+            }
+        };
+        let content = match read_brep_verified(Path::new(path), Some((bytes, sha))) {
+            Ok(content) => content,
+            Err(detail) => {
+                cleanup();
+                return Err(HostError::BrepIo { detail });
+            }
+        };
         let restored = Bundle::at(root).restore_derived_brep_if_revision(
             feature_id,
             &source_snapshot.revision_hash,
@@ -3272,17 +3315,21 @@ impl Host {
         let restored = match restored {
             Ok(path) => path,
             Err(error) => {
-                let _ = derived.artifact.path.parent().map(fs::remove_dir_all);
+                cleanup();
                 return Err(error.into());
             }
         };
-        let _ = derived.artifact.path.parent().map(fs::remove_dir_all);
-        Ok((
-            restored.clone(),
-            sha256_path(&restored).map_err(|error| HostError::BrepIo {
-                detail: format!("hash replayed BREP failed: {error}"),
-            })?,
-        ))
+        let fingerprint = match sha256_path(&restored) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                cleanup();
+                return Err(HostError::BrepIo {
+                    detail: format!("hash replayed BREP failed: {error}"),
+                });
+            }
+        };
+        cleanup();
+        Ok((restored, fingerprint))
     }
 
     /// Load a canonical bundle and validate its optional non-authoritative

@@ -269,6 +269,10 @@ fn unknown_intent_command_fails_closed_on_decode() {
         )
         .expect("revolve transaction appends");
 
+    let mut unknown = serde_json::to_value(&intent).expect("intent serializes");
+    unknown["command"] = serde_json::Value::String("revolve-evil".to_string());
+    assert!(serde_json::from_value::<CanonicalIntent>(unknown).is_err());
+
     let log_path = root.join("transactions.log");
     let log_bytes = std::fs::read(&log_path).expect("log reads");
     let tampered = String::from_utf8(log_bytes)

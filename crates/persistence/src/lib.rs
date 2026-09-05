@@ -711,7 +711,7 @@ impl CanonicalCircularPatternIntent {
 /// digests. Variant `deterministic_inputs` shapes are mutually exclusive and
 /// every struct denies unknown fields, so decoding is unambiguous and
 /// fail-closed: unknown commands, operations, and fields are rejected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum CanonicalIntent {
     Extrude(CanonicalExtrudeIntent),
@@ -719,6 +719,41 @@ pub enum CanonicalIntent {
     Mirror(CanonicalMirrorIntent),
     LinearPattern(CanonicalLinearPatternIntent),
     CircularPattern(CanonicalCircularPatternIntent),
+}
+
+impl<'de> Deserialize<'de> for CanonicalIntent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let command = value
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("canonical intent command is missing"))?;
+        match command {
+            "extrude" => serde_json::from_value(value)
+                .map(Self::Extrude)
+                .map_err(D::Error::custom),
+            "revolve" => serde_json::from_value(value)
+                .map(Self::Revolve)
+                .map_err(D::Error::custom),
+            "mirror" => serde_json::from_value(value)
+                .map(Self::Mirror)
+                .map_err(D::Error::custom),
+            "linear-pattern" => serde_json::from_value(value)
+                .map(Self::LinearPattern)
+                .map_err(D::Error::custom),
+            "circular-pattern" => serde_json::from_value(value)
+                .map(Self::CircularPattern)
+                .map_err(D::Error::custom),
+            other => Err(D::Error::custom(format!(
+                "unknown canonical intent command: {other}"
+            ))),
+        }
+    }
 }
 
 impl CanonicalIntent {
@@ -2292,6 +2327,12 @@ impl Bundle {
                 )));
             }
             if let Some(base_feature_id) = intent.base_reference() {
+                if !valid_feature_path_component(base_feature_id) {
+                    return Err(BundleError::Invalid(format!(
+                        "canonical {} base feature ID is not a plain path component: {base_feature_id}",
+                        intent.command(),
+                    )));
+                }
                 let base_path = self
                     .root
                     .join("brep")
@@ -3271,6 +3312,13 @@ fn is_supported_bracket_kind(kind: &str) -> bool {
                 && keys.insert(key)
                 && value.parse::<f64>().is_ok_and(f64::is_finite)
         })
+}
+
+fn valid_feature_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn verify_brep_provenance(

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
@@ -543,4 +544,89 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
     assert_eq!(viewport_after, viewport_before, "replayed viewport scene");
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn fillet_domain_command_resolves_one_source_edge_before_commit() {
+    let Some(worker) = OcctWorker::locate().ok() else {
+        eprintln!("fillet edge resolution: OCCT worker unavailable");
+        return;
+    };
+    let root = root("fillet-edge-resolution");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            2.0,
+        )
+        .with_output_path(root.join("seed-stage"), "seed.brep")
+        .with_feature_id("seed"),
+        &worker,
+    )
+    .expect("canonical seed extrude commits");
+    let revision = Bundle::at(&root)
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let mut candidate = worker
+        .inspect_edges(
+            new_request_id(),
+            root.join("brep/seed.brep"),
+            "seed",
+            &revision,
+            serde_json::json!({
+                "semantic_id": "requested-edge",
+                "source_feature_id": "seed",
+                "source_revision_id": revision,
+                "source_edge_id": "source-edge",
+                "role": "outer-perimeter",
+                "midpoint": [0.0, 0.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 1.0
+            }),
+        )
+        .expect("edge inspection returns")
+        .edge_candidates
+        .into_iter()
+        .next()
+        .expect("source edge candidate exists");
+    let evidence = serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+        .expect("edge evidence serializes");
+    candidate.semantic_id = format!("edge-{}", sha256_hex(&evidence));
+    let response = host
+        .execute_domain_command(
+            threeterm_protocol::schema::FILLET_COMMAND_ID,
+            json!({
+                "bundle_path": root.to_string_lossy(),
+                "expected_revision": revision,
+                "feature_id": "fillet",
+                "base_feature_id": "seed",
+                "radius": 0.2,
+                "selected_edge": {
+                    "semantic_id": candidate.semantic_id,
+                    "provenance": {
+                        "source_feature_id": candidate.source_feature_id,
+                        "source_revision_id": candidate.source_revision_id,
+                        "source_edge_id": candidate.source_edge_id
+                    },
+                    "role": candidate.role,
+                    "evidence": {
+                        "midpoint": candidate.midpoint,
+                        "tangent": candidate.tangent,
+                        "length": candidate.length
+                    }
+                }
+            }),
+        )
+        .expect("fillet commits");
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["feature_id"], "fillet");
+    assert!(root.join("brep/fillet.brep").is_file());
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));
 }

@@ -12,7 +12,7 @@
   "revision_hash": "67bc2eebe9ee92febff9c5fbcbf4ac5af30a222d55e7ba9e875dabba854d4a51",
   "canonical_root_sha256": "05c01072590230b8b0344e9d4d371d2dea93ae18f0a0909566885d46e8da7b94",
   "seal_sha256": "c8ac98d18c43b8daad87a7f8101b980963197662bcfebf9beb85a897d02fe399",
-  "command_registry_hash": "932c99678ce82d4493a5e19530c6f6c228e7f90118415233d5dd0af7cb015276",
+  "command_registry_hash": "c05dc168bf5591665ab62a74bbdfb0bf57e31543b39c2c2bf9e60fff702b1f7e",
   "feature_schema_version": "threeterm.domain/1",
   "protocol_schema_version": "threeterm.protocol/1",
   "occt_worker": {

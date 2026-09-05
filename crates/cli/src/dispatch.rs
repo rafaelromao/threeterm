@@ -20,24 +20,25 @@ use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
     BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CAPTURE_COMPONENT_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
-    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
-    DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
+    CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
+    REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID,
+    SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
     TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
     BRACKET_RESPONSE_SCHEMA_VERSION, CHAMFER_RESPONSE_SCHEMA_VERSION,
-    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, DRAFT_RESPONSE_SCHEMA_VERSION,
-    EXTRUDE_RESPONSE_SCHEMA_VERSION, FILLET_RESPONSE_SCHEMA_VERSION,
-    FIT_DIMENSION_RESPONSE_SCHEMA_VERSION, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
-    HOLE_RESPONSE_SCHEMA_VERSION, LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION,
-    LOAD_RESPONSE_SCHEMA_VERSION, LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
+    CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION, EXTRUDE_RESPONSE_SCHEMA_VERSION,
+    FILLET_RESPONSE_SCHEMA_VERSION, FIT_DIMENSION_RESPONSE_SCHEMA_VERSION,
+    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, HOLE_RESPONSE_SCHEMA_VERSION,
+    LINEAR_PATTERN_RESPONSE_SCHEMA_VERSION, LOAD_RESPONSE_SCHEMA_VERSION,
+    LOFT_RESPONSE_SCHEMA_VERSION, MIRROR_RESPONSE_SCHEMA_VERSION,
     REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION, REVOLVE_RESPONSE_SCHEMA_VERSION,
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
@@ -206,12 +207,16 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         radius: f64,
+        selected_edge_file: Option<String>,
+        expected_revision: Option<String>,
     },
     Chamfer {
         bundle: String,
         feature_id: String,
         base_feature_id: String,
         distance: f64,
+        selected_edge_file: Option<String>,
+        expected_revision: Option<String>,
     },
     Hole {
         bundle: String,
@@ -266,6 +271,7 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         thickness: f64,
+        expected_revision: Option<String>,
     },
     Draft {
         bundle: String,
@@ -273,6 +279,7 @@ enum DispatchPlan {
         base_feature_id: String,
         angle: f64,
         pull_direction: [f64; 3],
+        expected_revision: Option<String>,
     },
     Loft {
         bundle: String,
@@ -280,6 +287,7 @@ enum DispatchPlan {
         profile_files: Vec<String>,
         is_solid: bool,
         ruled: bool,
+        expected_revision: Option<String>,
     },
     Export {
         bundle: String,
@@ -2142,6 +2150,8 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut radius: Option<f64> = None;
+    let mut selected_edge_file: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2175,6 +2185,16 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--selected-edge-file" => {
+                    selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2212,6 +2232,8 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         radius,
+        selected_edge_file,
+        expected_revision,
     }
 }
 
@@ -2225,6 +2247,8 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut distance: Option<f64> = None;
+    let mut selected_edge_file: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2258,6 +2282,16 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--selected-edge-file" => {
+                    selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2295,6 +2329,8 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         distance,
+        selected_edge_file,
+        expected_revision,
     }
 }
 
@@ -2974,6 +3010,7 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut thickness: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -3007,6 +3044,11 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -3044,6 +3086,7 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         thickness,
+        expected_revision,
     }
 }
 
@@ -3080,6 +3123,7 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut angle: Option<f64> = None;
     let mut pull_direction: Option<[f64; 3]> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -3130,6 +3174,11 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -3173,6 +3222,7 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         angle,
         pull_direction,
+        expected_revision,
     }
 }
 
@@ -3187,6 +3237,7 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
     let mut profile_files: Vec<String> = Vec::new();
     let mut is_solid = true;
     let mut ruled = false;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -3232,6 +3283,11 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -3265,6 +3321,7 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
         profile_files,
         is_solid,
         ruled,
+        expected_revision,
     }
 }
 
@@ -3602,32 +3659,12 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Fillet {
-            bundle,
-            feature_id,
-            base_feature_id,
-            radius,
-        } => emit_fillet(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            radius,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Chamfer {
-            bundle,
-            feature_id,
-            base_feature_id,
-            distance,
-        } => emit_chamfer(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            distance,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Fillet { .. } => {
+            emit_registered_domain_handler(FILLET_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Chamfer { .. } => {
+            emit_registered_domain_handler(CHAMFER_COMMAND_ID, request, stdout, stderr)
+        }
         DispatchPlan::Hole { .. } => {
             let host = Host::new();
             match dispatch_registered_command(&host, HOLE_COMMAND_ID, request.clone()) {
@@ -3663,49 +3700,175 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Shell {
+        DispatchPlan::Shell { .. } => {
+            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Draft { .. } => {
+            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Loft { .. } => {
+            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Revolve {
             bundle,
             feature_id,
-            base_feature_id,
-            thickness,
-        } => emit_shell(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            thickness,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Draft {
-            bundle,
-            feature_id,
-            base_feature_id,
+            axis_point,
+            axis_direction,
             angle,
-            pull_direction,
-        } => emit_draft(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            angle,
-            pull_direction,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Loft {
-            bundle,
-            feature_id,
-            is_solid,
-            ruled,
             ..
-        } => emit_loft(
+        } => emit_revolve(
             &bundle,
             &feature_id,
-            profiles_from_request(request),
-            is_solid,
-            ruled,
+            profile_from_request(request),
+            axis_point,
+            axis_direction,
+            angle,
             stdout,
             stderr,
         ),
+        DispatchPlan::Mirror {
+            bundle,
+            feature_id,
+            base_feature_id,
+            plane_point,
+            plane_normal,
+            ..
+        } => emit_mirror(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            plane_point,
+            plane_normal,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::LinearPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            direction,
+            count,
+            spacing,
+            ..
+        } => emit_linear_pattern(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            direction,
+            count,
+            spacing,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::CircularPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+            ..
+        } => emit_circular_pattern(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Shell { .. } => {
+            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Draft { .. } => {
+            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Loft { .. } => {
+            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Revolve {
+            bundle,
+            feature_id,
+            axis_point,
+            axis_direction,
+            angle,
+            ..
+        } => emit_revolve(
+            &bundle,
+            &feature_id,
+            profile_from_request(request),
+            axis_point,
+            axis_direction,
+            angle,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Mirror {
+            bundle,
+            feature_id,
+            base_feature_id,
+            plane_point,
+            plane_normal,
+            ..
+        } => emit_mirror(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            plane_point,
+            plane_normal,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::LinearPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            direction,
+            count,
+            spacing,
+            ..
+        } => emit_linear_pattern(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            direction,
+            count,
+            spacing,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::CircularPattern {
+            bundle,
+            feature_id,
+            base_feature_id,
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+            ..
+        } => emit_circular_pattern(
+            &bundle,
+            &feature_id,
+            &base_feature_id,
+            axis_point,
+            axis_normal,
+            angle_step,
+            count,
+            stdout,
+            stderr,
+        ),
+        DispatchPlan::Shell { .. } => {
+            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Draft { .. } => {
+            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
+        }
+        DispatchPlan::Loft { .. } => {
+            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
+        }
         DispatchPlan::Export {
             bundle,
             feature_id,
@@ -3868,6 +4031,18 @@ pub fn dispatch_lua_session<R: BufRead>(
 
 /// Dispatch semantic JSON through the versioned command registry while
 /// retaining the caller's Host context for canonical-state preservation.
+fn emit_registered_domain_handler(
+    command: CommandId,
+    request: &Value,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match dispatch_registered_command(&Host::new(), command, request.clone()) {
+        Ok(response) => write_success(stdout, &response, stderr),
+        Err(error) => emit_dispatch_error(&error, stderr),
+    }
+}
+
 pub fn dispatch_registered_command(
     host: &Host,
     command: CommandId,
@@ -3888,6 +4063,11 @@ pub fn dispatch_registered_command(
             | BOOLEAN_COMMON_COMMAND_ID
             | HOLE_COMMAND_ID
             | REATTACH_EDGE_COMMAND_ID
+            | FILLET_COMMAND_ID
+            | CHAMFER_COMMAND_ID
+            | SHELL_COMMAND_ID
+            | DRAFT_COMMAND_ID
+            | LOFT_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)
@@ -4543,6 +4723,20 @@ fn execute_registered_with_observer(
     };
     if matches!(
         command,
+        threeterm_protocol::schema::FILLET_COMMAND_ID
+            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+            | threeterm_protocol::schema::SHELL_COMMAND_ID
+            | threeterm_protocol::schema::DRAFT_COMMAND_ID
+            | threeterm_protocol::schema::LOFT_COMMAND_ID
+    ) && request
+        .get("expected_revision")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return emit_internal_error("finishing command requires --expected-revision", stderr);
+    }
+    if matches!(
+        command,
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
             | threeterm_protocol::schema::REVOLVE_COMMAND_ID
             | threeterm_protocol::schema::MIRROR_COMMAND_ID
@@ -4551,6 +4745,11 @@ fn execute_registered_with_observer(
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
             | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
+            | threeterm_protocol::schema::FILLET_COMMAND_ID
+            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+            | threeterm_protocol::schema::SHELL_COMMAND_ID
+            | threeterm_protocol::schema::DRAFT_COMMAND_ID
+            | threeterm_protocol::schema::LOFT_COMMAND_ID
     ) {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
@@ -4800,16 +4999,34 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             radius,
+            selected_edge_file,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            if let Some(path) = selected_edge_file {
+                request["selected_edge"] = read_selected_edge_reference(path)?;
+            }
+            request
         }
         DispatchPlan::Chamfer {
             bundle,
             feature_id,
             base_feature_id,
             distance,
+            selected_edge_file,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            if let Some(path) = selected_edge_file {
+                request["selected_edge"] = read_selected_edge_reference(path)?;
+            }
+            request
         }
         DispatchPlan::Hole {
             bundle,
@@ -4908,8 +5125,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             thickness,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness, "expected_revision": expected_revision })
         }
         DispatchPlan::Draft {
             bundle,
@@ -4917,8 +5135,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             base_feature_id,
             angle,
             pull_direction,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction, "expected_revision": expected_revision })
         }
         DispatchPlan::Loft {
             bundle,
@@ -4926,12 +5145,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             profile_files,
             is_solid,
             ruled,
+            expected_revision,
         } => {
             let profiles: Result<Vec<_>, _> = profile_files
                 .iter()
                 .map(|path| read_profile_3d(path))
                 .collect();
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled, "expected_revision": expected_revision })
         }
         DispatchPlan::Export {
             bundle,
@@ -5039,6 +5259,19 @@ fn emit_export(
             EXIT_BREP_INVALID
         }
     }
+}
+
+fn read_selected_edge_reference(path: &str) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|error| format!("selected edge file: {error}"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("selected edge file is not valid JSON: {error}"))?;
+    if value.get("provenance").is_none() || value.get("evidence").is_none() {
+        return Err(
+            "selected edge file must contain the nested provenance and evidence objects"
+                .to_string(),
+        );
+    }
+    Ok(value)
 }
 
 fn profile_json(profile_file: &str) -> Result<Value, String> {
@@ -5296,6 +5529,11 @@ fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: 
 fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
     serde_json::from_value(request["profiles"].clone())
         .expect("registered loft schema guarantees profile triples")
+}
+
+fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
+    serde_json::from_value(request["profile"].clone())
+        .expect("registered profile schema guarantees coordinate pairs")
 }
 
 fn emit_boolean_fuse(
@@ -5662,6 +5900,94 @@ fn emit_hole(
 }
 
 #[allow(dead_code, clippy::too_many_arguments)]
+fn emit_fillet(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    radius: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
+        .with_output_path(&staging_dir, &output_filename)
+        .with_feature_id(feature_id);
+    match Host::new().fillet(bundle, request, &worker) {
+        Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+fn emit_chamfer(
+    bundle: &str,
+    feature_id: &str,
+    base_feature_id: &str,
+    distance: f64,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let base_path = Path::new(bundle)
+        .join("brep")
+        .join(format!("{base_feature_id}.brep"));
+    if !base_path.is_file() {
+        let detail = format!(
+            "base feature {base_feature_id:?} has no committed BREP at {}",
+            base_path.display()
+        );
+        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+        return EXIT_WORKER_FAILURE;
+    }
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            let detail = format!("occt worker locate failed: {error}");
+            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
+            return EXIT_WORKER_FAILURE;
+        }
+    };
+    let staging_dir = Path::new(bundle).join("stage");
+    let output_filename = format!(
+        "{feature_id}-{}.brep",
+        threeterm_occt_worker::new_request_id()
+    );
+    let request = ChamferRequest::new(
+        threeterm_occt_worker::new_request_id(),
+        &base_path,
+        distance,
+    )
+    .with_output_path(&staging_dir, &output_filename)
+    .with_feature_id(feature_id);
+    match Host::new().chamfer(bundle, request, &worker) {
+        Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
+        Err(error) => emit_host_error(&error, stderr),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn emit_revolve(
     bundle: &str,
     feature_id: &str,
@@ -6055,134 +6381,6 @@ fn emit_circular_pattern(
             stdout,
             stderr,
         ),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_shell(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    thickness: f64,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = ShellRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        thickness,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
-    match Host::new().shell(bundle, request, &worker) {
-        Ok(view) => write_shell_view(&view, SHELL_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_draft(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    angle: f64,
-    pull_direction: [f64; 3],
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = DraftRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        angle,
-        pull_direction,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id);
-    match Host::new().draft(bundle, request, &worker) {
-        Ok(view) => write_draft_view(&view, DRAFT_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_loft(
-    bundle: &str,
-    feature_id: &str,
-    profiles: Vec<Vec<[f64; 3]>>,
-    is_solid: bool,
-    ruled: bool,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let request = LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
-        .with_solid(is_solid)
-        .with_ruled(ruled)
-        .with_output_path(&staging_dir, &output_filename)
-        .with_feature_id(feature_id);
-    match Host::new().loft(bundle, request, &worker) {
-        Ok(view) => write_loft_view(&view, LOFT_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => emit_host_error(&error, stderr),
     }
 }
@@ -6602,6 +6800,60 @@ fn write_circular_pattern_view(
 }
 
 /*
+fn write_fillet_view(
+    view: &threeterm_host::FilletCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Fillet.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+fn write_chamfer_view(
+    view: &threeterm_host::ChamferCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Chamfer.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_revolve_view(
     view: &threeterm_host::RevolveCommitView,
     schema_version: &str,
@@ -6711,6 +6963,90 @@ fn write_circular_pattern_view(
 }
 
 */
+#[cfg(any())]
+fn write_shell_view(
+    view: &threeterm_host::ShellCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Shell.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[cfg(any())]
+fn write_draft_view(
+    view: &threeterm_host::DraftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Draft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                view.source_snapshot.as_ref(),
+                view.artifact.as_ref(),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
+#[cfg(any())]
+fn write_loft_view(
+    view: &threeterm_host::LoftCommitView,
+    schema_version: &str,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    write_success(
+        stdout,
+        &serde_json::json!({
+            "status": view.result.status,
+            "operation": Operation::Loft.as_str(),
+            "feature_id": view.result.feature_id,
+            "feature_graph_hash": view.snapshot.feature_graph_hash,
+            "revision_hash": view.snapshot.revision_hash,
+            "brep_path": view.result.brep_path,
+            "brep_sha256": view.result.brep_sha256,
+            "brep_bytes": view.result.brep_bytes,
+            "derived_result": derived_result_metadata(
+                Some(&view.source_snapshot),
+                Some(&view.artifact),
+            ),
+            "schema_version": schema_version,
+        }),
+        stderr,
+    )
+}
+
 fn write_shell_view(
     view: &threeterm_host::ShellCommitView,
     schema_version: &str,
@@ -6992,6 +7328,7 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
             .as_deref()
             .map(|request_id| format!("request_id={request_id}; {detail}"))
             .unwrap_or_else(|| detail.clone()),
+        HostError::Validation { detail } => detail.clone(),
         _ => error.to_string(),
     };
     match error {
@@ -7003,6 +7340,15 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         | HostError::WorkerUnavailable { .. }
         | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { .. } if detail.starts_with("reference is ambiguous") => {
+            Diagnostic::reference_ambiguous(&detail)
+        }
+        HostError::Validation { .. } if detail.starts_with("reference is lost") => {
+            Diagnostic::reference_lost(&detail)
+        }
+        HostError::Validation { .. } if detail.starts_with("reference is incompatible") => {
+            Diagnostic::reference_incompatible(&detail)
+        }
         HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),

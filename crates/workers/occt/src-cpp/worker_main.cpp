@@ -1544,6 +1544,11 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
+std::string edge_role(const TopoDS_Edge& edge) {
+    return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter"
+                                                              : "fillet-transition";
+}
+
 void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Edge>& edges,
                             const JsonParser::Value& request) {
     const auto* selected = find_field(request, "selected_edge");
@@ -1575,23 +1580,54 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         // A candidate role is evidence about the returned edge, not a copy
         // of the caller's claim. Preserve the MVP perimeter role for linear
         // edges and expose a distinct role for curved edit results.
-        const std::string role =
-            BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter" : "fillet-transition";
-        std::ostringstream identity;
-        identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
-                 << properties.Mass();
         if (!first) out << ',';
         first = false;
-        out << "{\"semantic_id\":\"edge-" << sha256_hex(identity.str()) << "\","
+        // Semantic identity is assigned by the host. The worker returns only
+        // transient geometry evidence and a geometric role classification.
+        out << "{\"semantic_id\":\"\","
             << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
             << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
             << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
-            << "\"role\":\"" << json_escape(role) << "\","
+            << "\"role\":\"" << json_escape(edge_role(edge)) << "\","
             << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
             << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"
             << "\"length\":" << properties.Mass() << "}";
     }
     out << ']';
+}
+
+bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) {
+    const std::string request_id = get_string(request, "request_id");
+    const std::string feature_id = get_string(request, "feature_id");
+    const std::string base_path = get_string(request, "base_path");
+    if (request_id.empty() || feature_id.empty() || base_path.empty()) {
+        error = "edge inspection request is missing required fields";
+        return false;
+    }
+    try {
+        TopoDS_Shape shape;
+        BRep_Builder builder;
+        if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) {
+            error = "could not read base BREP at " + base_path;
+            return false;
+        }
+        std::vector<TopoDS_Edge> edges;
+        for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            edges.push_back(TopoDS::Edge(explorer.Current()));
+        }
+        std::ostringstream out;
+        out << "{\"schema_version\":\"" << kSchemaVersion
+            << "\",\"request_id\":\"" << json_escape(request_id)
+            << "\",\"operation\":\"inspect_edges\",\"status\":\"ok\",\"feature_id\":\""
+            << json_escape(feature_id) << "\"";
+        append_edge_candidates(out, edges, request);
+        out << '}';
+        g_result_json = out.str();
+        return true;
+    } catch (const Standard_Failure& exception) {
+        error = std::string("OCCT edge inspection failed: ") + exception.GetMessageString();
+        return false;
+    }
 }
 
 TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
@@ -1606,6 +1642,7 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
         tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
 
+    TopoDS_Edge match;
     for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
         const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
         GProp_GProps properties;
@@ -1629,10 +1666,13 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
             (edge_tangent_length * tangent_length);
         if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
             1.0 - std::abs(tangent_dot) <= 1e-6) {
-            return edge;
+            if (!match.IsNull()) {
+                return {};
+            }
+            match = edge;
         }
     }
-    return {};
+    return match;
 }
 
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
@@ -1673,37 +1713,13 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request, "selected_edge");
         const TopoDS_Edge edit_target_edge = source_edge_for_context(base, request, "edit_target");
         BRepFilletAPI_MakeFillet fillet(base);
-        TopoDS_Edge fallback_edit_edge;
-        TopoDS_Vertex selected_first_vertex;
-        TopoDS_Vertex selected_last_vertex;
-        if (!selected_source_edge.IsNull()) {
-            TopExp::Vertices(selected_source_edge, selected_first_vertex, selected_last_vertex);
-        }
         if (!edit_target_edge.IsNull()) {
             fillet.Add(radius, edit_target_edge);
-        }
-        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edit_target_edge.IsNull() && edge_explorer.More(); edge_explorer.Next()) {
-            TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-            if (!selected_source_edge.IsNull() && edge.IsSame(selected_source_edge)) continue;
-            if (!selected_source_edge.IsNull()) {
-                if (fallback_edit_edge.IsNull()) fallback_edit_edge = edge;
-                TopoDS_Vertex first_vertex;
-                TopoDS_Vertex last_vertex;
-                TopExp::Vertices(edge, first_vertex, last_vertex);
-                if (first_vertex.IsSame(selected_first_vertex) ||
-                    first_vertex.IsSame(selected_last_vertex) ||
-                    last_vertex.IsSame(selected_first_vertex) ||
-                    last_vertex.IsSame(selected_last_vertex)) {
-                    continue;
-                }
-                fillet.Add(radius, edge);
-                fallback_edit_edge = {};
-                break;
-            }
-            fillet.Add(radius, edge);
-        }
-        if (!selected_source_edge.IsNull() && !fallback_edit_edge.IsNull()) {
-            fillet.Add(radius, fallback_edit_edge);
+        } else if (!selected_source_edge.IsNull()) {
+            fillet.Add(radius, selected_source_edge);
+        } else {
+            error = "fillet requires one resolved semantic edge";
+            return false;
         }
         fillet.Build();
         if (!fillet.IsDone()) {
@@ -1999,9 +2015,12 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
 
         try {
             BRepFilletAPI_MakeChamfer chamfer(base);
-            for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-                TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-                chamfer.Add(distance, edge);
+            const TopoDS_Edge selected_edge = source_edge_for_context(base, request, "selected_edge");
+            if (!selected_edge.IsNull()) {
+                chamfer.Add(distance, selected_edge);
+            } else {
+                error = "chamfer requires one resolved semantic edge";
+                return false;
             }
             chamfer.Build();
             if (!chamfer.IsDone()) {
@@ -3563,6 +3582,8 @@ int main() {
         success = handle_boolean_common(*args, error);
     } else if (command_id == "fillet") {
         success = handle_fillet(*args, error);
+    } else if (command_id == "inspect_edges") {
+        success = handle_inspect_edges(*args, error);
     } else if (command_id == "split") {
         success = handle_split(*args, error);
     } else if (command_id == "chamfer") {

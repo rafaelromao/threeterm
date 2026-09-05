@@ -376,6 +376,30 @@ impl ProtocolNeutralViewport {
         draw_solids(&mut rgb, width, height, scene, &request);
 
         for feature in &scene.features {
+            if let Some((center, edge)) = sketch_circle_coordinates(&feature.kind) {
+                draw_sketch_polyline(
+                    &mut rgb,
+                    width,
+                    circle_points(center, edge),
+                    width as f64 / 2.0,
+                    height as f64 / 2.0,
+                    scale,
+                    request.camera,
+                );
+                continue;
+            }
+            if let Some((center, start, end)) = sketch_arc_coordinates(&feature.kind) {
+                draw_sketch_polyline(
+                    &mut rgb,
+                    width,
+                    arc_points(center, start, end),
+                    width as f64 / 2.0,
+                    height as f64 / 2.0,
+                    scale,
+                    request.camera,
+                );
+                continue;
+            }
             let Some(points) = sketch_primitive_coordinates(&feature.kind) else {
                 continue;
             };
@@ -408,6 +432,130 @@ impl ProtocolNeutralViewport {
             frame_token: None,
         })
     }
+}
+
+fn sketch_circle_coordinates(kind: &str) -> Option<([f64; 3], [f64; 3])> {
+    let values = parse_sketch_values(kind, "sketch-circle3:", 6)?;
+    Some((
+        [values[0], values[1], values[2]],
+        [values[3], values[4], values[5]],
+    ))
+}
+
+fn sketch_arc_coordinates(kind: &str) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let values = parse_sketch_values(kind, "sketch-arc3:", 9)?;
+    Some((
+        [values[0], values[1], values[2]],
+        [values[3], values[4], values[5]],
+        [values[6], values[7], values[8]],
+    ))
+}
+
+fn parse_sketch_values(kind: &str, prefix: &str, length: usize) -> Option<Vec<f64>> {
+    let values: Vec<f64> = kind
+        .strip_prefix(prefix)?
+        .split(',')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    (values.len() == length).then_some(values)
+}
+
+fn circle_points(center: [f64; 3], edge: [f64; 3]) -> Vec<[f64; 3]> {
+    let radius = sub(edge, center);
+    let first = normalize(radius);
+    let reference = if first[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let second = normalize(cross(first, reference));
+    (0..=24)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * f64::from(index) / 24.0;
+            add(
+                center,
+                add(
+                    scale_vector(first, radius_norm(radius) * angle.cos()),
+                    scale_vector(second, radius_norm(radius) * angle.sin()),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn arc_points(center: [f64; 3], start: [f64; 3], end: [f64; 3]) -> Vec<[f64; 3]> {
+    let first = normalize(sub(start, center));
+    let second = normalize(sub(end, center));
+    let radius = radius_norm(sub(start, center));
+    (0..=12)
+        .map(|index| {
+            let amount = f64::from(index) / 12.0;
+            let direction = normalize([
+                first[0] * (1.0 - amount) + second[0] * amount,
+                first[1] * (1.0 - amount) + second[1] * amount,
+                first[2] * (1.0 - amount) + second[2] * amount,
+            ]);
+            add(center, scale_vector(direction, radius))
+        })
+        .collect()
+}
+
+fn draw_sketch_polyline(
+    rgb: &mut [u8],
+    width: usize,
+    points: Vec<[f64; 3]>,
+    center_x: f64,
+    center_y: f64,
+    scale: f64,
+    camera: CameraState,
+) {
+    for pair in points.windows(2) {
+        let first = project_sketch_point(pair[0], center_x, center_y, scale, camera);
+        let second = project_sketch_point(pair[1], center_x, center_y, scale, camera);
+        draw_sketch_line(
+            &mut *rgb,
+            width,
+            first.0,
+            first.1,
+            second.0,
+            second.1,
+            [105, 220, 190],
+        );
+    }
+}
+
+fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn scale_vector(vector: [f64; 3], scale: f64) -> [f64; 3] {
+    [vector[0] * scale, vector[1] * scale, vector[2] * scale]
+}
+
+fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn radius_norm(vector: [f64; 3]) -> f64 {
+    vector
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn normalize(vector: [f64; 3]) -> [f64; 3] {
+    let length = radius_norm(vector).max(f64::EPSILON);
+    scale_vector(vector, 1.0 / length)
 }
 
 fn draw_solids(

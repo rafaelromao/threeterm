@@ -136,14 +136,20 @@ pub struct SketchDiagnostic {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanarFaceEvidence {
+    pub topology_kind: String,
     pub origin: [f64; 3],
     pub normal: [f64; 3],
     pub x_axis: [f64; 3],
     pub y_axis: [f64; 3],
+    #[serde(default)]
+    pub adjacent_feature_ids: Vec<String>,
 }
 
 impl PlanarFaceEvidence {
     pub fn validate(&self) -> Result<(), String> {
+        if self.topology_kind != "planar_face" {
+            return Err("face evidence topology kind must be planar_face".to_string());
+        }
         validate_frame(
             self.origin,
             self.x_axis,
@@ -1645,10 +1651,12 @@ mod tests {
     #[test]
     fn planar_face_placement_maps_local_coordinates_and_resolves_by_evidence() {
         let evidence = PlanarFaceEvidence {
+            topology_kind: "planar_face".to_string(),
             origin: [4.0, 5.0, 6.0],
             normal: [0.0, 1.0, 0.0],
             x_axis: [1.0, 0.0, 0.0],
             y_axis: [0.0, 0.0, -1.0],
+            adjacent_feature_ids: Vec::new(),
         };
         let reference = PlanarFaceReference {
             semantic_id: "bracket/vertical-face".to_string(),

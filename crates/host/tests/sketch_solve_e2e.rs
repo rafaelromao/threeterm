@@ -143,10 +143,12 @@ fn lost_planar_face_support_is_explicit_and_does_not_mutate_the_bundle() {
                         "source_face_id": "missing/face"
                     },
                     "evidence": {
+                        "topology_kind": "planar_face",
                         "origin": [0.0, 0.0, 0.0],
                         "normal": [0.0, 1.0, 0.0],
                         "x_axis": [1.0, 0.0, 0.0],
-                        "y_axis": [0.0, 0.0, -1.0]
+                        "y_axis": [0.0, 0.0, -1.0],
+                        "adjacent_feature_ids": []
                     }
                 },
                 "placement": {

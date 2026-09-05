@@ -69,10 +69,12 @@ fn sketch_solve_request_accepts_semantic_face_support_and_placement() {
                     "source_face_id": "bracket/vertical-face"
                 },
                 "evidence": {
+                    "topology_kind": "planar_face",
                     "origin": [0.0, 0.0, 0.0],
                     "normal": [0.0, 1.0, 0.0],
                     "x_axis": [1.0, 0.0, 0.0],
-                    "y_axis": [0.0, 0.0, -1.0]
+                    "y_axis": [0.0, 0.0, -1.0],
+                    "adjacent_feature_ids": []
                 }
             },
             "placement": {

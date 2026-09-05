@@ -1935,6 +1935,7 @@ pub static SKETCH_SOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "phase": { "type": "string", "enum": ["preview", "commit"] },
+            "preview_revision": { "type": "string", "minLength": 1 },
             "request_id": { "type": "string", "minLength": 1 },
             "expected_revision": { "type": "string", "minLength": 1 },
             "source_revision": { "type": "string", "minLength": 1 },
@@ -1948,11 +1949,13 @@ pub static SKETCH_SOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "source_revision_id": { "type": "string", "minLength": 1 },
                         "source_face_id": { "type": "string", "minLength": 1 }
                     }, "additionalProperties": false },
-                    "evidence": { "type": "object", "required": ["origin", "normal", "x_axis", "y_axis"], "properties": {
+                    "evidence": { "type": "object", "required": ["topology_kind", "origin", "normal", "x_axis", "y_axis", "adjacent_feature_ids"], "properties": {
+                        "topology_kind": { "const": "planar_face" },
                         "origin": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
                         "normal": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
                         "x_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
-                        "y_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } }
+                        "y_axis": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } },
+                        "adjacent_feature_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
                     }, "additionalProperties": false }
                 }, "additionalProperties": false
             },

@@ -195,10 +195,12 @@ fn attached_sketch_primitives_are_projected_in_their_face_frame() {
                     },
                     role: "sketch-support".into(),
                     evidence: PlanarFaceEvidence {
+                        topology_kind: "planar_face".into(),
                         origin: placement.origin,
                         normal: placement.normal,
                         x_axis: placement.x_axis,
                         y_axis: placement.y_axis,
+                        adjacent_feature_ids: Vec::new(),
                     },
                 }),
                 placement: Some(placement),

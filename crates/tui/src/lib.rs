@@ -3314,6 +3314,12 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),
             );
+            if let Some(preview) = self.draft.preview() {
+                object.insert(
+                    "preview_revision".to_string(),
+                    Value::String(preview.preview_revision.clone()),
+                );
+            }
         }
         Ok(request)
     }

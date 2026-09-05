@@ -1371,7 +1371,7 @@ fn sketch_request_from_value(
         .map_err(|error| HostError::Validation {
             detail: format!("invalid sketch support: {error}"),
         })?;
-    let placement = request
+    let placement: Option<threeterm_domain::SketchPlacement> = request
         .get("placement")
         .cloned()
         .map(serde_json::from_value)
@@ -1381,6 +1381,16 @@ fn sketch_request_from_value(
         })?;
     match (support, placement) {
         (Some(support), Some(placement)) => {
+            if support.evidence.origin != placement.origin
+                || support.evidence.normal != placement.normal
+                || support.evidence.x_axis != placement.x_axis
+                || support.evidence.y_axis != placement.y_axis
+            {
+                return Err(HostError::Validation {
+                    detail: "sketch placement must match the selected planar face frame"
+                        .to_string(),
+                });
+            }
             typed = typed.with_attachment(support, placement);
         }
         (None, None) => {}
@@ -1480,6 +1490,32 @@ fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'stati
         PlanarFaceReattachmentOutcome::Lost => "lost",
         PlanarFaceReattachmentOutcome::Incompatible { .. } => "incompatible",
     }
+}
+
+fn sketch_input_fingerprint(request: &serde_json::Value) -> String {
+    let mut input = request.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("phase");
+        object.remove("preview_revision");
+        object.remove("expected_revision");
+    }
+    sha256_hex(input.to_string().as_bytes())
+}
+
+fn sketch_preview_revision(
+    request: &serde_json::Value,
+    source_revision: &str,
+    result: &SketchSolveResponse,
+) -> String {
+    let input_fingerprint = sketch_input_fingerprint(request);
+    let geometry_fingerprint = sha256_hex(
+        serde_json::to_string(result)
+            .expect("sketch preview serializes")
+            .as_bytes(),
+    );
+    sha256_hex(
+        format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}").as_bytes(),
+    )
 }
 
 fn sketch_support_failure_response(
@@ -1914,11 +1950,14 @@ impl Host {
                 .expect("sketch support response serializes"),
             });
         }
-        let result = worker
+        let mut result = worker
             .clone()
             .with_revision_id(source_revision.clone())
             .solve(&request)
             .map_err(HostError::from)?;
+        result.support = request.support.clone();
+        result.placement = request.placement;
+        result.reattachment_outcome = Some("resolved".to_string());
         if !result.is_success() {
             return Err(HostError::Validation {
                 detail: serde_json::to_string(&result).expect("sketch result serializes"),
@@ -2014,6 +2053,22 @@ impl Host {
                         ),
                         "commit" => {
                             let preview = self.preview_sketch_solve(bundle_path, &typed_request)?;
+                            if let Some(expected_preview) = request
+                                .get("preview_revision")
+                                .and_then(serde_json::Value::as_str)
+                                && expected_preview
+                                    != sketch_preview_revision(
+                                        &request,
+                                        loaded.revision_hash_hex(),
+                                        &preview,
+                                    )
+                            {
+                                return Err(HostError::Validation {
+                                    detail:
+                                        "sketch preview is stale; preview the current draft again"
+                                            .to_string(),
+                                });
+                            }
                             if !preview.is_success() {
                                 (preview, None)
                             } else {
@@ -2759,7 +2814,7 @@ impl Host {
                 .preview_sketch_solve(bundle_path, &typed_request)
                 .map_err(ExecutionError::Handler)?;
             let source_revision = loaded.revision_hash_hex().to_string();
-            let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+            let input_fingerprint = sketch_input_fingerprint(&request);
             let geometry_fingerprint = sha256_hex(
                 serde_json::to_string(&result)
                     .expect("sketch preview serializes")

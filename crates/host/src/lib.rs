@@ -5897,6 +5897,7 @@ impl Host {
         self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn preview_occt_result<R, T>(
         &self,
         root: &Path,

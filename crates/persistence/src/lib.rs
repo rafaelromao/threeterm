@@ -453,14 +453,43 @@ fn is_revision_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_plain_feature_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 fn validate_intent_impact(
     affected_semantic_ids: &[String],
     feature_id: &str,
+    dependency_id: Option<&str>,
     source_revision: &str,
     worker_requirements: &threeterm_protocol::artifact::WorkerFingerprint,
     kind: &str,
 ) -> Result<(), BundleError> {
-    if affected_semantic_ids != [feature_id.to_string()] || !is_revision_hex(source_revision) {
+    let expected_ids = match dependency_id {
+        Some(dependency_id) if !dependency_id.is_empty() => {
+            if !is_plain_feature_id(feature_id) || !is_plain_feature_id(dependency_id) {
+                return Err(BundleError::Invalid(format!(
+                    "canonical {kind} semantic reference is invalid"
+                )));
+            }
+            vec![feature_id.to_string(), dependency_id.to_string()]
+        }
+        Some(_) => {
+            return Err(BundleError::Invalid(format!(
+                "canonical {kind} dependency is invalid"
+            )));
+        }
+        None if is_plain_feature_id(feature_id) => vec![feature_id.to_string()],
+        None => {
+            return Err(BundleError::Invalid(format!(
+                "canonical {kind} semantic reference is invalid"
+            )));
+        }
+    };
+    if affected_semantic_ids != expected_ids || !is_revision_hex(source_revision) {
         return Err(BundleError::Invalid(format!(
             "canonical {kind} semantic impact or source revision is invalid"
         )));
@@ -540,6 +569,7 @@ impl CanonicalRevolveIntent {
         validate_intent_impact(
             &self.affected_semantic_ids,
             feature_id,
+            None,
             &self.source_revision,
             &self.worker_requirements,
             "revolve",
@@ -591,6 +621,7 @@ impl CanonicalMirrorIntent {
         validate_intent_impact(
             &self.affected_semantic_ids,
             feature_id,
+            Some(&inputs.base_feature_id),
             &self.source_revision,
             &self.worker_requirements,
             "mirror",
@@ -645,6 +676,7 @@ impl CanonicalLinearPatternIntent {
         validate_intent_impact(
             &self.affected_semantic_ids,
             feature_id,
+            Some(&inputs.base_feature_id),
             &self.source_revision,
             &self.worker_requirements,
             "linear pattern",
@@ -702,6 +734,7 @@ impl CanonicalCircularPatternIntent {
         validate_intent_impact(
             &self.affected_semantic_ids,
             feature_id,
+            Some(&inputs.base_feature_id),
             &self.source_revision,
             &self.worker_requirements,
             "circular pattern",
@@ -3207,6 +3240,15 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     log_index: entry.log_index,
                     detail: error.to_string(),
                 })?;
+            if intent.worker_requirements() != &occt_worker_identity() {
+                return Err(BundleError::CompatibilityIdentityMismatch {
+                    identity: "canonical_transform_worker",
+                    expected: serde_json::to_string(&occt_worker_identity())
+                        .expect("worker identity serializes"),
+                    found: serde_json::to_string(intent.worker_requirements())
+                        .expect("worker identity serializes"),
+                });
+            }
             if entry.idempotency_key.as_deref() != Some(intent.request_id()) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,

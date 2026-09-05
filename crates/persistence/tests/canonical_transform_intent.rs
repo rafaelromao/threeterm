@@ -58,7 +58,7 @@ fn mirror_intent(request_id: &str, source_revision: &str, feature_id: &str) -> C
             plane_point: [0.0, 0.0, 0.0],
             plane_normal: [1.0, 0.0, 0.0],
         },
-        affected_semantic_ids: vec![feature_id.to_string()],
+        affected_semantic_ids: vec![feature_id.to_string(), "base-1".to_string()],
         source_revision: source_revision.to_string(),
         worker_requirements: occt_worker_identity(),
     })
@@ -80,7 +80,7 @@ fn linear_pattern_intent(
             count: 3,
             spacing: 5.0,
         },
-        affected_semantic_ids: vec![feature_id.to_string()],
+        affected_semantic_ids: vec![feature_id.to_string(), "base-1".to_string()],
         source_revision: source_revision.to_string(),
         worker_requirements: occt_worker_identity(),
     })
@@ -103,7 +103,7 @@ fn circular_pattern_intent(
             angle_step: std::f64::consts::FRAC_PI_2,
             count: 4,
         },
-        affected_semantic_ids: vec![feature_id.to_string()],
+        affected_semantic_ids: vec![feature_id.to_string(), "base-1".to_string()],
         source_revision: source_revision.to_string(),
         worker_requirements: occt_worker_identity(),
     })
@@ -162,6 +162,10 @@ fn mirror_and_pattern_intents_validate_base_references() {
             .validate(intent.affected_semantic_ids()[0].as_str())
             .expect("valid intent");
         assert_eq!(intent.base_reference(), Some("base-1"));
+        assert_eq!(
+            &intent.affected_semantic_ids()[1..],
+            &["base-1".to_string()]
+        );
     }
 
     let mut bad = mirror_intent("req-m", &revision, "mir-1");

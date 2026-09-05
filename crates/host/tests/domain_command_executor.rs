@@ -280,6 +280,76 @@ fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
 }
 
 #[test]
+fn transform_validation_rejects_before_canonical_mutation() {
+    let root = root("canonical-transform-rejections");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let initial = host
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
+        .expect("initial identity executes");
+    let revision = initial["revision_hash"].as_str().unwrap();
+    let manifest_before = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = fs::read(root.join("transactions.log")).expect("log reads");
+
+    let mut too_short = transform_request(&root, "revolve-short", None, revision);
+    too_short["profile"] = json!([[0.0, 0.0], [1.0, 0.0]]);
+    assert!(matches!(
+        host.execute_domain_command(REVOLVE_COMMAND_ID, too_short),
+        Err(ExecutionError::InvalidRequest(_))
+    ));
+
+    let mut zero_axis = transform_request(&root, "revolve-zero-axis", None, revision);
+    zero_axis["axis_direction"] = json!([0.0, 0.0, 0.0]);
+    assert!(matches!(
+        host.execute_domain_command(REVOLVE_COMMAND_ID, zero_axis),
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+
+    let mut non_positive_angle = transform_request(&root, "revolve-negative-angle", None, revision);
+    non_positive_angle["angle"] = json!(-1.0);
+    assert!(matches!(
+        host.execute_domain_command(REVOLVE_COMMAND_ID, non_positive_angle),
+        Err(ExecutionError::InvalidRequest(_))
+    ));
+
+    let invalid_feature = transform_request(&root, "../outside", None, revision);
+    assert!(matches!(
+        host.execute_domain_command(REVOLVE_COMMAND_ID, invalid_feature),
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+
+    let missing_base =
+        transform_request(&root, "mirror-missing-base", Some("missing-base"), revision);
+    assert!(matches!(
+        host.execute_domain_command(MIRROR_COMMAND_ID, missing_base),
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+
+    let stale = transform_request(&root, "revolve-stale", None, &"0".repeat(64));
+    assert!(matches!(
+        host.execute_domain_command(REVOLVE_COMMAND_ID, stale),
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("manifest reads after rejection"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("log reads after rejection"),
+        log_before
+    );
+    let after = host
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
+        .expect("identity remains readable");
+    assert_eq!(after["revision_hash"], initial["revision_hash"]);
+    assert_eq!(after["transaction_count"], initial["transaction_count"]);
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));
+}
+
+#[test]
 fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
     let Some(_worker) = OcctWorker::locate().ok() else {
         eprintln!("canonical transform tracer: OCCT worker unavailable");
@@ -297,6 +367,19 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
     let initial = host
         .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
         .expect("initial identity executes");
+    let revolve_request = transform_request(
+        &root,
+        "revolve-preview",
+        None,
+        initial["revision_hash"].as_str().unwrap(),
+    );
+    let revolve_preview = host
+        .preview_domain_command(REVOLVE_COMMAND_ID, revolve_request)
+        .expect("revolve preview executes");
+    assert_eq!(
+        revolve_preview.source_revision,
+        initial["revision_hash"].as_str().unwrap()
+    );
     let revolve = host
         .execute_domain_command(
             REVOLVE_COMMAND_ID,
@@ -315,6 +398,13 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
         (CIRCULAR_PATTERN_COMMAND_ID, "circular-feature"),
     ];
     for (command, feature_id) in commands.drain(..) {
+        let preview = host
+            .preview_domain_command(
+                command,
+                transform_request(&root, feature_id, Some("revolve-feature"), &revision),
+            )
+            .expect("transform preview executes");
+        assert_eq!(preview.source_revision, revision);
         let response = host
             .execute_domain_command(
                 command,
@@ -333,6 +423,27 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
             .iter()
             .all(|entry| entry.intent.is_some())
     );
+    assert_eq!(
+        loaded.log.entries()[0]
+            .intent
+            .as_ref()
+            .unwrap()
+            .affected_semantic_ids(),
+        &["revolve-feature".to_string()]
+    );
+    for (index, feature_id) in ["mirror-feature", "linear-feature", "circular-feature"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            loaded.log.entries()[index + 1]
+                .intent
+                .as_ref()
+                .unwrap()
+                .affected_semantic_ids(),
+            &[feature_id.to_string(), "revolve-feature".to_string()]
+        );
+    }
     let original_hashes: Vec<_> = [
         "revolve-feature",
         "mirror-feature",

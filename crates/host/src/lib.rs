@@ -2702,6 +2702,289 @@ impl Host {
             });
         }
 
+        if matches!(
+            command,
+            REVOLVE_COMMAND_ID
+                | MIRROR_COMMAND_ID
+                | LINEAR_PATTERN_COMMAND_ID
+                | CIRCULAR_PATTERN_COMMAND_ID
+        ) {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+            if let Some(expected_revision) = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str)
+                && current.revision_hash != expected_revision
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "{} source revision {expected_revision:?} does not match current revision {:?}",
+                        command.0, current.revision_hash
+                    ),
+                }));
+            }
+            let feature_id = request
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+            if !valid_feature_path_component(feature_id) {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: "feature IDs must be plain path components".to_string(),
+                }));
+            }
+            let root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+            let worker = OcctWorker::locate().map_err(|error| {
+                ExecutionError::Handler(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            let expected_revision = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str);
+            let preview = match command {
+                REVOLVE_COMMAND_ID => {
+                    let profile =
+                        serde_json::from_value(request.get("profile").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing profile".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve profile: {error}"),
+                            })
+                        })?;
+                    let axis_point =
+                        serde_json::from_value(request.get("axis_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve axis_point: {error}"),
+                            })
+                        })?;
+                    let axis_direction =
+                        serde_json::from_value(request.get("axis_direction").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_direction".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid revolve axis_direction: {error}"),
+                            })
+                        })?;
+                    let angle = request
+                        .get("angle")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing angle".to_string())
+                        })?;
+                    let typed = RevolveRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        profile,
+                        axis_point,
+                        axis_direction,
+                        angle,
+                    )
+                    .with_output_path(root.join("stage"), "revolve.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, RevolveResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::Revolve,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                MIRROR_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let plane_point =
+                        serde_json::from_value(request.get("plane_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing plane_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid mirror plane_point: {error}"),
+                            })
+                        })?;
+                    let plane_normal =
+                        serde_json::from_value(request.get("plane_normal").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing plane_normal".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid mirror plane_normal: {error}"),
+                            })
+                        })?;
+                    let typed = MirrorRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        plane_point,
+                        plane_normal,
+                    )
+                    .with_output_path(root.join("stage"), "mirror.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, MirrorResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::Mirror,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                LINEAR_PATTERN_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let direction =
+                        serde_json::from_value(request.get("direction").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing direction".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid linear pattern direction: {error}"),
+                            })
+                        })?;
+                    let count = request
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing count".to_string())
+                        })?;
+                    let spacing = request
+                        .get("spacing")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing spacing".to_string())
+                        })?;
+                    let typed = LinearPatternRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        direction,
+                        count,
+                        spacing,
+                    )
+                    .with_output_path(root.join("stage"), "linear-pattern.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, LinearPatternResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::LinearPattern,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                CIRCULAR_PATTERN_COMMAND_ID => {
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                        })?;
+                    if !valid_feature_path_component(base_feature_id) {
+                        return Err(ExecutionError::Handler(HostError::Validation {
+                            detail: "base feature IDs must be plain path components".to_string(),
+                        }));
+                    }
+                    let base_path = authenticated_base_brep(&root, base_feature_id)
+                        .map_err(ExecutionError::Handler)?;
+                    let axis_point =
+                        serde_json::from_value(request.get("axis_point").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_point".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid circular pattern axis_point: {error}"),
+                            })
+                        })?;
+                    let axis_normal =
+                        serde_json::from_value(request.get("axis_normal").cloned().ok_or_else(
+                            || ExecutionError::InvalidRequest("missing axis_normal".to_string()),
+                        )?)
+                        .map_err(|error| {
+                            ExecutionError::Handler(HostError::Validation {
+                                detail: format!("invalid circular pattern axis_normal: {error}"),
+                            })
+                        })?;
+                    let angle_step = request
+                        .get("angle_step")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing angle_step".to_string())
+                        })?;
+                    let count = request
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            ExecutionError::InvalidRequest("missing count".to_string())
+                        })?;
+                    let typed = CircularPatternRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        base_path,
+                        axis_point,
+                        axis_normal,
+                        angle_step,
+                        count,
+                    )
+                    .with_output_path(root.join("stage"), "circular-pattern.brep")
+                    .with_feature_id(feature_id);
+                    typed.validate().map_err(|detail| {
+                        ExecutionError::Handler(HostError::Validation { detail })
+                    })?;
+                    self.preview_occt_result::<_, CircularPatternResult>(
+                        &root,
+                        &typed,
+                        threeterm_occt_worker::Operation::CircularPattern,
+                        &worker,
+                        command,
+                        expected_revision,
+                        &request,
+                    )
+                }
+                _ => unreachable!(),
+            }?;
+            return Ok(preview);
+        }
+
         if command != EXTRUDE_COMMAND_ID {
             return Err(ExecutionError::Handler(HostError::Validation {
                 detail: format!(
@@ -5314,6 +5597,52 @@ impl Host {
         self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 
+    fn preview_occt_result<R, T>(
+        &self,
+        root: &Path,
+        request: &R,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        command: CommandId,
+        expected_revision: Option<&str>,
+        input: &serde_json::Value,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>>
+    where
+        R: Serialize,
+        T: DeserializeOwned + Serialize,
+    {
+        let derived = self
+            .stage_occt_result::<T>(root, request, operation, worker)
+            .map_err(ExecutionError::Handler)?;
+        if let Some(expected_revision) = expected_revision
+            && derived.source_snapshot.revision_hash != expected_revision
+        {
+            let current_revision = derived.source_snapshot.revision_hash.clone();
+            self.discard_staged_occt_result(&derived);
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "{} preview source revision changed from {expected_revision:?} to {current_revision:?}",
+                    command.0
+                ),
+            }));
+        }
+        let source_revision = derived.source_snapshot.revision_hash.clone();
+        let input_fingerprint = sha256_hex(input.to_string().as_bytes());
+        let geometry_fingerprint = derived.artifact.sha256.clone();
+        let preview_revision = sha256_hex(
+            format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                .as_bytes(),
+        );
+        self.discard_staged_occt_result(&derived);
+        Ok(DomainCommandPreview {
+            command,
+            source_revision,
+            preview_revision,
+            input_fingerprint,
+            geometry_fingerprint,
+        })
+    }
+
     fn stage_occt_result_for_revision<R>(
         &self,
         root: &Path,
@@ -5403,6 +5732,7 @@ impl Host {
                 detail: "OCCT request is missing feature_id".to_string(),
             })?
             .to_string();
+        let source_snapshot = self.load(root)?;
         worker.verify_identity().map_err(|error| match error {
             WorkerError::Spawn { binary, detail, .. } => HostError::WorkerFailure {
                 request_id: Some(request_id.clone()),
@@ -5410,7 +5740,6 @@ impl Host {
             },
             other => HostError::from(other),
         })?;
-        let source_snapshot = self.load(root)?;
         let mut binding = occt_artifact_request(
             &request_value,
             operation,
@@ -8854,7 +9183,7 @@ fn canonical_occt_intent(
                     }
                 })?,
             },
-            affected_semantic_ids: vec![feature_id.clone()],
+            affected_semantic_ids: vec![feature_id.clone(), base_feature_id()?],
             source_revision,
             worker_requirements,
         }),
@@ -8881,7 +9210,7 @@ fn canonical_occt_intent(
                     }
                 })?,
             },
-            affected_semantic_ids: vec![feature_id.clone()],
+            affected_semantic_ids: vec![feature_id.clone(), base_feature_id()?],
             source_revision,
             worker_requirements,
         }),
@@ -8920,7 +9249,7 @@ fn canonical_occt_intent(
                     }
                 })?,
             },
-            affected_semantic_ids: vec![feature_id],
+            affected_semantic_ids: vec![feature_id, base_feature_id()?],
             source_revision,
             worker_requirements,
         }),

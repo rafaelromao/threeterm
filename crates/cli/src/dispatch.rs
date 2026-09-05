@@ -226,6 +226,7 @@ enum DispatchPlan {
         axis_point: [f64; 3],
         axis_direction: [f64; 3],
         angle: f64,
+        expected_revision: Option<String>,
     },
     Mirror {
         bundle: String,
@@ -233,6 +234,7 @@ enum DispatchPlan {
         base_feature_id: String,
         plane_point: [f64; 3],
         plane_normal: [f64; 3],
+        expected_revision: Option<String>,
     },
     LinearPattern {
         bundle: String,
@@ -241,6 +243,7 @@ enum DispatchPlan {
         direction: [f64; 3],
         count: u32,
         spacing: f64,
+        expected_revision: Option<String>,
     },
     CircularPattern {
         bundle: String,
@@ -250,6 +253,7 @@ enum DispatchPlan {
         axis_normal: [f64; 3],
         angle_step: f64,
         count: u32,
+        expected_revision: Option<String>,
     },
     Shell {
         bundle: String,
@@ -2453,6 +2457,7 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
     let mut axis_point: Option<[f64; 3]> = None;
     let mut axis_direction: Option<[f64; 3]> = None;
     let mut angle: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2466,6 +2471,11 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2551,6 +2561,7 @@ fn parse_revolve(args: &[OsString]) -> DispatchPlan {
         axis_point,
         axis_direction,
         angle,
+        expected_revision,
     }
 }
 
@@ -2565,6 +2576,7 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut plane_point: Option<[f64; 3]> = None;
     let mut plane_normal: Option<[f64; 3]> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2578,6 +2590,11 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2645,6 +2662,7 @@ fn parse_mirror(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         plane_point,
         plane_normal,
+        expected_revision,
     }
 }
 
@@ -2660,6 +2678,7 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
     let mut direction: Option<[f64; 3]> = None;
     let mut count: Option<u32> = None;
     let mut spacing: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2673,6 +2692,11 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2762,6 +2786,7 @@ fn parse_linear_pattern(args: &[OsString]) -> DispatchPlan {
         direction,
         count,
         spacing,
+        expected_revision,
     }
 }
 
@@ -2778,6 +2803,7 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
     let mut axis_normal: Option<[f64; 3]> = None;
     let mut angle_step: Option<f64> = None;
     let mut count: Option<u32> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2791,6 +2817,11 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
                 }
                 "--feature-id" => {
                     feature_id = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2894,6 +2925,7 @@ fn parse_circular_pattern(args: &[OsString]) -> DispatchPlan {
         axis_normal,
         angle_step,
         count,
+        expected_revision,
     }
 }
 
@@ -4839,8 +4871,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_point,
             axis_direction,
             angle,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "profile": profile_json(profile_file)?, "axis_point": axis_point, "axis_direction": axis_direction, "angle": angle });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::Mirror {
             bundle,
@@ -4848,8 +4885,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             base_feature_id,
             plane_point,
             plane_normal,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "plane_point": plane_point, "plane_normal": plane_normal });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::LinearPattern {
             bundle,
@@ -4858,8 +4900,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             direction,
             count,
             spacing,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "direction": direction, "count": count, "spacing": spacing });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::CircularPattern {
             bundle,
@@ -4869,8 +4916,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             axis_normal,
             angle_step,
             count,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "axis_point": axis_point, "axis_normal": axis_normal, "angle_step": angle_step, "count": count });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            request
         }
         DispatchPlan::Shell {
             bundle,

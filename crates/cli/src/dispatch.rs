@@ -201,6 +201,7 @@ enum DispatchPlan {
         base_feature_id: String,
         radius: f64,
         selected_edge_file: Option<String>,
+        expected_revision: Option<String>,
     },
     Chamfer {
         bundle: String,
@@ -208,6 +209,7 @@ enum DispatchPlan {
         base_feature_id: String,
         distance: f64,
         selected_edge_file: Option<String>,
+        expected_revision: Option<String>,
     },
     Hole {
         bundle: String,
@@ -258,6 +260,7 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         thickness: f64,
+        expected_revision: Option<String>,
     },
     Draft {
         bundle: String,
@@ -265,6 +268,7 @@ enum DispatchPlan {
         base_feature_id: String,
         angle: f64,
         pull_direction: [f64; 3],
+        expected_revision: Option<String>,
     },
     Loft {
         bundle: String,
@@ -272,6 +276,7 @@ enum DispatchPlan {
         profile_files: Vec<String>,
         is_solid: bool,
         ruled: bool,
+        expected_revision: Option<String>,
     },
     Export {
         bundle: String,
@@ -2106,6 +2111,7 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut radius: Option<f64> = None;
     let mut selected_edge_file: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2141,6 +2147,11 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
                 },
                 "--selected-edge-file" => {
                     selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2182,6 +2193,7 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         radius,
         selected_edge_file,
+        expected_revision,
     }
 }
 
@@ -2196,6 +2208,7 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut distance: Option<f64> = None;
     let mut selected_edge_file: Option<String> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2231,6 +2244,11 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
                 },
                 "--selected-edge-file" => {
                     selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
                     index += 2;
                     continue;
                 }
@@ -2272,6 +2290,7 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         distance,
         selected_edge_file,
+        expected_revision,
     }
 }
 
@@ -2923,6 +2942,7 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut thickness: Option<f64> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2956,6 +2976,11 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2993,6 +3018,7 @@ fn parse_shell(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         thickness,
+        expected_revision,
     }
 }
 
@@ -3029,6 +3055,7 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
     let mut base_feature_id: Option<String> = None;
     let mut angle: Option<f64> = None;
     let mut pull_direction: Option<[f64; 3]> = None;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -3079,6 +3106,11 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -3122,6 +3154,7 @@ fn parse_draft(args: &[OsString]) -> DispatchPlan {
         base_feature_id,
         angle,
         pull_direction,
+        expected_revision,
     }
 }
 
@@ -3136,6 +3169,7 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
     let mut profile_files: Vec<String> = Vec::new();
     let mut is_solid = true;
     let mut ruled = false;
+    let mut expected_revision: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -3181,6 +3215,11 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--expected-revision" => {
+                    expected_revision = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -3214,6 +3253,7 @@ fn parse_loft(args: &[OsString]) -> DispatchPlan {
         profile_files,
         is_solid,
         ruled,
+        expected_revision,
     }
 }
 
@@ -3553,6 +3593,7 @@ fn execute_handler(
             base_feature_id,
             radius,
             selected_edge_file,
+            ..
         } => emit_fillet(
             &bundle,
             &feature_id,
@@ -3568,6 +3609,7 @@ fn execute_handler(
             base_feature_id,
             distance,
             selected_edge_file,
+            ..
         } => emit_chamfer(
             &bundle,
             &feature_id,
@@ -3657,6 +3699,7 @@ fn execute_handler(
             feature_id,
             base_feature_id,
             thickness,
+            ..
         } => emit_shell(
             &bundle,
             &feature_id,
@@ -3671,6 +3714,7 @@ fn execute_handler(
             base_feature_id,
             angle,
             pull_direction,
+            ..
         } => emit_draft(
             &bundle,
             &feature_id,
@@ -4593,12 +4637,44 @@ fn execute_registered_with_observer(
         Ok(request) => request,
         Err(error) => return emit_persistence_error(&error, stderr),
     };
+    let request = if matches!(
+        command,
+        threeterm_protocol::schema::FILLET_COMMAND_ID
+            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+            | threeterm_protocol::schema::SHELL_COMMAND_ID
+            | threeterm_protocol::schema::DRAFT_COMMAND_ID
+            | threeterm_protocol::schema::LOFT_COMMAND_ID
+    ) {
+        let Some(bundle_path) = request.get("bundle_path").and_then(Value::as_str) else {
+            return emit_internal_error("finishing command is missing bundle_path", stderr);
+        };
+        let snapshot = match Host::new().load(bundle_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return emit_dispatch_error(&DispatchError::from(error), stderr),
+        };
+        let mut request = request;
+        if request
+            .get("expected_revision")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            request["expected_revision"] = Value::String(snapshot.revision_hash);
+        }
+        request
+    } else {
+        request
+    };
     if matches!(
         command,
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
             | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
+            | threeterm_protocol::schema::FILLET_COMMAND_ID
+            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+            | threeterm_protocol::schema::SHELL_COMMAND_ID
+            | threeterm_protocol::schema::DRAFT_COMMAND_ID
+            | threeterm_protocol::schema::LOFT_COMMAND_ID
     ) {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
@@ -4846,18 +4922,34 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             radius,
-            ..
+            selected_edge_file,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            if let Some(path) = selected_edge_file {
+                request["selected_edge"] = read_selected_edge_reference(path)?;
+            }
+            request
         }
         DispatchPlan::Chamfer {
             bundle,
             feature_id,
             base_feature_id,
             distance,
-            ..
+            selected_edge_file,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance })
+            let mut request = json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance });
+            if let Some(expected_revision) = expected_revision {
+                request["expected_revision"] = json!(expected_revision);
+            }
+            if let Some(path) = selected_edge_file {
+                request["selected_edge"] = read_selected_edge_reference(path)?;
+            }
+            request
         }
         DispatchPlan::Hole {
             bundle,
@@ -4936,8 +5028,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             thickness,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "thickness": thickness, "expected_revision": expected_revision })
         }
         DispatchPlan::Draft {
             bundle,
@@ -4945,8 +5038,9 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             base_feature_id,
             angle,
             pull_direction,
+            expected_revision,
         } => {
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "angle": angle, "pull_direction": pull_direction, "expected_revision": expected_revision })
         }
         DispatchPlan::Loft {
             bundle,
@@ -4954,12 +5048,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             profile_files,
             is_solid,
             ruled,
+            expected_revision,
         } => {
             let profiles: Result<Vec<_>, _> = profile_files
                 .iter()
                 .map(|path| read_profile_3d(path))
                 .collect();
-            json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled })
+            json!({ "bundle_path": bundle, "feature_id": feature_id, "profiles": profiles?, "is_solid": is_solid, "ruled": ruled, "expected_revision": expected_revision })
         }
         DispatchPlan::Export {
             bundle,
@@ -5067,6 +5162,19 @@ fn emit_export(
             EXIT_BREP_INVALID
         }
     }
+}
+
+fn read_selected_edge_reference(path: &str) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|error| format!("selected edge file: {error}"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("selected edge file is not valid JSON: {error}"))?;
+    if value.get("provenance").is_none() || value.get("evidence").is_none() {
+        return Err(
+            "selected edge file must contain the nested provenance and evidence objects"
+                .to_string(),
+        );
+    }
+    Ok(value)
 }
 
 fn profile_json(profile_file: &str) -> Result<Value, String> {

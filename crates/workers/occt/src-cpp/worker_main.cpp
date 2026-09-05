@@ -1606,6 +1606,7 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
         tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
 
+    TopoDS_Edge match;
     for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
         const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
         GProp_GProps properties;
@@ -1629,10 +1630,13 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
             (edge_tangent_length * tangent_length);
         if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
             1.0 - std::abs(tangent_dot) <= 1e-6) {
-            return edge;
+            if (!match.IsNull()) {
+                return {};
+            }
+            match = edge;
         }
     }
-    return {};
+    return match;
 }
 
 bool handle_fillet(const JsonParser::Value& request, std::string& error) {
@@ -1678,12 +1682,8 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         } else if (!selected_source_edge.IsNull()) {
             fillet.Add(radius, selected_source_edge);
         } else {
-            // Legacy worker callers may omit semantic selection; the host's
-            // shared executor rejects that shape, while this compatibility
-            // path preserves the low-level worker contract.
-            for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-                fillet.Add(radius, TopoDS::Edge(edge_explorer.Current()));
-            }
+            error = "fillet requires one resolved semantic edge";
+            return false;
         }
         fillet.Build();
         if (!fillet.IsDone()) {
@@ -1983,9 +1983,8 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
             if (!selected_edge.IsNull()) {
                 chamfer.Add(distance, selected_edge);
             } else {
-                for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-                    chamfer.Add(distance, TopoDS::Edge(edge_explorer.Current()));
-                }
+                error = "chamfer requires one resolved semantic edge";
+                return false;
             }
             chamfer.Build();
             if (!chamfer.IsDone()) {

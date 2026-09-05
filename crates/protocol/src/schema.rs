@@ -541,7 +541,7 @@ pub static BOOLEAN_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static FILLET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "base_feature_id", "radius"],
+        "required": ["bundle_path", "feature_id", "base_feature_id", "radius", "expected_revision", "selected_edge"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
@@ -557,7 +557,7 @@ pub static FILLET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static CHAMFER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "base_feature_id", "distance"],
+        "required": ["bundle_path", "feature_id", "base_feature_id", "distance", "expected_revision", "selected_edge"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
@@ -995,18 +995,38 @@ pub static FILLET_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "derived_result",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
@@ -1024,18 +1044,38 @@ pub static CHAMFER_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "derived_result",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
@@ -1298,7 +1338,8 @@ pub static SHELL_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path",
             "feature_id",
             "base_feature_id",
-            "thickness"
+            "thickness",
+            "expected_revision"
         ],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
@@ -1318,18 +1359,38 @@ pub static SHELL_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "derived_result",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
@@ -1348,7 +1409,8 @@ pub static DRAFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "feature_id",
             "base_feature_id",
             "angle",
-            "pull_direction"
+            "pull_direction",
+            "expected_revision"
         ],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
@@ -1374,18 +1436,38 @@ pub static DRAFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "derived_result",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
@@ -1402,7 +1484,8 @@ pub static LOFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "required": [
             "bundle_path",
             "feature_id",
-            "profiles"
+            "profiles",
+            "expected_revision"
         ],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
@@ -1436,18 +1519,38 @@ pub static LOFT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "status",
             "operation",
             "feature_id",
+            "request_id",
+            "source_snapshot",
             "feature_graph_hash",
             "revision_hash",
+            "authoritative",
+            "artifact_kind",
+            "artifact_name",
             "brep_path",
             "brep_sha256",
+            "brep_bytes",
+            "derived_result",
             "schema_version"
         ],
         "properties": {
             "status": { "type": "string", "minLength": 1 },
             "operation": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "request_id": { "type": "string", "minLength": 1 },
+            "source_snapshot": {
+                "type": "object",
+                "required": ["feature_graph_hash", "revision_hash"],
+                "properties": {
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                },
+                "additionalProperties": false
+            },
             "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "authoritative": { "const": true },
+            "artifact_kind": { "const": "brep" },
+            "artifact_name": { "type": "string", "minLength": 1 },
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },

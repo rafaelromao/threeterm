@@ -2311,10 +2311,18 @@ impl Host {
                             ),
                         });
                     }
+                    let loaded = Bundle::at(&bundle_path).open()?;
                     let base_feature_id = request
                         .get("base_feature_id")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
+                    validate_finishing_request(
+                        command,
+                        &loaded,
+                        &feature_id,
+                        base_feature_id.as_deref(),
+                        &request,
+                    )?;
                     let base_path = base_feature_id.as_deref().map(|base| {
                         Path::new(&bundle_path)
                             .join(BREP_SUBDIR)
@@ -2359,6 +2367,7 @@ impl Host {
                                 &view.result.status,
                                 "fillet",
                                 &view.result.feature_id,
+                                &view.source_snapshot,
                                 &view.snapshot,
                                 &view.result.brep_path,
                                 &view.result.brep_sha256,
@@ -2396,6 +2405,7 @@ impl Host {
                                 &view.result.status,
                                 "chamfer",
                                 &view.result.feature_id,
+                                &view.source_snapshot,
                                 &view.snapshot,
                                 &view.result.brep_path,
                                 &view.result.brep_sha256,
@@ -2425,6 +2435,7 @@ impl Host {
                                 &view.result.status,
                                 "shell",
                                 &view.result.feature_id,
+                                &view.source_snapshot,
                                 &view.snapshot,
                                 &view.result.brep_path,
                                 &view.result.brep_sha256,
@@ -2468,6 +2479,9 @@ impl Host {
                                 &view.result.status,
                                 "draft",
                                 &view.result.feature_id,
+                                view.source_snapshot
+                                    .as_ref()
+                                    .expect("draft source snapshot"),
                                 &view.snapshot,
                                 &view.result.brep_path,
                                 &view.result.brep_sha256,
@@ -2500,6 +2514,7 @@ impl Host {
                                 &view.result.status,
                                 "loft",
                                 &view.result.feature_id,
+                                &view.source_snapshot,
                                 &view.snapshot,
                                 &view.result.brep_path,
                                 &view.result.brep_sha256,
@@ -2791,11 +2806,15 @@ impl Host {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
         let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
-        if let Some(expected_revision) = request
+        let expected_revision = request
             .get("expected_revision")
             .and_then(serde_json::Value::as_str)
-            && expected_revision != current.revision_hash
-        {
+            .ok_or_else(|| {
+                ExecutionError::InvalidRequest(
+                    "finishing preview requires expected_revision".to_string(),
+                )
+            })?;
+        if expected_revision != current.revision_hash {
             return Err(ExecutionError::Handler(HostError::Validation {
                 detail: format!(
                     "{} source revision does not match current revision {:?}",
@@ -2803,6 +2822,23 @@ impl Host {
                 ),
             }));
         }
+        let feature_id = request
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+        let base_feature_id = request
+            .get("base_feature_id")
+            .and_then(serde_json::Value::as_str);
+        validate_finishing_request(
+            command,
+            &Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?,
+            feature_id,
+            base_feature_id,
+            request,
+        )
+        .map_err(ExecutionError::Handler)?;
         let bundle_root = Bundle::at(bundle_path).canonical_root().to_path_buf();
         let base_feature_id = request
             .get("base_feature_id")
@@ -2814,10 +2850,6 @@ impl Host {
                 detail: error.to_string(),
             })
         })?;
-        let feature_id = request
-            .get("feature_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
         match command {
             FILLET_COMMAND_ID => {
                 let base_path = base_path.ok_or_else(|| {
@@ -2970,31 +3002,34 @@ impl Host {
     ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
         let source_revision = derived.source_snapshot.revision_hash.clone();
         let input_fingerprint = sha256_hex(request.to_string().as_bytes());
-        let result = serde_json::to_value(&derived.result).map_err(|error| {
-            ExecutionError::Handler(HostError::Validation {
-                detail: format!("preview result serialization failed: {error}"),
-            })
-        })?;
-        let geometry_fingerprint = result["brep_sha256"]
-            .as_str()
-            .ok_or_else(|| {
+        let result = (|| {
+            let result = serde_json::to_value(&derived.result).map_err(|error| {
                 ExecutionError::Handler(HostError::Validation {
-                    detail: "preview result omitted brep_sha256".to_string(),
+                    detail: format!("preview result serialization failed: {error}"),
                 })
-            })?
-            .to_string();
-        let preview_revision = sha256_hex(
-            format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
-                .as_bytes(),
-        );
+            })?;
+            let geometry_fingerprint = result["brep_sha256"]
+                .as_str()
+                .ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "preview result omitted brep_sha256".to_string(),
+                    })
+                })?
+                .to_string();
+            let preview_revision = sha256_hex(
+                format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                    .as_bytes(),
+            );
+            Ok(DomainCommandPreview {
+                command,
+                source_revision,
+                preview_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+            })
+        })();
         self.discard_staged_occt_result(&derived);
-        Ok(DomainCommandPreview {
-            command,
-            source_revision,
-            preview_revision,
-            input_fingerprint,
-            geometry_fingerprint,
-        })
+        result
     }
 
     /// Run a real OCCT fillet, resolve the selected edge against evidence
@@ -3778,6 +3813,9 @@ impl Host {
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
         let mut replayed_paths = HashMap::with_capacity(intents.len());
+        let replay_stage = ReplayStage::create(root)?;
+        let replay_stage_root = replay_stage.root().to_path_buf();
+        let mut replay_artifacts = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
                 CanonicalIntent::Extrude(extrude) => {
@@ -3925,19 +3963,10 @@ impl Host {
                             ),
                         });
                     }
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4125,19 +4154,10 @@ impl Host {
                                 return Err(error);
                             }
                         };
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4270,19 +4290,10 @@ impl Host {
                             return Err(HostError::BrepIo { detail });
                         }
                     };
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4293,70 +4304,78 @@ impl Host {
                 CanonicalIntent::Fillet(fillet) => {
                     let replayed = replay_finishing_geometry(
                         root,
-                        &source_snapshot,
+                        &replay_stage_root,
                         &loaded,
                         &replayed_paths,
                         worker,
                         FinishingReplayIntent::Fillet(fillet),
                     )?;
                     replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
                     feature_ids.push(replayed.feature_id);
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
                 CanonicalIntent::Chamfer(chamfer) => {
                     let replayed = replay_finishing_geometry(
                         root,
-                        &source_snapshot,
+                        &replay_stage_root,
                         &loaded,
                         &replayed_paths,
                         worker,
                         FinishingReplayIntent::Chamfer(chamfer),
                     )?;
                     replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
                     feature_ids.push(replayed.feature_id);
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
                 CanonicalIntent::Shell(shell) => {
                     let replayed = replay_finishing_geometry(
                         root,
-                        &source_snapshot,
+                        &replay_stage_root,
                         &loaded,
                         &replayed_paths,
                         worker,
                         FinishingReplayIntent::Shell(shell),
                     )?;
                     replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
                     feature_ids.push(replayed.feature_id);
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
                 CanonicalIntent::Draft(draft) => {
                     let replayed = replay_finishing_geometry(
                         root,
-                        &source_snapshot,
+                        &replay_stage_root,
                         &loaded,
                         &replayed_paths,
                         worker,
                         FinishingReplayIntent::Draft(draft),
                     )?;
                     replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
                     feature_ids.push(replayed.feature_id);
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
                 CanonicalIntent::Loft(loft) => {
                     let replayed = replay_finishing_geometry(
                         root,
-                        &source_snapshot,
+                        &replay_stage_root,
                         &loaded,
                         &replayed_paths,
                         worker,
                         FinishingReplayIntent::Loft(loft),
                     )?;
                     replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
                     feature_ids.push(replayed.feature_id);
                     geometry_fingerprints.push(replayed.fingerprint);
                 }
             }
         }
+        Bundle::at(root)
+            .restore_derived_breps_if_revision(&source_snapshot.revision_hash, &replay_artifacts)?;
+        replay_stage.discard();
         let reloaded = Bundle::at(root).open()?;
         let snapshot = SnapshotView::from(&reloaded);
         if snapshot.revision_hash != source_snapshot.revision_hash
@@ -5172,6 +5191,51 @@ impl Host {
                     typed_value["feature_id"].as_str().unwrap_or("unknown"),
                 ),
             });
+        }
+        if matches!(
+            operation,
+            threeterm_occt_worker::Operation::Fillet | threeterm_occt_worker::Operation::Chamfer
+        ) && canonical_request.get("edit_target").is_none()
+        {
+            let selected = canonical_request
+                .get("selected_edge")
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "edge finishing operation requires selected_edge".to_string(),
+                })?;
+            let context = selected_edge_context_from_request(selected)?;
+            let reference = SelectedEdgeReference {
+                semantic_id: context.semantic_id,
+                provenance: threeterm_domain::EdgeProvenance {
+                    source_feature_id: context.source_feature_id,
+                    source_revision_id: context.source_revision_id,
+                    source_edge_id: context.source_edge_id,
+                },
+                role: context.role,
+                evidence: threeterm_domain::EdgeGeometricEvidence {
+                    midpoint: context.midpoint,
+                    tangent: context.tangent,
+                    length: context.length,
+                },
+            };
+            let outcome = resolve_edge_reference(
+                &reference,
+                domain_edge_candidates(
+                    &typed_value["edge_candidates"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| serde_json::from_value(value).ok())
+                        .collect::<Vec<EdgeCandidateEvidence>>(),
+                ),
+            );
+            if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+                let _ = completion.stage.discard();
+                return Err(HostError::Validation {
+                    detail: format!("semantic edge selection failed: {outcome:?}"),
+                });
+            }
         }
         let artifact = self
             .accept_staged_occt_result(
@@ -7888,11 +7952,62 @@ struct ReplayedGeometry {
     feature_id: String,
     path: PathBuf,
     fingerprint: String,
+    bytes: Vec<u8>,
+}
+
+struct ReplayStage {
+    stage: Option<Stage>,
+    root: PathBuf,
+}
+
+impl ReplayStage {
+    fn create(root: &Path) -> Result<Self, HostError> {
+        let stage =
+            Stage::create_fresh(root.join(".derived"), "replay-generation").map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create replay generation stage failed: {error}"),
+                }
+            })?;
+        Ok(Self {
+            root: stage.root().to_path_buf(),
+            stage: Some(stage),
+        })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn discard(mut self) {
+        if let Some(stage) = self.stage.take() {
+            let _ = stage.discard();
+        }
+    }
+}
+
+impl Drop for ReplayStage {
+    fn drop(&mut self) {
+        if let Some(stage) = self.stage.take() {
+            let _ = stage.discard();
+        }
+    }
+}
+
+fn stage_replay_artifact(
+    stage_root: &Path,
+    feature_id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, HostError> {
+    let path = stage_root.join(format!("{feature_id}.brep"));
+    fs::write(&path, bytes).map_err(|error| HostError::BrepIo {
+        detail: format!("stage replayed BREP failed: {error}"),
+    })?;
+    Ok(path)
 }
 
 fn replay_finishing_geometry(
     root: &Path,
-    source_snapshot: &SnapshotView,
+    replay_stage_root: &Path,
     loaded: &LoadedBundle,
     replayed_paths: &HashMap<String, PathBuf>,
     worker: &OcctWorker,
@@ -7975,13 +8090,6 @@ fn replay_finishing_geometry(
         Ok(path)
     };
 
-    let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
-        HostError::BrepIo {
-            detail: format!("create finishing replay stage failed: {error}"),
-        }
-    })?;
-    let stage_root = stage.root().to_path_buf();
-
     macro_rules! read_result {
         ($result:expr) => {{
             let result = $result.map_err(HostError::from)?;
@@ -8014,7 +8122,10 @@ fn replay_finishing_geometry(
                 length: value.selected_edge.evidence.length,
             };
             let request = FilletRequest::new(value.request_id, base_path, value.radius)
-                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
                 .with_feature_id(&feature_id)
                 .with_selected_edge(edge);
             read_result!(
@@ -8037,7 +8148,10 @@ fn replay_finishing_geometry(
                 length: value.selected_edge.evidence.length,
             };
             let request = ChamferRequest::new(value.request_id, base_path, value.distance)
-                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
                 .with_feature_id(&feature_id)
                 .with_selected_edge(edge);
             read_result!(
@@ -8050,7 +8164,10 @@ fn replay_finishing_geometry(
         FinishingReplayIntent::Shell(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;
             let request = ShellRequest::new(value.request_id, base_path, value.thickness)
-                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
                 .with_feature_id(&feature_id);
             read_result!(
                 worker
@@ -8067,7 +8184,10 @@ fn replay_finishing_geometry(
                 value.angle,
                 value.pull_direction,
             )
-            .with_output_path(&stage_root, "replay.brep.partial")
+            .with_output_path(
+                replay_stage_root,
+                format!("{feature_id}.worker.brep.partial"),
+            )
             .with_feature_id(&feature_id);
             read_result!(
                 worker
@@ -8080,7 +8200,10 @@ fn replay_finishing_geometry(
             let request = LoftRequest::new(value.request_id, value.profiles)
                 .with_solid(value.is_solid)
                 .with_ruled(value.ruled)
-                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
                 .with_feature_id(&feature_id);
             read_result!(
                 worker
@@ -8090,18 +8213,7 @@ fn replay_finishing_geometry(
             )
         }
     };
-    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-        &feature_id,
-        &source_snapshot.revision_hash,
-        &bytes,
-    ) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = stage.discard();
-            return Err(error.into());
-        }
-    };
-    let _ = stage.discard();
+    let path = stage_replay_artifact(replay_stage_root, &feature_id, &bytes)?;
     let fingerprint = sha256_path(&path).map_err(|error| HostError::BrepIo {
         detail: format!("hash replayed BREP failed: {error}"),
     })?;
@@ -8109,6 +8221,7 @@ fn replay_finishing_geometry(
         feature_id,
         path,
         fingerprint,
+        bytes,
     })
 }
 
@@ -8691,6 +8804,7 @@ fn finishing_response_value(
     status: &str,
     operation: &str,
     feature_id: &str,
+    source_snapshot: &SnapshotView,
     snapshot: &SnapshotView,
     brep_path: &Path,
     brep_sha256: &str,
@@ -8702,8 +8816,16 @@ fn finishing_response_value(
         "status": status,
         "operation": operation,
         "feature_id": feature_id,
+        "request_id": artifact.request_id,
+        "source_snapshot": {
+            "feature_graph_hash": source_snapshot.feature_graph_hash,
+            "revision_hash": source_snapshot.revision_hash,
+        },
         "feature_graph_hash": snapshot.feature_graph_hash,
         "revision_hash": snapshot.revision_hash,
+        "authoritative": true,
+        "artifact_kind": artifact.artifact_kind,
+        "artifact_name": artifact.artifact_name,
         "brep_path": brep_path,
         "brep_sha256": brep_sha256,
         "brep_bytes": brep_bytes,
@@ -8951,6 +9073,168 @@ fn selected_edge_context_from_request(
     serde_json::from_value(selected).map_err(|error| HostError::Validation {
         detail: format!("invalid selected edge context: {error}"),
     })
+}
+
+fn validate_finishing_request(
+    command: CommandId,
+    loaded: &LoadedBundle,
+    feature_id: &str,
+    base_feature_id: Option<&str>,
+    request: &serde_json::Value,
+) -> Result<(), HostError> {
+    if !valid_feature_path_component(feature_id) {
+        return Err(HostError::Validation {
+            detail: "finishing feature_id must be a plain path component".to_string(),
+        });
+    }
+    if loaded.graph.contains_feature(feature_id) {
+        return Err(HostError::Validation {
+            detail: format!("feature ID already exists: {feature_id}"),
+        });
+    }
+    let requires_base = !matches!(command, LOFT_COMMAND_ID);
+    if requires_base {
+        let base = base_feature_id.ok_or_else(|| HostError::Validation {
+            detail: format!("{} requires base_feature_id", command.0),
+        })?;
+        if base == feature_id || !valid_feature_path_component(base) {
+            return Err(HostError::Validation {
+                detail: "finishing base_feature_id is invalid".to_string(),
+            });
+        }
+        if !loaded.graph.contains_feature(base) {
+            return Err(HostError::Validation {
+                detail: format!("finishing base feature is missing: {base}"),
+            });
+        }
+        let replayable = loaded.log.entries().iter().any(|entry| {
+            entry.feature_id == base
+                && entry.intent.as_ref().is_some_and(|intent| {
+                    intent.affected_semantic_ids().iter().any(|id| id == base)
+                })
+        });
+        if !replayable {
+            return Err(HostError::Validation {
+                detail: format!("finishing base feature is not canonical and replayable: {base}"),
+            });
+        }
+    }
+
+    match command {
+        FILLET_COMMAND_ID | CHAMFER_COMMAND_ID => {
+            let selected = request
+                .get("selected_edge")
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("{} requires selected_edge", command.0),
+                })?;
+            if selected.get("provenance").is_none() || selected.get("evidence").is_none() {
+                return Err(HostError::Validation {
+                    detail: "selected_edge must be the nested semantic edge reference".to_string(),
+                });
+            }
+            let context = selected_edge_context_from_request(selected.clone())?;
+            let base = base_feature_id.expect("edge finishing operations require a base");
+            if context.source_feature_id != base
+                || context.source_revision_id != loaded.revision_hash_hex()
+                || context.semantic_id.is_empty()
+                || context.source_edge_id.is_empty()
+                || context.role.is_empty()
+                || !context.midpoint.iter().all(|value| value.is_finite())
+                || !context.tangent.iter().all(|value| value.is_finite())
+                || !context.length.is_finite()
+                || context.length <= 0.0
+            {
+                return Err(HostError::Validation {
+                    detail:
+                        "selected_edge provenance or evidence does not match the source snapshot"
+                            .to_string(),
+                });
+            }
+            let parameter = request
+                .get(if command == FILLET_COMMAND_ID {
+                    "radius"
+                } else {
+                    "distance"
+                })
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("{} finishing parameter is missing", command.0),
+                })?;
+            if !parameter.is_finite() || !(0.0 < parameter && parameter < 1e6) {
+                return Err(HostError::Validation {
+                    detail: format!("{} finishing parameter is out of bounds", command.0),
+                });
+            }
+        }
+        SHELL_COMMAND_ID => {
+            let thickness = request["thickness"]
+                .as_f64()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "shell thickness is missing".to_string(),
+                })?;
+            if !thickness.is_finite() || !(0.0 < thickness && thickness < 1e6) {
+                return Err(HostError::Validation {
+                    detail: "shell thickness is out of bounds".to_string(),
+                });
+            }
+        }
+        DRAFT_COMMAND_ID => {
+            let angle = request["angle"]
+                .as_f64()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "draft angle is missing".to_string(),
+                })?;
+            let pull: [f64; 3] =
+                serde_json::from_value(request.get("pull_direction").cloned().ok_or_else(
+                    || HostError::Validation {
+                        detail: "draft pull_direction is missing".to_string(),
+                    },
+                )?)
+                .map_err(|error| HostError::Validation {
+                    detail: format!("invalid draft pull_direction: {error}"),
+                })?;
+            let norm = pull.iter().map(|value| value * value).sum::<f64>();
+            if !angle.is_finite()
+                || !(0.0 < angle && angle < std::f64::consts::FRAC_PI_2)
+                || !pull
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() <= 1e9)
+                || !norm.is_finite()
+                || norm <= f64::EPSILON
+            {
+                return Err(HostError::Validation {
+                    detail: "draft inputs are out of bounds".to_string(),
+                });
+            }
+        }
+        LOFT_COMMAND_ID => {
+            let profiles: Vec<Vec<[f64; 3]>> =
+                serde_json::from_value(request.get("profiles").cloned().ok_or_else(|| {
+                    HostError::Validation {
+                        detail: "loft profiles are missing".to_string(),
+                    }
+                })?)
+                .map_err(|error| HostError::Validation {
+                    detail: format!("invalid loft profiles: {error}"),
+                })?;
+            if !(2..=32).contains(&profiles.len())
+                || profiles.iter().any(|profile| {
+                    !(3..=128).contains(&profile.len())
+                        || profile
+                            .iter()
+                            .flatten()
+                            .any(|value| !value.is_finite() || value.abs() > 1e9)
+                        || profile.first() == profile.last()
+                })
+            {
+                return Err(HostError::Validation {
+                    detail: "loft profiles are out of bounds".to_string(),
+                });
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 fn canonical_fillet_intent(

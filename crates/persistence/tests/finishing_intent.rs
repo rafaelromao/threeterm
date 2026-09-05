@@ -1,8 +1,12 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use threeterm_persistence::{
     Bundle, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalChamferIntent, CanonicalDraftIntent,
-    CanonicalEdgeReference, CanonicalFilletIntent, CanonicalIntent, CanonicalLoftIntent,
-    CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance,
+    CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalIntent,
+    CanonicalLoftIntent, CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION,
+    EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs,
     FILLET_INTENT_SCHEMA_VERSION, LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION,
     occt_worker_identity, replay_canonical_state,
 };
@@ -67,8 +71,31 @@ fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
         .expect("bundle opens")
         .revision_hash_hex()
         .to_string();
+    let base_intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
+        request_id: "request-base".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["base".to_string()],
+        source_revision: base_revision.clone(),
+        worker_requirements: occt_worker_identity(),
+    };
     let source_revision = bundle
-        .append_feature_with_brep_if_revision("base", "brep:base", &base_revision, b"base-brep")
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "base",
+            "brep:base",
+            &base_revision,
+            "request-base",
+            "{}",
+            &CanonicalIntent::Extrude(base_intent),
+            b"base-brep",
+        )
         .expect("base publishes")
         .revision_hash_hex()
         .to_string();
@@ -109,6 +136,106 @@ fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
     let state = replay_canonical_state(&committed.log).expect("fillet log replays");
     assert!(state.graph.contains_feature("fillet-1"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn replay_batch_authenticates_every_result_before_promotion() {
+    let root = temp_root();
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let base_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let base_intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
+        request_id: "request-batch-base".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["base".to_string()],
+        source_revision: base_revision.clone(),
+        worker_requirements: occt_worker_identity(),
+    };
+    let source_revision = bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "base",
+            "brep:base",
+            &base_revision,
+            "request-batch-base",
+            "{}",
+            &CanonicalIntent::Extrude(base_intent),
+            b"base-brep",
+        )
+        .expect("base publishes")
+        .revision_hash_hex()
+        .to_string();
+    let mut edge = selected_edge();
+    edge.provenance.source_revision_id = source_revision.clone();
+    let intent = CanonicalFilletIntent {
+        schema_version: FILLET_INTENT_SCHEMA_VERSION.to_string(),
+        command: "fillet".to_string(),
+        operation: "fillet".to_string(),
+        base_feature_id: "base".to_string(),
+        selected_edge: edge,
+        radius: 0.5,
+        request_id: "request-fillet-batch".to_string(),
+        affected_semantic_ids: vec!["fillet-1".to_string()],
+        source_revision: source_revision.clone(),
+        worker_requirements: occt_worker_identity(),
+    };
+    bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "fillet-1",
+            "brep:fillet-1",
+            &source_revision,
+            "request-fillet-batch",
+            "{}",
+            &CanonicalIntent::Fillet(intent),
+            b"fillet-brep",
+        )
+        .expect("fillet publishes");
+    let final_revision = Bundle::at(&root)
+        .open()
+        .expect("final bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    fs::remove_file(root.join("brep/base.brep")).expect("base removes");
+    fs::remove_file(root.join("brep/fillet-1.brep")).expect("fillet removes");
+
+    let error = Bundle::at(&root)
+        .restore_derived_breps_if_revision(
+            &final_revision,
+            &[
+                ("base".to_string(), b"base-brep".to_vec()),
+                ("fillet-1".to_string(), b"wrong".to_vec()),
+            ],
+        )
+        .expect_err("invalid later result must reject the generation");
+    assert!(error.to_string().contains("authenticated geometry"));
+    assert!(!root.join("brep/base.brep").exists());
+    assert!(!root.join("brep/fillet-1.brep").exists());
+
+    Bundle::at(&root)
+        .restore_derived_breps_if_revision(
+            &final_revision,
+            &[
+                ("base".to_string(), b"base-brep".to_vec()),
+                ("fillet-1".to_string(), b"fillet-brep".to_vec()),
+            ],
+        )
+        .expect("authenticated generation restores together");
+    assert_eq!(fs::read(root.join("brep/base.brep")).unwrap(), b"base-brep");
+    assert_eq!(
+        fs::read(root.join("brep/fillet-1.brep")).unwrap(),
+        b"fillet-brep"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

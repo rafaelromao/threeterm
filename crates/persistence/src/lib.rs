@@ -264,6 +264,18 @@ thread_local! {
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+struct ReplayPublicationCleanup {
+    staging: PathBuf,
+    backup: PathBuf,
+}
+
+impl Drop for ReplayPublicationCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.staging);
+        let _ = fs::remove_dir_all(&self.backup);
+    }
+}
+
 pub fn fail_next_publication_at(point: PublicationFailurePoint) {
     NEXT_PUBLICATION_FAILURE.with(|next| *next.borrow_mut() = Some(point));
 }
@@ -746,6 +758,12 @@ fn valid_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_geometry_feature_exists(log: &TransactionLog, feature_id: &str) -> bool {
+    log.entries()
+        .iter()
+        .any(|entry| entry.feature_id == feature_id && entry.intent.is_some())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1748,6 +1766,129 @@ impl Bundle {
         })
     }
 
+    /// Restore a complete replay generation without exposing a partially
+    /// promoted set of derived results. All bytes are authenticated before
+    /// any destination is moved; promotion then rolls back destination files
+    /// if a later rename fails.
+    pub fn restore_derived_breps_if_revision(
+        &self,
+        expected_revision: &str,
+        artifacts: &[(String, Vec<u8>)],
+    ) -> Result<Vec<PathBuf>, BundleError> {
+        if artifacts.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            if loaded.revision_hash_hex() != expected_revision {
+                return Err(BundleError::Invalid(
+                    "derived result restore raced with a canonical revision".to_string(),
+                ));
+            }
+
+            let mut feature_ids = std::collections::BTreeSet::new();
+            for (feature_id, bytes) in artifacts {
+                if !feature_ids.insert(feature_id) {
+                    return Err(BundleError::Invalid(format!(
+                        "duplicate replay artifact feature: {feature_id}"
+                    )));
+                }
+                let entry = loaded
+                    .log
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.feature_id == *feature_id && entry.brep_sha256.is_some())
+                    .ok_or_else(|| {
+                        BundleError::Invalid(format!(
+                            "derived result restore has no authenticated BREP provenance: {feature_id}"
+                        ))
+                    })?;
+                if entry.brep_byte_count != Some(bytes.len() as u64)
+                    || entry.brep_sha256.as_deref() != Some(hash(bytes).as_str())
+                {
+                    return Err(BundleError::Invalid(format!(
+                        "replayed BREP does not match authenticated geometry: {feature_id}"
+                    )));
+                }
+            }
+
+            let derived_root = self.root.join(".derived");
+            fs::create_dir_all(&derived_root)?;
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging =
+                derived_root.join(format!("replay-publish-{}-{sequence}", std::process::id()));
+            let backup =
+                derived_root.join(format!("replay-backup-{}-{sequence}", std::process::id()));
+            fs::create_dir_all(&staging)?;
+            fs::create_dir_all(&backup)?;
+            let _cleanup = ReplayPublicationCleanup {
+                staging: staging.clone(),
+                backup: backup.clone(),
+            };
+            let brep_root = self.root.join("brep");
+            fs::create_dir_all(&brep_root)?;
+
+            let mut destinations = Vec::with_capacity(artifacts.len());
+            for (feature_id, bytes) in artifacts {
+                let staged = staging.join(format!("{feature_id}.brep"));
+                fs::write(&staged, bytes)?;
+                destinations.push((brep_root.join(format!("{feature_id}.brep")), staged));
+            }
+            sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+
+            let mut backups = Vec::new();
+            let mut promoted = Vec::new();
+            let promotion = (|| -> Result<(), BundleError> {
+                for (destination, _) in &destinations {
+                    if destination.exists() {
+                        let backup_path =
+                            backup.join(destination.file_name().ok_or_else(|| {
+                                BundleError::Invalid(
+                                    "BREP destination has no file name".to_string(),
+                                )
+                            })?);
+                        fs::rename(destination, &backup_path)?;
+                        backups.push((destination.clone(), backup_path));
+                    }
+                }
+                for (destination, staged) in &destinations {
+                    fs::rename(staged, destination)?;
+                    promoted.push(destination.clone());
+                }
+                sync_directory(&brep_root, PublicationFailurePoint::BrepDirectorySync)?;
+                self.open_locked()?;
+                Ok(())
+            })();
+            if let Err(error) = promotion {
+                let mut rollback_errors = Vec::new();
+                for destination in promoted.iter().rev() {
+                    if let Err(rollback_error) = fs::remove_file(destination)
+                        && rollback_error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        rollback_errors.push(rollback_error.to_string());
+                    }
+                }
+                for (destination, backup_path) in backups.iter().rev() {
+                    if let Err(rollback_error) = fs::rename(backup_path, destination) {
+                        rollback_errors.push(rollback_error.to_string());
+                    }
+                }
+                if !rollback_errors.is_empty() {
+                    return Err(BundleError::Io(format!(
+                        "replay promotion failed: {error}; rollback failed: {}",
+                        rollback_errors.join("; ")
+                    )));
+                }
+                return Err(error);
+            }
+            Ok(destinations
+                .into_iter()
+                .map(|(destination, _)| destination)
+                .collect())
+        })
+    }
+
     /// The locked body of `open`. Callers must already hold the per-root
     /// write lock; `append_features_locked`, `load_unlocked`, and the
     /// migration staging validation call it from inside the lock.
@@ -1783,13 +1924,15 @@ impl Bundle {
                 found: manifest.schema_generation,
             });
         }
-        validate_compatibility_identities(&manifest)?;
-
         let transaction_bytes = read_required(&self.transactions_path(), BundleError::LogMissing)?;
         let log = TransactionLog::decode_and_verify(&transaction_bytes)?;
         if log.terminal_digest_hex() != manifest.terminal_log_digest {
             return Err(BundleError::LogDigestMismatch);
         }
+        let legacy_registry_manifest = manifest.command_registry_hash
+            == LEGACY_COMMAND_REGISTRY_HASH
+            && log.entries().iter().all(|entry| entry.intent.is_none());
+        validate_compatibility_identities(&manifest, legacy_registry_manifest)?;
 
         let CanonicalState {
             graph,
@@ -2688,7 +2831,9 @@ impl Bundle {
                             version: fillet.schema_version.clone(),
                         });
                     }
-                    if !loaded.graph.contains_feature(&fillet.base_feature_id) {
+                    if !loaded.graph.contains_feature(&fillet.base_feature_id)
+                        || !canonical_geometry_feature_exists(&loaded.log, &fillet.base_feature_id)
+                    {
                         return Err(BundleError::Invalid(format!(
                             "canonical fillet base feature is missing: {}",
                             fillet.base_feature_id
@@ -2723,6 +2868,7 @@ impl Bundle {
                 }
                 CanonicalIntent::Chamfer(chamfer) => {
                     if !loaded.graph.contains_feature(&chamfer.base_feature_id)
+                        || !canonical_geometry_feature_exists(&loaded.log, &chamfer.base_feature_id)
                         || entries.len() != 1
                         || chamfer.validate(entries[0].0).is_err()
                         || idempotency_key != Some(chamfer.request_id.as_str())
@@ -2736,6 +2882,7 @@ impl Bundle {
                 }
                 CanonicalIntent::Shell(shell) => {
                     if !loaded.graph.contains_feature(&shell.base_feature_id)
+                        || !canonical_geometry_feature_exists(&loaded.log, &shell.base_feature_id)
                         || entries.len() != 1
                         || shell.validate(entries[0].0).is_err()
                         || idempotency_key != Some(shell.request_id.as_str())
@@ -2749,6 +2896,7 @@ impl Bundle {
                 }
                 CanonicalIntent::Draft(draft) => {
                     if !loaded.graph.contains_feature(&draft.base_feature_id)
+                        || !canonical_geometry_feature_exists(&loaded.log, &draft.base_feature_id)
                         || entries.len() != 1
                         || draft.validate(entries[0].0).is_err()
                         || idempotency_key != Some(draft.request_id.as_str())
@@ -3122,7 +3270,10 @@ fn read_schema_version_raw(path: &Path) -> Option<String> {
     value.get("schema_version")?.as_str().map(str::to_string)
 }
 
-fn validate_compatibility_identities(manifest: &Manifest) -> Result<(), BundleError> {
+fn validate_compatibility_identities(
+    manifest: &Manifest,
+    legacy_registry_manifest: bool,
+) -> Result<(), BundleError> {
     let scalar_identities = [
         (
             "command_registry_hash",
@@ -3151,7 +3302,10 @@ fn validate_compatibility_identities(manifest: &Manifest) -> Result<(), BundleEr
         ),
     ];
     for (identity, expected, found) in scalar_identities {
-        if identity == "command_registry_hash" && found == LEGACY_COMMAND_REGISTRY_HASH {
+        if identity == "command_registry_hash"
+            && found == LEGACY_COMMAND_REGISTRY_HASH
+            && legacy_registry_manifest
+        {
             continue;
         }
         if expected != found {
@@ -3193,6 +3347,7 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
     let mut history = HistoryState::default();
     let mut history_events = Vec::new();
     let mut feature_ids = Vec::new();
+    let mut canonical_geometry_features = std::collections::BTreeSet::new();
     for entry in log.entries() {
         if let Some(intent) = &entry.intent {
             intent
@@ -3260,7 +3415,9 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     }
                 }
                 CanonicalIntent::Fillet(fillet) => {
-                    if !graph.contains_feature(&fillet.base_feature_id) {
+                    if !graph.contains_feature(&fillet.base_feature_id)
+                        || !canonical_geometry_features.contains(&fillet.base_feature_id)
+                    {
                         return Err(BundleError::LogBrokenLink {
                             log_index: entry.log_index,
                             detail: format!(
@@ -3271,7 +3428,9 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     }
                 }
                 CanonicalIntent::Chamfer(chamfer) => {
-                    if !graph.contains_feature(&chamfer.base_feature_id) {
+                    if !graph.contains_feature(&chamfer.base_feature_id)
+                        || !canonical_geometry_features.contains(&chamfer.base_feature_id)
+                    {
                         return Err(BundleError::LogBrokenLink {
                             log_index: entry.log_index,
                             detail: format!(
@@ -3282,7 +3441,9 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     }
                 }
                 CanonicalIntent::Shell(shell) => {
-                    if !graph.contains_feature(&shell.base_feature_id) {
+                    if !graph.contains_feature(&shell.base_feature_id)
+                        || !canonical_geometry_features.contains(&shell.base_feature_id)
+                    {
                         return Err(BundleError::LogBrokenLink {
                             log_index: entry.log_index,
                             detail: format!(
@@ -3293,7 +3454,9 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     }
                 }
                 CanonicalIntent::Draft(draft) => {
-                    if !graph.contains_feature(&draft.base_feature_id) {
+                    if !graph.contains_feature(&draft.base_feature_id)
+                        || !canonical_geometry_features.contains(&draft.base_feature_id)
+                    {
                         return Err(BundleError::LogBrokenLink {
                             log_index: entry.log_index,
                             detail: format!(
@@ -3305,6 +3468,7 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                 }
                 CanonicalIntent::Loft(_) => {}
             }
+            canonical_geometry_features.insert(entry.feature_id.clone());
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
             let event: HistoryEvent =

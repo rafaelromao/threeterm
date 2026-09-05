@@ -70,9 +70,10 @@ pub struct V0Bundle {
 }
 
 pub mod bundle {
-    pub use super::{
-        BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-        CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalState,
+        pub use super::{
+            BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
+        CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
+        CanonicalHoleIntent, CanonicalIntent, CanonicalState, EdgeEvidence, EdgeProvenance,
         EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
         HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
         MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
@@ -103,6 +104,7 @@ pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
 pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
 pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
+pub const FILLET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.fillet/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -341,6 +343,109 @@ impl Manifest {
         manifest.seal_sha256 = hash(&sealed_manifest_bytes(&manifest));
         manifest
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeProvenance {
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_edge_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeEvidence {
+    pub midpoint: [f64; 3],
+    pub tangent: [f64; 3],
+    pub length: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalEdgeReference {
+    pub semantic_id: String,
+    pub provenance: EdgeProvenance,
+    pub role: String,
+    pub evidence: EdgeEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalFilletIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub selected_edge: CanonicalEdgeReference,
+    pub radius: f64,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalFilletIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != FILLET_INTENT_SCHEMA_VERSION
+            || self.command != "fillet"
+            || self.operation != "fillet"
+            || self.base_feature_id.is_empty()
+            || self.request_id.is_empty()
+            || !self.radius.is_finite()
+            || !(0.0 < self.radius && self.radius < 1e6)
+        {
+            return Err(BundleError::Invalid(
+                "canonical fillet intent identity or parameter is invalid".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || !valid_sha256(&self.source_revision)
+            || self.selected_edge.provenance.source_feature_id != self.base_feature_id
+            || self.selected_edge.provenance.source_revision_id != self.source_revision
+        {
+            return Err(BundleError::Invalid(
+                "canonical fillet semantic impact or dependency is invalid".to_string(),
+            ));
+        }
+        let evidence = &self.selected_edge.evidence;
+        let tangent_norm = evidence
+            .tangent
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        if self.selected_edge.semantic_id.is_empty()
+            || self.selected_edge.provenance.source_edge_id.is_empty()
+            || self.selected_edge.role.is_empty()
+            || !evidence.midpoint.iter().all(|value| value.is_finite())
+            || !evidence.tangent.iter().all(|value| value.is_finite())
+            || evidence.midpoint.iter().any(|value| value.abs() > 1e9)
+            || !evidence.length.is_finite()
+            || !(evidence.length > 0.0 && evidence.length < 1e9)
+            || !tangent_norm.is_finite()
+            || tangent_norm <= f64::EPSILON
+        {
+            return Err(BundleError::Invalid(
+                "canonical fillet selected edge evidence is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical fillet worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -625,6 +730,7 @@ pub enum CanonicalIntent {
     Extrude(CanonicalExtrudeIntent),
     Boolean(CanonicalBooleanIntent),
     Hole(CanonicalHoleIntent),
+    Fillet(CanonicalFilletIntent),
 }
 
 impl CanonicalIntent {
@@ -633,6 +739,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => intent.schema_version.as_str(),
             Self::Boolean(intent) => intent.schema_version.as_str(),
             Self::Hole(intent) => intent.schema_version.as_str(),
+            Self::Fillet(intent) => intent.schema_version.as_str(),
         }
     }
 
@@ -641,6 +748,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => intent.request_id.as_str(),
             Self::Boolean(intent) => intent.request_id.as_str(),
             Self::Hole(intent) => intent.request_id.as_str(),
+            Self::Fillet(intent) => intent.request_id.as_str(),
         }
     }
 
@@ -649,6 +757,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => intent.source_revision.as_str(),
             Self::Boolean(intent) => intent.source_revision.as_str(),
             Self::Hole(intent) => intent.source_revision.as_str(),
+            Self::Fillet(intent) => intent.source_revision.as_str(),
         }
     }
 
@@ -657,6 +766,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => &intent.worker_requirements,
             Self::Boolean(intent) => &intent.worker_requirements,
             Self::Hole(intent) => &intent.worker_requirements,
+            Self::Fillet(intent) => &intent.worker_requirements,
         }
     }
 
@@ -665,6 +775,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => intent.affected_semantic_ids.as_slice(),
             Self::Boolean(intent) => intent.affected_semantic_ids.as_slice(),
             Self::Hole(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Fillet(intent) => intent.affected_semantic_ids.as_slice(),
         }
     }
 
@@ -673,6 +784,7 @@ impl CanonicalIntent {
             Self::Extrude(intent) => intent.validate(feature_id),
             Self::Boolean(intent) => intent.validate(feature_id),
             Self::Hole(intent) => intent.validate(feature_id),
+            Self::Fillet(intent) => intent.validate(feature_id),
         }
     }
 }
@@ -2241,6 +2353,46 @@ impl Bundle {
                         ));
                     }
                 }
+                CanonicalIntent::Fillet(fillet) => {
+                    if fillet.schema_version != FILLET_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: fillet.schema_version.clone(),
+                        });
+                    }
+                    if !loaded.graph.contains_feature(&fillet.base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical fillet base feature is missing: {}",
+                            fillet.base_feature_id
+                        )));
+                    }
+                    if entries.len() != 1 || fillet.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical fillet intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(fillet.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical fillet intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if fillet.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_fillet_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&fillet.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if fillet.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical fillet intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
@@ -2725,6 +2877,17 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                         });
                     }
                 }
+                CanonicalIntent::Fillet(fillet) => {
+                    if !graph.contains_feature(&fillet.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical fillet base feature is missing: {}",
+                                fillet.base_feature_id
+                            ),
+                        });
+                    }
+                }
             }
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
@@ -3046,6 +3209,29 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                         expected: serde_json::to_string(&occt_worker_identity())
                             .expect("worker identity serializes"),
                         found: serde_json::to_string(&hole.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Fillet(fillet) => {
+                if fillet.schema_version != FILLET_INTENT_SCHEMA_VERSION {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: fillet.schema_version.clone(),
+                    });
+                }
+                if fillet.command != "fillet" || fillet.operation != "fillet" {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", fillet.command, fillet.operation),
+                    });
+                }
+                if fillet.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_fillet_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&fillet.worker_requirements)
                             .expect("worker identity serializes"),
                     });
                 }

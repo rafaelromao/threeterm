@@ -11,21 +11,21 @@ use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
-    CircularPatternRequest, DraftRequest, FilletRequest, HoleRequest, LinearPatternRequest,
-    LoftRequest, MirrorRequest, OcctWorker, Operation, RevolveRequest, ShellRequest,
-    new_request_id,
+    CircularPatternRequest, DraftRequest, FilletRequest, LinearPatternRequest, LoftRequest,
+    MirrorRequest, OcctWorker, Operation, RevolveRequest, ShellRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
+    BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
     CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
     CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
     EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
-    HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
-    find_by_name, iter,
+    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
@@ -3555,31 +3555,13 @@ fn execute_handler(
             stdout,
             stderr,
         ),
-        DispatchPlan::Hole {
-            bundle,
-            feature_id,
-            base_feature_id,
-            position,
-            direction,
-            diameter,
-            hole_kind,
-            thread_designation,
-            thread_pitch,
-            thread_depth,
-        } => emit_hole(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            position,
-            direction,
-            diameter,
-            &hole_kind,
-            thread_designation.as_deref(),
-            thread_pitch,
-            thread_depth,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Hole { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, HOLE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Revolve {
             bundle,
             feature_id,
@@ -3864,6 +3846,10 @@ pub fn dispatch_registered_command(
             | APPLY_COMMAND_ID
             | EXTRUDE_COMMAND_ID
             | BOOLEAN_PATTERN_COMMAND_ID
+            | BOOLEAN_FUSE_COMMAND_ID
+            | BOOLEAN_CUT_COMMAND_ID
+            | BOOLEAN_COMMON_COMMAND_ID
+            | HOLE_COMMAND_ID
             | REATTACH_EDGE_COMMAND_ID
     ) {
         return host
@@ -4867,10 +4853,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
                 ("hole_kind".to_string(), json!(hole_kind)),
             ]);
             if let Some(thread_designation) = thread_designation {
-                request.insert(
-                    "thread_designation".to_string(),
-                    json!(thread_designation),
-                );
+                request.insert("thread_designation".to_string(), json!(thread_designation));
             }
             if let Some(thread_pitch) = thread_pitch {
                 request.insert("thread_pitch".to_string(), json!(thread_pitch));
@@ -5584,111 +5567,6 @@ fn emit_chamfer(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_hole(
-    bundle: &str,
-    feature_id: &str,
-    base_feature_id: &str,
-    position: [f64; 3],
-    direction: [f64; 3],
-    diameter: f64,
-    hole_kind: &str,
-    thread_designation: Option<&str>,
-    thread_pitch: Option<f64>,
-    thread_depth: Option<f64>,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    if !matches!(hole_kind, "drilled" | "tapped") {
-        write_diagnostic(
-            stderr,
-            &Diagnostic::invalid_request(&format!(
-                "hole kind must be drilled or tapped, got {hole_kind:?}"
-            )),
-        );
-        return EXIT_PERSISTENCE_FAILURE;
-    }
-    if hole_kind == "drilled"
-        && (thread_designation.is_some() || thread_pitch.is_some() || thread_depth.is_some())
-    {
-        write_diagnostic(
-            stderr,
-            &Diagnostic::invalid_request("drilled hole must not carry thread metadata"),
-        );
-        return EXIT_PERSISTENCE_FAILURE;
-    }
-    if hole_kind == "tapped" {
-        let designation = thread_designation.unwrap_or_default();
-        if designation.is_empty() {
-            write_diagnostic(
-                stderr,
-                &Diagnostic::invalid_request("tapped hole requires a thread designation"),
-            );
-            return EXIT_PERSISTENCE_FAILURE;
-        }
-        if thread_pitch.is_none_or(|value| !value.is_finite() || value <= 0.0) {
-            write_diagnostic(
-                stderr,
-                &Diagnostic::invalid_request("tapped hole requires a positive finite thread pitch"),
-            );
-            return EXIT_PERSISTENCE_FAILURE;
-        }
-        if thread_depth.is_none_or(|value| !value.is_finite() || value <= 0.0) {
-            write_diagnostic(
-                stderr,
-                &Diagnostic::invalid_request("tapped hole requires a positive finite thread depth"),
-            );
-            return EXIT_PERSISTENCE_FAILURE;
-        }
-    }
-    let base_path = Path::new(bundle)
-        .join("brep")
-        .join(format!("{base_feature_id}.brep"));
-    if !base_path.is_file() {
-        let detail = format!(
-            "base feature {base_feature_id:?} has no committed BREP at {}",
-            base_path.display()
-        );
-        write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-        return EXIT_WORKER_FAILURE;
-    }
-    let worker = match threeterm_occt_worker::OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let detail = format!("occt worker locate failed: {error}");
-            write_diagnostic(stderr, &Diagnostic::worker_failure(&detail));
-            return EXIT_WORKER_FAILURE;
-        }
-    };
-    let staging_dir = Path::new(bundle).join("stage");
-    let output_filename = format!(
-        "{feature_id}-{}.brep",
-        threeterm_occt_worker::new_request_id()
-    );
-    let mut request = HoleRequest::new(
-        threeterm_occt_worker::new_request_id(),
-        &base_path,
-        position,
-        direction,
-        diameter,
-    )
-    .with_output_path(&staging_dir, &output_filename)
-    .with_feature_id(feature_id)
-    .with_hole_kind(hole_kind)
-    .with_base_feature_id(base_feature_id);
-    if hole_kind == "tapped" {
-        request = request.with_thread(
-            thread_designation.unwrap_or_default(),
-            thread_pitch.unwrap_or_default(),
-            thread_depth.unwrap_or_default(),
-        );
-    }
-    match Host::new().hole(bundle, request, &worker) {
-        Ok(view) => write_hole_view(&view, HOLE_RESPONSE_SCHEMA_VERSION, stdout, stderr),
-        Err(error) => emit_host_error(&error, stderr),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn emit_revolve(
     bundle: &str,
     feature_id: &str,
@@ -6245,33 +6123,6 @@ fn write_chamfer_view(
         &serde_json::json!({
             "status": view.result.status,
             "operation": Operation::Chamfer.as_str(),
-            "feature_id": view.result.feature_id,
-            "feature_graph_hash": view.snapshot.feature_graph_hash,
-            "revision_hash": view.snapshot.revision_hash,
-            "brep_path": view.result.brep_path,
-            "brep_sha256": view.result.brep_sha256,
-            "brep_bytes": view.result.brep_bytes,
-            "derived_result": derived_result_metadata(
-                Some(&view.source_snapshot),
-                Some(&view.artifact),
-            ),
-            "schema_version": schema_version,
-        }),
-        stderr,
-    )
-}
-
-fn write_hole_view(
-    view: &threeterm_host::HoleCommitView,
-    schema_version: &str,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    write_success(
-        stdout,
-        &serde_json::json!({
-            "status": view.result.status,
-            "operation": Operation::Hole.as_str(),
             "feature_id": view.result.feature_id,
             "feature_graph_hash": view.snapshot.feature_graph_hash,
             "revision_hash": view.snapshot.revision_hash,

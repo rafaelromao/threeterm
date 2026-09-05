@@ -10,7 +10,7 @@ use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    IDENTITY_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
 };
 
 fn root(label: &str) -> PathBuf {
@@ -1040,6 +1040,95 @@ fn cli_mcp_and_tui_commit_equivalent_boolean_common_solids() {
         assert_eq!(
             result["schema_version"],
             "threeterm.command.boolean-common.response/1"
+        );
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+fn hole_request(root: &std::path::Path, feature_id: &str) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": feature_id,
+        "base_feature_id": "hole-base",
+        "position": [1.5, 1.5, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 1.0,
+        "hole_kind": "drilled"
+    })
+}
+
+fn setup_hole_base(path: &std::path::Path, worker: &OcctWorker) {
+    Bundle::create(path).expect("bundle creates");
+    threeterm_host::Host::new()
+        .extrude(
+            path,
+            ExtrudeRequest::new(
+                format!("hole-seed-{}", path.to_string_lossy()),
+                vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+                3.0,
+            )
+            .with_feature_id("hole-base"),
+            worker,
+        )
+        .expect("hole base commits");
+}
+
+fn mcp_hole(root: &std::path::Path, feature_id: &str) -> Value {
+    let entry = threeterm_protocol::schema::find(HOLE_COMMAND_ID).expect("hole is registered");
+    assert_eq!(entry.schema_version, "threeterm.command.hole/1");
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.hole/1",
+            "arguments": hole_request(root, feature_id)
+        }),
+    });
+    response.result.expect("MCP hole executes")["structuredContent"].clone()
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_drilled_holes() {
+    let cli_root = root("hole-cli");
+    let mcp_root = root("hole-mcp");
+    let tui_root = root("hole-tui");
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_drilled_holes") else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        setup_hole_base(path, &worker);
+    }
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        HOLE_COMMAND_ID,
+        hole_request(&cli_root, "hole-1"),
+    )
+    .expect("CLI hole executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        HOLE_COMMAND_ID,
+        hole_request(&tui_root, "hole-1"),
+    )
+    .expect("TUI hole executes");
+    let mcp = mcp_hole(&mcp_root, "hole-1");
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "hole");
+        assert_eq!(result["feature_id"], "hole-1");
+        assert_eq!(
+            result["schema_version"],
+            "threeterm.command.hole.response/1"
         );
     }
     assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);

@@ -482,8 +482,16 @@ impl CanonicalHoleIntent {
                 "canonical hole intent identity is invalid".to_string(),
             ));
         }
-        if !self.deterministic_inputs.position.iter().all(|v| v.is_finite())
-            || !self.deterministic_inputs.direction.iter().all(|v| v.is_finite())
+        if !self
+            .deterministic_inputs
+            .position
+            .iter()
+            .all(|v| v.is_finite())
+            || !self
+                .deterministic_inputs
+                .direction
+                .iter()
+                .all(|v| v.is_finite())
         {
             return Err(BundleError::Invalid(
                 "canonical hole deterministic placement is invalid".to_string(),
@@ -2355,14 +2363,9 @@ impl Bundle {
                 } else if let Some((brep_feature_id, brep_bytes)) = brep
                     && brep_feature_id == *feature_id
                 {
-                    loaded.log.append_feature_with_brep(
-                        feature_id,
-                        kind,
-                        brep_bytes,
-                        None,
-                        None,
-                        intent,
-                    );
+                    loaded
+                        .log
+                        .append_feature_with_brep(feature_id, kind, brep_bytes, None, None, intent);
                 } else {
                     loaded.log.append_feature(feature_id, kind);
                 }
@@ -3202,6 +3205,7 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "loft"
             | "history-feature"
     ) || is_supported_brep_kind(kind)
+        || is_supported_hole_kind(kind)
         || is_supported_edge_reattachment_kind(kind)
         || is_supported_bracket_kind(kind)
         || matches!(kind, "plate-vertical" | "plate-horizontal")
@@ -3216,6 +3220,10 @@ fn is_supported_brep_kind(kind: &str) -> bool {
         && feature_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_supported_hole_kind(kind: &str) -> bool {
+    matches!(kind, "hole:drilled" | "hole:tapped")
 }
 
 fn is_supported_edge_reattachment_kind(kind: &str) -> bool {

@@ -2182,6 +2182,120 @@ impl Host {
                         "schema_version": find(command).expect("boolean is registered").response_schema_version,
                     }))
                 }
+                HOLE_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?;
+                    let feature_id = string_field("feature_id")?;
+                    let base_feature_id = string_field("base_feature_id")?;
+                    if let Some(expected_revision) = request
+                        .get("expected_revision")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        let current = self.load(bundle_path)?;
+                        if current.revision_hash != expected_revision {
+                            return Err(HostError::Validation {
+                                detail: format!(
+                                    "hole source revision {expected_revision:?} does not match current revision {:?}",
+                                    current.revision_hash
+                                ),
+                            });
+                        }
+                    }
+                    let position: [f64; 3] =
+                        serde_json::from_value(request.get("position").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing hole position".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid hole position: {error}"),
+                        })?;
+                    let direction: [f64; 3] =
+                        serde_json::from_value(request.get("direction").cloned().ok_or_else(
+                            || HostError::Validation {
+                                detail: "missing hole direction".to_string(),
+                            },
+                        )?)
+                        .map_err(|error| HostError::Validation {
+                            detail: format!("invalid hole direction: {error}"),
+                        })?;
+                    let diameter = request
+                        .get("diameter")
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "missing hole diameter".to_string(),
+                        })?;
+                    let hole_kind = parse_hole_kind(request.get("hole_kind"))?;
+                    let thread_designation = request
+                        .get("thread_designation")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let thread_pitch = request
+                        .get("thread_pitch")
+                        .and_then(serde_json::Value::as_f64);
+                    let thread_depth = request
+                        .get("thread_depth")
+                        .and_then(serde_json::Value::as_f64);
+                    let bundle_root = PathBuf::from(bundle_path);
+                    let base_path = bundle_root
+                        .join("brep")
+                        .join(format!("{base_feature_id}.brep"));
+                    let output_dir = bundle_root.join("stage");
+                    let mut hole_request = HoleRequest::new(
+                        threeterm_occt_worker::new_request_id(),
+                        &base_path,
+                        position,
+                        direction,
+                        diameter,
+                    )
+                    .with_hole_kind(hole_kind)
+                    .with_base_feature_id(base_feature_id)
+                    .with_output_path(output_dir, feature_id)
+                    .with_feature_id(feature_id);
+                    if let Some(designation) = thread_designation {
+                        hole_request = hole_request.with_thread(
+                            designation,
+                            thread_pitch.unwrap_or_default(),
+                            thread_depth.unwrap_or_default(),
+                        );
+                    }
+                    // Fail closed before touching the worker so invalid hole
+                    // geometry preserves the prior Revision Snapshot without
+                    // requiring a worker binary.
+                    hole_request
+                        .validate()
+                        .map_err(|detail| HostError::Validation {
+                            detail: format!("hole request is invalid: {detail}"),
+                        })?;
+                    let loaded = Bundle::at(bundle_path).open()?;
+                    if !loaded.graph.contains_feature(base_feature_id) {
+                        return Err(HostError::Validation {
+                            detail: format!("hole base feature is missing: {base_feature_id}"),
+                        });
+                    }
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let view = self.hole(bundle_path, hole_request, &worker)?;
+                    let snapshot = self.load(bundle_path)?;
+                    let brep_path = bundle_root.join("brep").join(format!("{feature_id}.brep"));
+                    let brep_bytes = std::fs::metadata(&brep_path).map(|m| m.len()).unwrap_or(0);
+                    let brep_sha256 = threeterm_protocol::artifact::sha256_hex(
+                        &std::fs::read(&brep_path).unwrap_or_default(),
+                    );
+                    Ok(serde_json::json!({
+                        "status": view.result.status,
+                        "operation": "hole",
+                        "feature_id": view.result.feature_id,
+                        "feature_graph_hash": snapshot.feature_graph_hash,
+                        "revision_hash": snapshot.revision_hash,
+                        "brep_path": brep_path.to_string_lossy(),
+                        "brep_sha256": brep_sha256,
+                        "brep_bytes": brep_bytes,
+                        "derived_result": boolean_derived_result_json(&view.artifact),
+                        "schema_version": find(command).expect("hole is registered").response_schema_version,
+                    }))
+                }
                 _ => Err(HostError::Validation {
                     detail: format!(
                         "command {} is not handled by the domain executor",
@@ -2207,6 +2321,141 @@ impl Host {
                 ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
             });
         }
+        if command == HOLE_COMMAND_ID {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+            let loaded = Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?;
+            if let Some(expected_revision) = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str)
+                && current.revision_hash != expected_revision
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "hole source revision {expected_revision:?} does not match current revision {:?}",
+                        current.revision_hash
+                    ),
+                }));
+            }
+            let feature_id = request
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+            let base_feature_id = request
+                .get("base_feature_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing base_feature_id".to_string())
+                })?;
+            if !loaded.graph.contains_feature(base_feature_id) {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!("hole base feature is missing: {base_feature_id}"),
+                }));
+            }
+            let position: [f64; 3] =
+                serde_json::from_value(request.get("position").cloned().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing position".to_string())
+                })?)
+                .map_err(|error| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: format!("invalid hole position: {error}"),
+                    })
+                })?;
+            let direction: [f64; 3] =
+                serde_json::from_value(request.get("direction").cloned().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing direction".to_string())
+                })?)
+                .map_err(|error| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: format!("invalid hole direction: {error}"),
+                    })
+                })?;
+            let diameter = request
+                .get("diameter")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing diameter".to_string()))?;
+            let hole_kind =
+                parse_hole_kind(request.get("hole_kind")).map_err(ExecutionError::Handler)?;
+            let mut hole_request = HoleRequest::new(
+                threeterm_occt_worker::new_request_id(),
+                loaded
+                    .canonical_root
+                    .join(BREP_SUBDIR)
+                    .join(format!("{base_feature_id}.brep")),
+                position,
+                direction,
+                diameter,
+            )
+            .with_hole_kind(hole_kind.clone())
+            .with_base_feature_id(base_feature_id)
+            .with_feature_id(feature_id);
+            if hole_kind == "tapped" {
+                hole_request = hole_request.with_thread(
+                    request
+                        .get("thread_designation")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                    request
+                        .get("thread_pitch")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or_default(),
+                    request
+                        .get("thread_depth")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or_default(),
+                );
+            }
+            hole_request
+                .validate()
+                .map_err(|detail| ExecutionError::Handler(HostError::Validation { detail }))?;
+            let worker = OcctWorker::locate().map_err(|error| {
+                ExecutionError::Handler(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            let derived = self
+                .stage_occt_result::<HoleResult>(
+                    Path::new(bundle_path),
+                    &hole_request,
+                    threeterm_occt_worker::Operation::Hole,
+                    &worker,
+                )
+                .map_err(ExecutionError::Handler)?;
+            if let Some(expected_revision) = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str)
+                && derived.source_snapshot.revision_hash != expected_revision
+            {
+                let current_revision = derived.source_snapshot.revision_hash.clone();
+                self.discard_staged_occt_result(&derived);
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "hole preview source revision changed from {expected_revision:?} to {current_revision:?}"
+                    ),
+                }));
+            }
+            let source_revision = derived.source_snapshot.revision_hash.clone();
+            let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+            let geometry_fingerprint = derived.result.brep_sha256.clone();
+            let preview_revision = sha256_hex(
+                format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                    .as_bytes(),
+            );
+            self.discard_staged_occt_result(&derived);
+            return Ok(DomainCommandPreview {
+                command,
+                source_revision,
+                preview_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+            });
+        }
+
         if command != EXTRUDE_COMMAND_ID {
             return Err(ExecutionError::Handler(HostError::Validation {
                 detail: format!(
@@ -3466,12 +3715,11 @@ impl Host {
                         });
                     }
                     let feature_id =
-                        hole.affected_semantic_ids
-                            .first()
-                            .cloned()
-                            .ok_or_else(|| HostError::Validation {
+                        hole.affected_semantic_ids.first().cloned().ok_or_else(|| {
+                            HostError::Validation {
                                 detail: "hole intent has no affected feature".to_string(),
-                            })?;
+                            }
+                        })?;
                     if !loaded.graph.contains_feature(&feature_id) {
                         return Err(HostError::Validation {
                             detail: format!(
@@ -3511,9 +3759,12 @@ impl Host {
                                 detail: "hole replay base BREP byte count is invalid".to_string(),
                             })?;
                         let expected_sha256 =
-                            entry.brep_sha256.as_deref().ok_or_else(|| HostError::BrepIo {
-                                detail: "hole replay base BREP digest is missing".to_string(),
-                            })?;
+                            entry
+                                .brep_sha256
+                                .as_deref()
+                                .ok_or_else(|| HostError::BrepIo {
+                                    detail: "hole replay base BREP digest is missing".to_string(),
+                                })?;
                         read_brep_verified(&path, Some((expected_bytes, expected_sha256)))
                             .map_err(|detail| HostError::BrepIo { detail })?;
                         path
@@ -6733,11 +6984,13 @@ impl Host {
             detail: format!("hole request is invalid: {detail}"),
         })?;
         let root = root.as_ref();
-        let base_feature_id = request.base_feature_id.clone().ok_or_else(|| {
-            HostError::Validation {
-                detail: "hole request is missing its semantic support".to_string(),
-            }
-        })?;
+        let base_feature_id =
+            request
+                .base_feature_id
+                .clone()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "hole request is missing its semantic support".to_string(),
+                })?;
         if base_feature_id.is_empty() {
             return Err(HostError::Validation {
                 detail: "hole request is missing its semantic support".to_string(),
@@ -7735,8 +7988,12 @@ fn canonical_hole_intent(
         .get("thread_designation")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let thread_pitch = request.get("thread_pitch").and_then(serde_json::Value::as_f64);
-    let thread_depth = request.get("thread_depth").and_then(serde_json::Value::as_f64);
+    let thread_pitch = request
+        .get("thread_pitch")
+        .and_then(serde_json::Value::as_f64);
+    let thread_depth = request
+        .get("thread_depth")
+        .and_then(serde_json::Value::as_f64);
     if base_feature_id.is_empty() {
         return Err(HostError::Validation {
             detail: "canonical hole base feature is missing".to_string(),

@@ -1243,12 +1243,7 @@ impl HoleRequest {
         self
     }
 
-    pub fn with_thread(
-        mut self,
-        designation: impl Into<String>,
-        pitch: f64,
-        depth: f64,
-    ) -> Self {
+    pub fn with_thread(mut self, designation: impl Into<String>, pitch: f64, depth: f64) -> Self {
         self.thread_designation = Some(designation.into());
         self.thread_pitch = Some(pitch);
         self.thread_depth = Some(depth);
@@ -1334,9 +1329,7 @@ impl HoleRequest {
         if self.hole_kind == "tapped" {
             let designation = self.thread_designation.as_deref().unwrap_or_default();
             if designation.is_empty() {
-                return Err(
-                    "tapped hole requires a thread designation".to_string(),
-                );
+                return Err("tapped hole requires a thread designation".to_string());
             }
             match self.thread_pitch {
                 Some(pitch) if pitch.is_finite() && pitch > 0.0 => {}

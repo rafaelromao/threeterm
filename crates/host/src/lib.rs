@@ -13,7 +13,7 @@ use threeterm_domain::{
     PostEditEdgeCandidate, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
-    history::{HistoryEvaluation, HistoryState, HistoryStatus, HistoryTimeline},
+    history::{HistoryEvaluation, HistorySnapshot, HistoryState, HistoryStatus, HistoryTimeline},
     resolve_edge_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
@@ -2853,15 +2853,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let updated = bundle.append_features_with_history(&[], &event)?;
-        let snapshot = SnapshotView::from(&updated);
-        let history = updated.history.clone();
-        self.current.replace(Some(updated));
-        Ok(HistoryCommitView {
-            snapshot,
-            history,
-            evaluation: Some(evaluation),
-        })
+        self.commit_history_event_with_geometry(root, "historical-edit", event, Some(evaluation))
     }
 
     /// Report whether canonical undo and redo would succeed right now.
@@ -2887,15 +2879,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let updated = bundle.append_features_with_history(&[], &event)?;
-        let snapshot = SnapshotView::from(&updated);
-        let history = updated.history.clone();
-        self.current.replace(Some(updated));
-        Ok(HistoryCommitView {
-            snapshot,
-            history,
-            evaluation: None,
-        })
+        self.commit_history_event_with_geometry(root, "undo", event, None)
     }
 
     /// Move the active Revision Snapshot forward over undone transactions.
@@ -2909,15 +2893,155 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
+        self.commit_history_event_with_geometry(root, "redo", event, None)
+    }
+
+    /// Commit one history event and recompute the committed geometry that
+    /// moved with it.
+    ///
+    /// Worker recomputation runs before the sealed publication: a worker
+    /// failure rejects the operation atomically with no history transaction
+    /// and no BREP change, so committed geometry can never silently lag the
+    /// active Revision Snapshot. Only families whose parameters changed and
+    /// are all current-valid recompute; clean families keep byte-identical
+    /// results and degraded families keep last-valid bytes under the stale
+    /// geometry gate.
+    fn commit_history_event_with_geometry(
+        &self,
+        root: &Path,
+        operation: &str,
+        event: threeterm_domain::history::HistoryEvent,
+        evaluation: Option<HistoryEvaluation>,
+    ) -> Result<HistoryCommitView, HostError> {
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let staged = self.stage_changed_bracket_families(
+            root,
+            loaded.history.active_snapshot(),
+            &event.active,
+            loaded.revision_hash_hex(),
+        )?;
         let updated = bundle.append_features_with_history(&[], &event)?;
+        let expected_revision = updated.revision_hash_hex().to_string();
+        let ordinal = updated.history.event_ordinal();
+        for staged in staged {
+            let kind = bracket_kind(&staged.request);
+            let payload = history_recompute_idempotency_payload(
+                operation,
+                ordinal,
+                &staged.family,
+                &staged.request,
+                &staged.source_brep_sha256,
+                &staged.source_revision,
+                &staged.result_sha256,
+            );
+            self.promote_brep_bytes(
+                root,
+                &staged.family,
+                &kind,
+                &expected_revision,
+                &staged.bytes,
+                Some(&staged.source_brep_sha256),
+                Some(&payload.key),
+                Some(&payload.payload),
+            )?;
+        }
+        let updated = bundle.open()?;
         let snapshot = SnapshotView::from(&updated);
         let history = updated.history.clone();
         self.current.replace(Some(updated));
         Ok(HistoryCommitView {
             snapshot,
             history,
-            evaluation: None,
+            evaluation,
         })
+    }
+
+    /// Run the production bracket worker for every committed family whose
+    /// parameters changed between two history snapshots.
+    fn stage_changed_bracket_families(
+        &self,
+        root: &Path,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+        source_revision: &str,
+    ) -> Result<Vec<StagedBracketFamily>, HostError> {
+        let mut families = BTreeSet::new();
+        families.extend(bracket_family_ids(before));
+        families.extend(bracket_family_ids(after));
+        let mut changed = Vec::new();
+        for family in families {
+            if committed_brep_path(root, &family).is_file()
+                && let (Some(before_params), Some(after_params)) = (
+                    bracket_family_params(before, &family),
+                    bracket_family_params(after, &family),
+                )
+                && before_params != after_params
+                && bracket_family_is_current(after, &family)
+                && let Ok(source_brep_sha256) = sha256_path(&committed_brep_path(root, &family))
+            {
+                changed.push((family, after_params, source_brep_sha256));
+            }
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let worker = OcctWorker::locate().map_err(HostError::from)?;
+        let mut staged = Vec::with_capacity(changed.len());
+        for (family, params, source_brep_sha256) in changed {
+            let stage = preview_stage_path(root, &format!("history-recompute-{family}"));
+            fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+                detail: format!("create history recompute stage failed: {error}"),
+            })?;
+            let request = BracketRequest::new(
+                threeterm_occt_worker::new_request_id(),
+                params.length,
+                params.width,
+                params.height,
+                params.thickness,
+            )
+            .with_feature_id(&family)
+            .with_output_path(&stage, "recompute.brep");
+            request
+                .validate()
+                .map_err(|detail| HostError::Validation { detail })?;
+            let result = match worker
+                .clone()
+                .with_revision_id(source_revision.to_string())
+                .bracket(&request)
+            {
+                Ok(result) if result.is_success() => result,
+                Ok(result) => {
+                    remove_preview_stage(&stage);
+                    return Err(HostError::BrepInvalid {
+                        request_id: Some(request.request_id.clone()),
+                        detail: format!("history recompute returned status {}", result.status),
+                    });
+                }
+                Err(error) => {
+                    remove_preview_stage(&stage);
+                    return Err(error.into());
+                }
+            };
+            let bytes = match read_verified_worker_brep(&result) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    remove_preview_stage(&stage);
+                    return Err(error);
+                }
+            };
+            let result_sha256 = result.brep_sha256.clone();
+            remove_preview_stage(&stage);
+            staged.push(StagedBracketFamily {
+                family,
+                request,
+                bytes,
+                result_sha256,
+                source_brep_sha256,
+                source_revision: source_revision.to_string(),
+            });
+        }
+        Ok(staged)
     }
 
     pub fn timeline(
@@ -2990,15 +3114,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let updated = bundle.append_features_with_history(&[], &event)?;
-        let snapshot = SnapshotView::from(&updated);
-        let history = updated.history.clone();
-        self.current.replace(Some(updated));
-        Ok(HistoryCommitView {
-            snapshot,
-            history,
-            evaluation: None,
-        })
+        self.commit_history_event_with_geometry(root, "restore-revision", event, None)
     }
 
     pub fn verify_history_replay(
@@ -7098,6 +7214,109 @@ fn is_geometric_feature_kind(kind: &str) -> bool {
     kind.starts_with("brep:") || kind.starts_with("bracket:")
 }
 
+/// L-bracket family parameters read from one history snapshot. The role
+/// mapping mirrors the canonical descriptor derivation: base carries length,
+/// bend carries width, finish carries height, and independent-base carries
+/// thickness.
+#[derive(Debug, Clone, PartialEq)]
+struct BracketFamilyParams {
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+}
+
+fn bracket_family_params(snapshot: &HistorySnapshot, family: &str) -> Option<BracketFamilyParams> {
+    let value = |suffix: &str| {
+        snapshot
+            .features
+            .get(&format!("{family}{suffix}"))
+            .map(|feature| feature.input_value)
+    };
+    Some(BracketFamilyParams {
+        length: value("-base")?,
+        width: value("-bend")?,
+        height: value("-finish")?,
+        thickness: value("-independent-base")?,
+    })
+}
+
+fn bracket_family_ids(snapshot: &HistorySnapshot) -> BTreeSet<String> {
+    snapshot
+        .features
+        .keys()
+        .filter_map(|id| l_bracket_feature_role(id).map(|(family, _)| family.to_string()))
+        .collect()
+}
+
+fn bracket_family_is_current(snapshot: &HistorySnapshot, family: &str) -> bool {
+    ["-base", "-bend", "-finish", "-independent-base"]
+        .into_iter()
+        .all(|suffix| {
+            snapshot
+                .features
+                .get(&format!("{family}{suffix}"))
+                .is_none_or(|feature| feature.status == HistoryStatus::CurrentValid)
+        })
+}
+
+struct StagedBracketFamily {
+    family: String,
+    request: BracketRequest,
+    bytes: Vec<u8>,
+    result_sha256: String,
+    source_brep_sha256: String,
+    source_revision: String,
+}
+
+struct HistoryRecomputeIdempotency {
+    key: String,
+    payload: String,
+}
+
+fn history_recompute_idempotency_payload(
+    operation: &str,
+    ordinal: u64,
+    family: &str,
+    request: &BracketRequest,
+    source_brep_sha256: &str,
+    source_revision: &str,
+    result_sha256: &str,
+) -> HistoryRecomputeIdempotency {
+    let semantic = serde_json::json!({
+        "bracket_id": family,
+        "height": format!("{:.17}", request.height),
+        "length": format!("{:.17}", request.length),
+        "thickness": format!("{:.17}", request.thickness),
+        "width": format!("{:.17}", request.width),
+    });
+    let semantic_bytes =
+        serde_json::to_vec(&semantic).expect("history recompute semantic serializes");
+    let semantic_fingerprint = format!("{:x}", Sha256::digest(semantic_bytes));
+    let input = serde_json::json!({
+        "bracket_id": family,
+        "height": format!("{:.17}", request.height),
+        "length": format!("{:.17}", request.length),
+        "result_sha256": result_sha256,
+        "source_brep_sha256": source_brep_sha256,
+        "source_revision": source_revision,
+        "thickness": format!("{:.17}", request.thickness),
+        "width": format!("{:.17}", request.width),
+    });
+    let input_bytes = serde_json::to_vec(&input).expect("history recompute input serializes");
+    let input_fingerprint = format!("{:x}", Sha256::digest(input_bytes));
+    HistoryRecomputeIdempotency {
+        key: format!("history-{operation}-{ordinal}-{family}"),
+        payload: serde_json::json!({
+            "input_fingerprint": input_fingerprint,
+            "result_sha256": result_sha256,
+            "semantic_fingerprint": semantic_fingerprint,
+            "source_revision": source_revision,
+        })
+        .to_string(),
+    }
+}
+
 fn parse_ascii_stl(path: &Path, feature_id: &str) -> Result<Vec<SceneTriangle>, HostError> {
     let metadata = fs::metadata(path).map_err(|error| HostError::BrepIo {
         detail: format!("read viewport tessellation metadata failed: {error}"),
@@ -8345,6 +8564,180 @@ mod tests {
                 .active_snapshot()
                 .revision_id,
             "history-revision-2"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn successful_historical_edit_without_a_worker_is_rejected_atomically() {
+        if threeterm_occt_worker::OcctWorker::locate().is_ok() {
+            eprintln!("successful_historical_edit_without_a_worker: OCCT worker present");
+            return;
+        }
+        let root = temp_root("edit-without-worker");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir creates");
+        let seed = staging.join("seed.brep");
+        std::fs::write(&seed, [0x62, 0x72, 0x65, 0x70]).expect("seed writes");
+        host.commit_brep_feature(&root, "l-bracket", &seed)
+            .expect("seed BREP commits");
+        let before_bytes =
+            std::fs::read(root.join("brep/l-bracket.brep")).expect("seeded BREP reads");
+        let before_ordinal = host
+            .history(&root)
+            .expect("history reloads")
+            .event_ordinal();
+
+        let error = host
+            .historical_edit(&root, "l-bracket-base", "length", 61.0)
+            .expect_err("committed geometry must follow history, never go stale silently");
+        assert!(
+            matches!(error, HostError::WorkerFailure { .. }),
+            "missing worker surfaces a worker failure, got {error:?}"
+        );
+        assert_eq!(
+            host.history(&root)
+                .expect("history reloads")
+                .event_ordinal(),
+            before_ordinal,
+            "rejected recompute commits no history transaction"
+        );
+        assert_eq!(
+            std::fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads"),
+            before_bytes,
+            "rejected recompute leaves committed bytes untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_historical_edit_preserves_committed_brep_under_the_stale_gate() {
+        let root = temp_root("failed-edit-brep");
+        let output = temp_root("failed-edit-brep-output");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir creates");
+        let seed = staging.join("seed.brep");
+        std::fs::write(&seed, [0x62, 0x72, 0x65, 0x70]).expect("seed writes");
+        host.commit_brep_feature(&root, "l-bracket", &seed)
+            .expect("seed BREP commits");
+        let before_bytes =
+            std::fs::read(root.join("brep/l-bracket.brep")).expect("seeded BREP reads");
+
+        host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+            .expect("failing historical edit is committed");
+        assert_eq!(
+            std::fs::read(root.join("brep/l-bracket.brep")).expect("BREP reads"),
+            before_bytes,
+            "last-valid bytes stay on disk as recovery state"
+        );
+        let error = host
+            .export(
+                &root,
+                "l-bracket",
+                &["stl".to_string()],
+                &output,
+                0.5,
+                false,
+                false,
+                &[],
+            )
+            .expect_err("broken family stays gated");
+        assert!(
+            matches!(error, HostError::StaleLastValidGeometry { .. }),
+            "failed edit keeps the stale gate, got {error:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(output);
+    }
+
+    #[test]
+    fn successful_historical_edit_recomputes_only_the_dirty_family() {
+        let Ok(worker) = threeterm_occt_worker::OcctWorker::locate() else {
+            eprintln!(
+                "successful_historical_edit_recomputes_only_the_dirty_family: OCCT worker unavailable"
+            );
+            return;
+        };
+        let root = temp_root("edit-dirty-family");
+        let host = Host::new();
+        for bracket_id in ["family-a", "family-b"] {
+            let request = threeterm_occt_worker::BracketRequest::new(
+                format!("test-{bracket_id}"),
+                60.0,
+                30.0,
+                40.0,
+                3.0,
+            )
+            .with_feature_id(bracket_id);
+            host.create_bracket(&root, request, &worker)
+                .expect("production bracket commits");
+        }
+        let before_a = std::fs::read(root.join("brep/family-a.brep")).expect("family A BREP reads");
+        let before_b = std::fs::read(root.join("brep/family-b.brep")).expect("family B BREP reads");
+
+        let edited = host
+            .historical_edit(&root, "family-a-base", "length", 61.0)
+            .expect("successful edit recomputes");
+        assert_eq!(
+            edited.history.active_snapshot().revision_id,
+            "history-revision-3"
+        );
+        assert!(edited.history.active_snapshot().features.values().all(
+            |feature| feature.status == threeterm_domain::history::HistoryStatus::CurrentValid
+        ));
+        assert_ne!(
+            std::fs::read(root.join("brep/family-a.brep")).expect("family A BREP re-reads"),
+            before_a,
+            "the dirty family recomputes real geometry"
+        );
+        assert_eq!(
+            std::fs::read(root.join("brep/family-b.brep")).expect("family B BREP re-reads"),
+            before_b,
+            "the clean family keeps byte-identical results"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undo_restores_the_recomputed_family_geometry() {
+        let Ok(worker) = threeterm_occt_worker::OcctWorker::locate() else {
+            eprintln!("undo_restores_the_recomputed_family_geometry: OCCT worker unavailable");
+            return;
+        };
+        let root = temp_root("undo-family-geometry");
+        let host = Host::new();
+        let request =
+            threeterm_occt_worker::BracketRequest::new("test-undo", 60.0, 30.0, 40.0, 3.0)
+                .with_feature_id("family-a");
+        host.create_bracket(&root, request, &worker)
+            .expect("production bracket commits");
+        let initial = std::fs::read(root.join("brep/family-a.brep")).expect("initial BREP reads");
+        host.historical_edit(&root, "family-a-base", "length", 61.0)
+            .expect("edit recomputes");
+        assert_ne!(
+            std::fs::read(root.join("brep/family-a.brep")).expect("edited BREP reads"),
+            initial
+        );
+
+        let undone = host.undo(&root).expect("undo recomputes back");
+        assert_eq!(
+            undone.history.active_snapshot().revision_id,
+            "history-revision-1"
+        );
+        assert_eq!(
+            std::fs::read(root.join("brep/family-a.brep")).expect("undone BREP reads"),
+            initial,
+            "undo restores the prior committed geometry bytes"
         );
 
         let _ = std::fs::remove_dir_all(root);

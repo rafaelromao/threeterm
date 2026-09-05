@@ -49,7 +49,7 @@ fn environment_palette_allows_the_real_machine_command_path() {
     );
     assert!(output.stderr.is_empty());
     let commands: Value = serde_json::from_slice(&output.stdout).expect("list is JSON");
-    assert_eq!(commands.as_array().expect("list is an array").len(), 40);
+    assert_eq!(commands.as_array().expect("list is an array").len(), 42);
 }
 
 #[test]

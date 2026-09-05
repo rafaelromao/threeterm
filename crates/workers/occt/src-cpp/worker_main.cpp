@@ -1056,7 +1056,7 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
             << candidate.normal.Z() << "],\"x_axis\":[" << candidate.x_axis.X() << ','
             << candidate.x_axis.Y() << ',' << candidate.x_axis.Z() << "],\"y_axis\":["
             << candidate.y_axis.X() << ',' << candidate.y_axis.Y() << ',' << candidate.y_axis.Z()
-            << "],\"adjacent_feature_ids\":[]}";
+            << "],\"adjacent_feature_ids\":[\"" << json_escape(feature_id) << "\"]}";
     }
     out << "]}";
     g_result_json = out.str();

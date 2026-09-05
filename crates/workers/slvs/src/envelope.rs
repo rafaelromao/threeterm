@@ -107,6 +107,7 @@ pub struct SketchSolveResponse {
     pub request_id: String,
     pub operation: String,
     pub feature_id: String,
+    pub source_revision: String,
     pub status: String,
     pub dof: i32,
     pub entity_ids: Vec<String>,
@@ -249,6 +250,7 @@ impl SketchSolveResponse {
             || self.request_id != request.request_id
             || self.operation != OPERATION
             || self.feature_id != request.feature_id
+            || self.source_revision != request.source_revision
         {
             return Err("worker response identity does not match the request".to_string());
         }
@@ -275,6 +277,9 @@ impl SketchSolveResponse {
             return Err(
                 "worker response support and placement must be provided together".to_string(),
             );
+        }
+        if self.support != request.support || self.placement != request.placement {
+            return Err("worker response attachment does not match the request".to_string());
         }
         if let (Some(support), Some(placement)) = (&self.support, &self.placement)
             && (support.evidence.origin != placement.origin

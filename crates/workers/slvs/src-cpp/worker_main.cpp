@@ -189,6 +189,42 @@ std::string string_field(const Json& value, const char* name) {
     return found != nullptr && found->kind == Json::Kind::String ? found->string : std::string{};
 }
 
+std::string escape(const std::string& value);
+
+std::string vec3_field(const Json& value, const char* name) {
+    const Json* found = field(value, name);
+    if (found == nullptr || found->kind != Json::Kind::Array || found->array.size() != 3) return "[]";
+    std::ostringstream output;
+    output << '[' << found->array[0].number << ',' << found->array[1].number << ','
+           << found->array[2].number << ']';
+    return output.str();
+}
+
+std::string attachment_field(const Json& args, const char* name) {
+    const Json* found = field(args, name);
+    if (found == nullptr || found->kind != Json::Kind::Object) return "null";
+    std::ostringstream output;
+    output << "{\"semantic_id\":\"" << escape(string_field(*found, "semantic_id"))
+           << "\",\"role\":\"" << escape(string_field(*found, "role")) << "\",\"provenance\":{";
+    const Json* provenance = field(*found, "provenance");
+    output << "\"source_feature_id\":\""
+           << escape(provenance == nullptr ? "" : string_field(*provenance, "source_feature_id"))
+           << "\",\"source_revision_id\":\""
+           << escape(provenance == nullptr ? "" : string_field(*provenance, "source_revision_id"))
+           << "\",\"source_face_id\":\""
+           << escape(provenance == nullptr ? "" : string_field(*provenance, "source_face_id"))
+           << "},\"evidence\":{";
+    const Json* evidence = field(*found, "evidence");
+    output << "\"topology_kind\":\""
+           << escape(evidence == nullptr ? "" : string_field(*evidence, "topology_kind"))
+           << "\",\"origin\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "origin"))
+           << ",\"normal\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "normal"))
+           << ",\"x_axis\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "x_axis"))
+           << ",\"y_axis\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "y_axis"))
+           << ",\"adjacent_feature_ids\":[]}}";
+    return output.str();
+}
+
 double number_field(const Json& value, const char* name, double fallback = 0.0) {
     const Json* found = field(value, name);
     return found != nullptr && found->kind == Json::Kind::Number ? found->number : fallback;
@@ -416,6 +452,7 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
     std::ostringstream output;
     output << "{\"schema_version\":\"" << kWorkerSchema << "\",\"request_id\":\"" << escape(request_id)
            << "\",\"operation\":\"" << kOperation << "\",\"feature_id\":\"" << escape(string_field(args, "feature_id"))
+           << "\",\"source_revision\":\"" << escape(string_field(args, "source_revision"))
            << "\",\"status\":\"" << status << "\",\"dof\":" << system.dof << ",\"entity_ids\":[";
     for (std::size_t index = 0; index < entities_json->array.size(); ++index) {
         if (index != 0) output << ',';
@@ -436,6 +473,15 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
         output << "]}";
     }
     output << "]";
+    if (field(args, "support") != nullptr && field(args, "placement") != nullptr) {
+        output << ",\"support\":" << attachment_field(args, "support")
+               << ",\"placement\":{";
+        const Json* placement = field(args, "placement");
+        output << "\"origin\":" << vec3_field(*placement, "origin")
+               << ",\"x_axis\":" << vec3_field(*placement, "x_axis")
+               << ",\"y_axis\":" << vec3_field(*placement, "y_axis")
+               << ",\"normal\":" << vec3_field(*placement, "normal") << '}';
+    }
     if (status == "solved") {
         output << ",\"solved_coordinates\":[";
         for (std::size_t index = 0; index < points.size(); ++index) {

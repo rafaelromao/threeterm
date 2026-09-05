@@ -24,8 +24,9 @@ use threeterm_occt_worker::{
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
     ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
     HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
-    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
-    ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
+    MirrorResult, OcctDiagnostic, OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest,
+    RevolveResult, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
+    WorkerError,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
@@ -1485,6 +1486,72 @@ fn resolve_sketch_support(
     ))
 }
 
+fn production_planar_face_candidates(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+    let Some(reference) = &request.support else {
+        return Ok(Vec::new());
+    };
+    if !loaded
+        .graph
+        .contains_feature(&reference.provenance.source_feature_id)
+    {
+        return Ok(Vec::new());
+    }
+    let Some(source_revision) =
+        loaded.feature_brep_source_revision(&reference.provenance.source_feature_id)
+    else {
+        return Ok(Vec::new());
+    };
+    if source_revision != reference.provenance.source_revision_id {
+        return Ok(Vec::new());
+    }
+    let brep = bundle_root(&loaded.canonical_root)
+        .join(BREP_SUBDIR)
+        .join(format!("{}.brep", reference.provenance.source_feature_id));
+    if !brep.is_file() {
+        return Ok(Vec::new());
+    }
+    let worker = OcctWorker::locate().map_err(HostError::from)?;
+    let evidence = worker
+        .with_revision_id(loaded.revision_hash_hex())
+        .planar_face_evidence(&PlanarFaceEvidenceRequest::new(
+            format!("face-evidence-{}", request.feature_id),
+            brep,
+            reference.provenance.source_feature_id.clone(),
+            source_revision,
+        ))
+        .map_err(HostError::from)?;
+    if !evidence.is_success()
+        || evidence.feature_id != reference.provenance.source_feature_id
+        || evidence.source_revision_id != reference.provenance.source_revision_id
+    {
+        return Ok(Vec::new());
+    }
+    Ok(evidence
+        .candidates
+        .into_iter()
+        .map(|candidate| PlanarFaceCandidate {
+            semantic_id: candidate.semantic_id,
+            provenance: threeterm_domain::PlanarFaceProvenance {
+                source_feature_id: candidate.source_feature_id,
+                source_revision_id: candidate.source_revision_id,
+                source_face_id: candidate.source_face_id,
+            },
+            role: candidate.role,
+            evidence: threeterm_domain::PlanarFaceEvidence {
+                topology_kind: candidate.topology_kind,
+                origin: candidate.origin,
+                normal: candidate.normal,
+                x_axis: candidate.x_axis,
+                y_axis: candidate.y_axis,
+                adjacent_feature_ids: candidate.adjacent_feature_ids,
+            },
+        })
+        .collect())
+}
+
 fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
     match outcome {
         PlanarFaceReattachmentOutcome::Resolved { .. } => "resolved",
@@ -1536,6 +1603,7 @@ fn sketch_support_failure_response(
         request_id: request.request_id.clone(),
         operation: "sketch_solve".to_string(),
         feature_id: request.feature_id.clone(),
+        source_revision: request.source_revision.clone(),
         status: "invalid_request".to_string(),
         dof: 0,
         entity_ids: request
@@ -1824,7 +1892,10 @@ impl Host {
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
     ) -> Result<SketchSolveResponse, HostError> {
-        self.preview_sketch_solve_with_planar_face_candidates(root, request, &[])
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let candidates = production_planar_face_candidates(&loaded, request)?;
+        self.preview_sketch_solve_with_planar_face_candidates(root, request, &candidates)
     }
 
     pub fn preview_sketch_solve_with_planar_face_candidates(
@@ -1860,14 +1931,14 @@ impl Host {
         ) {
             return Ok(sketch_support_failure_response(&request, &support_outcome));
         }
-        let mut result = SlvsWorker::locate()?
+        let result = SlvsWorker::locate()?
             .with_revision_id(source_revision)
             .solve(&request)
             .map_err(HostError::from)?;
-        result.support = request.support;
-        result.placement = request.placement;
-        result.reattachment_outcome = Some("resolved".to_string());
-        Ok(result)
+        Ok(SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        })
     }
 
     pub fn commit_sketch_solve(
@@ -1897,7 +1968,37 @@ impl Host {
         feature_id: &str,
         worker: &SlvsWorker,
     ) -> Result<SketchSolveResponse, HostError> {
-        self.reload_sketch_with_worker_and_planar_face_candidates(root, feature_id, worker, &[])
+        let root = root.as_ref();
+        let initial = Bundle::at(root).open()?;
+        let source_feature_id = initial
+            .graph
+            .sketch(feature_id)
+            .and_then(|payload| payload.support.as_ref())
+            .map(|support| support.provenance.source_feature_id.clone());
+        if let Some(source_feature_id) = source_feature_id {
+            let source_brep = bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{source_feature_id}.brep"));
+            if !source_brep.is_file() {
+                let occt = OcctWorker::locate().map_err(HostError::from)?;
+                self.reload_and_recompute_geometry(root, &occt)?;
+            }
+        }
+        let loaded = Bundle::at(root).open()?;
+        let payload = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
+        let candidates = production_planar_face_candidates(&loaded, &request)?;
+        self.reload_sketch_with_worker_and_planar_face_candidates(
+            root,
+            feature_id,
+            worker,
+            &candidates,
+        )
     }
 
     pub fn reload_sketch_with_worker_and_planar_face_candidates(
@@ -1919,15 +2020,15 @@ impl Host {
         if !matches!(outcome, PlanarFaceReattachmentOutcome::Resolved { .. }) {
             return Ok(sketch_support_failure_response(&request, &outcome));
         }
-        let mut result = worker
+        let result = worker
             .clone()
             .with_revision_id(loaded.revision_hash_hex())
             .solve(&request)
             .map_err(HostError::from)?;
-        result.support = request.support;
-        result.placement = request.placement;
-        result.reattachment_outcome = Some("resolved".to_string());
-        Ok(result)
+        Ok(SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        })
     }
 
     /// Build a presentation scene from a freshly recomputed sketch result.
@@ -1977,7 +2078,15 @@ impl Host {
         request: &SketchSolveRequest,
         worker: &SlvsWorker,
     ) -> Result<SketchSolveCommitView, HostError> {
-        self.commit_sketch_solve_with_worker_and_planar_face_candidates(root, request, worker, &[])
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let candidates = production_planar_face_candidates(&loaded, request)?;
+        self.commit_sketch_solve_with_worker_and_planar_face_candidates(
+            root,
+            request,
+            worker,
+            &candidates,
+        )
     }
 
     pub fn commit_sketch_solve_with_worker_and_planar_face_candidates(
@@ -2022,14 +2131,15 @@ impl Host {
                 .expect("sketch support response serializes"),
             });
         }
-        let mut result = worker
+        let result = worker
             .clone()
             .with_revision_id(source_revision.clone())
             .solve(&request)
             .map_err(HostError::from)?;
-        result.support = request.support.clone();
-        result.placement = request.placement;
-        result.reattachment_outcome = Some("resolved".to_string());
+        let result = SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        };
         if !result.is_success() {
             return Err(HostError::Validation {
                 detail: serde_json::to_string(&result).expect("sketch result serializes"),
@@ -4003,11 +4113,29 @@ impl Host {
                         .is_file()
                 })
             });
-        if !replay_needed {
-            return Ok(view);
+        let snapshot = if replay_needed {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            self.reload_and_recompute_geometry(root, &worker)?.snapshot
+        } else {
+            view
+        };
+        let loaded = Bundle::at(root).open()?;
+        for feature in loaded.graph.features() {
+            if loaded
+                .graph
+                .sketch(feature.id.as_str())
+                .is_some_and(|sketch| sketch.support.is_some())
+            {
+                let result = self.reload_sketch(root, feature.id.as_str())?;
+                if !result.is_success() {
+                    return Err(HostError::Validation {
+                        detail: serde_json::to_string(&result)
+                            .expect("sketch reload response serializes"),
+                    });
+                }
+            }
         }
-        let worker = OcctWorker::locate().map_err(HostError::from)?;
-        Ok(self.reload_and_recompute_geometry(root, &worker)?.snapshot)
+        Ok(snapshot)
     }
 
     /// Reload canonical extrude intents and rebuild their disposable BREP

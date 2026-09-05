@@ -51,8 +51,9 @@ pub use envelope::{
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
     ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult,
     HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult,
-    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
-    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
+    MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate, PlanarFaceEvidenceRequest,
+    PlanarFaceEvidenceResult, RevolveRequest, RevolveResult, SCHEMA_VERSION, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -904,6 +905,17 @@ impl OcctWorker {
         .into_export()
     }
 
+    pub fn planar_face_evidence(
+        &self,
+        request: &PlanarFaceEvidenceRequest,
+    ) -> Result<PlanarFaceEvidenceResult, WorkerError> {
+        let bytes = bounded_serialize(request, "planar_face_evidence", &request.request_id)?;
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
+        self.invoke(&bytes, None)?.into_planar_face_evidence()
+    }
+
     fn invoke(
         &self,
         envelope: &[u8],
@@ -1743,6 +1755,15 @@ impl RawResult {
     }
     fn into_export(self) -> Result<ExportResult, WorkerError> {
         self.bounded()
+    }
+
+    fn into_planar_face_evidence(self) -> Result<PlanarFaceEvidenceResult, WorkerError> {
+        serde_json::from_value(self.value).map_err(|error| {
+            malformed_for_request(
+                &self.request_id,
+                format!("planar face evidence response could not be parsed: {error}"),
+            )
+        })
     }
 }
 

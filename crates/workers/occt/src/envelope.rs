@@ -57,6 +57,7 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    PlanarFaceEvidence,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +98,85 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::PlanarFaceEvidence => "planar_face_evidence",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub feature_id: String,
+    pub source_revision_id: String,
+}
+
+impl PlanarFaceEvidenceRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        feature_id: impl Into<String>,
+        source_revision_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::PlanarFaceEvidence,
+            base_path: base_path.into(),
+            feature_id: feature_id.into(),
+            source_revision_id: source_revision_id.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version)
+            || !is_request_id(&self.request_id)
+            || !is_feature_id(&self.feature_id)
+            || self.operation != Operation::PlanarFaceEvidence
+            || self.base_path.as_os_str().is_empty()
+            || self.source_revision_id.is_empty()
+        {
+            return Err("planar face evidence request has invalid identity or path".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceCandidate {
+    pub semantic_id: String,
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_face_id: String,
+    pub role: String,
+    pub topology_kind: String,
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    #[serde(default)]
+    pub adjacent_feature_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+    pub source_revision_id: String,
+    pub candidates: Vec<PlanarFaceEvidenceCandidate>,
+}
+
+impl PlanarFaceEvidenceResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
     }
 }
 

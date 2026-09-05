@@ -150,6 +150,15 @@ impl PlanarFaceEvidence {
         if self.topology_kind != "planar_face" {
             return Err("face evidence topology kind must be planar_face".to_string());
         }
+        let mut adjacent_ids = std::collections::BTreeSet::new();
+        if self.adjacent_feature_ids.len() > 32
+            || self
+                .adjacent_feature_ids
+                .iter()
+                .any(|id| !valid_stable_id(id) || !adjacent_ids.insert(id.as_str()))
+        {
+            return Err("face evidence adjacent feature IDs are invalid or unbounded".to_string());
+        }
         validate_frame(
             self.origin,
             self.x_axis,
@@ -158,6 +167,34 @@ impl PlanarFaceEvidence {
             "face evidence",
         )
     }
+}
+
+fn valid_stable_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/')
+        })
+}
+
+fn validate_face_identity(
+    semantic_id: &str,
+    role: &str,
+    provenance: &PlanarFaceProvenance,
+    require_semantic_face_match: bool,
+) -> Result<(), String> {
+    if !valid_stable_id(semantic_id)
+        || !valid_stable_id(role)
+        || !valid_stable_id(&provenance.source_feature_id)
+        || !valid_stable_id(&provenance.source_revision_id)
+        || !valid_stable_id(&provenance.source_face_id)
+    {
+        return Err("planar face identity contains an invalid stable identifier".to_string());
+    }
+    if require_semantic_face_match && provenance.source_face_id != semantic_id {
+        return Err("planar face source_face_id must equal semantic_id".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +261,20 @@ impl SketchPlacement {
     }
 }
 
+impl PlanarFaceReference {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_face_identity(&self.semantic_id, &self.role, &self.provenance, true)?;
+        self.evidence.validate()
+    }
+}
+
+impl PlanarFaceCandidate {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_face_identity(&self.semantic_id, &self.role, &self.provenance, false)?;
+        self.evidence.validate()
+    }
+}
+
 impl Eq for SketchPlacement {}
 
 fn validate_frame(
@@ -276,27 +327,16 @@ pub fn resolve_planar_face_reference(
     reference: &PlanarFaceReference,
     candidates: impl IntoIterator<Item = PlanarFaceCandidate>,
 ) -> PlanarFaceReattachmentOutcome {
-    if reference.semantic_id.is_empty()
-        || reference.role.is_empty()
-        || reference.provenance.source_feature_id.is_empty()
-        || reference.provenance.source_revision_id.is_empty()
-        || reference.provenance.source_face_id.is_empty()
-        || reference.provenance.source_face_id != reference.semantic_id
-        || reference.evidence.validate().is_err()
-    {
+    if reference.validate().is_err() {
         return PlanarFaceReattachmentOutcome::Incompatible {
             candidate_ids: Vec::new(),
         };
     }
     let candidates: Vec<_> = candidates.into_iter().collect();
-    if candidates.iter().any(|candidate| {
-        candidate.semantic_id.is_empty()
-            || candidate.role.is_empty()
-            || candidate.provenance.source_feature_id.is_empty()
-            || candidate.provenance.source_revision_id.is_empty()
-            || candidate.provenance.source_face_id.is_empty()
-            || candidate.evidence.validate().is_err()
-    }) {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.validate().is_err())
+    {
         return PlanarFaceReattachmentOutcome::Incompatible {
             candidate_ids: candidate_ids(&candidates),
         };
@@ -406,13 +446,7 @@ impl SketchPayload {
             return Err("unattached sketches must not carry a reattachment outcome".to_string());
         }
         if let Some(support) = &self.support {
-            if support.evidence.validate().is_err()
-                || support.semantic_id.is_empty()
-                || support.role.is_empty()
-                || support.provenance.source_feature_id.is_empty()
-                || support.provenance.source_revision_id.is_empty()
-                || support.provenance.source_face_id != support.semantic_id
-            {
+            if support.validate().is_err() {
                 return Err("sketch support reference is invalid".to_string());
             }
             self.placement

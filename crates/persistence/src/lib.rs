@@ -924,6 +924,26 @@ impl LoadedBundle {
         &self.manifest.revision_hash
     }
 
+    /// Return the revision that produced the current authenticated BREP for a
+    /// feature. The value is derived from the canonical log prefix, never from
+    /// a disposable file or caller-supplied topology evidence.
+    pub fn feature_brep_source_revision(&self, feature_id: &str) -> Option<String> {
+        let index = self
+            .log
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.feature_id == feature_id && entry.brep_path.is_some())
+            .map(|(index, _)| index)
+            .next_back()?;
+        let entry = &self.log.entries()[index];
+        let prefix = TransactionLog {
+            entries: self.log.entries()[..=index].to_vec(),
+        };
+        let state = replay_canonical_state(&prefix).ok()?;
+        Some(state.graph.revision_hash_hex(&entry.terminal_digest))
+    }
+
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
         project_feature_timeline(&self.history_events, feature_id)
             .map_err(|error| BundleError::Invalid(error.to_string()))

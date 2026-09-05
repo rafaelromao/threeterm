@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, Write};
@@ -11,9 +13,8 @@ use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
-    CircularPatternRequest, DraftRequest, FilletRequest, HoleRequest, LinearPatternRequest,
-    LoftRequest, MirrorRequest, OcctWorker, Operation, RevolveRequest, ShellRequest,
-    new_request_id,
+    CircularPatternRequest, FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest,
+    OcctWorker, Operation, RevolveRequest, new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
@@ -3709,166 +3710,6 @@ fn execute_handler(
         DispatchPlan::Loft { .. } => {
             emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
         }
-        DispatchPlan::Revolve {
-            bundle,
-            feature_id,
-            axis_point,
-            axis_direction,
-            angle,
-            ..
-        } => emit_revolve(
-            &bundle,
-            &feature_id,
-            profile_from_request(request),
-            axis_point,
-            axis_direction,
-            angle,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Mirror {
-            bundle,
-            feature_id,
-            base_feature_id,
-            plane_point,
-            plane_normal,
-            ..
-        } => emit_mirror(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            plane_point,
-            plane_normal,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::LinearPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            direction,
-            count,
-            spacing,
-            ..
-        } => emit_linear_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            direction,
-            count,
-            spacing,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::CircularPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            ..
-        } => emit_circular_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Shell { .. } => {
-            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
-        }
-        DispatchPlan::Draft { .. } => {
-            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
-        }
-        DispatchPlan::Loft { .. } => {
-            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
-        }
-        DispatchPlan::Revolve {
-            bundle,
-            feature_id,
-            axis_point,
-            axis_direction,
-            angle,
-            ..
-        } => emit_revolve(
-            &bundle,
-            &feature_id,
-            profile_from_request(request),
-            axis_point,
-            axis_direction,
-            angle,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Mirror {
-            bundle,
-            feature_id,
-            base_feature_id,
-            plane_point,
-            plane_normal,
-            ..
-        } => emit_mirror(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            plane_point,
-            plane_normal,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::LinearPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            direction,
-            count,
-            spacing,
-            ..
-        } => emit_linear_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            direction,
-            count,
-            spacing,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::CircularPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            ..
-        } => emit_circular_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Shell { .. } => {
-            emit_registered_domain_handler(SHELL_COMMAND_ID, request, stdout, stderr)
-        }
-        DispatchPlan::Draft { .. } => {
-            emit_registered_domain_handler(DRAFT_COMMAND_ID, request, stdout, stderr)
-        }
-        DispatchPlan::Loft { .. } => {
-            emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
-        }
         DispatchPlan::Export {
             bundle,
             feature_id,
@@ -5526,11 +5367,13 @@ fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: 
     })
 }
 
+#[allow(dead_code)]
 fn profiles_from_request(request: &Value) -> Vec<Vec<[f64; 3]>> {
     serde_json::from_value(request["profiles"].clone())
         .expect("registered loft schema guarantees profile triples")
 }
 
+#[allow(dead_code)]
 fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
     serde_json::from_value(request["profile"].clone())
         .expect("registered profile schema guarantees coordinate pairs")
@@ -5713,6 +5556,7 @@ fn emit_boolean_common(
     }
 }
 
+#[allow(dead_code)]
 fn emit_fillet(
     bundle: &str,
     feature_id: &str,
@@ -5754,6 +5598,7 @@ fn emit_fillet(
     }
 }
 
+#[allow(dead_code)]
 fn emit_chamfer(
     bundle: &str,
     feature_id: &str,
@@ -6577,6 +6422,7 @@ fn write_boolean_common_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_fillet_view(
     view: &threeterm_host::FilletCommitView,
     schema_version: &str,
@@ -6604,6 +6450,7 @@ fn write_fillet_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_chamfer_view(
     view: &threeterm_host::ChamferCommitView,
     schema_version: &str,
@@ -6964,6 +6811,7 @@ fn write_circular_pattern_view(
 
 */
 #[cfg(any())]
+#[allow(dead_code)]
 fn write_shell_view(
     view: &threeterm_host::ShellCommitView,
     schema_version: &str,
@@ -6992,6 +6840,7 @@ fn write_shell_view(
 }
 
 #[cfg(any())]
+#[allow(dead_code)]
 fn write_draft_view(
     view: &threeterm_host::DraftCommitView,
     schema_version: &str,
@@ -7020,6 +6869,7 @@ fn write_draft_view(
 }
 
 #[cfg(any())]
+#[allow(dead_code)]
 fn write_loft_view(
     view: &threeterm_host::LoftCommitView,
     schema_version: &str,

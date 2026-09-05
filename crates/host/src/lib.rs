@@ -1454,6 +1454,7 @@ fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value 
     })
 }
 
+#[allow(dead_code)]
 fn validate_replayed_edge_reference(
     reference: &CanonicalEdgeReference,
     candidates: &[EdgeCandidateEvidence],
@@ -10699,6 +10700,7 @@ impl Host {
     }
 }
 
+#[allow(dead_code)]
 enum FinishingReplayIntent {
     Fillet(CanonicalFilletIntent),
     Chamfer(CanonicalChamferIntent),
@@ -10707,6 +10709,7 @@ enum FinishingReplayIntent {
     Loft(CanonicalLoftIntent),
 }
 
+#[allow(dead_code)]
 struct ReplayedGeometry {
     feature_id: String,
     path: PathBuf,
@@ -10714,11 +10717,13 @@ struct ReplayedGeometry {
     bytes: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct ReplayStage {
     stage: Option<Stage>,
     root: PathBuf,
 }
 
+#[allow(dead_code)]
 impl ReplayStage {
     fn create(root: &Path) -> Result<Self, HostError> {
         let stage =
@@ -10752,6 +10757,7 @@ impl Drop for ReplayStage {
     }
 }
 
+#[allow(dead_code)]
 fn stage_replay_artifact(
     stage_root: &Path,
     feature_id: &str,
@@ -10769,6 +10775,7 @@ fn stage_replay_artifact(
     Ok(path)
 }
 
+#[allow(dead_code)]
 fn rollback_replay_artifacts(
     root: &Path,
     expected_revision: &str,
@@ -10804,6 +10811,7 @@ fn rollback_replay_artifacts(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn replay_finishing_geometry(
     root: &Path,
     replay_stage_root: &Path,
@@ -12175,6 +12183,7 @@ fn canonical_hole_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, HostError> {
     request
         .get("base_feature_id")
@@ -12186,6 +12195,7 @@ fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, Host
         })
 }
 
+#[allow(dead_code)]
 fn canonical_edge_reference(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -12496,6 +12506,7 @@ fn validate_finishing_request(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn canonical_fillet_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -12527,6 +12538,7 @@ fn canonical_fillet_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_chamfer_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -12557,6 +12569,7 @@ fn canonical_chamfer_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_shell_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -12586,6 +12599,7 @@ fn canonical_shell_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_draft_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -12622,6 +12636,7 @@ fn canonical_draft_intent(
     Ok(intent)
 }
 
+#[allow(dead_code)]
 fn canonical_loft_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,

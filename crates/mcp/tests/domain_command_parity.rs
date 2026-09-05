@@ -630,7 +630,10 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
 fn required_worker(test_name: &str) -> Option<OcctWorker> {
     match OcctWorker::locate() {
         Ok(worker) => Some(worker),
-        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
+        {
             panic!("{test_name}: OCCT worker is required: {error}")
         }
         Err(_) => {

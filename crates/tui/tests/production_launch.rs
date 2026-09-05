@@ -384,7 +384,10 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
 fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     let worker = match OcctWorker::locate() {
         Ok(worker) => worker,
-        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
             panic!("interactive hole command requires OCCT worker: {error}")
         }
         Err(error) => {

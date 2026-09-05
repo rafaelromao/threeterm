@@ -1313,7 +1313,7 @@ fn canonical_finishing_edge_candidates(
                 provenance: threeterm_domain::EdgeProvenance {
                     source_feature_id: candidate.source_feature_id.clone(),
                     source_revision_id: candidate.source_revision_id.clone(),
-                    source_edge_id: semantic_id,
+                    source_edge_id: candidate.source_edge_id.clone(),
                 },
                 role: candidate.role.clone(),
                 evidence: threeterm_domain::EdgeGeometricEvidence {
@@ -1332,6 +1332,16 @@ fn canonical_edge_semantic_id(candidate: &EdgeCandidateEvidence) -> String {
     format!("edge-{}", sha256_hex(&identity))
 }
 
+fn canonical_edge_semantic_id_from_reference(reference: &SelectedEdgeReference) -> String {
+    let identity = serde_json::to_vec(&(
+        reference.evidence.midpoint,
+        reference.evidence.tangent,
+        reference.evidence.length,
+    ))
+    .expect("edge evidence serializes");
+    format!("edge-{}", sha256_hex(&identity))
+}
+
 fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value {
     let semantic_id = canonical_edge_semantic_id(candidate);
     serde_json::json!({
@@ -1339,7 +1349,7 @@ fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value 
         "provenance": {
             "source_feature_id": candidate.source_feature_id,
             "source_revision_id": candidate.source_revision_id,
-            "source_edge_id": semantic_id,
+            "source_edge_id": candidate.source_edge_id,
         },
         "role": candidate.role,
         "evidence": {
@@ -9294,6 +9304,13 @@ fn resolve_selected_edge_with_worker(
     selected: serde_json::Value,
 ) -> Result<serde_json::Value, HostError> {
     let reference = selected_edge_reference_from_value(selected.clone())?;
+    if reference.semantic_id != canonical_edge_semantic_id_from_reference(&reference) {
+        return Err(HostError::Validation {
+            detail:
+                "reference is incompatible: selected edge semantic ID does not match its evidence"
+                    .to_string(),
+        });
+    }
     let inspection = worker
         .clone()
         .with_revision_id(source_revision)

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
 
@@ -258,7 +259,7 @@ fn fillet_domain_command_resolves_one_source_edge_before_commit() {
         .expect("bundle opens")
         .revision_hash_hex()
         .to_string();
-    let candidate = worker
+    let mut candidate = worker
         .inspect_edges(
             new_request_id(),
             root.join("brep/seed.brep"),
@@ -280,6 +281,9 @@ fn fillet_domain_command_resolves_one_source_edge_before_commit() {
         .into_iter()
         .next()
         .expect("source edge candidate exists");
+    let evidence = serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+        .expect("edge evidence serializes");
+    candidate.semantic_id = format!("edge-{}", sha256_hex(&evidence));
     let response = host
         .execute_domain_command(
             threeterm_protocol::schema::FILLET_COMMAND_ID,

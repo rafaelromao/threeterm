@@ -1452,6 +1452,7 @@ fn sketch_request_from_payload(
 fn resolve_sketch_support(
     loaded: &LoadedBundle,
     request: &SketchSolveRequest,
+    candidates: &[PlanarFaceCandidate],
 ) -> Result<PlanarFaceReattachmentOutcome, HostError> {
     let Some(reference) = &request.support else {
         return Ok(PlanarFaceReattachmentOutcome::Resolved {
@@ -1478,13 +1479,10 @@ fn resolve_sketch_support(
             candidate_ids: Vec::new(),
         });
     }
-    let candidate = PlanarFaceCandidate {
-        semantic_id: reference.semantic_id.clone(),
-        provenance: reference.provenance.clone(),
-        role: reference.role.clone(),
-        evidence: reference.evidence.clone(),
-    };
-    Ok(resolve_planar_face_reference(reference, [candidate]))
+    Ok(resolve_planar_face_reference(
+        reference,
+        candidates.iter().cloned(),
+    ))
 }
 
 fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
@@ -1826,6 +1824,15 @@ impl Host {
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
     ) -> Result<SketchSolveResponse, HostError> {
+        self.preview_sketch_solve_with_planar_face_candidates(root, request, &[])
+    }
+
+    pub fn preview_sketch_solve_with_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+        candidates: &[PlanarFaceCandidate],
+    ) -> Result<SketchSolveResponse, HostError> {
         let loaded = Bundle::at(root.as_ref()).open()?;
         let source_revision = if request.source_revision.is_empty() {
             loaded.revision_hash_hex().to_string()
@@ -1846,7 +1853,7 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        let support_outcome = resolve_sketch_support(&loaded, &request)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, candidates)?;
         if !matches!(
             support_outcome,
             PlanarFaceReattachmentOutcome::Resolved { .. }
@@ -1890,6 +1897,16 @@ impl Host {
         feature_id: &str,
         worker: &SlvsWorker,
     ) -> Result<SketchSolveResponse, HostError> {
+        self.reload_sketch_with_worker_and_planar_face_candidates(root, feature_id, worker, &[])
+    }
+
+    pub fn reload_sketch_with_worker_and_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        worker: &SlvsWorker,
+        candidates: &[PlanarFaceCandidate],
+    ) -> Result<SketchSolveResponse, HostError> {
         let loaded = Bundle::at(root.as_ref()).open()?;
         let payload = loaded
             .graph
@@ -1898,7 +1915,7 @@ impl Host {
                 detail: format!("sketch is missing: {feature_id}"),
             })?;
         let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
-        let outcome = resolve_sketch_support(&loaded, &request)?;
+        let outcome = resolve_sketch_support(&loaded, &request, candidates)?;
         if !matches!(outcome, PlanarFaceReattachmentOutcome::Resolved { .. }) {
             return Ok(sketch_support_failure_response(&request, &outcome));
         }
@@ -1960,6 +1977,16 @@ impl Host {
         request: &SketchSolveRequest,
         worker: &SlvsWorker,
     ) -> Result<SketchSolveCommitView, HostError> {
+        self.commit_sketch_solve_with_worker_and_planar_face_candidates(root, request, worker, &[])
+    }
+
+    pub fn commit_sketch_solve_with_worker_and_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+        worker: &SlvsWorker,
+        candidates: &[PlanarFaceCandidate],
+    ) -> Result<SketchSolveCommitView, HostError> {
         let root = root.as_ref();
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
@@ -1982,7 +2009,7 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        let support_outcome = resolve_sketch_support(&loaded, &request)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, candidates)?;
         if !matches!(
             support_outcome,
             PlanarFaceReattachmentOutcome::Resolved { .. }

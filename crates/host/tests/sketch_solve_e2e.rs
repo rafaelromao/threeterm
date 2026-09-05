@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
 use threeterm_domain::{
-    PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference, ProjectGeneration,
-    SketchPlacement,
+    PlanarFaceCandidate, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference,
+    ProjectGeneration, SketchPlacement,
 };
 use threeterm_host::Host;
 use threeterm_persistence::{Bundle, write_fresh};
@@ -14,10 +15,117 @@ use threeterm_slvs_worker::{
 };
 use threeterm_viewport::{CameraState, ProtocolNeutralViewport, ViewportRequest, ViewportScene};
 
+static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 fn root() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("threeterm-sketch-e2e-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "threeterm-sketch-e2e-{}-{}",
+        std::process::id(),
+        ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&path);
     path
+}
+
+fn attached_request(
+    feature_id: &str,
+    support: PlanarFaceReference,
+    placement: SketchPlacement,
+) -> SketchSolveRequest {
+    SketchSolveRequest::new(
+        feature_id,
+        "point",
+        vec![WorkerSketchEntity::Point {
+            id: "p0".into(),
+            x: 0.0,
+            y: 0.0,
+        }],
+        Vec::new(),
+    )
+    .with_attachment(support, placement)
+}
+
+fn support_reference(revision: &str) -> PlanarFaceReference {
+    PlanarFaceReference {
+        semantic_id: "solid/face".to_string(),
+        provenance: PlanarFaceProvenance {
+            source_feature_id: "solid".to_string(),
+            source_revision_id: revision.to_string(),
+            source_face_id: "solid/face".to_string(),
+        },
+        role: "sketch-support".to_string(),
+        evidence: PlanarFaceEvidence {
+            topology_kind: "planar_face".to_string(),
+            origin: [0.0, 0.0, 2.0],
+            normal: [0.0, 1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, -1.0],
+            adjacent_feature_ids: Vec::new(),
+        },
+    }
+}
+
+fn support_candidate(reference: &PlanarFaceReference) -> PlanarFaceCandidate {
+    PlanarFaceCandidate {
+        semantic_id: reference.semantic_id.clone(),
+        provenance: reference.provenance.clone(),
+        role: reference.role.clone(),
+        evidence: reference.evidence.clone(),
+    }
+}
+
+#[test]
+fn preview_requires_independent_face_evidence_and_reports_resolution_states() {
+    let path = root();
+    write_fresh(&path, ProjectGeneration::with_id("sketch-evidence")).expect("fresh bundle");
+    Bundle::at(&path)
+        .append_feature("solid", "brep")
+        .expect("solid support feature appends");
+    let revision = Bundle::at(&path)
+        .open()
+        .expect("solid bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let reference = support_reference(&revision);
+    let placement = SketchPlacement {
+        origin: [0.0, 0.0, 2.0],
+        normal: [0.0, 1.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 0.0, -1.0],
+    };
+    let request = attached_request("sketch-evidence", reference.clone(), placement);
+    let candidate = support_candidate(&reference);
+    let mut mismatched = candidate.clone();
+    mismatched.evidence.origin[2] += 1.0;
+    let host = Host::new();
+
+    let response = host
+        .preview_sketch_solve_with_planar_face_candidates(
+            &path,
+            &request,
+            std::slice::from_ref(&mismatched),
+        )
+        .expect("mismatched evidence produces a response");
+    assert_eq!(
+        response.reattachment_outcome.as_deref(),
+        Some("incompatible")
+    );
+    assert_eq!(response.status, "invalid_request");
+
+    let mut duplicate = candidate.clone();
+    duplicate.semantic_id = "solid/other-face".to_string();
+    let response = host
+        .preview_sketch_solve_with_planar_face_candidates(&path, &request, &[candidate, duplicate])
+        .expect("ambiguous evidence produces a response");
+    assert_eq!(response.reattachment_outcome.as_deref(), Some("ambiguous"));
+    assert_eq!(response.status, "invalid_request");
+
+    let response = host
+        .preview_sketch_solve(&path, &request)
+        .expect("missing evidence produces a response");
+    assert_eq!(response.reattachment_outcome.as_deref(), Some("lost"));
+    assert_eq!(response.status, "invalid_request");
+    let _ = fs::remove_dir_all(path);
 }
 
 #[test]
@@ -60,6 +168,12 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
         normal: [0.0, 1.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 0.0, -1.0],
+    };
+    let candidate = PlanarFaceCandidate {
+        semantic_id: support.semantic_id.clone(),
+        provenance: support.provenance.clone(),
+        role: support.role.clone(),
+        evidence: support.evidence.clone(),
     };
     let request = SketchSolveRequest::new(
         "host-rectangle",
@@ -119,7 +233,12 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
     .with_attachment(support, placement);
     let host = Host::new();
     let committed = host
-        .commit_sketch_solve_with_worker(&path, &request, &worker)
+        .commit_sketch_solve_with_worker_and_planar_face_candidates(
+            &path,
+            &request,
+            &worker,
+            std::slice::from_ref(&candidate),
+        )
         .expect("host commits a solved rectangle");
     let loaded = Bundle::at(&path).open().expect("bundle reloads");
     let scene = ViewportScene::from_feature_graph(
@@ -153,7 +272,12 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
     assert_eq!(committed.snapshot.revision_hash, loaded.revision_hash_hex());
     assert_ne!(baseline.revision_hash_hex(), loaded.revision_hash_hex());
     let reloaded = host
-        .reload_sketch_with_worker(&path, "host-rectangle", &worker)
+        .reload_sketch_with_worker_and_planar_face_candidates(
+            &path,
+            "host-rectangle",
+            &worker,
+            std::slice::from_ref(&candidate),
+        )
         .expect("canonical attachment reloads through the real worker");
     assert_eq!(reloaded.reattachment_outcome.as_deref(), Some("resolved"));
     let _ = fs::remove_dir_all(path);

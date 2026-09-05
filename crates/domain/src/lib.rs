@@ -1692,18 +1692,48 @@ mod tests {
 
         placement.validate().expect("face frame is right-handed");
         assert_eq!(placement.transform_point([2.0, 3.0]), [6.0, 5.0, 3.0]);
+        let candidate = PlanarFaceCandidate {
+            semantic_id: reference.semantic_id.clone(),
+            provenance: reference.provenance.clone(),
+            role: reference.role.clone(),
+            evidence: evidence.clone(),
+        };
+        assert_eq!(
+            resolve_planar_face_reference(&reference, [candidate.clone()]),
+            PlanarFaceReattachmentOutcome::Resolved {
+                semantic_id: "bracket/vertical-face".to_string(),
+            }
+        );
+        let mut mismatched_evidence = candidate.evidence.clone();
+        mismatched_evidence.origin[2] += 1.0;
         assert_eq!(
             resolve_planar_face_reference(
                 &reference,
                 [PlanarFaceCandidate {
-                    semantic_id: reference.semantic_id.clone(),
-                    provenance: reference.provenance.clone(),
-                    role: reference.role.clone(),
-                    evidence,
+                    evidence: mismatched_evidence,
+                    ..candidate.clone()
                 }],
             ),
-            PlanarFaceReattachmentOutcome::Resolved {
-                semantic_id: "bracket/vertical-face".to_string(),
+            PlanarFaceReattachmentOutcome::Incompatible {
+                candidate_ids: vec!["bracket/vertical-face".to_string()]
+            }
+        );
+        assert_eq!(
+            resolve_planar_face_reference(
+                &reference,
+                [
+                    candidate.clone(),
+                    PlanarFaceCandidate {
+                        semantic_id: "bracket/other-vertical-face".to_string(),
+                        ..candidate
+                    },
+                ],
+            ),
+            PlanarFaceReattachmentOutcome::Ambiguous {
+                candidate_ids: vec![
+                    "bracket/other-vertical-face".to_string(),
+                    "bracket/vertical-face".to_string(),
+                ]
             }
         );
     }

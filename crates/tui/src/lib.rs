@@ -339,6 +339,14 @@ pub fn reattachment_acknowledgement(response: &Value) -> String {
     }
 }
 
+pub fn sketch_reattachment_acknowledgement(response: &Value) -> String {
+    match response.get("reattachment_outcome").and_then(Value::as_str) {
+        Some("resolved") => "sketch support reattached".to_string(),
+        Some(outcome) => format!("sketch support reattachment {outcome}"),
+        None => "sketch support reattachment invalid response".to_string(),
+    }
+}
+
 /// Execute the selected-edge action from the interactive state through the
 /// same command seam used by headless adapters.
 #[allow(clippy::too_many_arguments)]
@@ -3085,7 +3093,11 @@ impl<R: Renderer> TuiViewportSession<R> {
                             .to_string(),
                     ));
                 };
-                if command != threeterm_protocol::schema::EXTRUDE_COMMAND_ID {
+                if !matches!(
+                    command,
+                    threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
+                ) {
                     self.palette.open();
                     return Ok(self.keyboard_overlay(format!(
                         "[error-glyph] Failure: command {} is discovery-only",
@@ -3242,6 +3254,11 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(response) => response,
             Err(error) => return self.reject_commit(format!("{error:?}")),
         };
+        if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
+            && response["status"] == "invalid_request"
+        {
+            return self.reject_commit(sketch_reattachment_acknowledgement(&response));
+        }
         let revision = match response.get("revision_hash").and_then(Value::as_str) {
             Some(revision) => revision.to_string(),
             None => return self.reject_commit("commit response has no revision_hash".to_string()),

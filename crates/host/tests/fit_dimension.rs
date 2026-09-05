@@ -34,6 +34,8 @@ fn sketch(feature_id: &str, dimension_id: &str, value: f64) -> SketchPayload {
         related_constraint_ids: vec![dimension_id.to_string()],
         diagnostics: vec![],
         solved_coordinates: None,
+        support: None,
+        placement: None,
     }
 }
 

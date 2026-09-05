@@ -3891,6 +3891,7 @@ pub fn dispatch_registered_command(
             | BOOLEAN_COMMON_COMMAND_ID
             | HOLE_COMMAND_ID
             | REATTACH_EDGE_COMMAND_ID
+            | SKETCH_SOLVE_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)

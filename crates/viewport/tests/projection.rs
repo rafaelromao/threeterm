@@ -1,4 +1,7 @@
-use threeterm_domain::{Feature, FeatureGraph};
+use threeterm_domain::{
+    Feature, FeatureGraph, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference,
+    SketchEntity, SketchPayload, SketchPlacement, SolvedCoordinate,
+};
 use threeterm_viewport::{
     CameraState, ProtocolNeutralViewport, SceneSolid, SceneTriangle, ViewportRequest, ViewportScene,
 };
@@ -103,5 +106,122 @@ fn tessellated_solid_produces_filled_pixels_with_feature_ownership() {
             .chunks_exact(3)
             .any(|pixel| pixel != [18, 22, 31] && pixel != [36, 43, 56]),
         "the solid must contribute pixels distinct from the background and grid"
+    );
+}
+
+#[test]
+fn attached_sketch_primitives_are_projected_in_their_face_frame() {
+    let placement = SketchPlacement {
+        origin: [3.0, 4.0, 5.0],
+        normal: [0.0, 1.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 0.0, -1.0],
+    };
+    let mut graph = FeatureGraph::empty();
+    graph
+        .add_sketch(
+            Feature::new("attached", "sketch").expect("feature is valid"),
+            SketchPayload {
+                feature_id: "attached".to_string(),
+                entities: vec![
+                    SketchEntity::Point {
+                        id: "p0".into(),
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    SketchEntity::Point {
+                        id: "p1".into(),
+                        x: 2.0,
+                        y: 0.0,
+                    },
+                    SketchEntity::Point {
+                        id: "p2".into(),
+                        x: 0.0,
+                        y: 2.0,
+                    },
+                    SketchEntity::LineSegment {
+                        id: "line".into(),
+                        start: "p0".into(),
+                        end: "p1".into(),
+                    },
+                    SketchEntity::Circle {
+                        id: "circle".into(),
+                        center: "p0".into(),
+                        radius: 1.0,
+                    },
+                    SketchEntity::Arc {
+                        id: "arc".into(),
+                        center: "p0".into(),
+                        start: "p1".into(),
+                        end: "p2".into(),
+                    },
+                ],
+                constraints: Vec::new(),
+                status: "solved".to_string(),
+                dof: 0,
+                entity_ids: vec![
+                    "p0".into(),
+                    "p1".into(),
+                    "p2".into(),
+                    "line".into(),
+                    "circle".into(),
+                    "arc".into(),
+                ],
+                related_constraint_ids: Vec::new(),
+                diagnostics: Vec::new(),
+                solved_coordinates: Some(vec![
+                    SolvedCoordinate {
+                        entity_id: "p0".into(),
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    SolvedCoordinate {
+                        entity_id: "p1".into(),
+                        x: 2.0,
+                        y: 0.0,
+                    },
+                    SolvedCoordinate {
+                        entity_id: "p2".into(),
+                        x: 0.0,
+                        y: 2.0,
+                    },
+                ]),
+                support: Some(PlanarFaceReference {
+                    semantic_id: "solid/face".into(),
+                    provenance: PlanarFaceProvenance {
+                        source_feature_id: "solid".into(),
+                        source_revision_id: "revision-a".into(),
+                        source_face_id: "solid/face".into(),
+                    },
+                    role: "sketch-support".into(),
+                    evidence: PlanarFaceEvidence {
+                        origin: placement.origin,
+                        normal: placement.normal,
+                        x_axis: placement.x_axis,
+                        y_axis: placement.y_axis,
+                    },
+                }),
+                placement: Some(placement),
+            },
+        )
+        .expect("attached sketch is valid");
+    let scene = ViewportScene::from_feature_graph("revision-a", &graph, None);
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-segment3:3,4,5,5,4,5"))
+    );
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-circle3:"))
+    );
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-arc3:"))
     );
 }

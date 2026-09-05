@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, EdgeReattachmentOutcome, FeatureGraph, FitDimension,
-    PostEditEdgeCandidate, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
+    PlanarFaceCandidate, PlanarFaceReattachmentOutcome, PlanarFaceReference, PostEditEdgeCandidate,
+    SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistorySnapshot, HistoryState, HistoryStatus, HistoryTimeline},
-    resolve_edge_reference, resolve_split_edge_reference,
+    resolve_edge_reference, resolve_planar_face_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
@@ -41,7 +42,7 @@ use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
     BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID,
-    IDENTITY_COMMAND_ID, find,
+    IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -1314,11 +1315,207 @@ fn sketch_payload(
         related_constraint_ids: result.related_constraint_ids.clone(),
         diagnostics,
         solved_coordinates,
+        support: request.support.clone(),
+        placement: request.placement,
     };
     payload
         .validate()
         .map_err(|detail| HostError::Validation { detail })?;
     Ok(payload)
+}
+
+fn sketch_request_from_value(
+    request: &serde_json::Value,
+    _loaded: &LoadedBundle,
+) -> Result<SketchSolveRequest, HostError> {
+    let request_id = request
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("sketch-request")
+        .to_string();
+    let feature_id = request
+        .get("feature_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing sketch feature_id".to_string(),
+        })?;
+    let entities = serde_json::from_value(request.get("entities").cloned().ok_or_else(|| {
+        HostError::Validation {
+            detail: "missing sketch entities".to_string(),
+        }
+    })?)
+    .map_err(|error| HostError::Validation {
+        detail: format!("invalid sketch entities: {error}"),
+    })?;
+    let constraints =
+        serde_json::from_value(request.get("constraints").cloned().ok_or_else(|| {
+            HostError::Validation {
+                detail: "missing sketch constraints".to_string(),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch constraints: {error}"),
+        })?;
+    let mut typed = SketchSolveRequest::new(request_id, feature_id, entities, constraints)
+        .with_source_revision(
+            request
+                .get("source_revision")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+    let support = request
+        .get("support")
+        .cloned()
+        .map(serde_json::from_value::<PlanarFaceReference>)
+        .transpose()
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch support: {error}"),
+        })?;
+    let placement = request
+        .get("placement")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch placement: {error}"),
+        })?;
+    match (support, placement) {
+        (Some(support), Some(placement)) => {
+            typed = typed.with_attachment(support, placement);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(HostError::Validation {
+                detail: "sketch support and placement must be provided together".to_string(),
+            });
+        }
+    }
+    typed
+        .validate()
+        .map_err(|detail| HostError::Validation { detail })?;
+    Ok(typed)
+}
+
+fn sketch_request_from_payload(
+    payload: &SketchPayload,
+    source_revision: &str,
+) -> Result<SketchSolveRequest, HostError> {
+    let entities =
+        serde_json::from_value(serde_json::to_value(&payload.entities).map_err(|error| {
+            HostError::Validation {
+                detail: format!("sketch entities serialization failed: {error}"),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("sketch entities conversion failed: {error}"),
+        })?;
+    let constraints =
+        serde_json::from_value(serde_json::to_value(&payload.constraints).map_err(|error| {
+            HostError::Validation {
+                detail: format!("sketch constraints serialization failed: {error}"),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("sketch constraints conversion failed: {error}"),
+        })?;
+    let mut request = SketchSolveRequest::new(
+        format!("reload-{}", payload.feature_id),
+        payload.feature_id.clone(),
+        entities,
+        constraints,
+    )
+    .with_source_revision(source_revision);
+    if let (Some(support), Some(placement)) = (&payload.support, payload.placement) {
+        request = request.with_attachment(support.clone(), placement);
+    }
+    request
+        .validate()
+        .map_err(|detail| HostError::Validation { detail })?;
+    Ok(request)
+}
+
+fn resolve_sketch_support(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+) -> Result<PlanarFaceReattachmentOutcome, HostError> {
+    let Some(reference) = &request.support else {
+        return Ok(PlanarFaceReattachmentOutcome::Resolved {
+            semantic_id: String::new(),
+        });
+    };
+    if reference.provenance.source_revision_id != loaded.revision_hash_hex()
+        || !loaded
+            .graph
+            .contains_feature(&reference.provenance.source_feature_id)
+    {
+        return Ok(PlanarFaceReattachmentOutcome::Lost);
+    }
+    let feature_kind = loaded
+        .graph
+        .features()
+        .find(|feature| feature.id.as_str() == reference.provenance.source_feature_id)
+        .map(|feature| feature.kind)
+        .unwrap_or_default();
+    if !(feature_kind.starts_with("brep:")
+        || feature_kind.starts_with("bracket:")
+        || feature_kind == "brep")
+    {
+        return Ok(PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: Vec::new(),
+        });
+    }
+    let candidate = PlanarFaceCandidate {
+        semantic_id: reference.semantic_id.clone(),
+        provenance: reference.provenance.clone(),
+        role: reference.role.clone(),
+        evidence: reference.evidence.clone(),
+    };
+    Ok(resolve_planar_face_reference(reference, [candidate]))
+}
+
+fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
+    match outcome {
+        PlanarFaceReattachmentOutcome::Resolved { .. } => "resolved",
+        PlanarFaceReattachmentOutcome::Ambiguous { .. } => "ambiguous",
+        PlanarFaceReattachmentOutcome::Lost => "lost",
+        PlanarFaceReattachmentOutcome::Incompatible { .. } => "incompatible",
+    }
+}
+
+fn sketch_support_failure_response(
+    request: &SketchSolveRequest,
+    outcome: &PlanarFaceReattachmentOutcome,
+) -> SketchSolveResponse {
+    let candidate_ids = match outcome {
+        PlanarFaceReattachmentOutcome::Ambiguous { candidate_ids }
+        | PlanarFaceReattachmentOutcome::Incompatible { candidate_ids } => candidate_ids.clone(),
+        PlanarFaceReattachmentOutcome::Resolved { .. } | PlanarFaceReattachmentOutcome::Lost => {
+            Vec::new()
+        }
+    };
+    SketchSolveResponse {
+        schema_version: threeterm_slvs_worker::SCHEMA_VERSION.to_string(),
+        request_id: request.request_id.clone(),
+        operation: "sketch_solve".to_string(),
+        feature_id: request.feature_id.clone(),
+        status: "invalid_request".to_string(),
+        dof: 0,
+        entity_ids: request
+            .entities
+            .iter()
+            .map(|entity| entity.id().to_string())
+            .collect(),
+        related_constraint_ids: candidate_ids.clone(),
+        diagnostics: vec![threeterm_slvs_worker::SketchDiagnostic {
+            code: format!("sketch_support_{}", reattachment_outcome_name(outcome)),
+            detail: format!("planar face reattachment outcome: {outcome:?}"),
+            constraint_ids: candidate_ids,
+        }],
+        solved_coordinates: None,
+        support: request.support.clone(),
+        placement: request.placement,
+        reattachment_outcome: Some(reattachment_outcome_name(outcome).to_string()),
+    }
 }
 
 fn sketch_dimension_value(
@@ -1609,10 +1806,21 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        SlvsWorker::locate()?
+        let support_outcome = resolve_sketch_support(&loaded, &request)?;
+        if !matches!(
+            support_outcome,
+            PlanarFaceReattachmentOutcome::Resolved { .. }
+        ) {
+            return Ok(sketch_support_failure_response(&request, &support_outcome));
+        }
+        let mut result = SlvsWorker::locate()?
             .with_revision_id(source_revision)
             .solve(&request)
-            .map_err(HostError::from)
+            .map_err(HostError::from)?;
+        result.support = request.support;
+        result.placement = request.placement;
+        result.reattachment_outcome = Some("resolved".to_string());
+        Ok(result)
     }
 
     pub fn commit_sketch_solve(
@@ -1622,6 +1830,47 @@ impl Host {
     ) -> Result<SketchSolveCommitView, HostError> {
         let worker = SlvsWorker::locate()?;
         self.commit_sketch_solve_with_worker(root, request, &worker)
+    }
+
+    /// Recompute a canonical sketch from its durable intent after disposable
+    /// solver results have been removed. No transaction or derived artifact is
+    /// published by this method.
+    pub fn reload_sketch(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let worker = SlvsWorker::locate()?;
+        self.reload_sketch_with_worker(root, feature_id, &worker)
+    }
+
+    pub fn reload_sketch_with_worker(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        worker: &SlvsWorker,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let loaded = Bundle::at(root.as_ref()).open()?;
+        let payload = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
+        let outcome = resolve_sketch_support(&loaded, &request)?;
+        if !matches!(outcome, PlanarFaceReattachmentOutcome::Resolved { .. }) {
+            return Ok(sketch_support_failure_response(&request, &outcome));
+        }
+        let mut result = worker
+            .clone()
+            .with_revision_id(loaded.revision_hash_hex())
+            .solve(&request)
+            .map_err(HostError::from)?;
+        result.support = request.support;
+        result.placement = request.placement;
+        result.reattachment_outcome = Some("resolved".to_string());
+        Ok(result)
     }
 
     pub fn commit_sketch_solve_with_worker(
@@ -1652,6 +1901,19 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
+        let support_outcome = resolve_sketch_support(&loaded, &request)?;
+        if !matches!(
+            support_outcome,
+            PlanarFaceReattachmentOutcome::Resolved { .. }
+        ) {
+            return Err(HostError::Validation {
+                detail: serde_json::to_string(&sketch_support_failure_response(
+                    &request,
+                    &support_outcome,
+                ))
+                .expect("sketch support response serializes"),
+            });
+        }
         let result = worker
             .clone()
             .with_revision_id(source_revision.clone())
@@ -1725,6 +1987,61 @@ impl Host {
             };
 
             match command {
+                SKETCH_SOLVE_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?;
+                    let loaded = Bundle::at(bundle_path).open()?;
+                    if let Some(expected_revision) = request
+                        .get("expected_revision")
+                        .and_then(serde_json::Value::as_str)
+                        && expected_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "sketch source revision {expected_revision:?} does not match current revision {:?}",
+                                loaded.revision_hash_hex()
+                            ),
+                        });
+                    }
+                    let typed_request = sketch_request_from_value(&request, &loaded)?;
+                    let phase = request
+                        .get("phase")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("commit");
+                    let (result, revision_hash) = match phase {
+                        "preview" => (
+                            self.preview_sketch_solve(bundle_path, &typed_request)?,
+                            None,
+                        ),
+                        "commit" => {
+                            let preview = self.preview_sketch_solve(bundle_path, &typed_request)?;
+                            if !preview.is_success() {
+                                (preview, None)
+                            } else {
+                                let view = self.commit_sketch_solve(bundle_path, &typed_request)?;
+                                (view.result, Some(view.snapshot.revision_hash))
+                            }
+                        }
+                        _ => {
+                            return Err(HostError::Validation {
+                                detail: "phase must be preview or commit".to_string(),
+                            });
+                        }
+                    };
+                    let mut response =
+                        serde_json::to_value(result).map_err(|error| HostError::Validation {
+                            detail: format!("sketch response serialization failed: {error}"),
+                        })?;
+                    response["schema_version"] = serde_json::Value::String(
+                        find(command)
+                            .expect("sketch solve is registered")
+                            .response_schema_version
+                            .to_string(),
+                    );
+                    if let Some(revision_hash) = revision_hash {
+                        response["revision_hash"] = serde_json::Value::String(revision_hash);
+                    }
+                    Ok(response)
+                }
                 IDENTITY_COMMAND_ID => {
                     let identity = self.identity(string_field("bundle_path")?)?;
                     Ok(serde_json::json!({
@@ -2426,6 +2743,37 @@ impl Host {
                 ExecutionError::UnknownCommand(command) => ExecutionError::UnknownCommand(command),
                 ExecutionError::InvalidRequest(detail) => ExecutionError::InvalidRequest(detail),
                 ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
+            });
+        }
+        if command == SKETCH_SOLVE_COMMAND_ID {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let loaded = Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?;
+            let typed_request =
+                sketch_request_from_value(&request, &loaded).map_err(ExecutionError::Handler)?;
+            let result = self
+                .preview_sketch_solve(bundle_path, &typed_request)
+                .map_err(ExecutionError::Handler)?;
+            let source_revision = loaded.revision_hash_hex().to_string();
+            let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+            let geometry_fingerprint = sha256_hex(
+                serde_json::to_string(&result)
+                    .expect("sketch preview serializes")
+                    .as_bytes(),
+            );
+            return Ok(DomainCommandPreview {
+                command,
+                source_revision: source_revision.clone(),
+                preview_revision: sha256_hex(
+                    format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                        .as_bytes(),
+                ),
+                input_fingerprint,
+                geometry_fingerprint,
             });
         }
         if command == HOLE_COMMAND_ID {

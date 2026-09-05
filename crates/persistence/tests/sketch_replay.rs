@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use threeterm_domain::{
-    ProjectGeneration, SketchConstraint, SketchDiagnostic, SketchEntity, SketchPayload,
+    PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference, ProjectGeneration,
+    SketchConstraint, SketchDiagnostic, SketchEntity, SketchPayload, SketchPlacement,
     SolvedCoordinate,
 };
 use threeterm_persistence::{Bundle, write_fresh};
@@ -44,6 +45,8 @@ fn failed_sketch_diagnostics_are_canonical_without_partial_coordinates() {
             constraint_ids: vec!["conflict".to_string()],
         }],
         solved_coordinates: None,
+        support: None,
+        placement: None,
     };
     let before = bundle.open().expect("open baseline");
     bundle
@@ -106,6 +109,27 @@ fn solved_sketch_is_canonical_and_replays_after_reload() {
                 y: 0.0,
             },
         ]),
+        support: Some(PlanarFaceReference {
+            semantic_id: "bracket/vertical-face".to_string(),
+            provenance: PlanarFaceProvenance {
+                source_feature_id: "bracket".to_string(),
+                source_revision_id: "revision-0".to_string(),
+                source_face_id: "bracket/vertical-face".to_string(),
+            },
+            role: "sketch-support".to_string(),
+            evidence: PlanarFaceEvidence {
+                origin: [0.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 0.0, -1.0],
+            },
+        }),
+        placement: Some(SketchPlacement {
+            origin: [0.0, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, -1.0],
+        }),
     };
     let before = bundle.open().expect("open baseline");
     let committed = bundle

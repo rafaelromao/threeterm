@@ -612,6 +612,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "threeterm-domain",
  "threeterm-protocol",
 ]
 

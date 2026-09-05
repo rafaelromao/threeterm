@@ -50,3 +50,40 @@ fn sketch_solve_response_schema_accepts_a_normalized_success() {
     )
     .expect("normalized success matches the response schema");
 }
+
+#[test]
+fn sketch_solve_request_accepts_semantic_face_support_and_placement() {
+    let command = find(SKETCH_SOLVE_COMMAND_ID).expect("sketch solve is registered");
+    validate(
+        &command.request_schema,
+        &json!({
+            "bundle_path": "/tmp/model",
+            "feature_id": "sketch-1",
+            "source_revision": "revision-1",
+            "support": {
+                "semantic_id": "bracket/vertical-face",
+                "role": "sketch-support",
+                "provenance": {
+                    "source_feature_id": "bracket",
+                    "source_revision_id": "revision-1",
+                    "source_face_id": "bracket/vertical-face"
+                },
+                "evidence": {
+                    "origin": [0.0, 0.0, 0.0],
+                    "normal": [0.0, 1.0, 0.0],
+                    "x_axis": [1.0, 0.0, 0.0],
+                    "y_axis": [0.0, 0.0, -1.0]
+                }
+            },
+            "placement": {
+                "origin": [0.0, 0.0, 0.0],
+                "normal": [0.0, 1.0, 0.0],
+                "x_axis": [1.0, 0.0, 0.0],
+                "y_axis": [0.0, 0.0, -1.0]
+            },
+            "entities": [{"kind": "point", "id": "p0", "x": 0.0, "y": 0.0}],
+            "constraints": []
+        }),
+    )
+    .expect("attached sketch request matches the schema");
+}

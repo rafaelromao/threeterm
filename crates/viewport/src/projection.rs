@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity};
+use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity, SketchPlacement};
 
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 
@@ -105,19 +105,72 @@ impl ViewportScene {
                 .map(|coordinate| (coordinate.entity_id.as_str(), (coordinate.x, coordinate.y)))
                 .collect();
             for entity in &sketch.entities {
-                let SketchEntity::LineSegment { id, start, end } = entity else {
-                    continue;
+                let point = |id: &str| {
+                    let [x, y] = coordinates.get(id).copied()?.into();
+                    Some(sketch_point(sketch.placement.as_ref(), [x, y]))
                 };
-                let (Some((x1, y1)), Some((x2, y2))) = (
-                    coordinates.get(start.as_str()),
-                    coordinates.get(end.as_str()),
-                ) else {
-                    continue;
-                };
-                features.push(SceneFeature {
-                    id: format!("{}/segment/{}", feature.id.as_str(), id),
-                    kind: format!("sketch-segment:{x1},{y1},{x2},{y2}"),
-                });
+                match entity {
+                    SketchEntity::LineSegment { id, start, end } => {
+                        let (Some(first), Some(second)) = (point(start), point(end)) else {
+                            continue;
+                        };
+                        features.push(SceneFeature {
+                            id: format!("{}/segment/{id}", feature.id.as_str()),
+                            kind: if sketch.placement.is_some() {
+                                format!(
+                                    "sketch-segment3:{},{},{},{},{},{}",
+                                    first[0], first[1], first[2], second[0], second[1], second[2]
+                                )
+                            } else {
+                                format!(
+                                    "sketch-segment:{},{},{},{}",
+                                    first[0], first[1], second[0], second[1]
+                                )
+                            },
+                        });
+                    }
+                    SketchEntity::Circle { id, center, radius } => {
+                        let Some(center) = point(center) else {
+                            continue;
+                        };
+                        let edge = sketch_radius_point(sketch.placement.as_ref(), center, *radius);
+                        features.push(SceneFeature {
+                            id: format!("{}/circle/{id}", feature.id.as_str()),
+                            kind: format!(
+                                "sketch-circle3:{},{},{},{},{},{}",
+                                center[0], center[1], center[2], edge[0], edge[1], edge[2]
+                            ),
+                        });
+                    }
+                    SketchEntity::Arc {
+                        id,
+                        center,
+                        start,
+                        end,
+                    } => {
+                        let (Some(center), Some(first), Some(second)) =
+                            (point(center), point(start), point(end))
+                        else {
+                            continue;
+                        };
+                        features.push(SceneFeature {
+                            id: format!("{}/arc/{id}", feature.id.as_str()),
+                            kind: format!(
+                                "sketch-arc3:{},{},{},{},{},{},{},{},{}",
+                                center[0],
+                                center[1],
+                                center[2],
+                                first[0],
+                                first[1],
+                                first[2],
+                                second[0],
+                                second[1],
+                                second[2]
+                            ),
+                        });
+                    }
+                    SketchEntity::Point { .. } => {}
+                }
             }
         }
         Self {
@@ -295,7 +348,7 @@ impl ProtocolNeutralViewport {
             .map(|solid| solid.feature_id.as_str())
             .collect();
         for (index, feature) in scene.features.iter().enumerate() {
-            if feature.kind.starts_with("sketch-segment:") {
+            if feature.kind.starts_with("sketch-") {
                 continue;
             }
             if solid_ids.contains(feature.id.as_str()) {
@@ -323,21 +376,27 @@ impl ProtocolNeutralViewport {
         draw_solids(&mut rgb, width, height, scene, &request);
 
         for feature in &scene.features {
-            let Some((x1, y1, x2, y2)) = sketch_segment_coordinates(&feature.kind) else {
+            let Some(points) = sketch_primitive_coordinates(&feature.kind) else {
                 continue;
             };
             let scale = f64::from(request.camera.zoom_percent) / 100.0 * min_dimension / 8.0;
             let center_x = width as f64 / 2.0;
             let center_y = height as f64 / 2.0;
-            draw_sketch_line(
-                &mut rgb,
-                width,
-                (center_x + x1 * scale).round() as i32,
-                (center_y - y1 * scale).round() as i32,
-                (center_x + x2 * scale).round() as i32,
-                (center_y - y2 * scale).round() as i32,
-                [105, 220, 190],
-            );
+            for pair in points.windows(2) {
+                let first =
+                    project_sketch_point(pair[0], center_x, center_y, scale, request.camera);
+                let second =
+                    project_sketch_point(pair[1], center_x, center_y, scale, request.camera);
+                draw_sketch_line(
+                    &mut rgb,
+                    width,
+                    first.0,
+                    first.1,
+                    second.0,
+                    second.1,
+                    [105, 220, 190],
+                );
+            }
         }
 
         Ok(ViewportFrame {
@@ -539,14 +598,69 @@ fn marker_color(feature: &SceneFeature, selected: bool) -> [u8; 3] {
     ]
 }
 
-fn sketch_segment_coordinates(kind: &str) -> Option<(f64, f64, f64, f64)> {
-    let values = kind.strip_prefix("sketch-segment:")?;
+fn sketch_point(placement: Option<&SketchPlacement>, point: [f64; 2]) -> [f64; 3] {
+    placement.map_or([point[0], point[1], 0.0], |placement| {
+        placement.transform_point(point)
+    })
+}
+
+fn sketch_radius_point(
+    placement: Option<&SketchPlacement>,
+    center: [f64; 3],
+    radius: f64,
+) -> [f64; 3] {
+    placement.map_or([center[0] + radius, center[1], center[2]], |placement| {
+        [
+            center[0] + radius * placement.x_axis[0],
+            center[1] + radius * placement.x_axis[1],
+            center[2] + radius * placement.x_axis[2],
+        ]
+    })
+}
+
+fn sketch_primitive_coordinates(kind: &str) -> Option<Vec<[f64; 3]>> {
+    if let Some(values) = kind.strip_prefix("sketch-segment:") {
+        let values: Vec<f64> = values
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        return (values.len() == 4)
+            .then(|| vec![[values[0], values[1], 0.0], [values[2], values[3], 0.0]]);
+    }
+    let values = kind
+        .strip_prefix("sketch-segment3:")
+        .or_else(|| kind.strip_prefix("sketch-circle3:"))
+        .or_else(|| kind.strip_prefix("sketch-arc3:"))?;
     let values: Vec<f64> = values
         .split(',')
         .map(str::parse)
         .collect::<Result<_, _>>()
         .ok()?;
-    (values.len() == 4).then(|| (values[0], values[1], values[2], values[3]))
+    values.len().is_multiple_of(3).then(|| {
+        values
+            .chunks_exact(3)
+            .map(|point| [point[0], point[1], point[2]])
+            .collect()
+    })
+}
+
+fn project_sketch_point(
+    point: [f64; 3],
+    center_x: f64,
+    center_y: f64,
+    scale: f64,
+    camera: CameraState,
+) -> (i32, i32) {
+    let yaw = f64::from(camera.yaw_degrees).to_radians();
+    let pitch = f64::from(camera.pitch_degrees).to_radians();
+    let yaw_x = point[0] * yaw.cos() - point[2] * yaw.sin();
+    let yaw_z = point[0] * yaw.sin() + point[2] * yaw.cos();
+    let rotated_y = point[1] * pitch.cos() - yaw_z * pitch.sin();
+    (
+        (center_x + yaw_x * scale).round() as i32,
+        (center_y - rotated_y * scale).round() as i32,
+    )
 }
 
 fn draw_sketch_line(

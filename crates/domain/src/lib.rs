@@ -22,7 +22,10 @@ pub mod history;
 
 pub mod sketch {
     pub use super::{
-        SketchConstraint, SketchDiagnostic, SketchEntity, SketchPayload, SolvedCoordinate,
+        PlanarFaceCandidate, PlanarFaceEvidence, PlanarFaceProvenance,
+        PlanarFaceReattachmentOutcome, PlanarFaceReference, SketchConstraint, SketchDiagnostic,
+        SketchEntity, SketchPayload, SketchPlacement, SolvedCoordinate,
+        resolve_planar_face_reference,
     };
 }
 
@@ -132,6 +135,238 @@ pub struct SketchDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidence {
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+}
+
+impl PlanarFaceEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_frame(
+            self.origin,
+            self.x_axis,
+            self.y_axis,
+            self.normal,
+            "face evidence",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceProvenance {
+    pub source_feature_id: String,
+    pub source_revision_id: String,
+    pub source_face_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceReference {
+    pub semantic_id: String,
+    pub provenance: PlanarFaceProvenance,
+    pub role: String,
+    pub evidence: PlanarFaceEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceCandidate {
+    pub semantic_id: String,
+    pub provenance: PlanarFaceProvenance,
+    pub role: String,
+    pub evidence: PlanarFaceEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanarFaceReattachmentOutcome {
+    Resolved { semantic_id: String },
+    Ambiguous { candidate_ids: Vec<String> },
+    Lost,
+    Incompatible { candidate_ids: Vec<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SketchPlacement {
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    pub normal: [f64; 3],
+}
+
+impl SketchPlacement {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_frame(
+            self.origin,
+            self.x_axis,
+            self.y_axis,
+            self.normal,
+            "sketch placement",
+        )
+    }
+
+    pub fn transform_point(&self, point: [f64; 2]) -> [f64; 3] {
+        [
+            self.origin[0] + point[0] * self.x_axis[0] + point[1] * self.y_axis[0],
+            self.origin[1] + point[0] * self.x_axis[1] + point[1] * self.y_axis[1],
+            self.origin[2] + point[0] * self.x_axis[2] + point[1] * self.y_axis[2],
+        ]
+    }
+}
+
+impl Eq for SketchPlacement {}
+
+fn validate_frame(
+    origin: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    normal: [f64; 3],
+    label: &str,
+) -> Result<(), String> {
+    if !origin
+        .into_iter()
+        .chain(x_axis)
+        .chain(y_axis)
+        .chain(normal)
+        .all(f64::is_finite)
+    {
+        return Err(format!("{label} frame must contain finite values"));
+    }
+    let norm = |vector: [f64; 3]| {
+        vector
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    };
+    let dot = |left: [f64; 3], right: [f64; 3]| {
+        left.into_iter().zip(right).map(|(a, b)| a * b).sum::<f64>()
+    };
+    if (norm(x_axis) - 1.0).abs() > 1e-6
+        || (norm(y_axis) - 1.0).abs() > 1e-6
+        || (norm(normal) - 1.0).abs() > 1e-6
+        || dot(x_axis, y_axis).abs() > 1e-6
+        || dot(x_axis, normal).abs() > 1e-6
+        || dot(y_axis, normal).abs() > 1e-6
+    {
+        return Err(format!("{label} frame must be orthonormal"));
+    }
+    let cross = [
+        x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1],
+        x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2],
+        x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0],
+    ];
+    if dot(cross, normal) < 1.0 - 1e-6 {
+        return Err(format!("{label} frame must be right-handed"));
+    }
+    Ok(())
+}
+
+pub fn resolve_planar_face_reference(
+    reference: &PlanarFaceReference,
+    candidates: impl IntoIterator<Item = PlanarFaceCandidate>,
+) -> PlanarFaceReattachmentOutcome {
+    if reference.semantic_id.is_empty()
+        || reference.role.is_empty()
+        || reference.provenance.source_feature_id.is_empty()
+        || reference.provenance.source_revision_id.is_empty()
+        || reference.provenance.source_face_id.is_empty()
+        || reference.provenance.source_face_id != reference.semantic_id
+        || reference.evidence.validate().is_err()
+    {
+        return PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: Vec::new(),
+        };
+    }
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    if candidates.iter().any(|candidate| {
+        candidate.semantic_id.is_empty()
+            || candidate.role.is_empty()
+            || candidate.provenance.source_feature_id.is_empty()
+            || candidate.provenance.source_revision_id.is_empty()
+            || candidate.provenance.source_face_id.is_empty()
+            || candidate.evidence.validate().is_err()
+    }) {
+        return PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: candidate_ids(&candidates),
+        };
+    }
+    let lineage: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.provenance == reference.provenance)
+        .collect::<Vec<_>>();
+    if lineage.is_empty() {
+        return PlanarFaceReattachmentOutcome::Lost;
+    }
+    let role_matches: Vec<_> = lineage
+        .iter()
+        .filter(|candidate| candidate.role == reference.role)
+        .copied()
+        .collect();
+    if role_matches.is_empty() {
+        return PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: candidate_ids(&lineage),
+        };
+    }
+    let geometric_matches: Vec<_> = role_matches
+        .into_iter()
+        .filter(|candidate| frame_matches(&reference.evidence, &candidate.evidence))
+        .collect();
+    let ids = geometric_matches
+        .iter()
+        .map(|candidate| candidate.semantic_id.clone())
+        .collect::<Vec<_>>();
+    let mut ids = ids;
+    ids.sort();
+    match geometric_matches.as_slice() {
+        [candidate] => PlanarFaceReattachmentOutcome::Resolved {
+            semantic_id: candidate.semantic_id.clone(),
+        },
+        [] => PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: candidate_ids(&lineage),
+        },
+        _ => PlanarFaceReattachmentOutcome::Ambiguous { candidate_ids: ids },
+    }
+}
+
+fn candidate_ids(candidates: &[impl std::borrow::Borrow<PlanarFaceCandidate>]) -> Vec<String> {
+    let mut ids = candidates
+        .iter()
+        .map(|candidate| candidate.borrow().semantic_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn frame_matches(left: &PlanarFaceEvidence, right: &PlanarFaceEvidence) -> bool {
+    left.origin
+        .into_iter()
+        .zip(right.origin)
+        .all(|(a, b)| (a - b).abs() <= 1e-6)
+        && left
+            .normal
+            .into_iter()
+            .zip(right.normal)
+            .all(|(a, b)| (a - b).abs() <= 1e-6)
+        && left
+            .x_axis
+            .into_iter()
+            .zip(right.x_axis)
+            .all(|(a, b)| (a - b).abs() <= 1e-6)
+        && left
+            .y_axis
+            .into_iter()
+            .zip(right.y_axis)
+            .all(|(a, b)| (a - b).abs() <= 1e-6)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SketchPayload {
     pub feature_id: String,
     pub entities: Vec<SketchEntity>,
@@ -143,6 +378,10 @@ pub struct SketchPayload {
     pub diagnostics: Vec<SketchDiagnostic>,
     #[serde(default)]
     pub solved_coordinates: Option<Vec<SolvedCoordinate>>,
+    #[serde(default)]
+    pub support: Option<PlanarFaceReference>,
+    #[serde(default)]
+    pub placement: Option<SketchPlacement>,
 }
 
 impl Eq for SketchPayload {}
@@ -151,6 +390,24 @@ impl SketchPayload {
     pub fn validate(&self) -> Result<(), String> {
         if self.feature_id.is_empty() || self.entities.is_empty() {
             return Err("sketch feature and entities must not be empty".to_string());
+        }
+        if self.support.is_some() != self.placement.is_some() {
+            return Err("sketch support and placement must be provided together".to_string());
+        }
+        if let Some(support) = &self.support {
+            if support.evidence.validate().is_err()
+                || support.semantic_id.is_empty()
+                || support.role.is_empty()
+                || support.provenance.source_feature_id.is_empty()
+                || support.provenance.source_revision_id.is_empty()
+                || support.provenance.source_face_id != support.semantic_id
+            {
+                return Err("sketch support reference is invalid".to_string());
+            }
+            self.placement
+                .as_ref()
+                .expect("support and placement presence checked")
+                .validate()?;
         }
         if self.dof < 0 {
             return Err("sketch dof must not be negative".to_string());
@@ -1382,6 +1639,49 @@ mod tests {
                 },
             }),
             Err("component ID already exists".to_string())
+        );
+    }
+
+    #[test]
+    fn planar_face_placement_maps_local_coordinates_and_resolves_by_evidence() {
+        let evidence = PlanarFaceEvidence {
+            origin: [4.0, 5.0, 6.0],
+            normal: [0.0, 1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, -1.0],
+        };
+        let reference = PlanarFaceReference {
+            semantic_id: "bracket/vertical-face".to_string(),
+            provenance: PlanarFaceProvenance {
+                source_feature_id: "bracket".to_string(),
+                source_revision_id: "revision-1".to_string(),
+                source_face_id: "bracket/vertical-face".to_string(),
+            },
+            role: "sketch-support".to_string(),
+            evidence: evidence.clone(),
+        };
+        let placement = SketchPlacement {
+            origin: evidence.origin,
+            x_axis: evidence.x_axis,
+            y_axis: evidence.y_axis,
+            normal: evidence.normal,
+        };
+
+        placement.validate().expect("face frame is right-handed");
+        assert_eq!(placement.transform_point([2.0, 3.0]), [6.0, 5.0, 3.0]);
+        assert_eq!(
+            resolve_planar_face_reference(
+                &reference,
+                [PlanarFaceCandidate {
+                    semantic_id: reference.semantic_id.clone(),
+                    provenance: reference.provenance.clone(),
+                    role: reference.role.clone(),
+                    evidence,
+                }],
+            ),
+            PlanarFaceReattachmentOutcome::Resolved {
+                semantic_id: "bracket/vertical-face".to_string(),
+            }
         );
     }
 }

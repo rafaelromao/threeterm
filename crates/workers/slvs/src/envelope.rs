@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use threeterm_domain::{PlanarFaceReference, SketchPlacement};
 
 pub const SCHEMA_VERSION: &str = "threeterm.workers.slvs/1";
 pub const OPERATION: &str = "sketch_solve";
@@ -76,6 +77,10 @@ pub struct SketchSolveRequest {
     pub source_revision: String,
     pub entities: Vec<SketchEntity>,
     pub constraints: Vec<SketchConstraint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<PlanarFaceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<SketchPlacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +114,12 @@ pub struct SketchSolveResponse {
     pub diagnostics: Vec<SketchDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solved_coordinates: Option<Vec<SolvedCoordinate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<PlanarFaceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<SketchPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reattachment_outcome: Option<String>,
 }
 
 impl SketchSolveRequest {
@@ -126,11 +137,23 @@ impl SketchSolveRequest {
             source_revision: String::new(),
             entities,
             constraints,
+            support: None,
+            placement: None,
         }
     }
 
     pub fn with_source_revision(mut self, revision: impl Into<String>) -> Self {
         self.source_revision = revision.into();
+        self
+    }
+
+    pub fn with_attachment(
+        mut self,
+        support: PlanarFaceReference,
+        placement: SketchPlacement,
+    ) -> Self {
+        self.support = Some(support);
+        self.placement = Some(placement);
         self
     }
 
@@ -197,6 +220,20 @@ impl SketchSolveRequest {
             if constraint.value.is_some_and(|value| !value.is_finite()) {
                 return Err(format!("constraint {} value must be finite", constraint.id));
             }
+        }
+        if self.support.is_some() != self.placement.is_some() {
+            return Err("sketch support and placement must be provided together".to_string());
+        }
+        if let Some(support) = &self.support {
+            support
+                .evidence
+                .validate()
+                .map_err(|detail| format!("invalid sketch support: {detail}"))?;
+            self.placement
+                .as_ref()
+                .expect("support and placement presence checked")
+                .validate()
+                .map_err(|detail| format!("invalid sketch placement: {detail}"))?;
         }
         Ok(())
     }

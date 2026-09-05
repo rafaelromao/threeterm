@@ -44,7 +44,7 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CommandSchema, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, iter,
+    CommandSchema, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, find, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -397,7 +397,11 @@ impl McpServer {
 
         if matches!(
             schema_entry.id,
-            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID | HOLE_COMMAND_ID
+            IDENTITY_COMMAND_ID
+                | APPLY_COMMAND_ID
+                | BOOLEAN_PATTERN_COMMAND_ID
+                | HOLE_COMMAND_ID
+                | SKETCH_SOLVE_COMMAND_ID
         ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }
@@ -470,7 +474,20 @@ impl McpServer {
         arguments: Value,
     ) -> JsonRpcResponse {
         match Host::new().execute_domain_command(command, arguments) {
-            Ok(value) => JsonRpcResponse::success(request.id.clone(), tool_result(value, false)),
+            Ok(value) => {
+                if let Some(schema) = find(command)
+                    && let Err(reason) = validate(&schema.response_schema, &value)
+                {
+                    return JsonRpcResponse::error(
+                        request.id.clone(),
+                        ERROR_INTERNAL,
+                        format!(
+                            "domain command response failed response-schema validation: {reason}"
+                        ),
+                    );
+                }
+                JsonRpcResponse::success(request.id.clone(), tool_result(value, false))
+            }
             Err(ExecutionError::InvalidRequest(reason)) => JsonRpcResponse::error(
                 request.id.clone(),
                 ERROR_INVALID_PARAMS,

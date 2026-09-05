@@ -1721,6 +1721,15 @@ pub static REPLAY_VERIFY_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static CURSOR_MOVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path"],
+        "properties": { "bundle_path": { "type": "string", "minLength": 1 } },
+        "additionalProperties": false
+    })
+});
+
 pub static REPLAY_VERIFY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -2239,6 +2248,30 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
         },
     );
     map.insert(
+        UNDO_COMMAND_ID,
+        CommandSchema {
+            id: UNDO_COMMAND_ID,
+            name: "undo",
+            schema_version: "threeterm.command.undo/1",
+            request_schema_version: UNDO_REQUEST_SCHEMA_VERSION,
+            request_schema: CURSOR_MOVE_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
+        REDO_COMMAND_ID,
+        CommandSchema {
+            id: REDO_COMMAND_ID,
+            name: "redo",
+            schema_version: "threeterm.command.redo/1",
+            request_schema_version: REDO_REQUEST_SCHEMA_VERSION,
+            request_schema: CURSOR_MOVE_REQUEST_SCHEMA.clone(),
+            response_schema_version: HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            response_schema: HISTORY_COMMIT_RESPONSE_SCHEMA.clone(),
+        },
+    );
+    map.insert(
         TIMELINE_COMMAND_ID,
         CommandSchema {
             id: TIMELINE_COMMAND_ID,
@@ -2503,6 +2536,8 @@ pub const HISTORICAL_EDIT_COMMAND_ID: CommandId = CommandId("historical-edit");
 pub const CREATE_REVISION_COMMAND_ID: CommandId = CommandId("create-revision");
 pub const RESTORE_REVISION_COMMAND_ID: CommandId = CommandId("restore-revision");
 pub const REPLAY_VERIFY_COMMAND_ID: CommandId = CommandId("replay-verify");
+pub const UNDO_COMMAND_ID: CommandId = CommandId("undo");
+pub const REDO_COMMAND_ID: CommandId = CommandId("redo");
 pub const TIMELINE_COMMAND_ID: CommandId = CommandId("timeline");
 pub const EXTRUDE_COMMAND_ID: CommandId = CommandId("extrude");
 pub const FIT_DIMENSION_COMMAND_ID: CommandId = CommandId("fit-dimension");
@@ -2560,6 +2595,8 @@ pub const SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.sketch
 pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/2";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.replay-verify.response/1";
+pub const UNDO_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.undo.request/1";
+pub const REDO_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.redo.request/1";
 pub const TIMELINE_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.timeline.request/1";
 pub const TIMELINE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.timeline.response/2";
 pub const RESTORE_REVISION_REQUEST_SCHEMA_VERSION: &str =

@@ -1206,6 +1206,19 @@ impl LogEntry {
     }
 }
 
+/// One committed BREP replacement inside a history-bearing publication.
+/// The feature must already exist as a bracket-kind canonical feature; its
+/// kind changes with the recomputed parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryBrepReplacement<'a> {
+    pub feature_id: &'a str,
+    pub kind: &'a str,
+    pub brep_bytes: &'a [u8],
+    pub expected_source_sha256: &'a str,
+    pub idempotency_key: &'a str,
+    pub idempotency_payload: &'a str,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TransactionLog {
     entries: Vec<LogEntry>,
@@ -1875,8 +1888,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(&payload.feature_id, &encoded)],
                 Some(expected_revision),
-                None,
-                None,
+                &[],
+                &[],
                 None,
                 None,
                 None,
@@ -1922,8 +1935,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[],
                 Some(expected_revision),
-                None,
-                None,
+                &[],
+                &[],
                 None,
                 None,
                 None,
@@ -1957,8 +1970,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(&feature_id, &kind)],
                 expected_revision,
-                None,
-                None,
+                &[],
+                &[],
                 None,
                 None,
                 None,
@@ -1975,7 +1988,7 @@ impl Bundle {
         event: &HistoryEvent,
     ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, None, None, None, None, Some(event))
+            self.append_features_locked(entries, None, &[], &[], None, None, Some(event))
         })
     }
 
@@ -2007,8 +2020,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                None,
-                None,
+                &[],
+                &[],
                 None,
                 None,
                 None,
@@ -2063,8 +2076,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(feature_id, &encoded_kind)],
                 Some(expected_revision),
-                None,
-                None,
+                &[],
+                &[],
                 None,
                 None,
                 None,
@@ -2087,8 +2100,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 None,
                 None,
                 None,
@@ -2112,8 +2125,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 Some(request_id),
                 Some(provenance),
                 None,
@@ -2137,8 +2150,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 Some(request_id),
                 Some(provenance),
                 None,
@@ -2194,8 +2207,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 Some(request_id),
                 Some(provenance),
                 None,
@@ -2227,8 +2240,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 Some(request_id),
                 Some(provenance),
                 None,
@@ -2254,8 +2267,8 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                None,
+                &[(feature_id, brep_bytes)],
+                &[],
                 None,
                 None,
                 None,
@@ -2301,8 +2314,8 @@ impl Bundle {
             self.append_features_locked(
                 entries,
                 Some(expected_revision),
-                Some((brep_feature_id, brep_bytes)),
-                None,
+                &[(brep_feature_id, brep_bytes)],
+                &[],
                 None,
                 None,
                 Some(history_event),
@@ -2325,8 +2338,8 @@ impl Bundle {
             self.append_features_locked(
                 entries,
                 Some(expected_revision),
-                Some((brep_feature_id, brep_bytes)),
-                None,
+                &[(brep_feature_id, brep_bytes)],
+                &[],
                 Some(request_id),
                 Some(provenance),
                 Some(history_event),
@@ -2390,8 +2403,8 @@ impl Bundle {
             self.append_features_locked(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                Some((feature_id, expected_source_sha256)),
+                &[(feature_id, brep_bytes)],
+                &[(feature_id, expected_source_sha256)],
                 idempotency_key,
                 idempotency_payload,
                 None,
@@ -2426,11 +2439,75 @@ impl Bundle {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
                 Some(expected_revision),
-                Some((feature_id, brep_bytes)),
-                Some((feature_id, expected_source_sha256)),
+                &[(feature_id, brep_bytes)],
+                &[(feature_id, expected_source_sha256)],
                 Some(idempotency_key),
                 Some(idempotency_payload),
                 None,
+                None,
+                false,
+                false,
+                true,
+                None,
+            )
+        })
+    }
+
+    /// Replace existing parameterized brackets and publish one accepted
+    /// history event as one conditional bundle transaction.
+    ///
+    /// The revision guard, every source-BREP digest, and the history ordinal
+    /// are all checked inside the same bundle write lock, so a failed BREP
+    /// promotion or an intervening writer commits neither geometry nor
+    /// history: the active Revision Snapshot and current geometry cannot be
+    /// left out of sync.
+    pub fn replace_bracket_families_with_history_if_revision(
+        &self,
+        families: &[HistoryBrepReplacement<'_>],
+        expected_revision: &str,
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        if families.is_empty() {
+            return Err(BundleError::Invalid(
+                "history geometry publication requires at least one family".to_string(),
+            ));
+        }
+        let entries = families
+            .iter()
+            .map(|family| (family.feature_id, family.kind))
+            .collect::<Vec<_>>();
+        let breps = families
+            .iter()
+            .map(|family| (family.feature_id, family.brep_bytes))
+            .collect::<Vec<_>>();
+        let sources = families
+            .iter()
+            .map(|family| (family.feature_id, family.expected_source_sha256))
+            .collect::<Vec<_>>();
+        let key = families
+            .iter()
+            .map(|family| family.idempotency_key)
+            .collect::<Vec<_>>();
+        let key = key.iter().collect::<std::collections::BTreeSet<_>>();
+        if key.len() != 1 {
+            return Err(BundleError::Invalid(
+                "history geometry publication requires one shared idempotency key".to_string(),
+            ));
+        }
+        let payload = families
+            .iter()
+            .map(|family| family.idempotency_payload)
+            .collect::<Vec<_>>()
+            .join("\n");
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &entries,
+                Some(expected_revision),
+                &breps,
+                &sources,
+                Some(families[0].idempotency_key),
+                Some(&payload),
+                Some(history_event),
                 None,
                 false,
                 false,
@@ -2487,7 +2564,7 @@ impl Bundle {
         // half-published rotation. The OS releases the lock if the holder
         // crashes, so an interrupted writer never leaves a stale lock.
         with_bundle_write_lock(&self.root, || {
-            self.append_features_locked(entries, None, None, None, None, None, None)
+            self.append_features_locked(entries, None, &[], &[], None, None, None)
         })
     }
 
@@ -2496,8 +2573,8 @@ impl Bundle {
         &self,
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
-        brep: Option<(&str, &[u8])>,
-        source_brep: Option<(&str, &str)>,
+        breps: &[(&str, &[u8])],
+        source_breps: &[(&str, &str)],
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
@@ -2505,8 +2582,8 @@ impl Bundle {
         self.append_features_locked_with_fit(
             entries,
             expected_revision,
-            brep,
-            source_brep,
+            breps,
+            source_breps,
             idempotency_key,
             idempotency_payload,
             history_event,
@@ -2523,8 +2600,8 @@ impl Bundle {
         &self,
         entries: &[(&str, &str)],
         expected_revision: Option<&str>,
-        brep: Option<(&str, &[u8])>,
-        source_brep: Option<(&str, &str)>,
+        breps: &[(&str, &[u8])],
+        source_breps: &[(&str, &str)],
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
         history_event: Option<&HistoryEvent>,
@@ -2545,16 +2622,21 @@ impl Bundle {
             Self::create_staged(&self.root, EMPTY_LOG_DIGEST_HEX, "revision-0")?.open_locked()?
         };
         if let Some(idempotency_key) = idempotency_key
-            && let Some(existing) = loaded
+            && loaded
                 .log
                 .entries()
                 .iter()
-                .find(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
+                .any(|entry| entry.idempotency_key.as_deref() == Some(idempotency_key))
         {
-            let same_transaction = entries.len() == 1
-                && existing.feature_id == entries[0].0
-                && existing.kind == entries[0].1
-                && existing.idempotency_payload.as_deref() == idempotency_payload;
+            let same_transaction = !entries.is_empty()
+                && entries.iter().all(|(feature_id, kind)| {
+                    loaded.log.entries().iter().any(|entry| {
+                        entry.idempotency_key.as_deref() == Some(idempotency_key)
+                            && entry.feature_id == *feature_id
+                            && entry.kind == *kind
+                            && entry.idempotency_payload.as_deref() == idempotency_payload
+                    })
+                });
             if same_transaction {
                 return Ok(loaded);
             }
@@ -2818,54 +2900,61 @@ impl Bundle {
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
             && idempotency_key.is_some()
-            && source_brep.is_some()
-            && entries.len() == 1
-            && entries[0].1.starts_with("bracket:")
-            && loaded
-                .graph
-                .features()
-                .find(|feature| feature.id.as_str() == entries[0].0)
-                .is_some_and(|feature| feature.kind.starts_with("bracket:"))
-        {
-            Some(entries[0].0)
+            && !source_breps.is_empty()
+            && !entries.is_empty()
+            && entries.iter().all(|(_, kind)| kind.starts_with("bracket:"))
+            && entries.iter().all(|(feature_id, _)| {
+                loaded
+                    .graph
+                    .features()
+                    .find(|feature| feature.id.as_str() == *feature_id)
+                    .is_some_and(|feature| feature.kind.starts_with("bracket:"))
+            }) {
+            entries
+                .iter()
+                .map(|(feature_id, _)| *feature_id)
+                .collect::<Vec<_>>()
         } else {
-            None
+            Vec::new()
         };
         validate_feature_entries(
             &loaded.graph,
             &loaded.log,
             entries,
-            allow_existing_bracket_edit,
+            &allow_existing_bracket_edit,
             allow_existing_sketch_update,
         )?;
-        if let Some((brep_feature_id, _)) = brep
-            && !entries
+        for (brep_feature_id, _) in breps {
+            if !entries
                 .iter()
-                .any(|(feature_id, _)| *feature_id == brep_feature_id)
-        {
-            return Err(BundleError::Invalid(
-                "BREP feature ID is not part of the transaction".to_string(),
-            ));
+                .any(|(feature_id, _)| feature_id == brep_feature_id)
+            {
+                return Err(BundleError::Invalid(
+                    "BREP feature ID is not part of the transaction".to_string(),
+                ));
+            }
         }
-        if reject_existing_brep
-            && let Some((feature_id, _)) = brep
-            && loaded
-                .graph
-                .features()
-                .any(|feature| feature.id.as_str() == feature_id)
-        {
-            return Err(BundleError::Invalid(format!(
-                "feature ID {feature_id:?} already exists"
-            )));
+        if reject_existing_brep {
+            for (feature_id, _) in breps {
+                if loaded
+                    .graph
+                    .features()
+                    .any(|feature| feature.id.as_str() == *feature_id)
+                {
+                    return Err(BundleError::Invalid(format!(
+                        "feature ID {feature_id:?} already exists"
+                    )));
+                }
+            }
         }
-        if let Some((feature_id, expected_sha256)) = source_brep {
+        for (feature_id, expected_sha256) in source_breps {
             let source = self.root.join("brep").join(format!("{feature_id}.brep"));
             let actual = fs::read(&source)
                 .map(|bytes| hash(&bytes))
                 .map_err(|error| {
                     BundleError::Invalid(format!("source BREP could not be read: {error}"))
                 })?;
-            if actual != expected_sha256 {
+            if actual != *expected_sha256 {
                 return Err(BundleError::Invalid(format!(
                     "source BREP digest mismatch for {feature_id}: expected {expected_sha256}, actual {actual}"
                 )));
@@ -2913,10 +3002,12 @@ impl Bundle {
                 _ => loaded.graph.add_feature(feature),
             };
             if graph_changed {
+                let staged_brep = breps
+                    .iter()
+                    .find(|(brep_feature_id, _)| *brep_feature_id == *feature_id)
+                    .map(|(_, brep_bytes)| *brep_bytes);
                 if let Some(idempotency_key) = idempotency_key {
-                    if let Some((brep_feature_id, brep_bytes)) = brep
-                        && brep_feature_id == *feature_id
-                    {
+                    if let Some(brep_bytes) = staged_brep {
                         loaded.log.append_feature_with_brep(
                             feature_id,
                             kind,
@@ -2933,9 +3024,7 @@ impl Bundle {
                             idempotency_payload,
                         );
                     }
-                } else if let Some((brep_feature_id, brep_bytes)) = brep
-                    && brep_feature_id == *feature_id
-                {
+                } else if let Some(brep_bytes) = staged_brep {
                     loaded
                         .log
                         .append_feature_with_brep(feature_id, kind, brep_bytes, None, None, intent);
@@ -3030,7 +3119,7 @@ impl Bundle {
                     .map_err(|error| BundleError::Invalid(error.to_string()))?,
                 Some(PublicationFailurePoint::ManifestSync),
             )?;
-            if let Some((feature_id, brep_bytes)) = brep {
+            for (feature_id, brep_bytes) in breps {
                 let brep_dir = staging.join("brep");
                 fs::create_dir_all(&brep_dir)?;
                 atomic_write_with_points(
@@ -3406,7 +3495,7 @@ fn validate_feature_entries(
     graph: &FeatureGraph,
     log: &TransactionLog,
     entries: &[(&str, &str)],
-    allow_existing_bracket_edit: Option<&str>,
+    allow_existing_bracket_edit: &[&str],
     allow_existing_sketch_update: bool,
 ) -> Result<(), BundleError> {
     let mut ids = std::collections::BTreeSet::new();
@@ -3457,7 +3546,7 @@ fn validate_feature_entries(
             let sketch_update = kind.starts_with(SKETCH_COMMAND_KIND_PREFIX)
                 && allow_existing_sketch_update
                 && existing_kind == Some("sketch".to_string());
-            let bracket_update = allow_existing_bracket_edit == Some(*feature_id);
+            let bracket_update = allow_existing_bracket_edit.contains(feature_id);
             if !bracket_update && !sketch_update {
                 return Err(BundleError::Invalid(format!(
                     "feature ID {feature_id:?} already exists"

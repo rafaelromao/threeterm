@@ -25,9 +25,9 @@ use threeterm_protocol::schema::{
     DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID,
     FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
     LINEAR_PATTERN_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    REVOLVE_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
-    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
+    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
@@ -135,6 +135,12 @@ enum DispatchPlan {
         feature_id: String,
     },
     ReplayVerify {
+        bundle: String,
+    },
+    Undo {
+        bundle: String,
+    },
+    Redo {
         bundle: String,
     },
     Extrude {
@@ -564,6 +570,8 @@ fn plan_unregistered(args: &[OsString]) -> DispatchPlan {
         "restore-revision" => parse_named_revision(&args[2..], false),
         "timeline" => parse_timeline(&args[2..]),
         "replay-verify" => parse_replay_verify(&args[2..]),
+        "undo" => parse_cursor_move(&args[2..], UNDO_COMMAND_ID),
+        "redo" => parse_cursor_move(&args[2..], REDO_COMMAND_ID),
         "extrude" => parse_extrude(&args[2..]),
         "reattach-edge" => parse_reattach_edge(&args[2..]),
         "fit-dimension" => parse_fit_dimension(&args[2..]),
@@ -790,6 +798,8 @@ fn reject_non_finite(plan: DispatchPlan) -> DispatchPlan {
         | DispatchPlan::RestoreRevision { .. }
         | DispatchPlan::Timeline { .. }
         | DispatchPlan::ReplayVerify { .. }
+        | DispatchPlan::Undo { .. }
+        | DispatchPlan::Redo { .. }
         | DispatchPlan::Unknown { .. } => true,
         DispatchPlan::HistoricalEdit { value, .. } => value.is_finite(),
     };
@@ -1355,6 +1365,31 @@ fn parse_replay_verify(args: &[OsString]) -> DispatchPlan {
         [] => DispatchPlan::Unknown {
             arg: "replay-verify".to_string(),
         },
+    }
+}
+
+fn parse_cursor_move(args: &[OsString], command: CommandId) -> DispatchPlan {
+    let [bundle] = args else {
+        return DispatchPlan::Unknown {
+            arg: args
+                .first()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| command.0.to_owned()),
+        };
+    };
+    let Some(bundle) = bundle.to_str() else {
+        return DispatchPlan::Unknown {
+            arg: bundle.to_string_lossy().into_owned(),
+        };
+    };
+    if command == UNDO_COMMAND_ID {
+        DispatchPlan::Undo {
+            bundle: bundle.to_owned(),
+        }
+    } else {
+        DispatchPlan::Redo {
+            bundle: bundle.to_owned(),
+        }
     }
 }
 
@@ -3462,13 +3497,17 @@ fn execute_handler(
         | DispatchPlan::CreateRevision { .. }
         | DispatchPlan::RestoreRevision { .. }
         | DispatchPlan::Timeline { .. }
-        | DispatchPlan::ReplayVerify { .. } => {
+        | DispatchPlan::ReplayVerify { .. }
+        | DispatchPlan::Undo { .. }
+        | DispatchPlan::Redo { .. } => {
             let command = match &plan {
                 DispatchPlan::HistoricalEdit { .. } => HISTORICAL_EDIT_COMMAND_ID,
                 DispatchPlan::CreateRevision { .. } => CREATE_REVISION_COMMAND_ID,
                 DispatchPlan::RestoreRevision { .. } => RESTORE_REVISION_COMMAND_ID,
                 DispatchPlan::Timeline { .. } => TIMELINE_COMMAND_ID,
                 DispatchPlan::ReplayVerify { .. } => REPLAY_VERIFY_COMMAND_ID,
+                DispatchPlan::Undo { .. } => UNDO_COMMAND_ID,
+                DispatchPlan::Redo { .. } => REDO_COMMAND_ID,
                 _ => unreachable!(),
             };
             let host = Host::new();
@@ -4062,6 +4101,22 @@ pub fn dispatch_registered_command(
             let view = host.timeline(string_field("bundle_path")?, string_field("feature_id")?)?;
             return Ok(timeline_response(schema.response_schema_version, &view));
         }
+        if command == UNDO_COMMAND_ID {
+            let view = host.undo(string_field("bundle_path")?)?;
+            return Ok(history_commit_response(
+                "undo",
+                schema.response_schema_version,
+                &view,
+            ));
+        }
+        if command == REDO_COMMAND_ID {
+            let view = host.redo(string_field("bundle_path")?)?;
+            return Ok(history_commit_response(
+                "redo",
+                schema.response_schema_version,
+                &view,
+            ));
+        }
         if command == REPLAY_VERIFY_COMMAND_ID {
             let verification = host.verify_history_replay(string_field("bundle_path")?)?;
             return Ok(json!({
@@ -4333,85 +4388,7 @@ fn history_commit_response(
     schema_version: &'static str,
     view: &threeterm_host::HistoryCommitView,
 ) -> Value {
-    let active = view.history.active_snapshot();
-    let diagnostics: Vec<_> = active
-        .features
-        .values()
-        .filter_map(|feature| feature.diagnostic.clone())
-        .collect();
-    let named_revisions: Vec<_> = view
-        .history
-        .named_revisions()
-        .values()
-        .map(|revision| {
-            json!({
-                "name": revision.name,
-                "revision_id": revision.snapshot.revision_id,
-                "provenance": revision.provenance,
-            })
-        })
-        .collect();
-    let features: Vec<_> = active
-        .features
-        .values()
-        .map(|feature| {
-            let mut value = json!({
-                "id": feature.id,
-                "status": history_status_name(feature.status),
-                "geometry_fingerprint": feature.geometry_fingerprint.clone().unwrap_or_default(),
-                "last_valid_geometry_fingerprint": feature
-                    .last_valid_geometry_fingerprint
-                    .clone()
-                    .unwrap_or_default(),
-                "stale_last_valid_geometry": feature.last_valid_geometry_fingerprint.is_some(),
-            });
-            if let Some(diagnostic) = &feature.diagnostic {
-                value["diagnostic"] = json!(diagnostic);
-            }
-            value
-        })
-        .collect();
-    let (dirty_features, evaluated_features, blocked_features) =
-        view.evaluation.as_ref().map_or_else(
-            || (Vec::new(), Vec::new(), Vec::new()),
-            |evaluation| {
-                (
-                    evaluation.dirty_features.clone(),
-                    evaluation.evaluated_features.clone(),
-                    evaluation.blocked_features.clone(),
-                )
-            },
-        );
-    let degraded = active.features.values().any(|feature| {
-        matches!(
-            feature.status,
-            threeterm_domain::history::HistoryStatus::Broken
-                | threeterm_domain::history::HistoryStatus::BlockedByFailure
-        )
-    });
-    json!({
-        "status": if degraded { "degraded" } else { "ok" },
-        "operation": operation,
-        "active_revision": active.revision_id,
-        "dirty_features": dirty_features,
-        "evaluated_features": evaluated_features,
-        "blocked_features": blocked_features,
-        "diagnostics": diagnostics,
-        "named_revisions": named_revisions,
-        "features": features,
-        "feature_graph_hash": view.snapshot.feature_graph_hash,
-        "revision_hash": view.snapshot.revision_hash,
-        "schema_version": schema_version,
-    })
-}
-
-fn history_status_name(status: threeterm_domain::history::HistoryStatus) -> &'static str {
-    match status {
-        threeterm_domain::history::HistoryStatus::CurrentValid => "current-valid",
-        threeterm_domain::history::HistoryStatus::Broken => "broken",
-        threeterm_domain::history::HistoryStatus::BlockedByFailure => "blocked-by-failure",
-        threeterm_domain::history::HistoryStatus::Suppressed => "suppressed",
-    }
+    threeterm_host::history_commit_value(operation, schema_version, view)
 }
 
 fn timeline_response(
@@ -4710,6 +4687,8 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             json!({ "bundle_path": bundle, "feature_id": feature_id })
         }
         DispatchPlan::ReplayVerify { bundle } => json!({ "bundle_path": bundle }),
+        DispatchPlan::Undo { bundle } => json!({ "bundle_path": bundle }),
+        DispatchPlan::Redo { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Extrude {
             bundle,
             feature_id,
@@ -7121,12 +7100,39 @@ mod tests {
         assert!(stderr.is_empty());
         let parsed: Value = serde_json::from_slice(&stdout).expect("listing is JSON");
         let commands = parsed.as_array().expect("listing is an array");
-        assert_eq!(commands.len(), 40);
+        assert_eq!(commands.len(), 42);
         let list = commands
             .iter()
             .find(|command| command["id"] == "list")
             .expect("list is registered");
         assert_eq!(list["schema_version"], "threeterm.command.list/1");
+    }
+
+    #[test]
+    fn shared_executor_moves_the_active_snapshot_on_undo_and_redo() {
+        let root = std::env::temp_dir().join(format!(
+            "threeterm-dispatch-undo-redo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos()
+        ));
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        host.historical_edit(&root, "l-bracket-base", "length", 61.0)
+            .expect("historical edit commits");
+        let request = json!({ "bundle_path": root.to_str().expect("utf-8 path") });
+
+        let undone = dispatch_registered_command(&host, UNDO_COMMAND_ID, request.clone())
+            .expect("shared executor undo moves back");
+        assert_eq!(undone["active_revision"], "history-revision-1");
+
+        let redone = dispatch_registered_command(&host, REDO_COMMAND_ID, request)
+            .expect("shared executor redo moves forward");
+        assert_eq!(redone["active_revision"], "history-revision-2");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

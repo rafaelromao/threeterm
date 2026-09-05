@@ -588,6 +588,56 @@ fn hole_through_positive_translated_box_removes_full_cylindrical_volume() {
 }
 
 #[test]
+fn tapped_hole_preserves_drilled_geometry_and_rejects_depth_beyond_support() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-tapped-hole-{}-{}",
+        std::process::id(),
+        unique_request_id("test")
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+
+    let base = worker
+        .extrude(
+            &rectangle_extrude_request()
+                .with_output_path(&temp, "base.brep")
+                .with_feature_id("base-1"),
+        )
+        .expect("base extrudes");
+    let drilled = worker
+        .hole(
+            &hole_request(&base.brep_path, "drilled", "drilled-1")
+                .with_output_path(&temp, "drilled.brep"),
+        )
+        .expect("drilled hole cuts");
+    let tapped = worker
+        .hole(
+            &hole_request(&base.brep_path, "tapped", "tapped-1")
+                .with_output_path(&temp, "tapped.brep")
+                .with_hole_kind("tapped")
+                .with_thread("M6x1", 1.0, 2.0),
+        )
+        .expect("tapped hole cuts");
+    assert_eq!(drilled.brep_sha256, tapped.brep_sha256);
+
+    let too_deep = worker.hole(
+        &hole_request(&base.brep_path, "too-deep", "too-deep-1")
+            .with_output_path(&temp, "too-deep.brep")
+            .with_hole_kind("tapped")
+            .with_thread("M6x1", 1.0, 4.0),
+    );
+    assert!(
+        too_deep.is_err(),
+        "thread depth beyond support must fail closed"
+    );
+    assert!(!temp.join("too-deep.brep").exists());
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn hole_with_missing_base_returns_request_malformed() {
     let Some(worker) = locate_worker() else {
         return;

@@ -6,7 +6,10 @@ use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
-use threeterm_protocol::schema::{APPLY_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID};
+use threeterm_protocol::schema::{
+    APPLY_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
+};
 
 fn root(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -43,6 +46,50 @@ fn extrude_request(path: &std::path::Path, revision: Option<&str>) -> Value {
     if let Some(revision) = revision {
         request["expected_revision"] = revision.into();
     }
+    request
+}
+
+fn transform_request(
+    path: &std::path::Path,
+    feature_id: &str,
+    base_feature_id: Option<&str>,
+    revision: &str,
+) -> Value {
+    let mut request = match base_feature_id {
+        None => json!({
+            "bundle_path": path.to_string_lossy(),
+            "feature_id": feature_id,
+            "profile": [[0.0, 0.0], [4.0, 0.0], [2.0, 4.0]],
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_direction": [0.0, 1.0, 0.0],
+            "angle": std::f64::consts::PI,
+        }),
+        Some(base_feature_id) if feature_id.starts_with("mirror") => json!({
+            "bundle_path": path.to_string_lossy(),
+            "feature_id": feature_id,
+            "base_feature_id": base_feature_id,
+            "plane_point": [0.0, 0.0, 0.0],
+            "plane_normal": [1.0, 0.0, 0.0],
+        }),
+        Some(base_feature_id) if feature_id.starts_with("linear") => json!({
+            "bundle_path": path.to_string_lossy(),
+            "feature_id": feature_id,
+            "base_feature_id": base_feature_id,
+            "direction": [1.0, 0.0, 0.0],
+            "count": 2,
+            "spacing": 5.0,
+        }),
+        Some(base_feature_id) => json!({
+            "bundle_path": path.to_string_lossy(),
+            "feature_id": feature_id,
+            "base_feature_id": base_feature_id,
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_normal": [0.0, 0.0, 1.0],
+            "angle_step": std::f64::consts::FRAC_PI_2,
+            "count": 2,
+        }),
+    };
+    request["expected_revision"] = revision.into();
     request
 }
 
@@ -229,5 +276,92 @@ fn preview_is_read_only_and_commit_rechecks_the_draft_revision() {
         fs::read(root.join("transactions.log")).unwrap(),
         after_advance_log
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
+    let Some(_worker) = OcctWorker::locate().ok() else {
+        eprintln!("canonical transform tracer: OCCT worker unavailable");
+        return;
+    };
+    let root = root("canonical-transform-tracer");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+
+    let initial = host
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
+        .expect("initial identity executes");
+    let revolve = host
+        .execute_domain_command(
+            REVOLVE_COMMAND_ID,
+            transform_request(
+                &root,
+                "revolve-feature",
+                None,
+                initial["revision_hash"].as_str().unwrap(),
+            ),
+        )
+        .expect("revolve executes");
+    let mut revision = revolve["revision_hash"].as_str().unwrap().to_string();
+    let mut commands = vec![
+        (MIRROR_COMMAND_ID, "mirror-feature"),
+        (LINEAR_PATTERN_COMMAND_ID, "linear-feature"),
+        (CIRCULAR_PATTERN_COMMAND_ID, "circular-feature"),
+    ];
+    for (command, feature_id) in commands.drain(..) {
+        let response = host
+            .execute_domain_command(
+                command,
+                transform_request(&root, feature_id, Some("revolve-feature"), &revision),
+            )
+            .expect("transform executes");
+        revision = response["revision_hash"].as_str().unwrap().to_string();
+    }
+
+    let loaded = Bundle::at(&root).open().expect("bundle opens");
+    assert_eq!(loaded.log.entries().len(), 4);
+    assert!(
+        loaded
+            .log
+            .entries()
+            .iter()
+            .all(|entry| entry.intent.is_some())
+    );
+    let original_hashes: Vec<_> = [
+        "revolve-feature",
+        "mirror-feature",
+        "linear-feature",
+        "circular-feature",
+    ]
+    .into_iter()
+    .map(|feature_id| {
+        fs::read(root.join("brep").join(format!("{feature_id}.brep"))).expect("BREP reads")
+    })
+    .collect();
+    fs::remove_dir_all(root.join("brep")).expect("derived BREPs delete");
+
+    let before = Bundle::at(&root).open().expect("bundle reopens");
+    let replayed = host
+        .load_with_extrude_replay(&root)
+        .expect("canonical transforms replay");
+    assert_eq!(replayed.revision_hash, before.revision_hash_hex());
+    assert_eq!(Bundle::at(&root).open().unwrap().log.entries().len(), 4);
+    for (feature_id, original) in [
+        "revolve-feature",
+        "mirror-feature",
+        "linear-feature",
+        "circular-feature",
+    ]
+    .into_iter()
+    .zip(original_hashes)
+    {
+        assert_eq!(
+            fs::read(root.join("brep").join(format!("{feature_id}.brep"))).unwrap(),
+            original,
+            "replayed geometry for {feature_id}"
+        );
+    }
+
     let _ = fs::remove_dir_all(&root);
 }

@@ -18,13 +18,14 @@ use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
-    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
-    HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
     REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
-    find_by_name, iter,
+    REVOLVE_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_FUSE_RESPONSE_SCHEMA_VERSION, BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
@@ -3321,74 +3322,34 @@ fn execute_handler(
             stdout,
             stderr,
         ),
-        DispatchPlan::Revolve {
-            bundle,
-            feature_id,
-            axis_point,
-            axis_direction,
-            angle,
-            ..
-        } => emit_revolve(
-            &bundle,
-            &feature_id,
-            profile_from_request(request),
-            axis_point,
-            axis_direction,
-            angle,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::Mirror {
-            bundle,
-            feature_id,
-            base_feature_id,
-            plane_point,
-            plane_normal,
-        } => emit_mirror(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            plane_point,
-            plane_normal,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::LinearPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            direction,
-            count,
-            spacing,
-        } => emit_linear_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            direction,
-            count,
-            spacing,
-            stdout,
-            stderr,
-        ),
-        DispatchPlan::CircularPattern {
-            bundle,
-            feature_id,
-            base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-        } => emit_circular_pattern(
-            &bundle,
-            &feature_id,
-            &base_feature_id,
-            axis_point,
-            axis_normal,
-            angle_step,
-            count,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Revolve { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, REVOLVE_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::Mirror { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, MIRROR_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::LinearPattern { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, LINEAR_PATTERN_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
+        DispatchPlan::CircularPattern { .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, CIRCULAR_PATTERN_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Shell {
             bundle,
             feature_id,
@@ -3604,6 +3565,10 @@ pub fn dispatch_registered_command(
         IDENTITY_COMMAND_ID
             | APPLY_COMMAND_ID
             | EXTRUDE_COMMAND_ID
+            | REVOLVE_COMMAND_ID
+            | MIRROR_COMMAND_ID
+            | LINEAR_PATTERN_COMMAND_ID
+            | CIRCULAR_PATTERN_COMMAND_ID
             | BOOLEAN_PATTERN_COMMAND_ID
             | REATTACH_EDGE_COMMAND_ID
     ) {
@@ -4325,6 +4290,10 @@ fn execute_registered_with_observer(
     if matches!(
         command,
         threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+            | threeterm_protocol::schema::REVOLVE_COMMAND_ID
+            | threeterm_protocol::schema::MIRROR_COMMAND_ID
+            | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
+            | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
             | threeterm_protocol::schema::IDENTITY_COMMAND_ID
             | threeterm_protocol::schema::APPLY_COMMAND_ID
             | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
@@ -5010,6 +4979,7 @@ fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: 
     })
 }
 
+#[allow(dead_code)]
 fn profile_from_request(request: &Value) -> Vec<(f64, f64)> {
     serde_json::from_value(request["profile"].clone())
         .expect("registered profile schema guarantees coordinate pairs")
@@ -5215,6 +5185,7 @@ fn emit_hole(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_revolve(
     bundle: &str,
     feature_id: &str,
@@ -5254,6 +5225,7 @@ fn emit_revolve(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_mirror(
     bundle: &str,
     feature_id: &str,
@@ -5302,6 +5274,7 @@ fn emit_mirror(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_linear_pattern(
     bundle: &str,
     feature_id: &str,
@@ -5357,6 +5330,7 @@ fn emit_linear_pattern(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_circular_pattern(
     bundle: &str,
     feature_id: &str,
@@ -5760,6 +5734,7 @@ fn write_hole_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_revolve_view(
     view: &threeterm_host::RevolveCommitView,
     schema_version: &str,
@@ -5787,6 +5762,7 @@ fn write_revolve_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_mirror_view(
     view: &threeterm_host::MirrorCommitView,
     schema_version: &str,
@@ -5814,6 +5790,7 @@ fn write_mirror_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_linear_pattern_view(
     view: &threeterm_host::LinearPatternCommitView,
     schema_version: &str,
@@ -5841,6 +5818,7 @@ fn write_linear_pattern_view(
     )
 }
 
+#[allow(dead_code)]
 fn write_circular_pattern_view(
     view: &threeterm_host::CircularPatternCommitView,
     schema_version: &str,

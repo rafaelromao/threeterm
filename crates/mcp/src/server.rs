@@ -397,7 +397,13 @@ impl McpServer {
 
         if matches!(
             schema_entry.id,
-            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
+            IDENTITY_COMMAND_ID
+                | APPLY_COMMAND_ID
+                | BOOLEAN_PATTERN_COMMAND_ID
+                | threeterm_protocol::schema::REVOLVE_COMMAND_ID
+                | threeterm_protocol::schema::MIRROR_COMMAND_ID
+                | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
+                | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
         ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }

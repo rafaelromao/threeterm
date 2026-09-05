@@ -98,6 +98,10 @@ pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
 pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
+pub const REVOLVE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.revolve/1";
+pub const MIRROR_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.mirror/1";
+pub const LINEAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.linear-pattern/1";
+pub const CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.circular-pattern/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -437,6 +441,422 @@ impl CanonicalExtrudeIntent {
     }
 }
 
+fn is_revision_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_intent_impact(
+    affected_semantic_ids: &[String],
+    feature_id: &str,
+    source_revision: &str,
+    worker_requirements: &threeterm_protocol::artifact::WorkerFingerprint,
+    kind: &str,
+) -> Result<(), BundleError> {
+    if affected_semantic_ids != [feature_id.to_string()] || !is_revision_hex(source_revision) {
+        return Err(BundleError::Invalid(format!(
+            "canonical {kind} semantic impact or source revision is invalid"
+        )));
+    }
+    if worker_requirements.worker_kind != "occt"
+        || worker_requirements.worker_schema_version.is_empty()
+        || worker_requirements.protocol_schema_version.is_empty()
+    {
+        return Err(BundleError::Invalid(format!(
+            "canonical {kind} worker requirements are invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn is_finite_vec3(value: &[f64; 3]) -> bool {
+    value.iter().all(|component| component.is_finite())
+}
+
+fn is_nonzero_vec3(value: &[f64; 3]) -> bool {
+    is_finite_vec3(value)
+        && value
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            != 0.0
+}
+
+fn is_finite_profile(profile: &[[f64; 2]]) -> bool {
+    profile.len() >= 3 && profile.iter().flatten().all(|value| value.is_finite())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RevolveDeterministicInputs {
+    pub profile: Vec<[f64; 2]>,
+    pub axis_point: [f64; 3],
+    pub axis_direction: [f64; 3],
+    pub angle: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalRevolveIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: RevolveDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalRevolveIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != REVOLVE_INTENT_SCHEMA_VERSION
+            || self.command != "revolve"
+            || self.operation != "revolve"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical revolve intent identity is invalid".to_string(),
+            ));
+        }
+        let inputs = &self.deterministic_inputs;
+        if !is_finite_profile(&inputs.profile)
+            || !is_finite_vec3(&inputs.axis_point)
+            || !is_nonzero_vec3(&inputs.axis_direction)
+            || !inputs.angle.is_finite()
+            || inputs.angle <= 0.0
+        {
+            return Err(BundleError::Invalid(
+                "canonical revolve deterministic inputs are invalid".to_string(),
+            ));
+        }
+        validate_intent_impact(
+            &self.affected_semantic_ids,
+            feature_id,
+            &self.source_revision,
+            &self.worker_requirements,
+            "revolve",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorDeterministicInputs {
+    pub base_feature_id: String,
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalMirrorIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: MirrorDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalMirrorIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != MIRROR_INTENT_SCHEMA_VERSION
+            || self.command != "mirror"
+            || self.operation != "mirror"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical mirror intent identity is invalid".to_string(),
+            ));
+        }
+        let inputs = &self.deterministic_inputs;
+        if inputs.base_feature_id.is_empty()
+            || !is_finite_vec3(&inputs.plane_point)
+            || !is_nonzero_vec3(&inputs.plane_normal)
+        {
+            return Err(BundleError::Invalid(
+                "canonical mirror deterministic inputs are invalid".to_string(),
+            ));
+        }
+        validate_intent_impact(
+            &self.affected_semantic_ids,
+            feature_id,
+            &self.source_revision,
+            &self.worker_requirements,
+            "mirror",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LinearPatternDeterministicInputs {
+    pub base_feature_id: String,
+    pub direction: [f64; 3],
+    pub count: u32,
+    pub spacing: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalLinearPatternIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: LinearPatternDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalLinearPatternIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != LINEAR_PATTERN_INTENT_SCHEMA_VERSION
+            || self.command != "linear-pattern"
+            || self.operation != "linear-pattern"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical linear pattern intent identity is invalid".to_string(),
+            ));
+        }
+        let inputs = &self.deterministic_inputs;
+        if inputs.base_feature_id.is_empty()
+            || !is_nonzero_vec3(&inputs.direction)
+            || inputs.count < 1
+            || !inputs.spacing.is_finite()
+            || inputs.spacing <= 0.0
+        {
+            return Err(BundleError::Invalid(
+                "canonical linear pattern deterministic inputs are invalid".to_string(),
+            ));
+        }
+        validate_intent_impact(
+            &self.affected_semantic_ids,
+            feature_id,
+            &self.source_revision,
+            &self.worker_requirements,
+            "linear pattern",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CircularPatternDeterministicInputs {
+    pub base_feature_id: String,
+    pub axis_point: [f64; 3],
+    pub axis_normal: [f64; 3],
+    pub angle_step: f64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalCircularPatternIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: CircularPatternDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalCircularPatternIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
+            || self.command != "circular-pattern"
+            || self.operation != "circular-pattern"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical circular pattern intent identity is invalid".to_string(),
+            ));
+        }
+        let inputs = &self.deterministic_inputs;
+        if inputs.base_feature_id.is_empty()
+            || !is_finite_vec3(&inputs.axis_point)
+            || !is_nonzero_vec3(&inputs.axis_normal)
+            || !inputs.angle_step.is_finite()
+            || inputs.angle_step <= 0.0
+            || inputs.angle_step > std::f64::consts::TAU
+            || inputs.count < 1
+        {
+            return Err(BundleError::Invalid(
+                "canonical circular pattern deterministic inputs are invalid".to_string(),
+            ));
+        }
+        validate_intent_impact(
+            &self.affected_semantic_ids,
+            feature_id,
+            &self.source_revision,
+            &self.worker_requirements,
+            "circular pattern",
+        )
+    }
+}
+
+/// Versioned canonical command intent recorded in the Canonical Transaction
+/// Log. The untagged representation keeps every variant's JSON shape exactly
+/// the shape its single-command struct would serialize to, so entries sealed
+/// before a new command migrated (extrude today) keep byte-identical
+/// digests. Variant `deterministic_inputs` shapes are mutually exclusive and
+/// every struct denies unknown fields, so decoding is unambiguous and
+/// fail-closed: unknown commands, operations, and fields are rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum CanonicalIntent {
+    Extrude(CanonicalExtrudeIntent),
+    Revolve(CanonicalRevolveIntent),
+    Mirror(CanonicalMirrorIntent),
+    LinearPattern(CanonicalLinearPatternIntent),
+    CircularPattern(CanonicalCircularPatternIntent),
+}
+
+impl CanonicalIntent {
+    pub fn command(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => &intent.command,
+            Self::Revolve(intent) => &intent.command,
+            Self::Mirror(intent) => &intent.command,
+            Self::LinearPattern(intent) => &intent.command,
+            Self::CircularPattern(intent) => &intent.command,
+        }
+    }
+
+    pub fn operation(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => &intent.operation,
+            Self::Revolve(intent) => &intent.operation,
+            Self::Mirror(intent) => &intent.operation,
+            Self::LinearPattern(intent) => &intent.operation,
+            Self::CircularPattern(intent) => &intent.operation,
+        }
+    }
+
+    pub fn schema_version(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => &intent.schema_version,
+            Self::Revolve(intent) => &intent.schema_version,
+            Self::Mirror(intent) => &intent.schema_version,
+            Self::LinearPattern(intent) => &intent.schema_version,
+            Self::CircularPattern(intent) => &intent.schema_version,
+        }
+    }
+
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => &intent.request_id,
+            Self::Revolve(intent) => &intent.request_id,
+            Self::Mirror(intent) => &intent.request_id,
+            Self::LinearPattern(intent) => &intent.request_id,
+            Self::CircularPattern(intent) => &intent.request_id,
+        }
+    }
+
+    pub fn affected_semantic_ids(&self) -> &[String] {
+        match self {
+            Self::Extrude(intent) => &intent.affected_semantic_ids,
+            Self::Revolve(intent) => &intent.affected_semantic_ids,
+            Self::Mirror(intent) => &intent.affected_semantic_ids,
+            Self::LinearPattern(intent) => &intent.affected_semantic_ids,
+            Self::CircularPattern(intent) => &intent.affected_semantic_ids,
+        }
+    }
+
+    pub fn source_revision(&self) -> &str {
+        match self {
+            Self::Extrude(intent) => &intent.source_revision,
+            Self::Revolve(intent) => &intent.source_revision,
+            Self::Mirror(intent) => &intent.source_revision,
+            Self::LinearPattern(intent) => &intent.source_revision,
+            Self::CircularPattern(intent) => &intent.source_revision,
+        }
+    }
+
+    pub fn worker_requirements(&self) -> &threeterm_protocol::artifact::WorkerFingerprint {
+        match self {
+            Self::Extrude(intent) => &intent.worker_requirements,
+            Self::Revolve(intent) => &intent.worker_requirements,
+            Self::Mirror(intent) => &intent.worker_requirements,
+            Self::LinearPattern(intent) => &intent.worker_requirements,
+            Self::CircularPattern(intent) => &intent.worker_requirements,
+        }
+    }
+
+    /// The canonical base feature this intent transforms, if any. Revolve
+    /// and additive extrude are profile-based and return `None`;
+    /// subtractive extrude, mirror, and both patterns return their
+    /// target/base feature.
+    pub fn base_reference(&self) -> Option<&str> {
+        match self {
+            Self::Extrude(intent) => intent.target_feature_id.as_deref(),
+            Self::Revolve(_) => None,
+            Self::Mirror(intent) => Some(intent.deterministic_inputs.base_feature_id.as_str()),
+            Self::LinearPattern(intent) => {
+                Some(intent.deterministic_inputs.base_feature_id.as_str())
+            }
+            Self::CircularPattern(intent) => {
+                Some(intent.deterministic_inputs.base_feature_id.as_str())
+            }
+        }
+    }
+
+    /// `true` when the intent carries the current (appendable) schema
+    /// version for its command. Older supported epochs remain readable
+    /// and replayable but are never sealed into new transactions.
+    pub fn is_current_schema_version(&self) -> bool {
+        match self {
+            Self::Extrude(intent) => intent.schema_version == EXTRUDE_INTENT_SCHEMA_VERSION,
+            Self::Revolve(intent) => intent.schema_version == REVOLVE_INTENT_SCHEMA_VERSION,
+            Self::Mirror(intent) => intent.schema_version == MIRROR_INTENT_SCHEMA_VERSION,
+            Self::LinearPattern(intent) => {
+                intent.schema_version == LINEAR_PATTERN_INTENT_SCHEMA_VERSION
+            }
+            Self::CircularPattern(intent) => {
+                intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
+            }
+        }
+    }
+
+    /// `true` when the intent carries a readable schema version for its
+    /// command, including supported prior epochs.
+    pub fn is_readable_schema_version(&self) -> bool {
+        match self {
+            Self::Extrude(intent) => matches!(
+                intent.schema_version.as_str(),
+                EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+            ),
+            Self::Revolve(intent) => intent.schema_version == REVOLVE_INTENT_SCHEMA_VERSION,
+            Self::Mirror(intent) => intent.schema_version == MIRROR_INTENT_SCHEMA_VERSION,
+            Self::LinearPattern(intent) => {
+                intent.schema_version == LINEAR_PATTERN_INTENT_SCHEMA_VERSION
+            }
+            Self::CircularPattern(intent) => {
+                intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
+            }
+        }
+    }
+
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        match self {
+            Self::Extrude(intent) => intent.validate(feature_id),
+            Self::Revolve(intent) => intent.validate(feature_id),
+            Self::Mirror(intent) => intent.validate(feature_id),
+            Self::LinearPattern(intent) => intent.validate(feature_id),
+            Self::CircularPattern(intent) => intent.validate(feature_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LogEntry {
@@ -457,7 +877,7 @@ pub struct LogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<CanonicalExtrudeIntent>,
+    pub intent: Option<CanonicalIntent>,
     pub terminal_digest: String,
 }
 
@@ -497,7 +917,7 @@ impl LogEntry {
         self
     }
 
-    fn with_intent(mut self, intent: &CanonicalExtrudeIntent) -> Self {
+    fn with_intent(mut self, intent: &CanonicalIntent) -> Self {
         self.intent = Some(intent.clone());
         self.terminal_digest = self.recomputed_digest();
         self
@@ -563,7 +983,7 @@ impl TransactionLog {
         brep_bytes: &[u8],
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
-        intent: Option<&CanonicalExtrudeIntent>,
+        intent: Option<&CanonicalIntent>,
     ) {
         let previous = self.terminal_digest_hex().to_string();
         let entry =
@@ -1468,6 +1888,32 @@ impl Bundle {
         intent: &CanonicalExtrudeIntent,
         brep_bytes: &[u8],
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
+            feature_id,
+            kind,
+            expected_revision,
+            request_id,
+            provenance,
+            &CanonicalIntent::Extrude(intent.clone()),
+            brep_bytes,
+        )
+    }
+
+    /// Publish one verified BREP together with its canonical command
+    /// intent for any intent-backed command (extrude, revolve, mirror,
+    /// linear pattern, circular pattern). The intent and artifact
+    /// provenance share the same generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        intent: &CanonicalIntent,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
         with_bundle_write_lock(&self.root, || {
             self.append_features_locked_with_fit(
                 &[(feature_id, kind)],
@@ -1777,7 +2223,7 @@ impl Bundle {
         reject_existing_brep: bool,
         allow_existing_sketch_update: bool,
         allow_existing_bracket_edit: bool,
-        intent: Option<&CanonicalExtrudeIntent>,
+        intent: Option<&CanonicalIntent>,
     ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
@@ -1816,52 +2262,67 @@ impl Bundle {
             )));
         }
         if let Some(intent) = intent {
-            if intent.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION {
+            if !intent.is_current_schema_version() {
                 return Err(BundleError::CanonicalVersionUnsupported {
                     log_index: None,
-                    version: intent.schema_version.clone(),
+                    version: intent.schema_version().to_string(),
                 });
             }
-            if intent.command != "extrude"
-                || !matches!(intent.operation.as_str(), "additive" | "subtractive")
-            {
+            let operation_known = match intent {
+                CanonicalIntent::Extrude(_) => {
+                    matches!(intent.operation(), "additive" | "subtractive")
+                }
+                CanonicalIntent::Revolve(_) => intent.operation() == "revolve",
+                CanonicalIntent::Mirror(_) => intent.operation() == "mirror",
+                CanonicalIntent::LinearPattern(_) => intent.operation() == "linear-pattern",
+                CanonicalIntent::CircularPattern(_) => intent.operation() == "circular-pattern",
+            };
+            if !operation_known {
                 return Err(BundleError::CanonicalOperationUnknown {
                     log_index: None,
-                    operation: format!("{}:{}", intent.command, intent.operation),
+                    operation: format!("{}:{}", intent.command(), intent.operation()),
                 });
             }
-            if let Some(target_feature_id) = &intent.target_feature_id
-                && !loaded.graph.contains_feature(target_feature_id)
+            if let Some(base_feature_id) = intent.base_reference()
+                && !loaded.graph.contains_feature(base_feature_id)
             {
                 return Err(BundleError::Invalid(format!(
-                    "canonical extrude target feature is missing: {target_feature_id}"
+                    "canonical {} base feature is missing: {base_feature_id}",
+                    intent.command(),
                 )));
             }
             if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent does not match its transaction".to_string(),
-                ));
+                return Err(BundleError::Invalid(format!(
+                    "canonical {} intent does not match its transaction",
+                    intent.command(),
+                )));
             }
-            if idempotency_key != Some(intent.request_id.as_str()) {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent request ID does not match transaction provenance"
-                        .to_string(),
-                ));
+            if idempotency_key != Some(intent.request_id()) {
+                return Err(BundleError::Invalid(format!(
+                    "canonical {} intent request ID does not match transaction provenance",
+                    intent.command(),
+                )));
             }
-            if intent.worker_requirements != occt_worker_identity() {
+            if intent.worker_requirements() != &occt_worker_identity() {
                 return Err(BundleError::CompatibilityIdentityMismatch {
-                    identity: "canonical_extrude_worker",
+                    identity: match intent {
+                        CanonicalIntent::Extrude(_) => "canonical_extrude_worker",
+                        CanonicalIntent::Revolve(_) => "canonical_revolve_worker",
+                        CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
+                        CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
+                        CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                    },
                     expected: serde_json::to_string(&occt_worker_identity())
                         .expect("worker identity serializes"),
-                    found: serde_json::to_string(&intent.worker_requirements)
+                    found: serde_json::to_string(intent.worker_requirements())
                         .expect("worker identity serializes"),
                 });
             }
-            if intent.source_revision != loaded.revision_hash_hex() {
-                return Err(BundleError::Invalid(
-                    "canonical extrude intent source revision does not match the transaction source"
-                        .to_string(),
-                ));
+            if intent.source_revision() != loaded.revision_hash_hex() {
+                return Err(BundleError::Invalid(format!(
+                    "canonical {} intent source revision does not match the transaction source",
+                    intent.command(),
+                )));
             }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
@@ -2288,29 +2749,32 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     log_index: entry.log_index,
                     detail: error.to_string(),
                 })?;
-            if entry.idempotency_key.as_deref() != Some(intent.request_id.as_str()) {
+            if entry.idempotency_key.as_deref() != Some(intent.request_id()) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
-                    detail:
-                        "canonical extrude intent request ID does not match transaction provenance"
-                            .to_string(),
+                    detail: format!(
+                        "canonical {} intent request ID does not match transaction provenance",
+                        intent.command(),
+                    ),
                 });
             }
-            if intent.source_revision != graph.revision_hash_hex(&entry.previous_digest) {
+            if intent.source_revision() != graph.revision_hash_hex(&entry.previous_digest) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
-                    detail:
-                        "canonical extrude intent source revision does not match the log prefix"
-                            .to_string(),
+                    detail: format!(
+                        "canonical {} intent source revision does not match the log prefix",
+                        intent.command(),
+                    ),
                 });
             }
-            if let Some(target_feature_id) = &intent.target_feature_id
-                && !graph.contains_feature(target_feature_id)
+            if let Some(base_feature_id) = intent.base_reference()
+                && !graph.contains_feature(base_feature_id)
             {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
                     detail: format!(
-                        "canonical extrude target feature is missing: {target_feature_id}"
+                        "canonical {} base feature is missing: {base_feature_id}",
+                        intent.command(),
                     ),
                 });
             }
@@ -2559,29 +3023,30 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
         });
     }
     if let Some(intent) = &entry.intent {
-        if !matches!(
-            intent.schema_version.as_str(),
-            EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
-        ) {
+        if !intent.is_readable_schema_version() {
             return Err(BundleError::CanonicalVersionUnsupported {
                 log_index: Some(entry.log_index),
-                version: intent.schema_version.clone(),
+                version: intent.schema_version().to_string(),
             });
         }
-        if intent.command != "extrude"
-            || !matches!(intent.operation.as_str(), "additive" | "subtractive")
-        {
+        if intent.validate(&entry.feature_id).is_err() {
             return Err(BundleError::CanonicalOperationUnknown {
                 log_index: Some(entry.log_index),
-                operation: format!("{}:{}", intent.command, intent.operation),
+                operation: format!("{}:{}", intent.command(), intent.operation()),
             });
         }
-        if intent.worker_requirements != occt_worker_identity() {
+        if intent.worker_requirements() != &occt_worker_identity() {
             return Err(BundleError::CompatibilityIdentityMismatch {
-                identity: "canonical_extrude_worker",
+                identity: match intent {
+                    CanonicalIntent::Extrude(_) => "canonical_extrude_worker",
+                    CanonicalIntent::Revolve(_) => "canonical_revolve_worker",
+                    CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
+                    CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
+                    CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                },
                 expected: serde_json::to_string(&occt_worker_identity())
                     .expect("worker identity serializes"),
-                found: serde_json::to_string(&intent.worker_requirements)
+                found: serde_json::to_string(intent.worker_requirements())
                     .expect("worker identity serializes"),
             });
         }

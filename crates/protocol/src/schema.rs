@@ -377,6 +377,7 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "profile": {
                 "type": "array",
                 "minItems": 3,
@@ -388,7 +389,6 @@ pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 }
             },
             "height": { "type": "number", "exclusiveMinimum": 0 },
-            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "mode": { "enum": ["additive", "subtractive"] },
             "target_feature_id": { "type": "string", "minLength": 1 }
         },
@@ -649,6 +649,7 @@ pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+// Transform commits may fence themselves to the revision they inspected.
 pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -663,6 +664,7 @@ pub static REVOLVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "profile": {
                 "type": "array",
                 "minItems": 3,
@@ -1006,6 +1008,7 @@ pub static MIRROR_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "base_feature_id": { "type": "string", "minLength": 1 },
             "plane_point": {
                 "type": "array",
@@ -1038,6 +1041,7 @@ pub static LINEAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "base_feature_id": { "type": "string", "minLength": 1 },
             "direction": {
                 "type": "array",
@@ -1073,6 +1077,7 @@ pub static CIRCULAR_PATTERN_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "base_feature_id": { "type": "string", "minLength": 1 },
             "axis_point": {
                 "type": "array",

@@ -25,9 +25,9 @@ use threeterm_occt_worker::{
     LoftRequest, MirrorRequest, Operation, ShellRequest,
 };
 use threeterm_persistence::{
-    Bundle, CanonicalExtrudeIntent, EXTRUDE_INTENT_SCHEMA_VERSION, ExtrudeDeterministicInputs,
-    MANIFEST_FILENAME, PublicationFailurePoint, TRANSACTIONS_LOG_FILENAME,
-    fail_next_publication_at,
+    Bundle, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, MANIFEST_FILENAME, PublicationFailurePoint,
+    TRANSACTIONS_LOG_FILENAME, fail_next_publication_at,
 };
 use threeterm_protocol::artifact::sha256_hex;
 
@@ -256,6 +256,9 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .last()
         .expect("extrude transaction exists");
     let intent = entry.intent.as_ref().expect("extrude intent persists");
+    let CanonicalIntent::Extrude(intent) = intent else {
+        panic!("expected extrude intent");
+    };
     assert_eq!(intent.command, "extrude");
     assert_eq!(intent.operation, "additive");
     assert_eq!(intent.affected_semantic_ids, ["replay-box-1"]);

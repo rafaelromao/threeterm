@@ -382,10 +382,16 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
 
 #[test]
 fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
-    if OcctWorker::locate().is_err() {
-        eprintln!("interactive command slice: OCCT worker unavailable");
-        return;
-    }
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+            panic!("interactive hole command requires OCCT worker: {error}")
+        }
+        Err(error) => {
+            eprintln!("interactive command slice: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after epoch")
@@ -397,7 +403,6 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     let host = Host::new();
     host.save(&root, "seed", "box")
         .expect("project is persisted");
-    let worker = OcctWorker::locate().expect("OCCT worker is available");
     host.extrude(
         &root,
         ExtrudeRequest::new(

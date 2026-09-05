@@ -1062,6 +1062,15 @@ fn hole_request(root: &std::path::Path, feature_id: &str) -> Value {
     })
 }
 
+fn tapped_hole_request(root: &std::path::Path, feature_id: &str) -> Value {
+    let mut request = hole_request(root, feature_id);
+    request["hole_kind"] = json!("tapped");
+    request["thread_designation"] = json!("M6x1");
+    request["thread_pitch"] = json!(1.0);
+    request["thread_depth"] = json!(2.0);
+    request
+}
+
 fn setup_hole_base(path: &std::path::Path, worker: &OcctWorker) {
     Bundle::create(path).expect("bundle creates");
     threeterm_host::Host::new()
@@ -1076,6 +1085,53 @@ fn setup_hole_base(path: &std::path::Path, worker: &OcctWorker) {
             worker,
         )
         .expect("hole base commits");
+}
+
+fn cli_hole(root: &std::path::Path, feature_id: &str, tapped: bool) -> Value {
+    let path = root.to_string_lossy().into_owned();
+    let kind = if tapped { "tapped" } else { "drilled" };
+    let mut args = vec![
+        "--machine".to_string(),
+        "hole".to_string(),
+        "--bundle".to_string(),
+        path,
+        "--feature-id".to_string(),
+        feature_id.to_string(),
+        "--base".to_string(),
+        "hole-base".to_string(),
+        "--position".to_string(),
+        "1.5,1.5,0.0".to_string(),
+        "--direction".to_string(),
+        "0.0,0.0,1.0".to_string(),
+        "--diameter".to_string(),
+        "1.0".to_string(),
+        "--hole-kind".to_string(),
+        kind.to_string(),
+    ];
+    if tapped {
+        args.extend([
+            "--thread-designation".to_string(),
+            "M6x1".to_string(),
+            "--thread-pitch".to_string(),
+            "1.0".to_string(),
+            "--thread-depth".to_string(),
+            "2.0".to_string(),
+        ]);
+    }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = threeterm_cli::dispatch::dispatch(
+        args.into_iter().map(OsString::from),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(
+        status,
+        0,
+        "CLI hole failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    serde_json::from_slice(&stdout).expect("CLI hole returns JSON")
 }
 
 fn mcp_hole(root: &std::path::Path, feature_id: &str) -> Value {
@@ -1093,6 +1149,20 @@ fn mcp_hole(root: &std::path::Path, feature_id: &str) -> Value {
     response.result.expect("MCP hole executes")["structuredContent"].clone()
 }
 
+fn mcp_tapped_hole(root: &std::path::Path, feature_id: &str) -> Value {
+    let entry = threeterm_protocol::schema::find(HOLE_COMMAND_ID).expect("hole is registered");
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": entry.schema_version,
+            "arguments": tapped_hole_request(root, feature_id)
+        }),
+    });
+    response.result.expect("MCP tapped hole executes")["structuredContent"].clone()
+}
+
 #[test]
 fn cli_mcp_and_tui_commit_equivalent_drilled_holes() {
     let cli_root = root("hole-cli");
@@ -1108,12 +1178,7 @@ fn cli_mcp_and_tui_commit_equivalent_drilled_holes() {
         setup_hole_base(path, &worker);
     }
 
-    let cli = threeterm_cli::dispatch::dispatch_registered_command(
-        &threeterm_host::Host::new(),
-        HOLE_COMMAND_ID,
-        hole_request(&cli_root, "hole-1"),
-    )
-    .expect("CLI hole executes");
+    let cli = cli_hole(&cli_root, "hole-1", false);
     let tui = threeterm_tui::execute_domain_command(
         &threeterm_host::Host::new(),
         HOLE_COMMAND_ID,
@@ -1137,4 +1202,140 @@ fn cli_mcp_and_tui_commit_equivalent_drilled_holes() {
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_equivalent_tapped_holes() {
+    let cli_root = root("tapped-hole-cli");
+    let mcp_root = root("tapped-hole-mcp");
+    let tui_root = root("tapped-hole-tui");
+    let Some(worker) = required_worker("cli_mcp_and_tui_commit_equivalent_tapped_holes") else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        setup_hole_base(path, &worker);
+    }
+
+    let cli = cli_hole(&cli_root, "hole-1", true);
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        HOLE_COMMAND_ID,
+        tapped_hole_request(&tui_root, "hole-1"),
+    )
+    .expect("TUI tapped hole executes");
+    let mcp = mcp_tapped_hole(&mcp_root, "hole-1");
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "hole");
+        assert_eq!(result["feature_id"], "hole-1");
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        let loaded = Bundle::at(path).open().expect("tapped bundle opens");
+        let entry = loaded
+            .log
+            .entries()
+            .last()
+            .expect("tapped transaction exists");
+        let intent = entry.intent.as_ref().expect("tapped intent persists");
+        let intent = match intent {
+            threeterm_persistence::CanonicalIntent::Hole(intent) => intent,
+            other => panic!("unexpected intent: {other:?}"),
+        };
+        assert_eq!(intent.hole_kind, "tapped");
+        assert_eq!(
+            intent.deterministic_inputs.thread_designation.as_deref(),
+            Some("M6x1")
+        );
+    }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_report_the_same_invalid_hole_diagnostic() {
+    let cli_root = root("invalid-hole-cli");
+    let mcp_root = root("invalid-hole-mcp");
+    let tui_root = root("invalid-hole-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        Bundle::create(path).expect("bundle creates");
+    }
+    let before = fs::read(cli_root.join("manifest.json")).expect("CLI manifest reads");
+    let before_log = fs::read(cli_root.join("transactions.log")).expect("CLI log reads");
+
+    let cli_path = cli_root.to_string_lossy().into_owned();
+    let mut cli_stdout = Vec::new();
+    let mut cli_stderr = Vec::new();
+    let status = threeterm_cli::dispatch::dispatch(
+        [
+            "--machine",
+            "hole",
+            "--bundle",
+            cli_path.as_str(),
+            "--feature-id",
+            "hole-1",
+            "--base",
+            "missing-base",
+            "--position",
+            "1.5,1.5,0.0",
+            "--direction",
+            "0.0,0.0,1.0",
+            "--diameter",
+            "1.0",
+        ]
+        .into_iter()
+        .map(OsString::from),
+        &mut cli_stdout,
+        &mut cli_stderr,
+    );
+    assert_ne!(status, 0);
+    assert!(cli_stdout.is_empty());
+    let cli_diagnostic: Value = serde_json::from_slice(&cli_stderr).expect("CLI diagnostic JSON");
+    assert_eq!(cli_diagnostic["code"], "invalid_request");
+
+    let mut tui_request = hole_request(&tui_root, "hole-1");
+    tui_request["base_feature_id"] = json!("missing-base");
+    let tui_error = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        HOLE_COMMAND_ID,
+        tui_request,
+    )
+    .expect_err("TUI must reject a missing hole support");
+    let tui_text = format!("{tui_error:?}");
+    assert!(tui_text.contains("hole base feature is missing: missing-base"));
+
+    let mut mcp_request = hole_request(&mcp_root, "hole-1");
+    mcp_request["base_feature_id"] = json!("missing-base");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.hole/1",
+            "arguments": mcp_request
+        }),
+    });
+    let mcp_result = mcp.result.expect("MCP returns a structured tool error");
+    assert_eq!(mcp_result["isError"], true);
+    assert_eq!(mcp_result["structuredContent"]["code"], "invalid_request");
+    assert_eq!(
+        mcp_result["structuredContent"]["detail"],
+        cli_diagnostic["detail"]
+    );
+
+    assert_eq!(fs::read(cli_root.join("manifest.json")).unwrap(), before);
+    assert_eq!(
+        fs::read(cli_root.join("transactions.log")).unwrap(),
+        before_log
+    );
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
 }

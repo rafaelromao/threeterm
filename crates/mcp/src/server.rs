@@ -478,7 +478,15 @@ impl McpServer {
             ),
             Err(ExecutionError::Handler(error)) => JsonRpcResponse::success(
                 request.id.clone(),
-                tool_execution_error(format!("domain command failed: {error}")),
+                if command == HOLE_COMMAND_ID {
+                    tool_result(
+                        serde_json::to_value(host_error_diagnostic(&error))
+                            .expect("diagnostics serialize"),
+                        true,
+                    )
+                } else {
+                    tool_execution_error(format!("domain command failed: {error}"))
+                },
             ),
             Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
                 request.id.clone(),

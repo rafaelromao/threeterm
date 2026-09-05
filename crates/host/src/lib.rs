@@ -2279,10 +2279,6 @@ impl Host {
                     let view = self.hole(bundle_path, hole_request, &worker)?;
                     let snapshot = self.load(bundle_path)?;
                     let brep_path = bundle_root.join("brep").join(format!("{feature_id}.brep"));
-                    let brep_bytes = std::fs::metadata(&brep_path).map(|m| m.len()).unwrap_or(0);
-                    let brep_sha256 = threeterm_protocol::artifact::sha256_hex(
-                        &std::fs::read(&brep_path).unwrap_or_default(),
-                    );
                     Ok(serde_json::json!({
                         "status": view.result.status,
                         "operation": "hole",
@@ -2290,8 +2286,8 @@ impl Host {
                         "feature_graph_hash": snapshot.feature_graph_hash,
                         "revision_hash": snapshot.revision_hash,
                         "brep_path": brep_path.to_string_lossy(),
-                        "brep_sha256": brep_sha256,
-                        "brep_bytes": brep_bytes,
+                        "brep_sha256": view.artifact.sha256,
+                        "brep_bytes": view.artifact.byte_count,
                         "derived_result": boolean_derived_result_json(&view.artifact),
                         "schema_version": find(command).expect("hole is registered").response_schema_version,
                     }))

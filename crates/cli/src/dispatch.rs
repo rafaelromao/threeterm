@@ -4485,7 +4485,6 @@ impl From<ExecutionError<HostError>> for DispatchError {
         match error {
             ExecutionError::UnknownCommand(command) => Self::UnknownCommand(command),
             ExecutionError::InvalidRequest(detail) => Self::Validation(detail),
-            ExecutionError::Handler(HostError::Validation { detail }) => Self::Validation(detail),
             ExecutionError::Handler(error) => Self::Host(error),
             ExecutionError::InvalidResponse(detail) => {
                 Self::Validation(format!("response violates registered schema: {detail}"))
@@ -6570,16 +6569,17 @@ fn emit_persistence_error(detail: &str, stderr: &mut dyn Write) -> i32 {
 
 fn emit_dispatch_error(error: &DispatchError, stderr: &mut dyn Write) -> i32 {
     let detail = error.diagnostic_detail();
-    let diagnostic =
-        if detail.contains("reference is ambiguous") || detail.contains("ID already exists") {
+    let diagnostic = match error {
+        DispatchError::Host(error) => host_error_diagnostic(error),
+        _ if detail.contains("reference is ambiguous") || detail.contains("ID already exists") => {
             Diagnostic::reference_ambiguous(&detail)
-        } else if detail.contains("reference is lost") {
-            Diagnostic::reference_lost(&detail)
-        } else if detail.contains("reference is incompatible") {
+        }
+        _ if detail.contains("reference is lost") => Diagnostic::reference_lost(&detail),
+        _ if detail.contains("reference is incompatible") => {
             Diagnostic::reference_incompatible(&detail)
-        } else {
-            Diagnostic::invalid_request(&detail)
-        };
+        }
+        _ => Diagnostic::invalid_request(&detail),
+    };
     write_diagnostic(stderr, &diagnostic);
     EXIT_INTEGRITY_FAILURE
 }

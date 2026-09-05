@@ -44,7 +44,7 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CommandSchema, IDENTITY_COMMAND_ID, iter,
+    CommandSchema, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -397,7 +397,7 @@ impl McpServer {
 
         if matches!(
             schema_entry.id,
-            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID
+            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID | HOLE_COMMAND_ID
         ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }
@@ -478,7 +478,15 @@ impl McpServer {
             ),
             Err(ExecutionError::Handler(error)) => JsonRpcResponse::success(
                 request.id.clone(),
-                tool_execution_error(format!("domain command failed: {error}")),
+                if command == HOLE_COMMAND_ID {
+                    tool_result(
+                        serde_json::to_value(host_error_diagnostic(&error))
+                            .expect("diagnostics serialize"),
+                        true,
+                    )
+                } else {
+                    tool_execution_error(format!("domain command failed: {error}"))
+                },
             ),
             Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
                 request.id.clone(),

@@ -71,12 +71,15 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, CanonicalState, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX,
-        LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION,
-        Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
-        PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
-        V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
-        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
+        CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalState,
+        EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
+        HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
+        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
+        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
+        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
+        fail_next_publication_at, load, load_with_policy, migrate_v0_to_v1, prior_schema_epoch,
+        read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -98,6 +101,7 @@ pub const EMPTY_LOG_DIGEST_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 pub const EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/2";
 pub const LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.extrude/1";
+pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
@@ -440,6 +444,129 @@ impl CanonicalExtrudeIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct HoleDeterministicInputs {
+    pub position: [f64; 3],
+    pub direction: [f64; 3],
+    pub diameter: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_pitch: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalHoleIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub hole_kind: String,
+    pub base_feature_id: String,
+    pub request_id: String,
+    pub deterministic_inputs: HoleDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalHoleIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != HOLE_INTENT_SCHEMA_VERSION
+            || self.command != "hole"
+            || !matches!(self.hole_kind.as_str(), "drilled" | "tapped")
+            || self.request_id.is_empty()
+            || self.base_feature_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole intent identity is invalid".to_string(),
+            ));
+        }
+        if !self
+            .deterministic_inputs
+            .position
+            .iter()
+            .all(|v| v.is_finite())
+            || !self
+                .deterministic_inputs
+                .direction
+                .iter()
+                .all(|v| v.is_finite())
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic placement is invalid".to_string(),
+            ));
+        }
+        let norm: f64 = self
+            .deterministic_inputs
+            .direction
+            .iter()
+            .map(|v| v * v)
+            .sum();
+        if norm <= f64::EPSILON {
+            return Err(BundleError::Invalid(
+                "canonical hole direction must be a non-zero vector".to_string(),
+            ));
+        }
+        if !self.deterministic_inputs.diameter.is_finite()
+            || self.deterministic_inputs.diameter <= 0.0
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic inputs are invalid".to_string(),
+            ));
+        }
+        let is_tapped = self.hole_kind == "tapped";
+        let has_thread = self.deterministic_inputs.thread_designation.is_some()
+            || self.deterministic_inputs.thread_pitch.is_some()
+            || self.deterministic_inputs.thread_depth.is_some();
+        if is_tapped {
+            let designation = self
+                .deterministic_inputs
+                .thread_designation
+                .as_deref()
+                .unwrap_or_default();
+            let pitch = self.deterministic_inputs.thread_pitch.unwrap_or(0.0);
+            let depth = self.deterministic_inputs.thread_depth.unwrap_or(0.0);
+            if designation.is_empty() || !pitch.is_finite() || pitch <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread designation and pitch are invalid".to_string(),
+                ));
+            }
+            if !depth.is_finite() || depth <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread depth is invalid".to_string(),
+                ));
+            }
+        } else if has_thread {
+            return Err(BundleError::Invalid(
+                "canonical drilled hole must not carry thread metadata".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalBooleanIntent {
     pub schema_version: String,
     pub command: String,
@@ -489,14 +616,15 @@ impl CanonicalBooleanIntent {
 }
 
 /// Canonical command intent attached to a transaction. Extrude intents predate
-/// the Boolean family; Boolean fuse/cut/common intents share the same replay
-/// path. Old fuse entries without any intent remain loadable but are not
-/// recomputable.
+/// the Boolean family; Boolean fuse/cut/common and drilled/tapped hole intents
+/// share the same replay path. Old fuse entries without any intent remain
+/// loadable but are not recomputable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum CanonicalIntent {
     Extrude(CanonicalExtrudeIntent),
     Boolean(CanonicalBooleanIntent),
+    Hole(CanonicalHoleIntent),
 }
 
 impl CanonicalIntent {
@@ -504,6 +632,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => intent.schema_version.as_str(),
             Self::Boolean(intent) => intent.schema_version.as_str(),
+            Self::Hole(intent) => intent.schema_version.as_str(),
         }
     }
 
@@ -511,6 +640,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => intent.request_id.as_str(),
             Self::Boolean(intent) => intent.request_id.as_str(),
+            Self::Hole(intent) => intent.request_id.as_str(),
         }
     }
 
@@ -518,6 +648,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => intent.source_revision.as_str(),
             Self::Boolean(intent) => intent.source_revision.as_str(),
+            Self::Hole(intent) => intent.source_revision.as_str(),
         }
     }
 
@@ -525,6 +656,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => &intent.worker_requirements,
             Self::Boolean(intent) => &intent.worker_requirements,
+            Self::Hole(intent) => &intent.worker_requirements,
         }
     }
 
@@ -532,6 +664,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => intent.affected_semantic_ids.as_slice(),
             Self::Boolean(intent) => intent.affected_semantic_ids.as_slice(),
+            Self::Hole(intent) => intent.affected_semantic_ids.as_slice(),
         }
     }
 
@@ -539,6 +672,7 @@ impl CanonicalIntent {
         match self {
             Self::Extrude(intent) => intent.validate(feature_id),
             Self::Boolean(intent) => intent.validate(feature_id),
+            Self::Hole(intent) => intent.validate(feature_id),
         }
     }
 }
@@ -1592,6 +1726,39 @@ impl Bundle {
         })
     }
 
+    /// Publish one verified hole BREP together with its canonical hole
+    /// intent. The intent and artifact provenance share the same generation.
+    /// `kind` carries the hole discriminator (e.g. `hole:drilled`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_new_feature_with_brep_if_revision_and_hole_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        hole_intent: &CanonicalHoleIntent,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        let intent = CanonicalIntent::Hole(hole_intent.clone());
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+                false,
+                false,
+                Some(&intent),
+            )
+        })
+    }
+
     /// Publish a BREP for a new feature ID only. The duplicate check and the
     /// complete generation publication run under the bundle write lock.
     pub fn append_new_feature_with_brep_if_revision(
@@ -2022,6 +2189,54 @@ impl Bundle {
                     if boolean.source_revision != loaded.revision_hash_hex() {
                         return Err(BundleError::Invalid(
                             "canonical boolean intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Hole(hole) => {
+                    if hole.schema_version != HOLE_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: hole.schema_version.clone(),
+                        });
+                    }
+                    if hole.command != "hole"
+                        || !matches!(hole.hole_kind.as_str(), "drilled" | "tapped")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", hole.command, hole.hole_kind),
+                        });
+                    }
+                    if !loaded.graph.contains_feature(&hole.base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical hole base feature is missing: {}",
+                            hole.base_feature_id
+                        )));
+                    }
+                    if entries.len() != 1 || hole.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(hole.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if hole.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_hole_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&hole.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if hole.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent source revision does not match the transaction source"
                                 .to_string(),
                         ));
                     }
@@ -2499,6 +2714,17 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                         });
                     }
                 }
+                CanonicalIntent::Hole(hole) => {
+                    if !graph.contains_feature(&hole.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical hole base feature is missing: {}",
+                                hole.base_feature_id
+                            ),
+                        });
+                    }
+                }
             }
         }
         if let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) {
@@ -2799,6 +3025,31 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                     });
                 }
             }
+            CanonicalIntent::Hole(hole) => {
+                if hole.schema_version != HOLE_INTENT_SCHEMA_VERSION {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: hole.schema_version.clone(),
+                    });
+                }
+                if hole.command != "hole"
+                    || !matches!(hole.hole_kind.as_str(), "drilled" | "tapped")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", hole.command, hole.hole_kind),
+                    });
+                }
+                if hole.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_hole_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&hole.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
         }
     }
     validate_canonical_kind(Some(entry.log_index), &entry.kind)
@@ -2954,6 +3205,7 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "loft"
             | "history-feature"
     ) || is_supported_brep_kind(kind)
+        || is_supported_hole_kind(kind)
         || is_supported_edge_reattachment_kind(kind)
         || is_supported_bracket_kind(kind)
         || matches!(kind, "plate-vertical" | "plate-horizontal")
@@ -2968,6 +3220,10 @@ fn is_supported_brep_kind(kind: &str) -> bool {
         && feature_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_supported_hole_kind(kind: &str) -> bool {
+    matches!(kind, "hole:drilled" | "hole:tapped")
 }
 
 fn is_supported_edge_reattachment_kind(kind: &str) -> bool {

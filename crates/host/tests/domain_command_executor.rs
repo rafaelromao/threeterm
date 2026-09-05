@@ -480,6 +480,9 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
             )
         })
         .collect();
+    let viewport_before = host
+        .presentation_viewport_scene()
+        .expect("pre-replay viewport scene succeeds");
     fs::remove_dir_all(root.join("brep")).expect("derived BREPs delete");
 
     let before = Bundle::at(&root).open().expect("bundle reopens");
@@ -534,6 +537,10 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
         })
         .collect();
     assert_eq!(export_after_bytes, export_bytes, "replayed export bytes");
+    let viewport_after = host
+        .presentation_viewport_scene()
+        .expect("post-replay viewport scene succeeds");
+    assert_eq!(viewport_after, viewport_before, "replayed viewport scene");
 
     let _ = fs::remove_dir_all(&root);
 }

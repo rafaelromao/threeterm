@@ -3097,6 +3097,11 @@ impl<R: Renderer> TuiViewportSession<R> {
                     command,
                     threeterm_protocol::schema::EXTRUDE_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
+                        | threeterm_protocol::schema::FILLET_COMMAND_ID
+                        | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+                        | threeterm_protocol::schema::SHELL_COMMAND_ID
+                        | threeterm_protocol::schema::DRAFT_COMMAND_ID
+                        | threeterm_protocol::schema::LOFT_COMMAND_ID
                 ) {
                     self.palette.open();
                     return Ok(self.keyboard_overlay(format!(

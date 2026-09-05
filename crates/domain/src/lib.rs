@@ -831,7 +831,6 @@ pub fn resolve_edge_reference(
         || reference.provenance.source_feature_id.is_empty()
         || reference.provenance.source_revision_id.is_empty()
         || reference.provenance.source_edge_id.is_empty()
-        || reference.provenance.source_edge_id != reference.semantic_id
         || reference.evidence.validate().is_err()
     {
         return EdgeReattachmentOutcome::Incompatible {

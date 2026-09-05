@@ -3237,9 +3237,17 @@ impl<R: Renderer> TuiViewportSession<R> {
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         if self.draft.preview().is_none() {
-            return Ok(self.keyboard_overlay(
-                "[error-glyph] Failure: commit requires a current preview".to_string(),
-            ));
+            let command = self.draft.draft().expect("draft remains").command;
+            let request = match self.domain_request(root, false) {
+                Ok(request) => request,
+                Err(detail) => return self.reject_commit(detail),
+            };
+            let preview = match gateway.preview(command, request) {
+                Ok(preview) => preview,
+                Err(error) => return self.reject_commit(format!("preview failed: {error}")),
+            };
+            self.draft
+                .set_preview(preview.preview_revision, preview.input_fingerprint);
         }
         self.tui
             .transition_command(CommandEvent::CommitRequested)
@@ -3259,10 +3267,17 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(response) => response,
             Err(error) => return self.reject_commit(format!("{error:?}")),
         };
-        if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
-            && response["status"] == "invalid_request"
-        {
-            return self.reject_commit(sketch_reattachment_acknowledgement(&response));
+        if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID {
+            if response["status"] == "invalid_request" {
+                return self.reject_commit(sketch_reattachment_acknowledgement(&response));
+            }
+            if response["status"] != "solved" {
+                return self.reject_commit(format!(
+                    "sketch solve {}: {}",
+                    response["status"].as_str().unwrap_or("unknown"),
+                    response["diagnostics"]
+                ));
+            }
         }
         let revision = match response.get("revision_hash").and_then(Value::as_str) {
             Some(revision) => revision.to_string(),

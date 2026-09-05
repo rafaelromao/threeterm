@@ -1563,21 +1563,11 @@ fn production_planar_face_candidates(
 fn fresh_planar_face_candidates(
     loaded: &LoadedBundle,
     request: &SketchSolveRequest,
-    supplied_candidates: &[PlanarFaceCandidate],
+    _supplied_candidates: &[PlanarFaceCandidate],
 ) -> Result<Vec<PlanarFaceCandidate>, HostError> {
-    let Some(reference) = &request.support else {
-        return Ok(Vec::new());
-    };
-    let source_brep = bundle_root(&loaded.canonical_root)
-        .join(BREP_SUBDIR)
-        .join(format!("{}.brep", reference.provenance.source_feature_id));
-    if source_brep.is_file() {
-        // Once a production BREP exists, only fresh OCCT evidence for that
-        // revision can authorize the attachment. Supplied candidates remain a
-        // narrow seam for protocol containment tests without a BREP.
-        return production_planar_face_candidates(loaded, request);
-    }
-    Ok(supplied_candidates.to_vec())
+    // Candidate evidence is always derived from the current authenticated BREP;
+    // callers cannot authorize an attachment with fabricated or stale values.
+    production_planar_face_candidates(loaded, request)
 }
 
 fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
@@ -4860,7 +4850,12 @@ impl Host {
             }
         }
         self.current.replace(Some(projected));
-        Ok(snapshot)
+        Ok(self
+            .current
+            .borrow()
+            .as_ref()
+            .map(SnapshotView::from)
+            .unwrap_or(snapshot))
     }
 
     /// Reload canonical extrude intents and rebuild their disposable BREP

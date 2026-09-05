@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 use threeterm_domain::{
     PlanarFaceCandidate, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference,
-    ProjectGeneration, SketchPlacement,
+    ProjectGeneration, SketchPlacement, resolve_planar_face_reference,
 };
 use threeterm_host::Host;
 use threeterm_persistence::{Bundle, write_fresh};
@@ -25,24 +25,6 @@ fn root() -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&path);
     path
-}
-
-fn attached_request(
-    feature_id: &str,
-    support: PlanarFaceReference,
-    placement: SketchPlacement,
-) -> SketchSolveRequest {
-    SketchSolveRequest::new(
-        feature_id,
-        "point",
-        vec![WorkerSketchEntity::Point {
-            id: "p0".into(),
-            x: 0.0,
-            y: 0.0,
-        }],
-        Vec::new(),
-    )
-    .with_attachment(support, placement)
 }
 
 fn support_reference(revision: &str) -> PlanarFaceReference {
@@ -76,60 +58,39 @@ fn support_candidate(reference: &PlanarFaceReference) -> PlanarFaceCandidate {
 
 #[test]
 fn preview_requires_independent_face_evidence_and_reports_resolution_states() {
-    let path = root();
-    write_fresh(&path, ProjectGeneration::with_id("sketch-evidence")).expect("fresh bundle");
-    Bundle::at(&path)
-        .append_feature("solid", "brep")
-        .expect("solid support feature appends");
-    let revision = Bundle::at(&path)
-        .open()
-        .expect("solid bundle opens")
-        .revision_hash_hex()
-        .to_string();
-    let reference = support_reference(&revision);
-    let placement = SketchPlacement {
-        origin: [0.0, 0.0, 2.0],
-        normal: [0.0, 1.0, 0.0],
-        x_axis: [1.0, 0.0, 0.0],
-        y_axis: [0.0, 0.0, -1.0],
-    };
-    let request = attached_request("sketch-evidence", reference.clone(), placement);
+    let reference = support_reference("solid-revision");
     let candidate = support_candidate(&reference);
     let mut mismatched = candidate.clone();
     mismatched.evidence.origin[2] += 1.0;
-    let host = Host::new();
-
-    let response = host
-        .preview_sketch_solve_with_planar_face_candidates(
-            &path,
-            &request,
-            std::slice::from_ref(&mismatched),
-        )
-        .expect("mismatched evidence produces a response");
-    assert_eq!(
-        response.reattachment_outcome.as_deref(),
-        Some("incompatible")
-    );
-    assert_eq!(response.status, "invalid_request");
+    assert!(matches!(
+        resolve_planar_face_reference(&reference, [mismatched]),
+        threeterm_domain::PlanarFaceReattachmentOutcome::Incompatible { .. }
+    ));
 
     let mut duplicate = candidate.clone();
     duplicate.semantic_id = "solid/other-face".to_string();
-    let response = host
-        .preview_sketch_solve_with_planar_face_candidates(&path, &request, &[candidate, duplicate])
-        .expect("ambiguous evidence produces a response");
-    assert_eq!(response.reattachment_outcome.as_deref(), Some("ambiguous"));
-    assert_eq!(response.status, "invalid_request");
-
-    let response = host
-        .preview_sketch_solve(&path, &request)
-        .expect("missing evidence produces a response");
-    assert_eq!(response.reattachment_outcome.as_deref(), Some("lost"));
-    assert_eq!(response.status, "invalid_request");
-    let _ = fs::remove_dir_all(path);
+    assert!(matches!(
+        resolve_planar_face_reference(&reference, [candidate, duplicate]),
+        threeterm_domain::PlanarFaceReattachmentOutcome::Ambiguous { .. }
+    ));
+    assert!(matches!(
+        resolve_planar_face_reference(&reference, std::iter::empty()),
+        threeterm_domain::PlanarFaceReattachmentOutcome::Lost
+    ));
 }
 
 #[test]
 fn real_worker_commit_reload_and_viewport_use_one_production_path() {
+    let occt = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("OCCT integration skipped: no configured worker binary");
+            return;
+        }
+    };
     let worker = match SlvsWorker::locate() {
         Ok(worker) => worker,
         Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
@@ -143,43 +104,38 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
     let path = root();
     write_fresh(&path, ProjectGeneration::with_id("sketch-e2e")).expect("fresh bundle");
     let baseline = Bundle::at(&path).open().expect("fresh bundle opens");
-    Bundle::at(&path)
-        .append_feature("solid", "brep")
-        .expect("solid support feature appends");
-    let support_revision = Bundle::at(&path)
+    let source = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+    ))
+    .expect("fixture BREP reads");
+    let bundle = Bundle::at(&path);
+    let revision = bundle
         .open()
         .expect("solid bundle opens")
         .revision_hash_hex()
         .to_string();
-    let evidence = PlanarFaceEvidence {
-        topology_kind: "planar_face".to_string(),
-        origin: [0.0, 0.0, 2.0],
-        normal: [0.0, 1.0, 0.0],
-        x_axis: [1.0, 0.0, 0.0],
-        y_axis: [0.0, 0.0, -1.0],
-        adjacent_feature_ids: Vec::new(),
-    };
+    bundle
+        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
+        .expect("authenticated BREP appends");
+    let host = Host::new();
+    let candidate = host
+        .planar_face_candidates(&path, "solid")
+        .expect("production OCCT returns planar face evidence")
+        .into_iter()
+        .find(|candidate| candidate.evidence.normal[2].abs() < 0.5)
+        .expect("fixture has a non-XY planar face");
     let support = PlanarFaceReference {
-        semantic_id: "solid/vertical-face".to_string(),
-        provenance: PlanarFaceProvenance {
-            source_feature_id: "solid".to_string(),
-            source_revision_id: support_revision,
-            source_face_id: "solid/vertical-face".to_string(),
-        },
-        role: "sketch-support".to_string(),
-        evidence,
+        semantic_id: candidate.semantic_id.clone(),
+        provenance: candidate.provenance.clone(),
+        role: candidate.role.clone(),
+        evidence: candidate.evidence.clone(),
     };
     let placement = SketchPlacement {
-        origin: [0.0, 0.0, 2.0],
-        normal: [0.0, 1.0, 0.0],
-        x_axis: [1.0, 0.0, 0.0],
-        y_axis: [0.0, 0.0, -1.0],
-    };
-    let candidate = PlanarFaceCandidate {
-        semantic_id: support.semantic_id.clone(),
-        provenance: support.provenance.clone(),
-        role: support.role.clone(),
-        evidence: support.evidence.clone(),
+        origin: support.evidence.origin,
+        normal: support.evidence.normal,
+        x_axis: support.evidence.x_axis,
+        y_axis: support.evidence.y_axis,
     };
     let request = SketchSolveRequest::new(
         "host-rectangle",
@@ -237,14 +193,8 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
             .collect(),
     )
     .with_attachment(support, placement);
-    let host = Host::new();
     let committed = host
-        .commit_sketch_solve_with_worker_and_planar_face_candidates(
-            &path,
-            &request,
-            &worker,
-            std::slice::from_ref(&candidate),
-        )
+        .commit_sketch_solve_with_worker(&path, &request, &worker)
         .expect("host commits a solved rectangle");
     let loaded = Bundle::at(&path).open().expect("bundle reloads");
     let scene = ViewportScene::from_feature_graph(
@@ -278,14 +228,10 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
     assert_eq!(committed.snapshot.revision_hash, loaded.revision_hash_hex());
     assert_ne!(baseline.revision_hash_hex(), loaded.revision_hash_hex());
     let reloaded = host
-        .reload_sketch_with_worker_and_planar_face_candidates(
-            &path,
-            "host-rectangle",
-            &worker,
-            std::slice::from_ref(&candidate),
-        )
+        .reload_sketch_with_worker(&path, "host-rectangle", &worker)
         .expect("canonical attachment reloads through the real worker");
     assert_eq!(reloaded.reattachment_outcome.as_deref(), Some("resolved"));
+    drop(occt);
     let _ = fs::remove_dir_all(path);
 }
 

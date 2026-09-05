@@ -1218,6 +1218,7 @@ bool write_staged_artifact(const JsonParser::Value& request,
     const bool is_brep_operation = operation == "extrude" || operation == "bracket" ||
         operation == "boolean_fuse" || operation == "fillet" || operation == "split" || operation == "chamfer" ||
         operation == "hole" || operation == "revolve" || operation == "mirror" ||
+        operation == "translate" ||
         operation == "linear_pattern" || operation == "circular_pattern" ||
         operation == "boolean_pattern" || operation == "shell" || operation == "draft" ||
         operation == "loft";
@@ -2375,6 +2376,97 @@ bool handle_mirror(const JsonParser::Value& request, std::string& error) {
         return false;
     } catch (const std::exception& e) {
         error = "std::exception during mirror: ";
+        error += e.what();
+        return false;
+    }
+}
+
+bool handle_translate(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path_str = get_string(request, "base_path");
+    std::string output_dir = get_string(request, "output_dir");
+    std::string output_filename = get_string(request, "output_filename");
+    auto translation = get_vec3(request, "translation");
+
+    if (request_id.empty() || feature_id.empty() || base_path_str.empty() ||
+        output_dir.empty() || output_filename.empty()) {
+        error = "translate request is missing required string fields";
+        return false;
+    }
+    if (output_filename.find('/') != std::string::npos) {
+        error = "output_filename must not contain a path separator";
+        return false;
+    }
+    for (double component : translation) {
+        if (!std::isfinite(component)) {
+            error = "translate translation components must be finite";
+            return false;
+        }
+    }
+
+    try {
+        TopoDS_Shape base;
+        BRep_Builder builder;
+        if (!BRepTools::Read(base, base_path_str.c_str(), builder)) {
+            error = "could not read base BREP at " + base_path_str;
+            return false;
+        }
+        if (base.IsNull()) {
+            error = "BREP file produced a null TopoDS_Shape";
+            return false;
+        }
+
+        gp_Vec offset(translation[0], translation[1], translation[2]);
+        gp_Trsf transform;
+        transform.SetTranslation(offset);
+
+        BRepBuilderAPI_Transform translate_op(base, transform, Standard_False, Standard_False);
+        translate_op.Build();
+        if (!translate_op.IsDone()) {
+            error = "BRepBuilderAPI_Transform did not complete";
+            return false;
+        }
+        TopoDS_Shape result = translate_op.Shape();
+
+        std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
+        if (output_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(output_path.parent_path(), ec);
+        }
+        if (!write_brep(result, output_path, error)) {
+            return false;
+        }
+        std::ifstream stream(output_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        std::string sha = sha256_hex(bytes.str());
+
+        std::string status = "ok";
+        if (!analyze_brep(result)) {
+            error = "brep_invalid: BRepCheck_Analyzer failed";
+            status = "brep_invalid";
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"schema_version\":\"" << json_escape(kSchemaVersion) << "\","
+            << "\"request_id\":\"" << json_escape(request_id) << "\","
+            << "\"operation\":\"translate\","
+            << "\"status\":\"" << json_escape(status) << "\","
+            << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
+            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"feature_id\":\"" << json_escape(feature_id) << "\""
+            << "}";
+        g_result_json = out.str();
+        return status == "ok";
+    } catch (const Standard_Failure& e) {
+        error = "OCCT exception during translate: ";
+        error += e.GetMessageString();
+        return false;
+    } catch (const std::exception& e) {
+        error = "std::exception during translate: ";
         error += e.what();
         return false;
     }
@@ -3573,6 +3665,8 @@ int main() {
         success = handle_revolve(*args, error);
     } else if (command_id == "mirror") {
         success = handle_mirror(*args, error);
+    } else if (command_id == "translate") {
+        success = handle_translate(*args, error);
     } else if (command_id == "linear_pattern") {
         success = handle_linear_pattern(*args, error);
     } else if (command_id == "circular_pattern") {

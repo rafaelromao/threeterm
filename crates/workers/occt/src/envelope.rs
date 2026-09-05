@@ -50,6 +50,7 @@ pub enum Operation {
     Hole,
     Revolve,
     Mirror,
+    Translate,
     LinearPattern,
     CircularPattern,
     Shell,
@@ -90,6 +91,7 @@ impl Operation {
             Self::Hole => "hole",
             Self::Revolve => "revolve",
             Self::Mirror => "mirror",
+            Self::Translate => "translate",
             Self::LinearPattern => "linear_pattern",
             Self::CircularPattern => "circular_pattern",
             Self::Shell => "shell",
@@ -1652,6 +1654,120 @@ impl MirrorResult {
     }
 }
 
+/// Translate request: shift the BREP at `base_path` by the
+/// `translation` vector. The worker constructs a translation
+/// `gp_Trsf`, applies it through `BRepBuilderAPI_Transform`, and
+/// writes the translated solid to `<output_dir>/<output_filename>`.
+/// A zero vector is valid and returns an untranslated copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranslateRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    /// Path to the BREP file the worker reads as the input solid.
+    pub base_path: PathBuf,
+    /// Translation vector in world coordinates. Components must be
+    /// finite; the zero vector is valid.
+    pub translation: [f64; 3],
+    /// Output directory where the worker writes the BREP file.
+    pub output_dir: PathBuf,
+    /// Output file name (no path separators; the worker uses this
+    /// filename literally, so callers should include the `.brep`
+    /// extension).
+    pub output_filename: String,
+    /// Stable ThreeTerm feature id the host will commit.
+    pub feature_id: String,
+}
+
+impl TranslateRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        translation: [f64; 3],
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Translate,
+            base_path: base_path.into(),
+            translation,
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::Translate {
+            return Err(format!(
+                "operation must be translate for TranslateRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if !self
+            .translation
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err("translate translation components must be finite".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranslateResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl TranslateResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 /// Linear pattern request: translate the BREP at `base_path` along
 /// `direction` by `spacing * (index - 1)` for `index` in `1..count`
 /// and fuse the resulting copies into one solid. The OCCT worker
@@ -3186,6 +3302,34 @@ mod tests {
         let mut request = canonical_mirror_request();
         request.schema_version = SCHEMA_VERSION.to_string();
         request.operation = Operation::Revolve;
+        assert!(request.validate().is_err());
+    }
+
+    fn canonical_translate_request() -> TranslateRequest {
+        TranslateRequest::new("req-1", "/tmp/base.brep", [12.0, 0.0, 90.0])
+            .with_output_path("/tmp", "translated.brep")
+            .with_feature_id("instance-1")
+    }
+
+    #[test]
+    fn operation_as_str_returns_snake_case_for_translate() {
+        assert_eq!(Operation::Translate.as_str(), "translate");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_translate() {
+        let mut request = canonical_translate_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("translate envelope is valid");
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_translate_vector_component() {
+        let mut request = canonical_translate_request();
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.translation = [f64::NAN, 0.0, 0.0];
+        assert!(request.validate().is_err());
+        request.translation = [0.0, f64::INFINITY, 0.0];
         assert!(request.validate().is_err());
     }
 

@@ -36,7 +36,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "e5c20ab688a762ea986f89f0a76bbce70e94d9dccee43abdf70ae9e2250d22fa",
+        "0878f24b980c628bb2fea24c4afad6edb32ea93bb4f8d197ca229e764354523a",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -304,6 +304,35 @@ fn registry_contains_versioned_hole_contract() {
         ])
     );
     assert_eq!(hole.request_schema["additionalProperties"], false);
+}
+
+#[test]
+fn registry_contains_versioned_undo_and_redo_contracts() {
+    let undo = find(threeterm_protocol::schema::UNDO_COMMAND_ID).expect("undo is registered");
+    assert_eq!(undo.name, "undo");
+    assert_eq!(undo.schema_version, "threeterm.command.undo/1");
+    assert_eq!(
+        undo.request_schema["required"],
+        serde_json::json!(["bundle_path"])
+    );
+    assert_eq!(undo.request_schema["additionalProperties"], false);
+    assert_eq!(
+        undo.response_schema_version,
+        threeterm_protocol::schema::HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION
+    );
+
+    let redo = find(threeterm_protocol::schema::REDO_COMMAND_ID).expect("redo is registered");
+    assert_eq!(redo.name, "redo");
+    assert_eq!(redo.schema_version, "threeterm.command.redo/1");
+    assert_eq!(
+        redo.request_schema["required"],
+        serde_json::json!(["bundle_path"])
+    );
+    assert_eq!(redo.request_schema["additionalProperties"], false);
+    assert_eq!(
+        redo.response_schema_version,
+        threeterm_protocol::schema::HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION
+    );
 }
 
 #[test]

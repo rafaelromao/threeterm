@@ -711,6 +711,96 @@ pub struct HistoryTimelineView {
     pub timeline: HistoryTimeline,
 }
 
+/// Shared history-commit response shared by every adapter.
+///
+/// The CLI, MCP, and TUI boundaries all serialize cursor movement and
+/// historical edits through this single builder so the wire shape never
+/// depends on which adapter executed the command.
+pub fn history_commit_value(
+    operation: &str,
+    schema_version: &str,
+    view: &HistoryCommitView,
+) -> serde_json::Value {
+    let active = view.history.active_snapshot();
+    let diagnostics: Vec<_> = active
+        .features
+        .values()
+        .filter_map(|feature| feature.diagnostic.clone())
+        .collect();
+    let named_revisions: Vec<_> = view
+        .history
+        .named_revisions()
+        .values()
+        .map(|revision| {
+            serde_json::json!({
+                "name": revision.name,
+                "revision_id": revision.snapshot.revision_id,
+                "provenance": revision.provenance,
+            })
+        })
+        .collect();
+    let features: Vec<_> = active
+        .features
+        .values()
+        .map(|feature| {
+            let mut value = serde_json::json!({
+                "id": feature.id,
+                "status": history_status_name(feature.status),
+                "geometry_fingerprint": feature.geometry_fingerprint.clone().unwrap_or_default(),
+                "last_valid_geometry_fingerprint": feature
+                    .last_valid_geometry_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
+                "stale_last_valid_geometry": feature.last_valid_geometry_fingerprint.is_some(),
+            });
+            if let Some(diagnostic) = &feature.diagnostic {
+                value["diagnostic"] = serde_json::json!(diagnostic);
+            }
+            value
+        })
+        .collect();
+    let (dirty_features, evaluated_features, blocked_features) =
+        view.evaluation.as_ref().map_or_else(
+            || (Vec::new(), Vec::new(), Vec::new()),
+            |evaluation| {
+                (
+                    evaluation.dirty_features.clone(),
+                    evaluation.evaluated_features.clone(),
+                    evaluation.blocked_features.clone(),
+                )
+            },
+        );
+    let degraded = active.features.values().any(|feature| {
+        matches!(
+            feature.status,
+            HistoryStatus::Broken | HistoryStatus::BlockedByFailure
+        )
+    });
+    serde_json::json!({
+        "status": if degraded { "degraded" } else { "ok" },
+        "operation": operation,
+        "active_revision": active.revision_id,
+        "dirty_features": dirty_features,
+        "evaluated_features": evaluated_features,
+        "blocked_features": blocked_features,
+        "diagnostics": diagnostics,
+        "named_revisions": named_revisions,
+        "features": features,
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "schema_version": schema_version,
+    })
+}
+
+fn history_status_name(status: HistoryStatus) -> &'static str {
+    match status {
+        HistoryStatus::CurrentValid => "current-valid",
+        HistoryStatus::Broken => "broken",
+        HistoryStatus::BlockedByFailure => "blocked-by-failure",
+        HistoryStatus::Suppressed => "suppressed",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayVerification {
     pub deterministic: bool,
@@ -1836,6 +1926,26 @@ impl Host {
                             .response_schema_version,
                     ))
                 }
+                threeterm_protocol::schema::UNDO_COMMAND_ID => {
+                    let view = self.undo(string_field("bundle_path")?)?;
+                    Ok(history_commit_value(
+                        "undo",
+                        find(command)
+                            .expect("undo is registered")
+                            .response_schema_version,
+                        &view,
+                    ))
+                }
+                threeterm_protocol::schema::REDO_COMMAND_ID => {
+                    let view = self.redo(string_field("bundle_path")?)?;
+                    Ok(history_commit_value(
+                        "redo",
+                        find(command)
+                            .expect("redo is registered")
+                            .response_schema_version,
+                        &view,
+                    ))
+                }
                 APPLY_COMMAND_ID => {
                     let operation = string_field("operation")?;
                     let feature_id = string_field("feature_id")?;
@@ -2751,6 +2861,62 @@ impl Host {
             snapshot,
             history,
             evaluation: Some(evaluation),
+        })
+    }
+
+    /// Report whether canonical undo and redo would succeed right now.
+    ///
+    /// The probe runs the pure cursor constructors without appending, so the
+    /// TUI session can gate its transient history flags on canonical truth.
+    pub fn history_availability(&self, root: impl AsRef<Path>) -> Result<(bool, bool), HostError> {
+        let loaded = Bundle::at(root.as_ref()).open()?;
+        Ok((
+            loaded.history.undo(&loaded.history_events).is_ok(),
+            loaded.history.redo(&loaded.history_events).is_ok(),
+        ))
+    }
+
+    /// Move the active Revision Snapshot back one sealed transaction.
+    pub fn undo(&self, root: impl AsRef<Path>) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .undo(&loaded.history_events)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
+        })
+    }
+
+    /// Move the active Revision Snapshot forward over undone transactions.
+    pub fn redo(&self, root: impl AsRef<Path>) -> Result<HistoryCommitView, HostError> {
+        let root = root.as_ref();
+        let bundle = Bundle::at(root);
+        let loaded = bundle.open()?;
+        let event = loaded
+            .history
+            .redo(&loaded.history_events)
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?;
+        let updated = bundle.append_features_with_history(&[], &event)?;
+        let snapshot = SnapshotView::from(&updated);
+        let history = updated.history.clone();
+        self.current.replace(Some(updated));
+        Ok(HistoryCommitView {
+            snapshot,
+            history,
+            evaluation: None,
         })
     }
 
@@ -8121,6 +8287,65 @@ mod tests {
             "tampered bundle must surface a LogDigestMismatch, got {result:?}"
         );
         assert!(host.current().is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undo_and_redo_move_the_active_revision_snapshot() {
+        let root = temp_root("undo-redo-movement");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        host.historical_edit(&root, "l-bracket-base", "length", 61.0)
+            .expect("historical edit commits");
+        assert_eq!(
+            host.history(&root)
+                .expect("history reloads")
+                .active_snapshot()
+                .revision_id,
+            "history-revision-2"
+        );
+
+        let undone = host.undo(&root).expect("undo moves back");
+        assert_eq!(
+            undone.history.active_snapshot().revision_id,
+            "history-revision-1"
+        );
+        assert_eq!(
+            undone.history.active_snapshot().features["l-bracket-base"].input_value,
+            60.0
+        );
+        assert_eq!(
+            host.history(&root)
+                .expect("history reloads after undo")
+                .active_snapshot()
+                .revision_id,
+            "history-revision-1",
+            "undo survives bundle reload"
+        );
+
+        let redone = host.redo(&root).expect("redo moves forward");
+        assert_eq!(
+            redone.history.active_snapshot().revision_id,
+            "history-revision-2"
+        );
+        assert_eq!(
+            redone.history.active_snapshot().features["l-bracket-base"].input_value,
+            61.0
+        );
+
+        assert!(
+            host.redo(&root).is_err(),
+            "redo with no undone work is rejected atomically"
+        );
+        assert_eq!(
+            host.history(&root)
+                .expect("history reloads after rejected redo")
+                .active_snapshot()
+                .revision_id,
+            "history-revision-2"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

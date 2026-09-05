@@ -1389,6 +1389,107 @@ impl TuiSession {
         Ok(view)
     }
 
+    /// Move the active Revision Snapshot through the canonical host.
+    ///
+    /// Availability flags refresh from canonical truth before the Applying
+    /// transition, so the state machine gates cursor movement on the sealed
+    /// timeline instead of stale transient flags. The stale-last-valid
+    /// overlay refreshes for the selected target when one exists.
+    pub fn apply_history_cursor(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+        direction: HistoryDirection,
+    ) -> Result<HistoryCommitView, TuiDiagnostic> {
+        let root = root.as_ref();
+        let (can_undo, can_redo) = host.history_availability(root).map_err(|error| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::UndoRequested),
+                error.to_string(),
+                "history-availability",
+            )
+        })?;
+        self.history = HistoryState::Linear { can_undo, can_redo };
+        let available = match direction {
+            HistoryDirection::Undo => can_undo,
+            HistoryDirection::Redo => can_redo,
+            HistoryDirection::NamedRevision { .. } => true,
+        };
+        if !available {
+            return Err(self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::UndoRequested),
+                match direction {
+                    HistoryDirection::Undo => "history has nothing to undo".to_string(),
+                    _ => "history has nothing to redo".to_string(),
+                },
+                "history-cursor",
+            ));
+        }
+        let requested = match &direction {
+            HistoryDirection::Undo => HistoryEvent::UndoRequested,
+            HistoryDirection::Redo => HistoryEvent::RedoRequested,
+            HistoryDirection::NamedRevision { name } => {
+                HistoryEvent::RestoreNamedRevision { name: name.clone() }
+            }
+        };
+        let started = self.transition_history(requested)?;
+        if let Some(diagnostic) = started.diagnostic {
+            return Err(diagnostic);
+        }
+
+        let view = match direction {
+            HistoryDirection::Undo => host.undo(root),
+            HistoryDirection::Redo => host.redo(root),
+            HistoryDirection::NamedRevision { .. } => {
+                return Err(self.operation_diagnostic(
+                    TuiDiagnosticCode::HistoryRejected,
+                    StateAxis::History,
+                    StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                    "named revision restore uses restore_feature_timeline".to_string(),
+                    "history-cursor",
+                ));
+            }
+        };
+        let view = match view {
+            Ok(view) => view,
+            Err(error) => {
+                let rejected = self
+                    .transition_history(HistoryEvent::ApplyCompleted(
+                        HistoryApplyResult::Rejected {
+                            detail: error.to_string(),
+                        },
+                    ))
+                    .expect("history rejection returns to the linear state");
+                return Err(rejected
+                    .diagnostic
+                    .expect("history rejection carries a diagnostic"));
+            }
+        };
+        let revision = view.history.active_snapshot().revision_id.clone();
+        let (can_undo, can_redo) = host.history_availability(root).map_err(|error| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::UndoRequested),
+                error.to_string(),
+                "history-availability",
+            )
+        })?;
+        self.transition_history(HistoryEvent::ApplyCompleted(HistoryApplyResult::Applied {
+            revision,
+            can_undo,
+            can_redo,
+        }))?;
+        if let Some(target) = self.selected_target().map(str::to_string) {
+            self.refresh_stale_last_valid_geometry(&view.history, &target);
+        }
+        Ok(view)
+    }
+
     pub fn transition_lifecycle(
         &mut self,
         event: LifecycleEvent,

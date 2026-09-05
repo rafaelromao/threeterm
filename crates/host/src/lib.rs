@@ -1560,6 +1560,26 @@ fn production_planar_face_candidates(
         .collect())
 }
 
+fn fresh_planar_face_candidates(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+    supplied_candidates: &[PlanarFaceCandidate],
+) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+    let Some(reference) = &request.support else {
+        return Ok(Vec::new());
+    };
+    let source_brep = bundle_root(&loaded.canonical_root)
+        .join(BREP_SUBDIR)
+        .join(format!("{}.brep", reference.provenance.source_feature_id));
+    if source_brep.is_file() {
+        // Once a production BREP exists, only fresh OCCT evidence for that
+        // revision can authorize the attachment. Supplied candidates remain a
+        // narrow seam for protocol containment tests without a BREP.
+        return production_planar_face_candidates(loaded, request);
+    }
+    Ok(supplied_candidates.to_vec())
+}
+
 fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
     match outcome {
         PlanarFaceReattachmentOutcome::Resolved { .. } => "resolved",
@@ -1619,11 +1639,13 @@ fn sketch_support_failure_response(
             .iter()
             .map(|entity| entity.id().to_string())
             .collect(),
-        related_constraint_ids: candidate_ids.clone(),
+        related_constraint_ids: Vec::new(),
         diagnostics: vec![threeterm_slvs_worker::SketchDiagnostic {
             code: format!("sketch_support_{}", reattachment_outcome_name(outcome)),
-            detail: format!("planar face reattachment outcome: {outcome:?}"),
-            constraint_ids: candidate_ids,
+            detail: format!(
+                "planar face reattachment outcome: {outcome:?}; candidate_ids={candidate_ids:?}"
+            ),
+            constraint_ids: Vec::new(),
         }],
         solved_coordinates: None,
         support: request.support.clone(),
@@ -2048,7 +2070,7 @@ impl Host {
         &self,
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
-        candidates: &[PlanarFaceCandidate],
+        supplied_candidates: &[PlanarFaceCandidate],
     ) -> Result<SketchSolveResponse, HostError> {
         let loaded = Bundle::at(root.as_ref()).open()?;
         let source_revision = if request.source_revision.is_empty() {
@@ -2070,7 +2092,8 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        let support_outcome = resolve_sketch_support(&loaded, &request, candidates)?;
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
         if !matches!(
             support_outcome,
             PlanarFaceReattachmentOutcome::Resolved { .. }
@@ -2152,7 +2175,7 @@ impl Host {
         root: impl AsRef<Path>,
         feature_id: &str,
         worker: &SlvsWorker,
-        candidates: &[PlanarFaceCandidate],
+        supplied_candidates: &[PlanarFaceCandidate],
     ) -> Result<SketchSolveResponse, HostError> {
         let loaded = Bundle::at(root.as_ref()).open()?;
         let payload = loaded
@@ -2162,7 +2185,8 @@ impl Host {
                 detail: format!("sketch is missing: {feature_id}"),
             })?;
         let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
-        let outcome = resolve_sketch_support(&loaded, &request, candidates)?;
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
         if !matches!(outcome, PlanarFaceReattachmentOutcome::Resolved { .. }) {
             return Ok(sketch_support_failure_response(&request, &outcome));
         }
@@ -2240,7 +2264,7 @@ impl Host {
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
         worker: &SlvsWorker,
-        candidates: &[PlanarFaceCandidate],
+        supplied_candidates: &[PlanarFaceCandidate],
     ) -> Result<SketchSolveCommitView, HostError> {
         let root = root.as_ref();
         let bundle = Bundle::at(root);
@@ -2264,7 +2288,8 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        let support_outcome = resolve_sketch_support(&loaded, &request, candidates)?;
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
         if !matches!(
             support_outcome,
             PlanarFaceReattachmentOutcome::Resolved { .. }
@@ -4807,9 +4832,9 @@ impl Host {
         } else {
             view
         };
-        let loaded = Bundle::at(root).open()?;
-        for feature in loaded.graph.features() {
-            if loaded
+        let mut projected = Bundle::at(root).open()?;
+        for feature in projected.graph.features().collect::<Vec<_>>() {
+            if projected
                 .graph
                 .sketch(feature.id.as_str())
                 .is_some_and(|sketch| sketch.support.is_some())
@@ -4821,8 +4846,20 @@ impl Host {
                             .expect("sketch reload response serializes"),
                     });
                 }
+                let existing = projected.graph.sketch(feature.id.as_str()).ok_or_else(|| {
+                    HostError::Validation {
+                        detail: format!("sketch is missing: {}", feature.id.as_str()),
+                    }
+                })?;
+                let request = sketch_request_from_payload(existing, projected.revision_hash_hex())?;
+                let payload = sketch_payload(&request, &result)?;
+                projected
+                    .graph
+                    .add_sketch(feature, payload)
+                    .map_err(|detail| HostError::Validation { detail })?;
             }
         }
+        self.current.replace(Some(projected));
         Ok(snapshot)
     }
 

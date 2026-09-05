@@ -130,9 +130,15 @@ fn preview_requires_independent_face_evidence_and_reports_resolution_states() {
 
 #[test]
 fn real_worker_commit_reload_and_viewport_use_one_production_path() {
-    let Ok(worker) = SlvsWorker::locate() else {
-        eprintln!("libslvs integration skipped: no configured worker binary");
-        return;
+    let worker = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+            panic!("libslvs worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("libslvs integration skipped: no configured worker binary");
+            return;
+        }
     };
     let path = root();
     write_fresh(&path, ProjectGeneration::with_id("sketch-e2e")).expect("fresh bundle");
@@ -341,13 +347,25 @@ fn lost_planar_face_support_is_explicit_and_does_not_mutate_the_bundle() {
 
 #[test]
 fn production_face_evidence_and_commit_use_the_real_occt_path() {
-    let Ok(occt) = threeterm_occt_worker::OcctWorker::locate() else {
-        eprintln!("OCCT integration skipped: no configured worker binary");
-        return;
+    let occt = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("OCCT integration skipped: no configured worker binary");
+            return;
+        }
     };
-    let Ok(slvs) = SlvsWorker::locate() else {
-        eprintln!("libslvs integration skipped: no configured worker binary");
-        return;
+    let slvs = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+            panic!("libslvs worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("libslvs integration skipped: no configured worker binary");
+            return;
+        }
     };
     let path = root();
     write_fresh(
@@ -540,6 +558,18 @@ fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
     assert!(path.join("brep/solid.brep").is_file());
 
     fs::remove_file(path.join("brep/solid.brep")).expect("derived source BREP deletes");
+    host.load_with_geometry_replay(&path)
+        .expect("production reload reconstructs geometry and sketch results");
+    let projected = host
+        .presentation_snapshot()
+        .expect("production reload installs a presentation snapshot");
+    assert!(
+        projected
+            .graph
+            .sketch("attached-sketch")
+            .and_then(|sketch| sketch.solved_coordinates.as_ref())
+            .is_some()
+    );
     let reloaded = host
         .reload_sketch_with_worker(&path, "attached-sketch", &slvs)
         .expect("reload reconstructs current face evidence and resolves support");

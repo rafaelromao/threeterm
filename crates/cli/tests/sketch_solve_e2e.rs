@@ -16,7 +16,10 @@ fn root() -> PathBuf {
 
 #[test]
 fn cli_sketch_solve_commits_and_renders_the_real_worker_result() {
-    if SlvsWorker::locate().is_err() {
+    if let Err(error) = SlvsWorker::locate() {
+        if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+            panic!("libslvs worker is required: {error}");
+        }
         eprintln!("libslvs integration skipped: no configured worker binary");
         return;
     }

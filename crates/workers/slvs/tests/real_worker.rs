@@ -107,7 +107,7 @@ fn pinned_libslvs_worker_reports_attached_failure_diagnostics_without_coordinate
             normal: [0.0, 1.0, 0.0],
             x_axis: [1.0, 0.0, 0.0],
             y_axis: [0.0, 0.0, -1.0],
-            adjacent_feature_ids: Vec::new(),
+            adjacent_feature_ids: vec!["solid/bend".into()],
         },
     };
     let placement = SketchPlacement {

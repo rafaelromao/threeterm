@@ -221,7 +221,15 @@ std::string attachment_field(const Json& args, const char* name) {
            << ",\"normal\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "normal"))
            << ",\"x_axis\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "x_axis"))
            << ",\"y_axis\":" << (evidence == nullptr ? "[]" : vec3_field(*evidence, "y_axis"))
-           << ",\"adjacent_feature_ids\":[]}}";
+           << ",\"adjacent_feature_ids\":[";
+    const Json* adjacent = evidence == nullptr ? nullptr : field(*evidence, "adjacent_feature_ids");
+    if (adjacent != nullptr && adjacent->kind == Json::Kind::Array) {
+        for (std::size_t index = 0; index < adjacent->array.size(); ++index) {
+            if (index != 0) output << ',';
+            output << '"' << escape(adjacent->array[index].string) << '"';
+        }
+    }
+    output << "]}}";
     return output.str();
 }
 

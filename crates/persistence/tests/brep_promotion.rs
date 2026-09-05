@@ -100,7 +100,7 @@ fn extrude_promotion_persists_versioned_deterministic_intent() {
             &source_revision,
             "request-1",
             "{}",
-            &intent,
+            &CanonicalIntent::Extrude(intent.clone()),
             b"brep",
         )
         .expect("extrude intent publishes");

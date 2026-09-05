@@ -71,12 +71,15 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        Bundle, BundleError, CanonicalState, EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX,
-        LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION,
-        Manifest, PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
-        PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
-        V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
-        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
+        CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalState,
+        EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
+        HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
+        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
+        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
+        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
+        fail_next_publication_at, load, load_with_policy, migrate_v0_to_v1, prior_schema_epoch,
+        read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -102,6 +105,8 @@ pub const REVOLVE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.revolve/1";
 pub const MIRROR_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.mirror/1";
 pub const LINEAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.linear-pattern/1";
 pub const CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.circular-pattern/1";
+pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
+pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -719,6 +724,8 @@ pub enum CanonicalIntent {
     Mirror(CanonicalMirrorIntent),
     LinearPattern(CanonicalLinearPatternIntent),
     CircularPattern(CanonicalCircularPatternIntent),
+    Boolean(CanonicalBooleanIntent),
+    Hole(CanonicalHoleIntent),
 }
 
 impl<'de> Deserialize<'de> for CanonicalIntent {
@@ -749,6 +756,12 @@ impl<'de> Deserialize<'de> for CanonicalIntent {
             "circular-pattern" => serde_json::from_value(value)
                 .map(Self::CircularPattern)
                 .map_err(D::Error::custom),
+            "boolean" => serde_json::from_value(value)
+                .map(Self::Boolean)
+                .map_err(D::Error::custom),
+            "hole" => serde_json::from_value(value)
+                .map(Self::Hole)
+                .map_err(D::Error::custom),
             other => Err(D::Error::custom(format!(
                 "unknown canonical intent command: {other}"
             ))),
@@ -764,6 +777,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.command,
             Self::LinearPattern(intent) => &intent.command,
             Self::CircularPattern(intent) => &intent.command,
+            Self::Boolean(intent) => &intent.command,
+            Self::Hole(intent) => &intent.command,
         }
     }
 
@@ -774,6 +789,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.operation,
             Self::LinearPattern(intent) => &intent.operation,
             Self::CircularPattern(intent) => &intent.operation,
+            Self::Boolean(intent) => &intent.operation,
+            Self::Hole(intent) => &intent.hole_kind,
         }
     }
 
@@ -784,6 +801,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.schema_version,
             Self::LinearPattern(intent) => &intent.schema_version,
             Self::CircularPattern(intent) => &intent.schema_version,
+            Self::Boolean(intent) => &intent.schema_version,
+            Self::Hole(intent) => &intent.schema_version,
         }
     }
 
@@ -794,6 +813,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.request_id,
             Self::LinearPattern(intent) => &intent.request_id,
             Self::CircularPattern(intent) => &intent.request_id,
+            Self::Boolean(intent) => &intent.request_id,
+            Self::Hole(intent) => &intent.request_id,
         }
     }
 
@@ -804,6 +825,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.affected_semantic_ids,
             Self::LinearPattern(intent) => &intent.affected_semantic_ids,
             Self::CircularPattern(intent) => &intent.affected_semantic_ids,
+            Self::Boolean(intent) => &intent.affected_semantic_ids,
+            Self::Hole(intent) => &intent.affected_semantic_ids,
         }
     }
 
@@ -814,6 +837,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.source_revision,
             Self::LinearPattern(intent) => &intent.source_revision,
             Self::CircularPattern(intent) => &intent.source_revision,
+            Self::Boolean(intent) => &intent.source_revision,
+            Self::Hole(intent) => &intent.source_revision,
         }
     }
 
@@ -824,6 +849,8 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.worker_requirements,
             Self::LinearPattern(intent) => &intent.worker_requirements,
             Self::CircularPattern(intent) => &intent.worker_requirements,
+            Self::Boolean(intent) => &intent.worker_requirements,
+            Self::Hole(intent) => &intent.worker_requirements,
         }
     }
 
@@ -842,6 +869,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 Some(intent.deterministic_inputs.base_feature_id.as_str())
             }
+            Self::Boolean(intent) => Some(intent.base_feature_id.as_str()),
+            Self::Hole(intent) => Some(intent.base_feature_id.as_str()),
         }
     }
 
@@ -859,6 +888,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
             }
+            Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
+            Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
         }
     }
 
@@ -878,6 +909,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
             }
+            Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
+            Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
         }
     }
 
@@ -888,7 +921,182 @@ impl CanonicalIntent {
             Self::Mirror(intent) => intent.validate(feature_id),
             Self::LinearPattern(intent) => intent.validate(feature_id),
             Self::CircularPattern(intent) => intent.validate(feature_id),
+            Self::Boolean(intent) => intent.validate(feature_id),
+            Self::Hole(intent) => intent.validate(feature_id),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HoleDeterministicInputs {
+    pub position: [f64; 3],
+    pub direction: [f64; 3],
+    pub diameter: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_pitch: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalHoleIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub hole_kind: String,
+    pub base_feature_id: String,
+    pub request_id: String,
+    pub deterministic_inputs: HoleDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalHoleIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != HOLE_INTENT_SCHEMA_VERSION
+            || self.command != "hole"
+            || !matches!(self.hole_kind.as_str(), "drilled" | "tapped")
+            || self.request_id.is_empty()
+            || self.base_feature_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole intent identity is invalid".to_string(),
+            ));
+        }
+        if !self
+            .deterministic_inputs
+            .position
+            .iter()
+            .all(|v| v.is_finite())
+            || !self
+                .deterministic_inputs
+                .direction
+                .iter()
+                .all(|v| v.is_finite())
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic placement is invalid".to_string(),
+            ));
+        }
+        let norm: f64 = self
+            .deterministic_inputs
+            .direction
+            .iter()
+            .map(|v| v * v)
+            .sum();
+        if norm <= f64::EPSILON {
+            return Err(BundleError::Invalid(
+                "canonical hole direction must be a non-zero vector".to_string(),
+            ));
+        }
+        if !self.deterministic_inputs.diameter.is_finite()
+            || self.deterministic_inputs.diameter <= 0.0
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole deterministic inputs are invalid".to_string(),
+            ));
+        }
+        let is_tapped = self.hole_kind == "tapped";
+        let has_thread = self.deterministic_inputs.thread_designation.is_some()
+            || self.deterministic_inputs.thread_pitch.is_some()
+            || self.deterministic_inputs.thread_depth.is_some();
+        if is_tapped {
+            let designation = self
+                .deterministic_inputs
+                .thread_designation
+                .as_deref()
+                .unwrap_or_default();
+            let pitch = self.deterministic_inputs.thread_pitch.unwrap_or(0.0);
+            let depth = self.deterministic_inputs.thread_depth.unwrap_or(0.0);
+            if designation.is_empty() || !pitch.is_finite() || pitch <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread designation and pitch are invalid".to_string(),
+                ));
+            }
+            if !depth.is_finite() || depth <= 0.0 {
+                return Err(BundleError::Invalid(
+                    "canonical tapped hole thread depth is invalid".to_string(),
+                ));
+            }
+        } else if has_thread {
+            return Err(BundleError::Invalid(
+                "canonical drilled hole must not carry thread metadata".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical hole worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalBooleanIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub tool_feature_id: String,
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalBooleanIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION
+            || self.command != "boolean"
+            || !matches!(self.operation.as_str(), "fuse" | "cut" | "common")
+            || self.request_id.is_empty()
+            || self.base_feature_id.is_empty()
+            || self.tool_feature_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean intent identity is invalid".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean semantic impact or source revision is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical boolean worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1920,7 +2128,7 @@ impl Bundle {
         expected_revision: &str,
         request_id: &str,
         provenance: &str,
-        intent: &CanonicalExtrudeIntent,
+        intent: &CanonicalIntent,
         brep_bytes: &[u8],
     ) -> Result<LoadedBundle, BundleError> {
         self.append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
@@ -1929,7 +2137,7 @@ impl Bundle {
             expected_revision,
             request_id,
             provenance,
-            &CanonicalIntent::Extrude(intent.clone()),
+            intent,
             brep_bytes,
         )
     }
@@ -1963,6 +2171,39 @@ impl Bundle {
                 false,
                 false,
                 Some(intent),
+            )
+        })
+    }
+
+    /// Publish one verified hole BREP together with its canonical hole
+    /// intent. The intent and artifact provenance share the same generation.
+    /// `kind` carries the hole discriminator (e.g. `hole:drilled`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_new_feature_with_brep_if_revision_and_hole_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        request_id: &str,
+        provenance: &str,
+        hole_intent: &CanonicalHoleIntent,
+        brep_bytes: &[u8],
+    ) -> Result<LoadedBundle, BundleError> {
+        let intent = CanonicalIntent::Hole(hole_intent.clone());
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                Some((feature_id, brep_bytes)),
+                None,
+                Some(request_id),
+                Some(provenance),
+                None,
+                None,
+                true,
+                false,
+                false,
+                Some(&intent),
             )
         })
     }
@@ -2311,6 +2552,10 @@ impl Bundle {
                 CanonicalIntent::Mirror(_) => intent.operation() == "mirror",
                 CanonicalIntent::LinearPattern(_) => intent.operation() == "linear-pattern",
                 CanonicalIntent::CircularPattern(_) => intent.operation() == "circular-pattern",
+                CanonicalIntent::Boolean(_) => {
+                    matches!(intent.operation(), "fuse" | "cut" | "common")
+                }
+                CanonicalIntent::Hole(_) => matches!(intent.operation(), "drilled" | "tapped"),
             };
             if !operation_known {
                 return Err(BundleError::CanonicalOperationUnknown {
@@ -2365,6 +2610,8 @@ impl Bundle {
                         CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
                         CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
                         CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                        CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
+                        CanonicalIntent::Hole(_) => "canonical_hole_worker",
                     },
                     expected: serde_json::to_string(&occt_worker_identity())
                         .expect("worker identity serializes"),
@@ -2377,6 +2624,163 @@ impl Bundle {
                     "canonical {} intent source revision does not match the transaction source",
                     intent.command(),
                 )));
+            }
+            match intent {
+                CanonicalIntent::Extrude(extrude) => {
+                    if extrude.schema_version != EXTRUDE_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: extrude.schema_version.clone(),
+                        });
+                    }
+                    if extrude.command != "extrude"
+                        || !matches!(extrude.operation.as_str(), "additive" | "subtractive")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", extrude.command, extrude.operation),
+                        });
+                    }
+                    if let Some(target_feature_id) = &extrude.target_feature_id
+                        && !loaded.graph.contains_feature(target_feature_id)
+                    {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical extrude target feature is missing: {target_feature_id}"
+                        )));
+                    }
+                    if entries.len() != 1 || extrude.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(extrude.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if extrude.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_extrude_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&extrude.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if extrude.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical extrude intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Boolean(boolean) => {
+                    if boolean.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: boolean.schema_version.clone(),
+                        });
+                    }
+                    if boolean.command != "boolean"
+                        || !matches!(boolean.operation.as_str(), "fuse" | "cut" | "common")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", boolean.command, boolean.operation),
+                        });
+                    }
+                    if !loaded.graph.contains_feature(&boolean.base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical boolean base feature is missing: {}",
+                            boolean.base_feature_id
+                        )));
+                    }
+                    if !loaded.graph.contains_feature(&boolean.tool_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical boolean tool feature is missing: {}",
+                            boolean.tool_feature_id
+                        )));
+                    }
+                    if entries.len() != 1 || boolean.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(boolean.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if boolean.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_boolean_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&boolean.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if boolean.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical boolean intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Hole(hole) => {
+                    if hole.schema_version != HOLE_INTENT_SCHEMA_VERSION {
+                        return Err(BundleError::CanonicalVersionUnsupported {
+                            log_index: None,
+                            version: hole.schema_version.clone(),
+                        });
+                    }
+                    if hole.command != "hole"
+                        || !matches!(hole.hole_kind.as_str(), "drilled" | "tapped")
+                    {
+                        return Err(BundleError::CanonicalOperationUnknown {
+                            log_index: None,
+                            operation: format!("{}:{}", hole.command, hole.hole_kind),
+                        });
+                    }
+                    if !loaded.graph.contains_feature(&hole.base_feature_id) {
+                        return Err(BundleError::Invalid(format!(
+                            "canonical hole base feature is missing: {}",
+                            hole.base_feature_id
+                        )));
+                    }
+                    if entries.len() != 1 || hole.validate(entries[0].0).is_err() {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent does not match its transaction".to_string(),
+                        ));
+                    }
+                    if idempotency_key != Some(hole.request_id.as_str()) {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent request ID does not match transaction provenance"
+                                .to_string(),
+                        ));
+                    }
+                    if hole.worker_requirements != occt_worker_identity() {
+                        return Err(BundleError::CompatibilityIdentityMismatch {
+                            identity: "canonical_hole_worker",
+                            expected: serde_json::to_string(&occt_worker_identity())
+                                .expect("worker identity serializes"),
+                            found: serde_json::to_string(&hole.worker_requirements)
+                                .expect("worker identity serializes"),
+                        });
+                    }
+                    if hole.source_revision != loaded.revision_hash_hex() {
+                        return Err(BundleError::Invalid(
+                            "canonical hole intent source revision does not match the transaction source"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Revolve(_)
+                | CanonicalIntent::Mirror(_)
+                | CanonicalIntent::LinearPattern(_)
+                | CanonicalIntent::CircularPattern(_) => {}
             }
         }
         let allow_existing_bracket_edit = if allow_existing_bracket_edit
@@ -3097,12 +3501,98 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                     CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
                     CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
                     CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                    CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
+                    CanonicalIntent::Hole(_) => "canonical_hole_worker",
                 },
                 expected: serde_json::to_string(&occt_worker_identity())
                     .expect("worker identity serializes"),
                 found: serde_json::to_string(intent.worker_requirements())
                     .expect("worker identity serializes"),
             });
+        }
+        match intent {
+            CanonicalIntent::Extrude(extrude) => {
+                if !matches!(
+                    extrude.schema_version.as_str(),
+                    EXTRUDE_INTENT_SCHEMA_VERSION | LEGACY_EXTRUDE_INTENT_SCHEMA_VERSION
+                ) {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: extrude.schema_version.clone(),
+                    });
+                }
+                if extrude.command != "extrude"
+                    || !matches!(extrude.operation.as_str(), "additive" | "subtractive")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", extrude.command, extrude.operation),
+                    });
+                }
+                if extrude.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_extrude_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&extrude.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Boolean(boolean) => {
+                if boolean.schema_version != BOOLEAN_INTENT_SCHEMA_VERSION {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: boolean.schema_version.clone(),
+                    });
+                }
+                if boolean.command != "boolean"
+                    || !matches!(boolean.operation.as_str(), "fuse" | "cut" | "common")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", boolean.command, boolean.operation),
+                    });
+                }
+                if boolean.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_boolean_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&boolean.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Hole(hole) => {
+                if hole.schema_version != HOLE_INTENT_SCHEMA_VERSION {
+                    return Err(BundleError::CanonicalVersionUnsupported {
+                        log_index: Some(entry.log_index),
+                        version: hole.schema_version.clone(),
+                    });
+                }
+                if hole.command != "hole"
+                    || !matches!(hole.hole_kind.as_str(), "drilled" | "tapped")
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", hole.command, hole.hole_kind),
+                    });
+                }
+                if hole.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_hole_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&hole.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Revolve(_)
+            | CanonicalIntent::Mirror(_)
+            | CanonicalIntent::LinearPattern(_)
+            | CanonicalIntent::CircularPattern(_) => {}
         }
     }
     validate_canonical_kind(Some(entry.log_index), &entry.kind)
@@ -3244,16 +3734,21 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "linear-pattern"
             | "circular-pattern"
             | "boolean-fuse"
+            | "boolean-cut"
+            | "boolean-common"
             | "boolean-pattern"
             | "linear_pattern"
             | "circular_pattern"
             | "boolean_fuse"
+            | "boolean_cut"
+            | "boolean_common"
             | "boolean_pattern"
             | "shell"
             | "draft"
             | "loft"
             | "history-feature"
     ) || is_supported_brep_kind(kind)
+        || is_supported_hole_kind(kind)
         || is_supported_edge_reattachment_kind(kind)
         || is_supported_bracket_kind(kind)
         || matches!(kind, "plate-vertical" | "plate-horizontal")
@@ -3268,6 +3763,10 @@ fn is_supported_brep_kind(kind: &str) -> bool {
         && feature_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_supported_hole_kind(kind: &str) -> bool {
+    matches!(kind, "hole:drilled" | "hole:tapped")
 }
 
 fn is_supported_edge_reattachment_kind(kind: &str) -> bool {

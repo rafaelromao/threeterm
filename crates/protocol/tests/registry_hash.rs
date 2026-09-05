@@ -8,11 +8,12 @@
 //! the test fails with both the actual and the expected hash.
 
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
-    DRAFT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID,
-    LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID,
-    SHELL_COMMAND_ID, find, registry_hash,
+    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
+    CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID,
+    MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID, find, find_by_name,
+    registry_hash,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -36,7 +37,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "fbb1ccc80d9f5214d9d644df681c8bf05413d4cbda206d2bc051a1ac1d87d535",
+        "656007f8959f0956be0e18e341c07ef926b29ecfe275575f77ae693e0b62225b",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -160,6 +161,48 @@ fn registry_contains_versioned_extrude_and_boolean_fuse_contracts() {
         ])
     );
     assert_eq!(fuse.request_schema["additionalProperties"], false);
+
+    let cut = find(BOOLEAN_CUT_COMMAND_ID).expect("boolean-cut is registered");
+    assert_eq!(cut.name, "boolean-cut");
+    assert_eq!(
+        cut.response_schema_version,
+        "threeterm.command.boolean-cut.response/1"
+    );
+    assert_eq!(
+        cut.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "tool_feature_id"
+        ])
+    );
+    assert_eq!(cut.request_schema["additionalProperties"], false);
+    assert_eq!(
+        find_by_name("boolean-cut").map(|entry| entry.id),
+        Some(BOOLEAN_CUT_COMMAND_ID)
+    );
+
+    let common = find(BOOLEAN_COMMON_COMMAND_ID).expect("boolean-common is registered");
+    assert_eq!(common.name, "boolean-common");
+    assert_eq!(
+        common.response_schema_version,
+        "threeterm.command.boolean-common.response/1"
+    );
+    assert_eq!(
+        common.request_schema["required"],
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "tool_feature_id"
+        ])
+    );
+    assert_eq!(common.request_schema["additionalProperties"], false);
+    assert_eq!(
+        find_by_name("boolean-common").map(|entry| entry.id),
+        Some(BOOLEAN_COMMON_COMMAND_ID)
+    );
 }
 
 #[test]

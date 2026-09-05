@@ -42,6 +42,8 @@ pub enum Operation {
     Extrude,
     Bracket,
     BooleanFuse,
+    BooleanCut,
+    BooleanCommon,
     Fillet,
     Split,
     Chamfer,
@@ -80,6 +82,8 @@ impl Operation {
             Self::Extrude => "extrude",
             Self::Bracket => "bracket",
             Self::BooleanFuse => "boolean_fuse",
+            Self::BooleanCut => "boolean_cut",
+            Self::BooleanCommon => "boolean_common",
             Self::Fillet => "fillet",
             Self::Split => "split",
             Self::Chamfer => "chamfer",
@@ -564,6 +568,194 @@ impl BooleanFuseResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCutRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub tool_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BooleanCutRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        tool_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::BooleanCut,
+            base_path: base_path.into(),
+            tool_path: tool_path.into(),
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::BooleanCut {
+            return Err(format!(
+                "operation must be boolean_cut for BooleanCutRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if self.tool_path.as_os_str().is_empty() {
+            return Err("tool_path must not be empty".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCutResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl BooleanCutResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCommonRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub tool_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub output_filename: String,
+    pub feature_id: String,
+}
+
+impl BooleanCommonRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        tool_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::BooleanCommon,
+            base_path: base_path.into(),
+            tool_path: tool_path.into(),
+            output_dir: PathBuf::new(),
+            output_filename: String::new(),
+            feature_id: String::new(),
+        }
+    }
+    pub fn with_output_path(
+        mut self,
+        output_dir: impl Into<PathBuf>,
+        output_filename: impl Into<String>,
+    ) -> Self {
+        self.output_dir = output_dir.into();
+        self.output_filename = output_filename.into();
+        self
+    }
+    pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
+        self.feature_id = feature_id.into();
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version) {
+            return Err(format!(
+                "schema_version must be {SCHEMA_VERSION:?}, got {:?}",
+                self.schema_version
+            ));
+        }
+        if !is_request_id(&self.request_id) {
+            return Err("request_id must be a non-empty identifier".to_string());
+        }
+        if !is_feature_id(&self.feature_id) {
+            return Err("feature_id must be a non-empty identifier".to_string());
+        }
+        if self.operation != Operation::BooleanCommon {
+            return Err(format!(
+                "operation must be boolean_common for BooleanCommonRequest, got {:?}",
+                self.operation
+            ));
+        }
+        if self.base_path.as_os_str().is_empty() {
+            return Err("base_path must not be empty".to_string());
+        }
+        if self.tool_path.as_os_str().is_empty() {
+            return Err("tool_path must not be empty".to_string());
+        }
+        if self.output_filename.is_empty() || self.output_filename.contains('/') {
+            return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanCommonResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
+    pub brep_bytes: usize,
+    pub feature_id: String,
+}
+
+impl BooleanCommonResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 /// Fillet request: apply a constant-radius rounding to every edge of
 /// the BREP at `base_path` and write the result to
 /// `<output_dir>/<output_filename>`.
@@ -983,6 +1175,26 @@ pub struct HoleRequest {
     pub direction: [f64; 3],
     /// Bore diameter. Must be a positive finite number.
     pub diameter: f64,
+    /// Hole kind discriminator: `drilled` (default) or `tapped`.
+    /// Carried canonically; the v1 worker cuts the same through-cylinder
+    /// for both kinds and ignores thread metadata for geometry.
+    #[serde(default = "default_hole_kind")]
+    pub hole_kind: String,
+    /// Tapped-thread designation (e.g. `M6x1`). Must be present for
+    /// `tapped` holes and absent for `drilled` holes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_designation: Option<String>,
+    /// Tapped-thread pitch. Must be strictly positive when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_pitch: Option<f64>,
+    /// Tapped-thread depth. Must be strictly positive when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_depth: Option<f64>,
+    /// Stable semantic support: the canonical base feature the hole cuts.
+    /// Carried for host provenance; the C++ worker ignores it and reads
+    /// only the disposable `base_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
     /// Requests the optional removed-volume measurement in the result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measure_removed_volume: Option<bool>,
@@ -992,6 +1204,10 @@ pub struct HoleRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+}
+
+fn default_hole_kind() -> String {
+    "drilled".to_string()
 }
 
 impl HoleRequest {
@@ -1010,11 +1226,33 @@ impl HoleRequest {
             position,
             direction,
             diameter,
+            hole_kind: default_hole_kind(),
+            thread_designation: None,
+            thread_pitch: None,
+            thread_depth: None,
+            base_feature_id: None,
             measure_removed_volume: None,
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
         }
+    }
+
+    pub fn with_hole_kind(mut self, hole_kind: impl Into<String>) -> Self {
+        self.hole_kind = hole_kind.into();
+        self
+    }
+
+    pub fn with_thread(mut self, designation: impl Into<String>, pitch: f64, depth: f64) -> Self {
+        self.thread_designation = Some(designation.into());
+        self.thread_pitch = Some(pitch);
+        self.thread_depth = Some(depth);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
+        self
     }
 
     pub fn with_output_path(
@@ -1082,8 +1320,37 @@ impl HoleRequest {
         {
             return Err("hole diameter must be a positive finite number".to_string());
         }
+        if !matches!(self.hole_kind.as_str(), "drilled" | "tapped") {
+            return Err("hole kind must be drilled or tapped".to_string());
+        }
+        let has_thread = self.thread_designation.is_some()
+            || self.thread_pitch.is_some()
+            || self.thread_depth.is_some();
+        if self.hole_kind == "tapped" {
+            let designation = self.thread_designation.as_deref().unwrap_or_default();
+            if designation.is_empty() {
+                return Err("tapped hole requires a thread designation".to_string());
+            }
+            match self.thread_pitch {
+                Some(pitch) if pitch.is_finite() && pitch > 0.0 => {}
+                _ => {
+                    return Err("tapped hole requires a positive finite thread pitch".to_string());
+                }
+            }
+            match self.thread_depth {
+                Some(depth) if depth.is_finite() && depth > 0.0 => {}
+                _ => {
+                    return Err("tapped hole requires a positive finite thread depth".to_string());
+                }
+            }
+        } else if has_thread {
+            return Err("drilled hole must not carry thread metadata".to_string());
+        }
         if self.output_filename.is_empty() || self.output_filename.contains('/') {
             return Err("output_filename must be a non-empty plain filename".to_string());
+        }
+        if self.base_feature_id.as_deref().is_some_and(str::is_empty) {
+            return Err("hole base_feature_id must not be empty".to_string());
         }
         Ok(())
     }
@@ -2325,6 +2592,48 @@ mod tests {
             .with_feature_id("fuse-1");
         request.schema_version = SCHEMA_VERSION.to_string();
         request.operation = Operation::Extrude;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_canonical_boolean_cut() {
+        let mut request = BooleanCutRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "cut.brep")
+            .with_feature_id("cut-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.validate().expect("boolean-cut envelope is valid");
+        assert_eq!(Operation::BooleanCut.as_str(), "boolean_cut");
+    }
+
+    #[test]
+    fn validate_rejects_boolean_cut_with_wrong_operation() {
+        let mut request = BooleanCutRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "cut.brep")
+            .with_feature_id("cut-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::BooleanFuse;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_canonical_boolean_common() {
+        let mut request = BooleanCommonRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "common.brep")
+            .with_feature_id("common-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request
+            .validate()
+            .expect("boolean-common envelope is valid");
+        assert_eq!(Operation::BooleanCommon.as_str(), "boolean_common");
+    }
+
+    #[test]
+    fn validate_rejects_boolean_common_with_wrong_operation() {
+        let mut request = BooleanCommonRequest::new("req-1", "/tmp/base.brep", "/tmp/tool.brep")
+            .with_output_path("/tmp", "common.brep")
+            .with_feature_id("common-1");
+        request.schema_version = SCHEMA_VERSION.to_string();
+        request.operation = Operation::BooleanCut;
         assert!(request.validate().is_err());
     }
 

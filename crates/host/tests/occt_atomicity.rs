@@ -1,5 +1,5 @@
 //! Atomicity and end-to-end tests for the host's `extrude` and
-//! `boolean_fuse` methods.
+//! `boolean_fuse`/`boolean_cut`/`boolean_common` methods.
 //!
 //! These tests exercise the real worker binary through the
 //! `OcctWorker` boundary so the production code path is the system
@@ -20,9 +20,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
-    DraftRequest, ExtrudeMode, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest,
-    LoftRequest, MirrorRequest, Operation, ShellRequest,
+    BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BooleanPatternRequest,
+    ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeMode, ExtrudeRequest,
+    FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
+    ShellRequest,
 };
 use threeterm_persistence::{
     Bundle, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -533,7 +534,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
             intent.source_revision.as_str(),
             &intent.request_id,
             "{}",
-            &intent,
+            &CanonicalIntent::Extrude(intent.clone()),
             bytes,
         )
         .expect("canonical extrude appends");
@@ -1353,6 +1354,245 @@ fn boolean_fuse_brep_invalid_preserves_canonical_state() {
     let _ = fs::remove_file(script);
 }
 
+fn overlapping_box_pair(
+    host: &Host,
+    root: &Path,
+    label: &str,
+    worker: &threeterm_occt_worker::OcctWorker,
+) {
+    let base_request = ExtrudeRequest::new(
+        unique_request_id(&format!("{label}-base")),
+        vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "base.brep")
+    .with_feature_id(format!("{label}-base-1"));
+    let base_view = host
+        .extrude(root, base_request, worker)
+        .expect("base extrude");
+    assert_eq!(base_view.result.status, "ok");
+
+    let tool_request = ExtrudeRequest::new(
+        unique_request_id(&format!("{label}-tool")),
+        vec![(5.0, 0.0), (15.0, 0.0), (15.0, 5.0), (5.0, 5.0)],
+        3.0,
+    )
+    .with_output_path(root.join("stage"), "tool.brep")
+    .with_feature_id(format!("{label}-tool-1"));
+    let tool_view = host
+        .extrude(root, tool_request, worker)
+        .expect("tool extrude");
+    assert_eq!(tool_view.result.status, "ok");
+}
+
+#[test]
+fn boolean_cut_of_two_extrudes_commits_a_cut_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("cut", "box-seed", "box");
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+    overlapping_box_pair(&host, &root, "cut", &worker);
+
+    let cut_request = BooleanCutRequest::new(
+        unique_request_id("cut"),
+        root.join("brep/cut-base-1.brep"),
+        root.join("brep/cut-tool-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "cut.brep")
+    .with_feature_id("cut-1");
+    let cut_request_id = cut_request.request_id.clone();
+    let cut_view = host
+        .boolean_cut(&root, cut_request, &worker)
+        .expect("boolean cut commits");
+
+    assert_eq!(cut_view.result.status, "ok");
+    assert_eq!(cut_view.result.operation, Operation::BooleanCut);
+    assert_eq!(cut_view.artifact.request_id, cut_request_id);
+    assert_eq!(cut_view.artifact.operation, "boolean_cut");
+    assert_eq!(cut_view.artifact.feature_id, "cut-1");
+    assert_eq!(cut_view.artifact.path, root.join("brep/cut-1.brep"));
+    assert_eq!(
+        cut_view.artifact.byte_count,
+        cut_view.result.brep_bytes as u64
+    );
+    assert_eq!(cut_view.artifact.sha256, cut_view.result.brep_sha256);
+    let cut_brep = root.join("brep/cut-1.brep");
+    assert!(cut_brep.is_file(), "cut BREP is on disk at {cut_brep:?}");
+    assert_ne!(cut_view.snapshot.revision_hash, prior_view.revision_hash);
+    let transactions = fs::read_to_string(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    assert!(transactions.contains(&cut_request_id));
+    assert!(transactions.contains("boolean_cut"));
+    assert!(!transactions.contains("/stage/"));
+    assert_eq!(Host::new().load(&root).expect("reloads"), cut_view.snapshot);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_common_of_two_extrudes_commits_a_common_brep() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("common", "box-seed", "box");
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+    overlapping_box_pair(&host, &root, "common", &worker);
+
+    let common_request = BooleanCommonRequest::new(
+        unique_request_id("common"),
+        root.join("brep/common-base-1.brep"),
+        root.join("brep/common-tool-1.brep"),
+    )
+    .with_output_path(root.join("stage"), "common.brep")
+    .with_feature_id("common-1");
+    let common_request_id = common_request.request_id.clone();
+    let common_view = host
+        .boolean_common(&root, common_request, &worker)
+        .expect("boolean common commits");
+
+    assert_eq!(common_view.result.status, "ok");
+    assert_eq!(common_view.result.operation, Operation::BooleanCommon);
+    assert_eq!(common_view.artifact.request_id, common_request_id);
+    assert_eq!(common_view.artifact.operation, "boolean_common");
+    assert_eq!(common_view.artifact.feature_id, "common-1");
+    assert_eq!(common_view.artifact.path, root.join("brep/common-1.brep"));
+    assert_eq!(
+        common_view.artifact.byte_count,
+        common_view.result.brep_bytes as u64
+    );
+    assert_eq!(common_view.artifact.sha256, common_view.result.brep_sha256);
+    let common_brep = root.join("brep/common-1.brep");
+    assert!(
+        common_brep.is_file(),
+        "common BREP is on disk at {common_brep:?}"
+    );
+    assert_ne!(common_view.snapshot.revision_hash, prior_view.revision_hash);
+    let transactions = fs::read_to_string(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+    assert!(transactions.contains(&common_request_id));
+    assert!(transactions.contains("boolean_common"));
+    assert!(!transactions.contains("/stage/"));
+    assert_eq!(
+        Host::new().load(&root).expect("reloads"),
+        common_view.snapshot
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_operations_reload_and_recompute_after_derived_results_are_removed() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("boolean-replay", "box-seed", "box");
+    let host = Host::new();
+    overlapping_box_pair(&host, &root, "replay", &worker);
+
+    let fuse_view = host
+        .boolean_fuse(
+            &root,
+            BooleanFuseRequest::new(
+                unique_request_id("replay-fuse"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "fused.brep")
+            .with_feature_id("replay-fused-1"),
+            &worker,
+        )
+        .expect("boolean fuse commits");
+    let cut_view = host
+        .boolean_cut(
+            &root,
+            BooleanCutRequest::new(
+                unique_request_id("replay-cut"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "cut.brep")
+            .with_feature_id("replay-cut-1"),
+            &worker,
+        )
+        .expect("boolean cut commits");
+    let common_view = host
+        .boolean_common(
+            &root,
+            BooleanCommonRequest::new(
+                unique_request_id("replay-common"),
+                root.join("brep/replay-base-1.brep"),
+                root.join("brep/replay-tool-1.brep"),
+            )
+            .with_output_path(root.join("stage"), "common.brep")
+            .with_feature_id("replay-common-1"),
+            &worker,
+        )
+        .expect("boolean common commits");
+
+    let originals = [
+        (
+            "replay-fused-1",
+            fs::read(&fuse_view.result.brep_path).expect("fused BREP reads"),
+        ),
+        (
+            "replay-cut-1",
+            fs::read(&cut_view.result.brep_path).expect("cut BREP reads"),
+        ),
+        (
+            "replay-common-1",
+            fs::read(&common_view.result.brep_path).expect("common BREP reads"),
+        ),
+    ];
+    let manifest = fs::read(root.join(MANIFEST_FILENAME)).expect("manifest reads");
+    let log = fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log reads");
+
+    for (feature_id, _) in &originals {
+        fs::remove_file(root.join("brep").join(format!("{feature_id}.brep")))
+            .expect("derived BREP removes");
+    }
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+    Host::new()
+        .load(&root)
+        .expect("canonical project loads without derived BREPs");
+
+    let replayed = Host::new()
+        .reload_and_recompute_booleans(&root, &worker)
+        .expect("booleans recompute");
+    assert_eq!(
+        replayed.snapshot.revision_hash,
+        common_view.snapshot.revision_hash
+    );
+    assert_eq!(replayed.recomputed, 3);
+    assert_eq!(
+        replayed.feature_ids,
+        ["replay-fused-1", "replay-cut-1", "replay-common-1"]
+    );
+    let expected_fingerprints: Vec<String> = originals
+        .iter()
+        .map(|(_, bytes)| sha256_hex(bytes))
+        .collect();
+    assert_eq!(replayed.geometry_fingerprints, expected_fingerprints);
+    for (feature_id, bytes) in &originals {
+        assert_eq!(
+            fs::read(root.join("brep").join(format!("{feature_id}.brep")))
+                .expect("recomputed BREP reads"),
+            *bytes
+        );
+    }
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).expect("manifest rereads"),
+        manifest
+    );
+    assert_eq!(
+        fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log rereads"),
+        log
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 fn fillet_request(label: &str, feature_id: &str, base_path: &Path) -> FilletRequest {
     FilletRequest::new(unique_request_id(label), base_path, 0.5)
         .with_output_path(PathBuf::from("/tmp"), "out.brep")
@@ -1365,7 +1605,12 @@ fn chamfer_request(label: &str, feature_id: &str, base_path: &Path) -> ChamferRe
         .with_feature_id(feature_id)
 }
 
-fn hole_request(label: &str, feature_id: &str, base_path: &Path) -> HoleRequest {
+fn hole_request(
+    label: &str,
+    feature_id: &str,
+    base_path: &Path,
+    base_feature_id: &str,
+) -> HoleRequest {
     HoleRequest::new(
         unique_request_id(label),
         base_path,
@@ -1373,6 +1618,7 @@ fn hole_request(label: &str, feature_id: &str, base_path: &Path) -> HoleRequest 
         [0.0, 0.0, 1.0],
         1.0,
     )
+    .with_base_feature_id(base_feature_id)
     .with_output_path(PathBuf::from("/tmp"), "out.brep")
     .with_feature_id(feature_id)
 }
@@ -1855,8 +2101,13 @@ fn hole_commits_brep_into_a_new_revision() {
     assert_eq!(base_view.result.status, "ok");
 
     let base_brep = committed_brep_path(&root, "hole-commit-base-1");
-    let request = hole_request("hole-commit", "hole-commit-1", &base_brep)
-        .with_output_path(root.join("stage"), "hole-commit.brep");
+    let request = hole_request(
+        "hole-commit",
+        "hole-commit-1",
+        &base_brep,
+        "hole-commit-base-1",
+    )
+    .with_output_path(root.join("stage"), "hole-commit.brep");
     let view = host.hole(&root, request, &worker).expect("hole commits");
 
     assert_ne!(view.snapshot.revision_hash, prior.revision_hash);
@@ -1933,6 +2184,7 @@ fn hole_on_l_bracket_shows_hole_in_viewport() {
         [0.0, 0.0, 1.0],
         1.0,
     )
+    .with_base_feature_id("l-bracket-1")
     .with_output_path(root.join("stage"), "l-bracket-hole.brep")
     .with_feature_id("l-bracket-hole-1");
     let hole_view = host
@@ -1989,6 +2241,7 @@ fn hole_spawn_failure_preserves_canonical_state() {
         "hole-spawn-fail",
         "hole-spawn-fail-1",
         &PathBuf::from("/no/such/base.brep"),
+        "box-seed",
     );
     let result = host.hole(&root, request, &bad_worker);
     assert!(
@@ -2021,6 +2274,7 @@ fn hole_request_malformed_preserves_canonical_state() {
         "hole-bad-req",
         "hole-bad-req-1",
         &PathBuf::from("/no/such/base.brep"),
+        "box-seed",
     );
     let result = host.hole(&root, request, &worker);
     assert!(
@@ -2074,6 +2328,7 @@ fn hole_brep_invalid_preserves_canonical_state() {
         "hole-brep-invalid",
         "hole-brep-invalid-1",
         &PathBuf::from("/no/such/base.brep"),
+        "box-seed",
     );
     let result = host.hole(&root, request, &fake_worker);
     assert!(is_brep_invalid(&result), "got {result:?}");
@@ -3698,4 +3953,362 @@ fn adversarial_trailing_worker_data_preserves_canonical_host_state() {
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_file(script);
+}
+
+#[test]
+fn boolean_cut_via_domain_command_rejects_missing_base_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_CUT_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("cut-missing-base", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "cut-1",
+        "base_feature_id": "does-not-exist",
+        "tool_feature_id": "box-seed",
+    });
+    let result = host.execute_domain_command(BOOLEAN_CUT_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("missing boolean base must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_common_via_domain_command_rejects_incompatible_operand_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_COMMON_COMMAND_ID;
+
+    let root = temp_root("common-incompatible");
+    let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("bundle creates");
+    bundle
+        .append_feature("solid-1", "brep:solid-1")
+        .expect("solid seed appends");
+    bundle
+        .append_feature("sketch-1", "sketch")
+        .expect("sketch seed appends");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "common-1",
+        "base_feature_id": "solid-1",
+        "tool_feature_id": "sketch-1",
+    });
+    let result = host.execute_domain_command(BOOLEAN_COMMON_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("incompatible boolean operand must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_fuse_via_domain_command_rejects_missing_tool_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("fuse-missing-tool", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "fuse-1",
+        "base_feature_id": "box-seed",
+        "tool_feature_id": "does-not-exist",
+    });
+    let result = host.execute_domain_command(BOOLEAN_FUSE_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("missing boolean tool must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn boolean_cut_brep_invalid_preserves_canonical_state() {
+    use threeterm_occt_worker::BooleanCutRequest;
+
+    let Some(_) = locate_worker() else { return };
+    let root = fresh_bundle_with_feature("cut-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-cut-brep-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        format!(
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let cut_request = BooleanCutRequest::new(
+        unique_request_id("cut-brep-invalid"),
+        "/no/such/base.brep",
+        "/no/such/tool.brep",
+    )
+    .with_output_path(root.join("stage"), "cut.brep")
+    .with_feature_id("cut-brep-invalid-1");
+    let result = host.boolean_cut(&root, cut_request, &fake_worker);
+    assert!(is_brep_invalid(&result), "got {result:?}");
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn boolean_common_brep_invalid_preserves_canonical_state() {
+    use threeterm_occt_worker::BooleanCommonRequest;
+
+    let Some(_) = locate_worker() else { return };
+    let root = fresh_bundle_with_feature("common-brep-invalid", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let mut script = std::env::temp_dir();
+    script.push(format!(
+        "threeterm-host-fake-occt-common-brep-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script,
+        format!(
+            "{worker}\nexit 3\n",
+            worker = fake_worker_script(&fake_failed_reply(
+                "brep_invalid",
+                "BRepCheck_Analyzer failed",
+            ))
+        ),
+    )
+    .expect("script writes");
+    let mut perms = fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let fake_worker = threeterm_occt_worker::OcctWorker::with_binary_path(script.clone());
+    let common_request = BooleanCommonRequest::new(
+        unique_request_id("common-brep-invalid"),
+        "/no/such/base.brep",
+        "/no/such/tool.brep",
+    )
+    .with_output_path(root.join("stage"), "common.brep")
+    .with_feature_id("common-brep-invalid-1");
+    let result = host.boolean_common(&root, common_request, &fake_worker);
+    assert!(is_brep_invalid(&result), "got {result:?}");
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.current(), Some(prior_view));
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn hole_via_domain_command_rejects_unknown_base_without_mutation() {
+    use threeterm_protocol::command_execution::ExecutionError;
+    use threeterm_protocol::schema::HOLE_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("hole-missing-base", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "hole-1",
+        "base_feature_id": "does-not-exist",
+        "position": [1.5, 1.5, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 1.0,
+        "hole_kind": "drilled",
+    });
+    let result = host.execute_domain_command(HOLE_COMMAND_ID, request);
+    match result {
+        Err(ExecutionError::Handler(HostError::Validation { .. })) => {}
+        other => panic!("missing hole base must fail closed, got {other:?}"),
+    }
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn hole_via_domain_command_rejects_invalid_diameter_without_mutation() {
+    use threeterm_protocol::schema::HOLE_COMMAND_ID;
+
+    let root = fresh_bundle_with_feature("hole-bad-diameter", "box-seed", "box");
+    let (prior_manifest, prior_log) = snapshot_files(&root);
+    let host = Host::new();
+    let prior_view = host.load(&root).expect("loads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "hole-1",
+        "base_feature_id": "box-seed",
+        "position": [1.5, 1.5, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 0.0,
+        "hole_kind": "drilled",
+    });
+    // Schema rejects non-positive diameter before the handler runs.
+    let result = host.execute_domain_command(HOLE_COMMAND_ID, request);
+    assert!(
+        result.is_err(),
+        "zero diameter must fail closed, got {result:?}"
+    );
+
+    let (post_manifest, post_log) = snapshot_files(&root);
+    assert_eq!(prior_manifest, post_manifest);
+    assert_eq!(prior_log, post_log);
+    assert_eq!(host.load(&root).expect("reloads"), prior_view);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn drilled_hole_via_shared_executor_commits_explicit_intent_and_reloads() {
+    use threeterm_protocol::schema::HOLE_COMMAND_ID;
+
+    let Some(worker) = required_fixture_worker("drilled_hole_via_shared_executor") else {
+        return;
+    };
+    let root = temp_root("hole-executor-tracer");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+
+    // Seed a real solid via extrude so the hole has semantic support.
+    let base_request = rectangle_extrude_request("hole-tracer-base")
+        .with_output_path(root.join("stage"), "hole-tracer-base.brep")
+        .with_feature_id("base-1");
+    host.extrude(&root, base_request, &worker)
+        .expect("base extrude commits");
+    let source = host.load(&root).expect("loads source");
+    let base_brep = committed_brep_path(&root, "base-1");
+    let base_bytes = fs::read(&base_brep).expect("base BREP reads");
+
+    let request = serde_json::json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "hole-1",
+        "base_feature_id": "base-1",
+        "position": [1.5, 1.5, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 1.0,
+        "hole_kind": "drilled",
+    });
+    let preview_source = host.load(&root).expect("loads preview source");
+    let preview = host
+        .preview_domain_command(HOLE_COMMAND_ID, request.clone())
+        .expect("hole preview executes through the OCCT worker");
+    assert_eq!(preview.source_revision, preview_source.revision_hash);
+    assert_eq!(
+        host.load(&root).expect("loads after preview"),
+        preview_source,
+        "preview must not mutate the canonical snapshot"
+    );
+
+    let response = host
+        .execute_domain_command(HOLE_COMMAND_ID, request)
+        .expect("drilled hole executes");
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["operation"], "hole");
+    assert_eq!(response["feature_id"], "hole-1");
+    assert_eq!(preview.geometry_fingerprint, response["brep_sha256"]);
+
+    // Explicit versioned intent survives reload.
+    let loaded = Bundle::at(&root).open().expect("bundle reopens");
+    let entry = loaded
+        .log
+        .entries()
+        .last()
+        .expect("hole transaction exists");
+    assert!(
+        matches!(
+            entry.intent.as_ref(),
+            Some(CanonicalIntent::Hole(intent)) if intent.hole_kind == "drilled"
+        ),
+        "hole intent is explicit and versioned, got {:?}",
+        entry.intent
+    );
+    assert!(loaded.graph.contains_feature("hole-1"));
+
+    // Through-ness at canonical level: holed BREP differs and reloads identically.
+    let holed_brep = committed_brep_path(&root, "hole-1");
+    assert!(holed_brep.is_file());
+    let holed_bytes = fs::read(&holed_brep).expect("holed BREP reads");
+    assert_ne!(holed_bytes, base_bytes);
+    let first_sha = threeterm_protocol::artifact::sha256_hex(&holed_bytes);
+
+    // Delete the derived BREP; production load + recompute rebuilds identical bytes.
+    fs::remove_file(&holed_brep).expect("derived BREP deletes");
+    let replayed = host
+        .reload_and_recompute_geometry(&root, &worker)
+        .expect("hole replays");
+    assert!(replayed.feature_ids.contains(&"hole-1".to_string()));
+    let rebuilt_bytes = fs::read(&holed_brep).expect("rebuilt BREP reads");
+    assert_eq!(
+        threeterm_protocol::artifact::sha256_hex(&rebuilt_bytes),
+        first_sha,
+        "reload rebuilds identical brep_sha256"
+    );
+    let after = host.load(&root).expect("reloads");
+    assert_ne!(after.revision_hash, source.revision_hash);
+    assert_ne!(after.feature_graph_hash, source.feature_graph_hash);
+
+    let _ = fs::remove_dir_all(root);
 }

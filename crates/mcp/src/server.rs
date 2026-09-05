@@ -44,7 +44,7 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CommandSchema, IDENTITY_COMMAND_ID, iter,
+    CommandSchema, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -404,6 +404,7 @@ impl McpServer {
                 | threeterm_protocol::schema::MIRROR_COMMAND_ID
                 | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
                 | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
+                | HOLE_COMMAND_ID
         ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }
@@ -484,7 +485,15 @@ impl McpServer {
             ),
             Err(ExecutionError::Handler(error)) => JsonRpcResponse::success(
                 request.id.clone(),
-                tool_execution_error(format!("domain command failed: {error}")),
+                if command == HOLE_COMMAND_ID {
+                    tool_result(
+                        serde_json::to_value(host_error_diagnostic(&error))
+                            .expect("diagnostics serialize"),
+                        true,
+                    )
+                } else {
+                    tool_execution_error(format!("domain command failed: {error}"))
+                },
             ),
             Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
                 request.id.clone(),
@@ -1811,6 +1820,33 @@ mod tests {
         object.insert("method".to_string(), Value::String(method.to_string()));
         object.insert("params".to_string(), params);
         Value::Object(object)
+    }
+
+    #[test]
+    fn advertise_tools_exposes_the_boolean_cut_and_common_contracts() {
+        use threeterm_protocol::schema::{BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, find};
+
+        let server = McpServer::new();
+        let tools = server.advertise_tools();
+        for command in [BOOLEAN_CUT_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID] {
+            let entry = find(command).expect("boolean command is registered");
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == entry.schema_version)
+                .unwrap_or_else(|| panic!("{command:?} is advertised"));
+            assert!(tool.input_schema.is_object());
+            assert_eq!(
+                tool.input_schema["required"],
+                json!([
+                    "bundle_path",
+                    "feature_id",
+                    "base_feature_id",
+                    "tool_feature_id"
+                ])
+            );
+            assert!(tool.output_schema.as_ref().is_some_and(Value::is_object));
+        }
+        assert_eq!(tools.len(), threeterm_protocol::schema::iter().count());
     }
 
     #[test]

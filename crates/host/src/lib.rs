@@ -1387,15 +1387,8 @@ fn sketch_request_from_value(
         })?;
     match (support, placement) {
         (Some(support), Some(placement)) => {
-            if support.evidence.origin != placement.origin
-                || support.evidence.normal != placement.normal
-                || support.evidence.x_axis != placement.x_axis
-                || support.evidence.y_axis != placement.y_axis
-            {
-                return Err(HostError::Validation {
-                    detail: "sketch placement must match the selected planar face frame"
-                        .to_string(),
-                });
+            if let Err(detail) = support.validate_placement(&placement) {
+                return Err(HostError::Validation { detail });
             }
             typed = typed.with_attachment(support, placement);
         }
@@ -1532,22 +1525,32 @@ fn production_planar_face_candidates(
     Ok(evidence
         .candidates
         .into_iter()
-        .map(|candidate| PlanarFaceCandidate {
-            semantic_id: candidate.semantic_id,
-            provenance: threeterm_domain::PlanarFaceProvenance {
-                source_feature_id: candidate.source_feature_id,
-                source_revision_id: candidate.source_revision_id,
-                source_face_id: candidate.source_face_id,
-            },
-            role: candidate.role,
-            evidence: threeterm_domain::PlanarFaceEvidence {
-                topology_kind: candidate.topology_kind,
-                origin: candidate.origin,
-                normal: candidate.normal,
-                x_axis: candidate.x_axis,
-                y_axis: candidate.y_axis,
-                adjacent_feature_ids: candidate.adjacent_feature_ids,
-            },
+        .map(|candidate| {
+            let geometry_hash = sha256_hex(
+                &serde_json::to_vec(&candidate).expect("planar face geometry evidence serializes"),
+            );
+            let semantic_id = format!(
+                "{}/face-{}",
+                reference.provenance.source_feature_id,
+                &geometry_hash[..24]
+            );
+            PlanarFaceCandidate {
+                semantic_id: semantic_id.clone(),
+                provenance: threeterm_domain::PlanarFaceProvenance {
+                    source_feature_id: reference.provenance.source_feature_id.clone(),
+                    source_revision_id: reference.provenance.source_revision_id.clone(),
+                    source_face_id: semantic_id,
+                },
+                role: "sketch-support".to_string(),
+                evidence: threeterm_domain::PlanarFaceEvidence {
+                    topology_kind: candidate.topology_kind,
+                    origin: candidate.origin,
+                    normal: candidate.normal,
+                    x_axis: candidate.x_axis,
+                    y_axis: candidate.y_axis,
+                    adjacent_feature_ids: candidate.adjacent_feature_ids,
+                },
+            }
         })
         .collect())
 }
@@ -1885,6 +1888,59 @@ impl Host {
     }
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Obtain fresh host-authenticated planar-face evidence for a solid. The
+    /// returned semantic IDs are derived by the host from the worker's
+    /// geometry-only evidence.
+    pub fn planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        source_feature_id: &str,
+    ) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_revision = loaded
+            .feature_brep_source_revision(source_feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("feature has no authenticated BREP: {source_feature_id}"),
+            })?;
+        let frame = threeterm_domain::SketchPlacement {
+            origin: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let support = PlanarFaceReference {
+            semantic_id: format!("{source_feature_id}/probe"),
+            provenance: threeterm_domain::PlanarFaceProvenance {
+                source_feature_id: source_feature_id.to_string(),
+                source_revision_id: source_revision,
+                source_face_id: format!("{source_feature_id}/probe"),
+            },
+            role: "sketch-support".to_string(),
+            evidence: threeterm_domain::PlanarFaceEvidence {
+                topology_kind: "planar_face".to_string(),
+                origin: frame.origin,
+                normal: frame.normal,
+                x_axis: frame.x_axis,
+                y_axis: frame.y_axis,
+                adjacent_feature_ids: Vec::new(),
+            },
+        };
+        let request = SketchSolveRequest::new(
+            format!("face-evidence-{source_feature_id}"),
+            "face-evidence",
+            vec![threeterm_slvs_worker::SketchEntity::Point {
+                id: "p0".to_string(),
+                x: 0.0,
+                y: 0.0,
+            }],
+            Vec::new(),
+        )
+        .with_source_revision(loaded.revision_hash_hex())
+        .with_attachment(support, frame);
+        production_planar_face_candidates(&loaded, &request)
     }
 
     pub fn preview_sketch_solve(

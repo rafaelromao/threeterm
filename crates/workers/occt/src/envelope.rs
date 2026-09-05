@@ -148,11 +148,6 @@ impl PlanarFaceEvidenceRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanarFaceEvidenceCandidate {
-    pub semantic_id: String,
-    pub source_feature_id: String,
-    pub source_revision_id: String,
-    pub source_face_id: String,
-    pub role: String,
     pub topology_kind: String,
     pub origin: [f64; 3],
     pub normal: [f64; 3],

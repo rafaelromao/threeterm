@@ -338,3 +338,82 @@ fn lost_planar_face_support_is_explicit_and_does_not_mutate_the_bundle() {
     );
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn production_face_evidence_and_commit_use_the_real_occt_path() {
+    let Ok(occt) = threeterm_occt_worker::OcctWorker::locate() else {
+        eprintln!("OCCT integration skipped: no configured worker binary");
+        return;
+    };
+    let Ok(slvs) = SlvsWorker::locate() else {
+        eprintln!("libslvs integration skipped: no configured worker binary");
+        return;
+    };
+    let path = root();
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("production-face-evidence"),
+    )
+    .expect("fresh bundle");
+    let source = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+    ))
+    .expect("fixture BREP reads");
+    let bundle = Bundle::at(&path);
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
+        .expect("authenticated BREP appends");
+    let host = Host::new();
+    let candidates = host
+        .planar_face_candidates(&path, "solid")
+        .expect("production OCCT returns planar face evidence");
+    let candidate = candidates
+        .first()
+        .expect("fixture has a planar face")
+        .clone();
+    let placement = SketchPlacement {
+        origin: candidate.evidence.origin,
+        normal: candidate.evidence.normal,
+        x_axis: candidate.evidence.x_axis,
+        y_axis: candidate.evidence.y_axis,
+    };
+    let support = PlanarFaceReference {
+        semantic_id: candidate.semantic_id,
+        provenance: candidate.provenance,
+        role: candidate.role,
+        evidence: candidate.evidence,
+    };
+    let request = SketchSolveRequest::new(
+        "production-face-sketch",
+        "production-face-sketch",
+        vec![WorkerSketchEntity::Point {
+            id: "p0".into(),
+            x: 0.0,
+            y: 0.0,
+        }],
+        vec![WorkerSketchConstraint {
+            id: "fixed-p0".into(),
+            kind: "fixed".into(),
+            entities: vec!["p0".into()],
+            value: None,
+        }],
+    )
+    .with_attachment(support, placement);
+    let committed = host
+        .commit_sketch_solve(&path, &request)
+        .expect("production preview and commit resolve the face");
+    assert_eq!(
+        committed.result.reattachment_outcome.as_deref(),
+        Some("resolved")
+    );
+    assert!(committed.result.is_success());
+    drop(occt);
+    drop(slvs);
+    let _ = fs::remove_dir_all(path);
+}

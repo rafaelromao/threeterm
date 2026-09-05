@@ -88,7 +88,6 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
-#include <iomanip>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -984,26 +983,6 @@ bool analyze_brep(const TopoDS_Shape& shape) {
     return analyzer.IsValid() != 0;
 }
 
-std::string face_identity(const std::string& feature_id, const TopoDS_Face& face,
-                          const gp_Pnt& origin, const gp_Dir& normal,
-                          const gp_Dir& x_axis, const gp_Dir& y_axis) {
-    Bnd_Box bounds;
-    BRepBndLib::Add(face, bounds);
-    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
-    bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
-    GProp_GProps properties;
-    BRepGProp::SurfaceProperties(face, properties);
-    std::ostringstream canonical;
-    canonical << std::fixed << std::setprecision(6)
-              << origin.X() << ',' << origin.Y() << ',' << origin.Z() << '|'
-              << normal.X() << ',' << normal.Y() << ',' << normal.Z() << '|'
-              << x_axis.X() << ',' << x_axis.Y() << ',' << x_axis.Z() << '|'
-              << y_axis.X() << ',' << y_axis.Y() << ',' << y_axis.Z() << '|'
-              << properties.Mass() << '|'
-              << xmin << ',' << ymin << ',' << zmin << ',' << xmax << ',' << ymax << ',' << zmax;
-    return feature_id + "/face-" + sha256_hex(canonical.str()).substr(0, 24);
-}
-
 bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& error) {
     const std::string request_id = get_string(request, "request_id");
     const std::string feature_id = get_string(request, "feature_id");
@@ -1020,8 +999,6 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
         return false;
     }
     struct Candidate {
-        std::string semantic_id;
-        TopoDS_Face face;
         gp_Pnt origin;
         gp_Dir normal;
         gp_Dir x_axis;
@@ -1044,15 +1021,13 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
         GProp_GProps properties;
         BRepGProp::SurfaceProperties(face, properties);
         const gp_Pnt origin = properties.CentreOfMass();
-        candidates.push_back({
-            "", face, origin, normal, x_axis, y_axis,
-        });
-        candidates.back().semantic_id = face_identity(
-            feature_id, face, origin, normal, x_axis, y_axis);
+        candidates.push_back({origin, normal, x_axis, y_axis});
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& left, const Candidate& right) {
-                  return left.semantic_id < right.semantic_id;
+                  if (left.origin.X() != right.origin.X()) return left.origin.X() < right.origin.X();
+                  if (left.origin.Y() != right.origin.Y()) return left.origin.Y() < right.origin.Y();
+                  return left.origin.Z() < right.origin.Z();
               });
     std::ostringstream out;
     out << "{\"schema_version\":\"" << json_escape(kSchemaVersion)
@@ -1063,11 +1038,7 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         if (index != 0) out << ',';
         const auto& candidate = candidates[index];
-        out << "{\"semantic_id\":\"" << json_escape(candidate.semantic_id)
-            << "\",\"source_feature_id\":\"" << json_escape(feature_id)
-            << "\",\"source_revision_id\":\"" << json_escape(source_revision_id)
-            << "\",\"source_face_id\":\"" << json_escape(candidate.semantic_id)
-            << "\",\"role\":\"sketch-support\",\"topology_kind\":\"planar_face\",\"origin\":["
+        out << "{\"topology_kind\":\"planar_face\",\"origin\":["
             << candidate.origin.X() << ',' << candidate.origin.Y() << ',' << candidate.origin.Z()
             << "],\"normal\":[" << candidate.normal.X() << ',' << candidate.normal.Y() << ','
             << candidate.normal.Z() << "],\"x_axis\":[" << candidate.x_axis.X() << ','

@@ -227,14 +227,12 @@ impl SketchSolveRequest {
         }
         if let Some(support) = &self.support {
             support
-                .evidence
-                .validate()
-                .map_err(|detail| format!("invalid sketch support: {detail}"))?;
-            self.placement
-                .as_ref()
-                .expect("support and placement presence checked")
-                .validate()
-                .map_err(|detail| format!("invalid sketch placement: {detail}"))?;
+                .validate_placement(
+                    self.placement
+                        .as_ref()
+                        .expect("support and placement presence checked"),
+                )
+                .map_err(|detail| format!("invalid sketch attachment: {detail}"))?;
         }
         Ok(())
     }

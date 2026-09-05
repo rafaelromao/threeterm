@@ -266,6 +266,19 @@ impl PlanarFaceReference {
         validate_face_identity(&self.semantic_id, &self.role, &self.provenance, true)?;
         self.evidence.validate()
     }
+
+    pub fn validate_placement(&self, placement: &SketchPlacement) -> Result<(), String> {
+        self.validate()?;
+        placement.validate()?;
+        if self.evidence.origin != placement.origin
+            || self.evidence.normal != placement.normal
+            || self.evidence.x_axis != placement.x_axis
+            || self.evidence.y_axis != placement.y_axis
+        {
+            return Err("sketch placement must match the selected planar face frame".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl PlanarFaceCandidate {
@@ -446,13 +459,11 @@ impl SketchPayload {
             return Err("unattached sketches must not carry a reattachment outcome".to_string());
         }
         if let Some(support) = &self.support {
-            if support.validate().is_err() {
-                return Err("sketch support reference is invalid".to_string());
-            }
-            self.placement
-                .as_ref()
-                .expect("support and placement presence checked")
-                .validate()?;
+            support.validate_placement(
+                self.placement
+                    .as_ref()
+                    .expect("support and placement presence checked"),
+            )?;
             if self.reattachment_outcome.is_none() {
                 return Err("attached sketches require a reattachment outcome".to_string());
             }

@@ -57,6 +57,7 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    InspectEdges,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +98,7 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::InspectEdges => "inspect_edges",
         }
     }
 }
@@ -779,6 +781,8 @@ pub struct FilletRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_edge: Option<SelectedEdgeContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_target: Option<SelectedEdgeContext>,
 }
 
@@ -794,6 +798,7 @@ impl FilletRequest {
             output_filename: String::new(),
             feature_id: String::new(),
             selected_edge: None,
+            base_feature_id: None,
             edit_target: None,
         }
     }
@@ -815,6 +820,11 @@ impl FilletRequest {
 
     pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
         self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -889,6 +899,17 @@ pub struct EdgeCandidateEvidence {
     pub length: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeInspectionResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
+}
+
 /// Chamfer request: apply a constant-distance chamfer to every edge of
 /// the BREP at `base_path` and write the result to
 /// `<output_dir>/<output_filename>`.
@@ -908,6 +929,11 @@ pub struct ChamferRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Semantic edge evidence resolved by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl ChamferRequest {
@@ -925,6 +951,8 @@ impl ChamferRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            selected_edge: None,
+            base_feature_id: None,
         }
     }
 
@@ -940,6 +968,16 @@ impl ChamferRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -1145,6 +1183,8 @@ pub struct ChamferResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 
 impl ChamferResult {
@@ -1980,6 +2020,8 @@ pub struct ShellRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl ShellRequest {
@@ -1997,6 +2039,7 @@ impl ShellRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            base_feature_id: None,
         }
     }
 
@@ -2012,6 +2055,11 @@ impl ShellRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -2103,6 +2151,8 @@ pub struct DraftRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl DraftRequest {
@@ -2122,6 +2172,7 @@ impl DraftRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            base_feature_id: None,
         }
     }
 
@@ -2137,6 +2188,11 @@ impl DraftRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -2787,6 +2843,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "chamfer-1".to_string(),
+            edge_candidates: Vec::new(),
         };
         assert!(result.is_success());
 

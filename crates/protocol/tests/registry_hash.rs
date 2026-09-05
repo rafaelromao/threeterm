@@ -36,7 +36,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "64bb97d5ff80d181cb56ab3c24d015063876c43d06c6d31233eed8a79cf8b0f7",
+        "c851ad375b170a056316204befff3e49a2336ec9693f802449b44a8ebb1d5125",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -261,7 +261,14 @@ fn registry_contains_versioned_fillet_and_chamfer_contracts() {
     );
     assert_eq!(
         fillet.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "radius"])
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "radius",
+            "expected_revision",
+            "selected_edge"
+        ])
     );
     assert_eq!(fillet.request_schema["additionalProperties"], false);
 
@@ -273,7 +280,14 @@ fn registry_contains_versioned_fillet_and_chamfer_contracts() {
     );
     assert_eq!(
         chamfer.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "distance"])
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "distance",
+            "expected_revision",
+            "selected_edge"
+        ])
     );
     assert_eq!(chamfer.request_schema["additionalProperties"], false);
 }
@@ -473,7 +487,13 @@ fn registry_contains_versioned_shell_contract() {
     );
     assert_eq!(
         shell.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "base_feature_id", "thickness"])
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "base_feature_id",
+            "thickness",
+            "expected_revision"
+        ])
     );
     assert_eq!(shell.request_schema["additionalProperties"], false);
 }
@@ -499,7 +519,8 @@ fn registry_contains_versioned_draft_contract() {
             "feature_id",
             "base_feature_id",
             "angle",
-            "pull_direction"
+            "pull_direction",
+            "expected_revision"
         ])
     );
     assert_eq!(draft.request_schema["additionalProperties"], false);
@@ -521,7 +542,14 @@ fn registry_contains_versioned_loft_contract() {
     );
     assert_eq!(
         loft.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "profiles"])
+        serde_json::json!([
+            "bundle_path",
+            "feature_id",
+            "profiles",
+            "expected_revision",
+            "is_solid",
+            "ruled"
+        ])
     );
     assert_eq!(loft.request_schema["additionalProperties"], false);
 }

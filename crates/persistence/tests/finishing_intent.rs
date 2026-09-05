@@ -10,10 +10,18 @@ use threeterm_persistence::{
     FILLET_INTENT_SCHEMA_VERSION, LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION,
     occt_worker_identity, replay_canonical_state,
 };
+use threeterm_protocol::artifact::sha256_hex;
 
 fn selected_edge() -> CanonicalEdgeReference {
+    let semantic_id = format!(
+        "edge-{}",
+        sha256_hex(
+            &serde_json::to_vec(&([1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 4.0))
+                .expect("edge evidence serializes")
+        )
+    );
     CanonicalEdgeReference {
-        semantic_id: "edge-1".to_string(),
+        semantic_id,
         provenance: EdgeProvenance {
             source_feature_id: "base".to_string(),
             source_revision_id: "a".repeat(64),

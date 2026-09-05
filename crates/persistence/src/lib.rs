@@ -14,7 +14,7 @@ use threeterm_domain::{
         HistoryEvent, HistoryOperation, HistoryState, HistoryTimeline, project_feature_timeline,
     },
 };
-use threeterm_protocol::artifact::WorkerFingerprint;
+use threeterm_protocol::artifact::{WorkerFingerprint, sha256_hex};
 
 const COMPONENT_COMMAND_KIND_PREFIX: &str = "component-command:";
 const SKETCH_COMMAND_KIND_PREFIX: &str = "sketch-command:";
@@ -753,6 +753,18 @@ fn validate_edge_operation(
             <= f64::EPSILON
         || !selected_edge.evidence.length.is_finite()
         || !(selected_edge.evidence.length > 0.0 && selected_edge.evidence.length < 1e9)
+        || selected_edge.semantic_id
+            != format!(
+                "edge-{}",
+                sha256_hex(
+                    &serde_json::to_vec(&(
+                        selected_edge.evidence.midpoint,
+                        selected_edge.evidence.tangent,
+                        selected_edge.evidence.length,
+                    ))
+                    .expect("edge evidence serializes")
+                )
+            )
     {
         return Err(BundleError::Invalid(format!(
             "canonical {command} selected edge is invalid"

@@ -1549,24 +1549,6 @@ std::string edge_role(const TopoDS_Edge& edge) {
                                                               : "fillet-transition";
 }
 
-std::string edge_semantic_id(const TopoDS_Edge& edge) {
-    GProp_GProps properties;
-    BRepGProp::LinearProperties(edge, properties);
-    TopoDS_Vertex first_vertex;
-    TopoDS_Vertex last_vertex;
-    TopExp::Vertices(edge, first_vertex, last_vertex);
-    const gp_Pnt first_point = BRep_Tool::Pnt(first_vertex);
-    const gp_Pnt last_point = BRep_Tool::Pnt(last_vertex);
-    const gp_Pnt midpoint(
-        (first_point.X() + last_point.X()) / 2.0,
-        (first_point.Y() + last_point.Y()) / 2.0,
-        (first_point.Z() + last_point.Z()) / 2.0);
-    std::ostringstream identity;
-    identity << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << ','
-             << properties.Mass();
-    return "edge-" + sha256_hex(identity.str());
-}
-
 void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Edge>& edges,
                             const JsonParser::Value& request) {
     const auto* selected = find_field(request, "selected_edge");
@@ -1576,6 +1558,7 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
     }
     const std::string source_feature_id = get_string(*selected, "source_feature_id");
     const std::string source_revision_id = get_string(*selected, "source_revision_id");
+    const std::string source_edge_id = get_string(*selected, "source_edge_id");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (const TopoDS_Edge& edge : edges) {
@@ -1599,10 +1582,12 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         // edges and expose a distinct role for curved edit results.
         if (!first) out << ',';
         first = false;
-        out << "{\"semantic_id\":\"" << edge_semantic_id(edge) << "\","
+        // Semantic identity is assigned by the host. The worker returns only
+        // transient geometry evidence and a geometric role classification.
+        out << "{\"semantic_id\":\"\","
             << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
             << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
-            << "\"source_edge_id\":\"" << edge_semantic_id(edge) << "\","
+            << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
             << "\"role\":\"" << json_escape(edge_role(edge)) << "\","
             << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
             << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"
@@ -1653,8 +1638,6 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
     const auto midpoint = get_vec3(*selected, "midpoint");
     const auto tangent = get_vec3(*selected, "tangent");
     const double length = get_number(*selected, "length");
-    const std::string semantic_id = get_string(*selected, "semantic_id");
-    const std::string role = get_string(*selected, "role");
     const double tangent_length = std::sqrt(
         tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
@@ -1682,8 +1665,7 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
              edge_tangent.Z() * tangent[2]) /
             (edge_tangent_length * tangent_length);
         if (midpoint_distance <= 1e-6 && std::abs(properties.Mass() - length) <= 1e-6 &&
-            1.0 - std::abs(tangent_dot) <= 1e-6 && semantic_id == edge_semantic_id(edge) &&
-            role == edge_role(edge)) {
+            1.0 - std::abs(tangent_dot) <= 1e-6) {
             if (!match.IsNull()) {
                 return {};
             }

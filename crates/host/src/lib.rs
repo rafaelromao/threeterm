@@ -1301,6 +1301,55 @@ fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeC
         .collect()
 }
 
+fn canonical_finishing_edge_candidates(
+    result: &[EdgeCandidateEvidence],
+) -> Vec<PostEditEdgeCandidate> {
+    result
+        .iter()
+        .map(|candidate| {
+            let semantic_id = canonical_edge_semantic_id(candidate);
+            PostEditEdgeCandidate {
+                semantic_id: semantic_id.clone(),
+                provenance: threeterm_domain::EdgeProvenance {
+                    source_feature_id: candidate.source_feature_id.clone(),
+                    source_revision_id: candidate.source_revision_id.clone(),
+                    source_edge_id: semantic_id,
+                },
+                role: candidate.role.clone(),
+                evidence: threeterm_domain::EdgeGeometricEvidence {
+                    midpoint: candidate.midpoint,
+                    tangent: candidate.tangent,
+                    length: candidate.length,
+                },
+            }
+        })
+        .collect()
+}
+
+fn canonical_edge_semantic_id(candidate: &EdgeCandidateEvidence) -> String {
+    let identity = serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+        .expect("edge evidence serializes");
+    format!("edge-{}", sha256_hex(&identity))
+}
+
+fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value {
+    let semantic_id = canonical_edge_semantic_id(candidate);
+    serde_json::json!({
+        "semantic_id": semantic_id.clone(),
+        "provenance": {
+            "source_feature_id": candidate.source_feature_id,
+            "source_revision_id": candidate.source_revision_id,
+            "source_edge_id": semantic_id,
+        },
+        "role": candidate.role,
+        "evidence": {
+            "midpoint": candidate.midpoint,
+            "tangent": candidate.tangent,
+            "length": candidate.length,
+        }
+    })
+}
+
 fn validate_replayed_edge_reference(
     reference: &CanonicalEdgeReference,
     candidates: &[EdgeCandidateEvidence],
@@ -1319,7 +1368,7 @@ fn validate_replayed_edge_reference(
             length: reference.evidence.length,
         },
     };
-    match resolve_edge_reference(&selected, domain_edge_candidates(candidates)) {
+    match resolve_edge_reference(&selected, canonical_finishing_edge_candidates(candidates)) {
         EdgeReattachmentOutcome::Resolved { .. } => Ok(()),
         outcome => Err(HostError::Validation {
             detail: format!("replayed semantic edge selection failed: {outcome:?}"),
@@ -8958,7 +9007,7 @@ fn finishing_response_value(
     });
     if let Some(edge_candidates) = edge_candidates {
         response["edge_candidates"] = serde_json::Value::Array(
-            domain_edge_candidates(edge_candidates)
+            canonical_finishing_edge_candidates(edge_candidates)
                 .into_iter()
                 .map(|candidate| {
                     serde_json::json!({
@@ -9258,7 +9307,7 @@ fn resolve_selected_edge_with_worker(
         .map_err(HostError::from)?;
     let outcome = resolve_edge_reference(
         &reference,
-        domain_edge_candidates(&inspection.edge_candidates),
+        canonical_finishing_edge_candidates(&inspection.edge_candidates),
     );
     let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
         return Err(HostError::Validation {
@@ -9268,24 +9317,11 @@ fn resolve_selected_edge_with_worker(
     let candidate = inspection
         .edge_candidates
         .iter()
-        .find(|candidate| candidate.semantic_id == semantic_id)
+        .find(|candidate| canonical_edge_semantic_id(candidate) == semantic_id)
         .ok_or_else(|| HostError::Validation {
             detail: "resolved semantic edge candidate is missing".to_string(),
         })?;
-    Ok(serde_json::json!({
-        "semantic_id": candidate.semantic_id.clone(),
-        "provenance": {
-            "source_feature_id": candidate.source_feature_id.clone(),
-            "source_revision_id": candidate.source_revision_id.clone(),
-            "source_edge_id": candidate.source_edge_id.clone(),
-        },
-        "role": candidate.role.clone(),
-        "evidence": {
-            "midpoint": candidate.midpoint,
-            "tangent": candidate.tangent,
-            "length": candidate.length,
-        }
-    }))
+    Ok(canonical_edge_value(candidate))
 }
 
 fn edge_selection_failure_detail(outcome: &EdgeReattachmentOutcome) -> String {

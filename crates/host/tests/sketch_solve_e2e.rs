@@ -417,3 +417,157 @@ fn production_face_evidence_and_commit_use_the_real_occt_path() {
     drop(slvs);
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
+    let occt = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("OCCT integration skipped: no configured worker binary");
+            return;
+        }
+    };
+    let slvs = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+            panic!("libslvs worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("libslvs integration skipped: no configured worker binary");
+            return;
+        }
+    };
+    let path = root();
+    write_fresh(&path, ProjectGeneration::with_id("reload-derived-sketch")).expect("fresh bundle");
+    let source = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+    ))
+    .expect("fixture BREP reads");
+    let bundle = Bundle::at(&path);
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
+        .expect("authenticated BREP appends");
+    let host = Host::new();
+    let candidate = host
+        .planar_face_candidates(&path, "solid")
+        .expect("production OCCT returns planar face evidence")
+        .into_iter()
+        .find(|candidate| candidate.evidence.normal[2].abs() < 0.5)
+        .expect("L-bracket has a selected non-XY planar face");
+    let placement = SketchPlacement {
+        origin: candidate.evidence.origin,
+        normal: candidate.evidence.normal,
+        x_axis: candidate.evidence.x_axis,
+        y_axis: candidate.evidence.y_axis,
+    };
+    let support = PlanarFaceReference {
+        semantic_id: candidate.semantic_id.clone(),
+        provenance: candidate.provenance.clone(),
+        role: candidate.role.clone(),
+        evidence: candidate.evidence.clone(),
+    };
+    let fixed_points = [
+        ("center", 1.0, 1.0),
+        ("line-start", 0.0, 1.0),
+        ("line-end", 2.0, 1.0),
+        ("arc-start", 1.0, 0.0),
+        ("arc-end", 1.0, 2.0),
+    ];
+    let mut entities = fixed_points
+        .into_iter()
+        .map(|(id, x, y)| WorkerSketchEntity::Point {
+            id: id.into(),
+            x,
+            y,
+        })
+        .collect::<Vec<_>>();
+    entities.extend([
+        WorkerSketchEntity::LineSegment {
+            id: "line".into(),
+            start: "line-start".into(),
+            end: "line-end".into(),
+        },
+        WorkerSketchEntity::Circle {
+            id: "circle".into(),
+            center: "center".into(),
+            radius: 1.0,
+        },
+        WorkerSketchEntity::Arc {
+            id: "arc".into(),
+            center: "center".into(),
+            start: "arc-start".into(),
+            end: "arc-end".into(),
+        },
+    ]);
+    let constraints = fixed_points
+        .into_iter()
+        .map(|(id, _, _)| WorkerSketchConstraint {
+            id: format!("fixed-{id}"),
+            kind: "fixed".into(),
+            entities: vec![id.into()],
+            value: None,
+        })
+        .collect();
+    let request = SketchSolveRequest::new(
+        "reload-derived-sketch-request",
+        "attached-sketch",
+        entities,
+        constraints,
+    )
+    .with_attachment(support.clone(), placement);
+    let committed = host
+        .commit_sketch_solve_with_worker_and_planar_face_candidates(
+            &path,
+            &request,
+            &slvs,
+            std::slice::from_ref(&candidate),
+        )
+        .expect("attached sketch commits through the real worker");
+    assert_eq!(committed.result.status, "solved");
+    assert_eq!(
+        committed.result.reattachment_outcome.as_deref(),
+        Some("resolved")
+    );
+    assert!(path.join("brep/solid.brep").is_file());
+
+    fs::remove_file(path.join("brep/solid.brep")).expect("derived source BREP deletes");
+    let reloaded = host
+        .reload_sketch_with_worker(&path, "attached-sketch", &slvs)
+        .expect("reload reconstructs current face evidence and resolves support");
+    assert_eq!(reloaded.status, "solved");
+    assert_eq!(reloaded.reattachment_outcome.as_deref(), Some("resolved"));
+    assert_eq!(reloaded.support.as_ref(), Some(&support));
+
+    let scene = host
+        .presentation_viewport_scene_after_sketch_reload(&path, "attached-sketch")
+        .expect("reloaded sketch renders");
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-segment3:"))
+    );
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-circle3:"))
+    );
+    assert!(
+        scene
+            .features
+            .iter()
+            .any(|feature| feature.kind.starts_with("sketch-arc3:"))
+    );
+    drop(occt);
+    let _ = fs::remove_dir_all(path);
+}

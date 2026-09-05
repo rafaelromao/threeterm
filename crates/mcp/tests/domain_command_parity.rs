@@ -7,11 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
 };
+use threeterm_slvs_worker::SlvsWorker;
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -150,6 +151,65 @@ fn setup_edge_root(root: &std::path::Path, label: &str) -> Option<String> {
     )
     .expect("base solid commits");
     Some(host.identity(root).expect("identity loads").revision_hash)
+}
+
+fn setup_attached_sketch_root(root: &std::path::Path) -> Option<Value> {
+    write_fresh(
+        root,
+        threeterm_domain::ProjectGeneration::with_id("attached-sketch-parity"),
+    )
+    .expect("sketch parity bundle creates");
+    let source = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+    ))
+    .expect("fixture BREP reads");
+    let bundle = Bundle::at(root);
+    let revision = bundle
+        .open()
+        .expect("sketch parity bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
+        .expect("sketch parity BREP appends");
+    let candidates = threeterm_host::Host::new()
+        .planar_face_candidates(root, "solid")
+        .expect("OCCT derives sketch parity faces");
+    let candidate = candidates
+        .into_iter()
+        .find(|candidate| candidate.evidence.normal[2].abs() < 0.5)?;
+    let placement = json!({
+        "origin": candidate.evidence.origin,
+        "normal": candidate.evidence.normal,
+        "x_axis": candidate.evidence.x_axis,
+        "y_axis": candidate.evidence.y_axis
+    });
+    Some(json!({
+        "bundle_path": root.to_string_lossy(),
+        "request_id": "attached-sketch-parity-request",
+        "feature_id": "attached-sketch",
+        "phase": "commit",
+        "entities": [
+            {"kind": "point", "id": "p0", "x": 1.0, "y": 1.0},
+            {"kind": "point", "id": "p1", "x": 0.0, "y": 1.0},
+            {"kind": "point", "id": "p2", "x": 2.0, "y": 1.0},
+            {"kind": "line_segment", "id": "line", "start": "p1", "end": "p2"},
+            {"kind": "circle", "id": "circle", "center": "p0", "radius": 1.0}
+        ],
+        "constraints": [
+            {"id": "fixed-p0", "kind": "fixed", "entities": ["p0"]},
+            {"id": "fixed-p1", "kind": "fixed", "entities": ["p1"]},
+            {"id": "fixed-p2", "kind": "fixed", "entities": ["p2"]}
+        ],
+        "support": {
+            "semantic_id": candidate.semantic_id,
+            "provenance": candidate.provenance,
+            "role": candidate.role,
+            "evidence": candidate.evidence
+        },
+        "placement": placement
+    }))
 }
 
 fn cli_identity(root: &std::path::Path) -> Value {
@@ -462,6 +522,119 @@ fn cli_mcp_and_tui_apply_the_same_versioned_request() {
     let _ = fs::remove_dir_all(&cli_root);
     let _ = fs::remove_dir_all(&mcp_root);
     let _ = fs::remove_dir_all(&tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_the_same_attached_sketch_result() {
+    let cli_root = root("attached-sketch-cli");
+    let mcp_root = root("attached-sketch-mcp");
+    let tui_root = root("attached-sketch-tui");
+    let Some(_) = required_worker("cli_mcp_and_tui_commit_the_same_attached_sketch_result") else {
+        return;
+    };
+    match SlvsWorker::locate() {
+        Ok(_) => {}
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+            panic!("libslvs worker is required: {error}");
+        }
+        Err(_) => {
+            eprintln!("attached sketch parity: libslvs worker unavailable; skipping");
+            return;
+        }
+    }
+    let Some(cli_request) = setup_attached_sketch_root(&cli_root) else {
+        panic!("L-bracket fixture has no non-XY planar face");
+    };
+    let Some(mcp_request) = setup_attached_sketch_root(&mcp_root) else {
+        panic!("L-bracket fixture has no non-XY planar face");
+    };
+    let Some(mut tui_request) = setup_attached_sketch_root(&tui_root) else {
+        panic!("L-bracket fixture has no non-XY planar face");
+    };
+
+    let cli = threeterm_cli::dispatch::dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        SKETCH_SOLVE_COMMAND_ID,
+        cli_request,
+    )
+    .expect("CLI attached sketch commits");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.sketch-solve/1",
+            "arguments": mcp_request
+        }),
+    });
+    assert!(
+        mcp.error.is_none(),
+        "MCP attached sketch failed: {:?}",
+        mcp.error
+    );
+    let mcp = mcp.result.expect("MCP attached sketch has result")["structuredContent"].clone();
+
+    let tui_host = threeterm_host::Host::new();
+    let preview = tui_host
+        .preview_domain_command(SKETCH_SOLVE_COMMAND_ID, tui_request.clone())
+        .expect("TUI attached sketch preview succeeds");
+    tui_request["preview_revision"] = Value::String(preview.preview_revision);
+    let tui =
+        threeterm_tui::execute_domain_command(&tui_host, SKETCH_SOLVE_COMMAND_ID, tui_request)
+            .expect("TUI attached sketch commits");
+
+    for result in [&cli, &mcp, &tui] {
+        assert_eq!(result["status"], "solved");
+        assert_eq!(result["dof"], 0);
+        assert_eq!(result["reattachment_outcome"], "resolved");
+        assert_eq!(
+            result["entity_ids"],
+            json!(["p0", "p1", "p2", "line", "circle"])
+        );
+        assert_eq!(
+            result["solved_coordinates"].as_array().map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(result["support"]["role"], "sketch-support");
+    }
+    assert_eq!(cli, mcp, "CLI and MCP attached sketch results differ");
+    assert_eq!(cli, tui, "CLI and TUI attached sketch results differ");
+
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        let loaded = Bundle::at(path)
+            .open()
+            .expect("attached sketch bundle reloads");
+        let sketch = loaded
+            .graph
+            .sketch("attached-sketch")
+            .expect("attached sketch intent persists");
+        assert_eq!(
+            sketch.support.as_ref().map(|support| support.role.as_str()),
+            Some("sketch-support")
+        );
+        assert!(sketch.placement.is_some());
+        let scene = threeterm_viewport::ViewportScene::from_feature_graph(
+            loaded.revision_hash_hex(),
+            &loaded.graph,
+            None,
+        );
+        assert!(
+            scene
+                .features
+                .iter()
+                .any(|feature| feature.kind.starts_with("sketch-segment3:"))
+        );
+        assert!(
+            scene
+                .features
+                .iter()
+                .any(|feature| feature.kind.starts_with("sketch-circle3:"))
+        );
+    }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
 }
 
 #[test]

@@ -566,11 +566,14 @@ dependencies = [
  "serde",
  "serde_json",
  "threeterm-cli",
+ "threeterm-domain",
  "threeterm-host",
  "threeterm-occt-worker",
  "threeterm-persistence",
  "threeterm-protocol",
+ "threeterm-slvs-worker",
  "threeterm-tui",
+ "threeterm-viewport",
 ]
 
 [[package]]
@@ -612,6 +615,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "threeterm-domain",
  "threeterm-protocol",
 ]
 

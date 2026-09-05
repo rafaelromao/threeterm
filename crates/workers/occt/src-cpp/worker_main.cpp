@@ -90,6 +90,7 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <limits>
@@ -981,6 +982,85 @@ bool analyze_brep(const TopoDS_Shape& shape) {
     BRepCheck_Analyzer analyzer(shape);
     analyzer.SetParallel(false);
     return analyzer.IsValid() != 0;
+}
+
+bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& error) {
+    const std::string request_id = get_string(request, "request_id");
+    const std::string feature_id = get_string(request, "feature_id");
+    const std::string source_revision_id = get_string(request, "source_revision_id");
+    const std::string base_path = get_string(request, "base_path");
+    if (request_id.empty() || feature_id.empty() || source_revision_id.empty() || base_path.empty()) {
+        error = "planar_face_evidence request is missing required fields";
+        return false;
+    }
+    TopoDS_Shape shape;
+    BRep_Builder builder;
+    if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) {
+        error = "could not read planar face evidence BREP";
+        return false;
+    }
+    struct Candidate {
+        gp_Pnt origin;
+        gp_Dir normal;
+        gp_Dir x_axis;
+        gp_Dir y_axis;
+    };
+    std::vector<Candidate> candidates;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        const TopoDS_Face face = TopoDS::Face(explorer.Current());
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull() || surface->DynamicType() != STANDARD_TYPE(Geom_Plane)) continue;
+        const Handle(Geom_Plane) plane = Handle(Geom_Plane)::DownCast(surface);
+        gp_Ax3 frame = plane->Position();
+        gp_Dir normal = frame.Direction();
+        gp_Dir x_axis = frame.XDirection();
+        gp_Dir y_axis = frame.YDirection();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            normal.Reverse();
+            y_axis.Reverse();
+        }
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const gp_Pnt origin = properties.CentreOfMass();
+        candidates.push_back({origin, normal, x_axis, y_axis});
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& left, const Candidate& right) {
+                  if (left.origin.X() != right.origin.X()) return left.origin.X() < right.origin.X();
+                  if (left.origin.Y() != right.origin.Y()) return left.origin.Y() < right.origin.Y();
+                  if (left.origin.Z() != right.origin.Z()) return left.origin.Z() < right.origin.Z();
+                  const auto direction_less = [](const gp_Dir& a, const gp_Dir& b) {
+                      if (a.X() != b.X()) return a.X() < b.X();
+                      if (a.Y() != b.Y()) return a.Y() < b.Y();
+                      return a.Z() < b.Z();
+                  };
+                  if (direction_less(left.normal, right.normal)) return true;
+                  if (direction_less(right.normal, left.normal)) return false;
+                  if (direction_less(left.x_axis, right.x_axis)) return true;
+                  if (direction_less(right.x_axis, left.x_axis)) return false;
+                  return direction_less(left.y_axis, right.y_axis);
+              });
+    std::ostringstream out;
+    out << std::setprecision(17);
+    out << "{\"schema_version\":\"" << json_escape(kSchemaVersion)
+        << "\",\"request_id\":\"" << json_escape(request_id)
+        << "\",\"operation\":\"planar_face_evidence\",\"status\":\"ok\",\"feature_id\":\""
+        << json_escape(feature_id) << "\",\"source_revision_id\":\""
+        << json_escape(source_revision_id) << "\",\"candidates\":[";
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        if (index != 0) out << ',';
+        const auto& candidate = candidates[index];
+        out << "{\"topology_kind\":\"planar_face\",\"origin\":["
+            << candidate.origin.X() << ',' << candidate.origin.Y() << ',' << candidate.origin.Z()
+            << "],\"normal\":[" << candidate.normal.X() << ',' << candidate.normal.Y() << ','
+            << candidate.normal.Z() << "],\"x_axis\":[" << candidate.x_axis.X() << ','
+            << candidate.x_axis.Y() << ',' << candidate.x_axis.Z() << "],\"y_axis\":["
+            << candidate.y_axis.X() << ',' << candidate.y_axis.Y() << ',' << candidate.y_axis.Z()
+            << "],\"adjacent_feature_ids\":[\"" << json_escape(feature_id) << "\"]}";
+    }
+    out << "]}";
+    g_result_json = out.str();
+    return true;
 }
 
 bool handle_extrude(const JsonParser::Value& request, std::string& error) {
@@ -3608,6 +3688,8 @@ int main() {
         success = handle_loft(*args, error);
     } else if (command_id == "export") {
         success = handle_export(*args, error);
+    } else if (command_id == "planar_face_evidence") {
+        success = handle_planar_face_evidence(*args, error);
     } else {
         write_failed(request_id, "request_malformed", "unknown command_id " + command_id);
         return 2;

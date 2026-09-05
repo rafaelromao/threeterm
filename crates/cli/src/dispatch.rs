@@ -6244,6 +6244,7 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
             .as_deref()
             .map(|request_id| format!("request_id={request_id}; {detail}"))
             .unwrap_or_else(|| detail.clone()),
+        HostError::Validation { detail } => detail.clone(),
         _ => error.to_string(),
     };
     match error {
@@ -6255,6 +6256,15 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         | HostError::WorkerUnavailable { .. }
         | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { .. } if detail.starts_with("reference is ambiguous") => {
+            Diagnostic::reference_ambiguous(&detail)
+        }
+        HostError::Validation { .. } if detail.starts_with("reference is lost") => {
+            Diagnostic::reference_lost(&detail)
+        }
+        HostError::Validation { .. } if detail.starts_with("reference is incompatible") => {
+            Diagnostic::reference_incompatible(&detail)
+        }
         HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),

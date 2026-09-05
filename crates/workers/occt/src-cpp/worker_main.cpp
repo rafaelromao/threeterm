@@ -1576,7 +1576,6 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
     }
     const std::string source_feature_id = get_string(*selected, "source_feature_id");
     const std::string source_revision_id = get_string(*selected, "source_revision_id");
-    const std::string source_edge_id = get_string(*selected, "source_edge_id");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (const TopoDS_Edge& edge : edges) {
@@ -1603,7 +1602,7 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         out << "{\"semantic_id\":\"" << edge_semantic_id(edge) << "\","
             << "\"source_feature_id\":\"" << json_escape(source_feature_id) << "\","
             << "\"source_revision_id\":\"" << json_escape(source_revision_id) << "\","
-            << "\"source_edge_id\":\"" << json_escape(source_edge_id) << "\","
+            << "\"source_edge_id\":\"" << edge_semantic_id(edge) << "\","
             << "\"role\":\"" << json_escape(edge_role(edge)) << "\","
             << "\"midpoint\":[" << midpoint.X() << ',' << midpoint.Y() << ',' << midpoint.Z() << "],"
             << "\"tangent\":[" << tangent.X() << ',' << tangent.Y() << ',' << tangent.Z() << "],"

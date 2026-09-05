@@ -2404,6 +2404,9 @@ impl Host {
                             )
                             .with_output_path(output_dir, output_name)
                             .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            )
                             .with_selected_edge(selected_edge);
                             let view = self.fillet(&bundle_path, request, &worker)?;
                             Ok(finishing_response_value(
@@ -2443,6 +2446,9 @@ impl Host {
                             )
                             .with_output_path(output_dir, output_name)
                             .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            )
                             .with_selected_edge(selected_edge);
                             let view = self.chamfer(&bundle_path, request, &worker)?;
                             Ok(finishing_response_value(
@@ -2474,7 +2480,10 @@ impl Host {
                                 thickness,
                             )
                             .with_output_path(output_dir, output_name)
-                            .with_feature_id(feature_id);
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            );
                             let view = self.shell(&bundle_path, request, &worker)?;
                             Ok(finishing_response_value(
                                 &view.result.status,
@@ -2519,7 +2528,10 @@ impl Host {
                                 pull_direction,
                             )
                             .with_output_path(output_dir, output_name)
-                            .with_feature_id(feature_id);
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            );
                             let view = self.draft(&bundle_path, request, &worker)?;
                             Ok(finishing_response_value(
                                 &view.result.status,
@@ -2950,6 +2962,7 @@ impl Host {
                             radius,
                         )
                         .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature"))
                         .with_selected_edge(selected_edge),
                         threeterm_occt_worker::Operation::Fillet,
                         &worker,
@@ -2983,6 +2996,7 @@ impl Host {
                             distance,
                         )
                         .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature"))
                         .with_selected_edge(selected_edge),
                         threeterm_occt_worker::Operation::Chamfer,
                         &worker,
@@ -3007,7 +3021,8 @@ impl Host {
                             base_path,
                             thickness,
                         )
-                        .with_feature_id(feature_id),
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature")),
                         threeterm_occt_worker::Operation::Shell,
                         &worker,
                     )
@@ -3037,7 +3052,8 @@ impl Host {
                             angle,
                             pull_direction,
                         )
-                        .with_feature_id(feature_id),
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature")),
                         threeterm_occt_worker::Operation::Draft,
                         &worker,
                     )
@@ -8219,6 +8235,7 @@ fn replay_finishing_geometry(
                     format!("{feature_id}.worker.brep.partial"),
                 )
                 .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id)
                 .with_selected_edge(edge);
             read_result!(
                 worker
@@ -8250,6 +8267,7 @@ fn replay_finishing_geometry(
                     format!("{feature_id}.worker.brep.partial"),
                 )
                 .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id)
                 .with_selected_edge(edge);
             read_result!(
                 worker
@@ -8268,7 +8286,8 @@ fn replay_finishing_geometry(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
                 )
-                .with_feature_id(&feature_id);
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id);
             read_result!(
                 worker
                     .clone()
@@ -8289,7 +8308,8 @@ fn replay_finishing_geometry(
                 replay_stage_root,
                 format!("{feature_id}.worker.brep.partial"),
             )
-            .with_feature_id(&feature_id);
+            .with_feature_id(&feature_id)
+            .with_base_feature_id(&value.base_feature_id);
             read_result!(
                 worker
                     .clone()
@@ -9226,6 +9246,8 @@ fn resolve_selected_edge_with_worker(
 ) -> Result<serde_json::Value, HostError> {
     let reference = selected_edge_reference_from_value(selected.clone())?;
     let inspection = worker
+        .clone()
+        .with_revision_id(source_revision)
         .inspect_edges(
             threeterm_occt_worker::new_request_id(),
             base_path,
@@ -9240,7 +9262,7 @@ fn resolve_selected_edge_with_worker(
     );
     let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
         return Err(HostError::Validation {
-            detail: format!("semantic edge selection failed: {outcome:?}"),
+            detail: edge_selection_failure_detail(&outcome),
         });
     };
     let candidate = inspection
@@ -9264,6 +9286,16 @@ fn resolve_selected_edge_with_worker(
             "length": candidate.length,
         }
     }))
+}
+
+fn edge_selection_failure_detail(outcome: &EdgeReattachmentOutcome) -> String {
+    let prefix = match outcome {
+        EdgeReattachmentOutcome::Lost => "reference is lost",
+        EdgeReattachmentOutcome::Ambiguous { .. } => "reference is ambiguous",
+        EdgeReattachmentOutcome::Incompatible { .. } => "reference is incompatible",
+        EdgeReattachmentOutcome::Resolved { .. } => return "reference is resolved".to_string(),
+    };
+    format!("{prefix}: semantic edge selection failed: {outcome:?}")
 }
 
 fn validate_finishing_request(

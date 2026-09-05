@@ -2291,6 +2291,19 @@ impl Bundle {
                     intent.command(),
                 )));
             }
+            if let Some(base_feature_id) = intent.base_reference() {
+                let base_path = self
+                    .root
+                    .join("brep")
+                    .join(format!("{base_feature_id}.brep"));
+                if !base_path.is_file() {
+                    return Err(BundleError::Invalid(format!(
+                        "canonical {} base feature has no available BREP: {base_feature_id}",
+                        intent.command(),
+                    )));
+                }
+                verify_brep_provenance(&self.root, &loaded.log, &loaded.graph)?;
+            }
             if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
                 return Err(BundleError::Invalid(format!(
                     "canonical {} intent does not match its transaction",

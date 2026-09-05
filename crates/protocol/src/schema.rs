@@ -546,7 +546,9 @@ pub static FILLET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "base_feature_id": { "type": "string", "minLength": 1 },
-            "radius": { "type": "number", "exclusiveMinimum": 0 }
+            "radius": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "selected_edge": selected_edge_schema()
         },
         "additionalProperties": false
     })
@@ -560,7 +562,9 @@ pub static CHAMFER_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "base_feature_id": { "type": "string", "minLength": 1 },
-            "distance": { "type": "number", "exclusiveMinimum": 0 }
+            "distance": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "selected_edge": selected_edge_schema()
         },
         "additionalProperties": false
     })
@@ -1300,7 +1304,8 @@ pub static SHELL_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
             "base_feature_id": { "type": "string", "minLength": 1 },
-            "thickness": { "type": "number", "exclusiveMinimum": 0 }
+            "thickness": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         },
         "additionalProperties": false
     })
@@ -1350,6 +1355,7 @@ pub static DRAFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "feature_id": { "type": "string", "minLength": 1 },
             "base_feature_id": { "type": "string", "minLength": 1 },
             "angle": { "type": "number", "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "pull_direction": {
                 "type": "array",
                 "minItems": 3,
@@ -1401,6 +1407,7 @@ pub static LOFT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "profiles": {
                 "type": "array",
                 "minItems": 2,

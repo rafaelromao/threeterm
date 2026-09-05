@@ -908,6 +908,9 @@ pub struct ChamferRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Semantic edge evidence resolved by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
 }
 
 impl ChamferRequest {
@@ -925,6 +928,7 @@ impl ChamferRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            selected_edge: None,
         }
     }
 
@@ -940,6 +944,11 @@ impl ChamferRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
         self
     }
 

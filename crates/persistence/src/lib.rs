@@ -70,12 +70,12 @@ pub struct V0Bundle {
 }
 
 pub mod bundle {
-        pub use super::{
-            BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-        CanonicalChamferIntent, CanonicalEdgeReference, CanonicalExtrudeIntent,
-        CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalLoftIntent,
-        CanonicalShellIntent, CanonicalDraftIntent, CanonicalState, EdgeEvidence, EdgeProvenance,
-        EMPTY_LOG_DIGEST_HEX, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
+    pub use super::{
+        BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
+        CanonicalChamferIntent, CanonicalDraftIntent, CanonicalEdgeReference,
+        CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
+        CanonicalLoftIntent, CanonicalShellIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX,
+        EdgeEvidence, EdgeProvenance, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
         HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
         MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
         PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
@@ -110,6 +110,8 @@ pub const CHAMFER_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.chamfer/1";
 pub const SHELL_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.shell/1";
 pub const DRAFT_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.draft/1";
 pub const LOFT_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.loft/1";
+pub const LEGACY_COMMAND_REGISTRY_HASH: &str =
+    "cd22969af81db009ba1ecfb4b2976df9b9d01aa9fea57e5b05c40f21c1c958d6";
 pub const OCCT_KERNEL_IDENTITY: &str = "occt/V7_9_2+c5f20409c52bf8f658314d205a0e5d6f0be0969c";
 pub const SLVS_SOLVER_IDENTITY: &str = "libslvs/v3.2+27b6a080c8b669421bd4d444650c3b8eddec5687";
 
@@ -602,7 +604,10 @@ impl CanonicalLoftIntent {
         if !(2..=32).contains(&self.profiles.len())
             || self.profiles.iter().any(|profile| {
                 !(3..=128).contains(&profile.len())
-                    || profile.iter().flatten().any(|value| !value.is_finite() || value.abs() > 1e9)
+                    || profile
+                        .iter()
+                        .flatten()
+                        .any(|value| !value.is_finite() || value.abs() > 1e9)
                     || profile.first() == profile.last()
             })
         {
@@ -614,6 +619,7 @@ impl CanonicalLoftIntent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_common_operation(
     schema_version: &str,
     expected_schema_version: &str,
@@ -640,6 +646,7 @@ fn validate_common_operation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_solid_operation(
     schema_version: &str,
     expected_schema_version: &str,
@@ -671,6 +678,7 @@ fn validate_solid_operation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_edge_operation(
     schema_version: &str,
     expected_schema_version: &str,
@@ -701,10 +709,28 @@ fn validate_edge_operation(
         || selected_edge.semantic_id.is_empty()
         || selected_edge.provenance.source_edge_id.is_empty()
         || selected_edge.role.is_empty()
-        || !selected_edge.evidence.midpoint.iter().all(|value| value.is_finite())
-        || selected_edge.evidence.midpoint.iter().any(|value| value.abs() > 1e9)
-        || !selected_edge.evidence.tangent.iter().all(|value| value.is_finite())
-        || selected_edge.evidence.tangent.iter().map(|value| value * value).sum::<f64>() <= f64::EPSILON
+        || !selected_edge
+            .evidence
+            .midpoint
+            .iter()
+            .all(|value| value.is_finite())
+        || selected_edge
+            .evidence
+            .midpoint
+            .iter()
+            .any(|value| value.abs() > 1e9)
+        || !selected_edge
+            .evidence
+            .tangent
+            .iter()
+            .all(|value| value.is_finite())
+        || selected_edge
+            .evidence
+            .tangent
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            <= f64::EPSILON
         || !selected_edge.evidence.length.is_finite()
         || !(selected_edge.evidence.length > 0.0 && selected_edge.evidence.length < 1e9)
     {
@@ -3125,6 +3151,9 @@ fn validate_compatibility_identities(manifest: &Manifest) -> Result<(), BundleEr
         ),
     ];
     for (identity, expected, found) in scalar_identities {
+        if identity == "command_registry_hash" && found == LEGACY_COMMAND_REGISTRY_HASH {
+            continue;
+        }
         if expected != found {
             return Err(BundleError::CompatibilityIdentityMismatch {
                 identity,

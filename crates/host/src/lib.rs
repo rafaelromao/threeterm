@@ -27,10 +27,14 @@ use threeterm_occt_worker::{
     ShellRequest, ShellResult, SplitRequest, SplitResult, WorkerError,
 };
 use threeterm_persistence::{
-    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-    CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
-    ExtrudeDeterministicInputs, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
-    LoadedBundle, load, load_with_policy, previous_generation_path, replay_canonical_state,
+    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
+    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalDraftIntent, CanonicalEdgeReference,
+    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
+    CanonicalLoftIntent, CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION,
+    EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs,
+    FILLET_INTENT_SCHEMA_VERSION, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs,
+    LOFT_INTENT_SCHEMA_VERSION, LoadPolicy, LoadedBundle, SHELL_INTENT_SCHEMA_VERSION, load,
+    load_with_policy, previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -39,8 +43,9 @@ use threeterm_protocol::command_execution::{ExecutionError, execute, validate_re
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
-    BOOLEAN_PATTERN_COMMAND_ID, CommandId, EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID,
-    IDENTITY_COMMAND_ID, find,
+    BOOLEAN_PATTERN_COMMAND_ID, CHAMFER_COMMAND_ID, CommandId, DRAFT_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID,
+    SHELL_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -2292,6 +2297,220 @@ impl Host {
                         "schema_version": find(command).expect("hole is registered").response_schema_version,
                     }))
                 }
+                FILLET_COMMAND_ID | CHAMFER_COMMAND_ID | SHELL_COMMAND_ID | DRAFT_COMMAND_ID
+                | LOFT_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?.to_string();
+                    let feature_id = string_field("feature_id")?.to_string();
+                    let expected_revision = string_field("expected_revision")?;
+                    let current = self.load(&bundle_path)?;
+                    if current.revision_hash != expected_revision {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "{} source revision does not match current revision {:?}",
+                                command.0, current.revision_hash
+                            ),
+                        });
+                    }
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let base_path = base_feature_id.as_deref().map(|base| {
+                        Path::new(&bundle_path)
+                            .join(BREP_SUBDIR)
+                            .join(format!("{base}.brep"))
+                    });
+                    let output_dir = Path::new(&bundle_path).join("stage");
+                    let output_name = format!("{feature_id}-domain.brep");
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let schema_version = find(command)
+                        .expect("finishing command is registered")
+                        .response_schema_version;
+                    match command {
+                        FILLET_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "fillet requires base_feature_id".to_string(),
+                            })?;
+                            let selected_edge = selected_edge_context_from_request(
+                                request.get("selected_edge").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "fillet requires selected_edge".to_string(),
+                                    }
+                                })?,
+                            )?;
+                            let radius = request["radius"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing fillet radius".to_string(),
+                                }
+                            })?;
+                            let request = FilletRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                radius,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_selected_edge(selected_edge);
+                            let view = self.fillet(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "fillet",
+                                &view.result.feature_id,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                schema_version,
+                            ))
+                        }
+                        CHAMFER_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "chamfer requires base_feature_id".to_string(),
+                            })?;
+                            let selected_edge = selected_edge_context_from_request(
+                                request.get("selected_edge").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "chamfer requires selected_edge".to_string(),
+                                    }
+                                })?,
+                            )?;
+                            let distance = request["distance"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing chamfer distance".to_string(),
+                                }
+                            })?;
+                            let request = ChamferRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                distance,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_selected_edge(selected_edge);
+                            let view = self.chamfer(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "chamfer",
+                                &view.result.feature_id,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                schema_version,
+                            ))
+                        }
+                        SHELL_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "shell requires base_feature_id".to_string(),
+                            })?;
+                            let thickness = request["thickness"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing shell thickness".to_string(),
+                                }
+                            })?;
+                            let request = ShellRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                thickness,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id);
+                            let view = self.shell(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "shell",
+                                &view.result.feature_id,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                schema_version,
+                            ))
+                        }
+                        DRAFT_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "draft requires base_feature_id".to_string(),
+                            })?;
+                            let angle =
+                                request["angle"]
+                                    .as_f64()
+                                    .ok_or_else(|| HostError::Validation {
+                                        detail: "missing draft angle".to_string(),
+                                    })?;
+                            let pull_direction = serde_json::from_value(
+                                request.get("pull_direction").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "missing draft pull_direction".to_string(),
+                                    }
+                                })?,
+                            )
+                            .map_err(|error| {
+                                HostError::Validation {
+                                    detail: format!("invalid draft pull_direction: {error}"),
+                                }
+                            })?;
+                            let request = DraftRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                angle,
+                                pull_direction,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id);
+                            let view = self.draft(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "draft",
+                                &view.result.feature_id,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                view.artifact.as_ref().expect("draft artifact exists"),
+                                schema_version,
+                            ))
+                        }
+                        LOFT_COMMAND_ID => {
+                            let profiles = serde_json::from_value(
+                                request.get("profiles").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "missing loft profiles".to_string(),
+                                    }
+                                })?,
+                            )
+                            .map_err(|error| {
+                                HostError::Validation {
+                                    detail: format!("invalid loft profiles: {error}"),
+                                }
+                            })?;
+                            let request =
+                                LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
+                                    .with_solid(request["is_solid"].as_bool().unwrap_or(true))
+                                    .with_ruled(request["ruled"].as_bool().unwrap_or(false))
+                                    .with_output_path(output_dir, output_name)
+                                    .with_feature_id(feature_id);
+                            let view = self.loft(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "loft",
+                                &view.result.feature_id,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                schema_version,
+                            ))
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 _ => Err(HostError::Validation {
                     detail: format!(
                         "command {} is not handled by the domain executor",
@@ -2453,6 +2672,16 @@ impl Host {
         }
 
         if command != EXTRUDE_COMMAND_ID {
+            if matches!(
+                command,
+                FILLET_COMMAND_ID
+                    | CHAMFER_COMMAND_ID
+                    | SHELL_COMMAND_ID
+                    | DRAFT_COMMAND_ID
+                    | LOFT_COMMAND_ID
+            ) {
+                return self.preview_finishing_command(command, &request);
+            }
             return Err(ExecutionError::Handler(HostError::Validation {
                 detail: format!(
                     "command {} is discoverable but has no interactive preview handler",
@@ -2543,6 +2772,222 @@ impl Host {
                 .as_bytes(),
         );
         self.discard_extrude_derived(derived);
+        Ok(DomainCommandPreview {
+            command,
+            source_revision,
+            preview_revision,
+            input_fingerprint,
+            geometry_fingerprint,
+        })
+    }
+
+    fn preview_finishing_command(
+        &self,
+        command: CommandId,
+        request: &serde_json::Value,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        let bundle_path = request
+            .get("bundle_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+        let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+        if let Some(expected_revision) = request
+            .get("expected_revision")
+            .and_then(serde_json::Value::as_str)
+            && expected_revision != current.revision_hash
+        {
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "{} source revision does not match current revision {:?}",
+                    command.0, current.revision_hash
+                ),
+            }));
+        }
+        let bundle_root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+        let base_feature_id = request
+            .get("base_feature_id")
+            .and_then(serde_json::Value::as_str);
+        let base_path =
+            base_feature_id.map(|base| bundle_root.join(BREP_SUBDIR).join(format!("{base}.brep")));
+        let worker = OcctWorker::locate().map_err(|error| {
+            ExecutionError::Handler(HostError::WorkerUnavailable {
+                detail: error.to_string(),
+            })
+        })?;
+        let feature_id = request
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+        match command {
+            FILLET_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "fillet requires base_feature_id".to_string(),
+                    })
+                })?;
+                let selected_edge = selected_edge_context_from_request(
+                    request.get("selected_edge").cloned().ok_or_else(|| {
+                        ExecutionError::Handler(HostError::Validation {
+                            detail: "fillet requires selected_edge".to_string(),
+                        })
+                    })?,
+                )
+                .map_err(ExecutionError::Handler)?;
+                let radius = request["radius"]
+                    .as_f64()
+                    .ok_or_else(|| ExecutionError::InvalidRequest("missing radius".to_string()))?;
+                let typed = self
+                    .stage_occt_result::<FilletResult>(
+                        Path::new(bundle_path),
+                        &FilletRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            radius,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_selected_edge(selected_edge),
+                        threeterm_occt_worker::Operation::Fillet,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, request, typed)
+            }
+            CHAMFER_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "chamfer requires base_feature_id".to_string(),
+                    })
+                })?;
+                let selected_edge = selected_edge_context_from_request(
+                    request.get("selected_edge").cloned().ok_or_else(|| {
+                        ExecutionError::Handler(HostError::Validation {
+                            detail: "chamfer requires selected_edge".to_string(),
+                        })
+                    })?,
+                )
+                .map_err(ExecutionError::Handler)?;
+                let distance = request["distance"].as_f64().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing distance".to_string())
+                })?;
+                let typed = self
+                    .stage_occt_result::<ChamferResult>(
+                        Path::new(bundle_path),
+                        &ChamferRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            distance,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_selected_edge(selected_edge),
+                        threeterm_occt_worker::Operation::Chamfer,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, request, typed)
+            }
+            SHELL_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "shell requires base_feature_id".to_string(),
+                    })
+                })?;
+                let thickness = request["thickness"].as_f64().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing thickness".to_string())
+                })?;
+                let typed = self
+                    .stage_occt_result::<ShellResult>(
+                        Path::new(bundle_path),
+                        &ShellRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            thickness,
+                        )
+                        .with_feature_id(feature_id),
+                        threeterm_occt_worker::Operation::Shell,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, request, typed)
+            }
+            DRAFT_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "draft requires base_feature_id".to_string(),
+                    })
+                })?;
+                let angle = request["angle"]
+                    .as_f64()
+                    .ok_or_else(|| ExecutionError::InvalidRequest("missing angle".to_string()))?;
+                let pull_direction =
+                    serde_json::from_value(request.get("pull_direction").cloned().ok_or_else(
+                        || ExecutionError::InvalidRequest("missing pull_direction".to_string()),
+                    )?)
+                    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+                let typed = self
+                    .stage_occt_result::<DraftResult>(
+                        Path::new(bundle_path),
+                        &DraftRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            angle,
+                            pull_direction,
+                        )
+                        .with_feature_id(feature_id),
+                        threeterm_occt_worker::Operation::Draft,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, request, typed)
+            }
+            LOFT_COMMAND_ID => {
+                let profiles =
+                    serde_json::from_value(request.get("profiles").cloned().ok_or_else(|| {
+                        ExecutionError::InvalidRequest("missing profiles".to_string())
+                    })?)
+                    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+                let typed = self
+                    .stage_occt_result::<LoftResult>(
+                        Path::new(bundle_path),
+                        &LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
+                            .with_solid(request["is_solid"].as_bool().unwrap_or(true))
+                            .with_ruled(request["ruled"].as_bool().unwrap_or(false))
+                            .with_feature_id(feature_id),
+                        threeterm_occt_worker::Operation::Loft,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, request, typed)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn preview_staged_result<R: Serialize>(
+        &self,
+        command: CommandId,
+        request: &serde_json::Value,
+        derived: StagedOcctResult<R>,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        let source_revision = derived.source_snapshot.revision_hash.clone();
+        let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+        let result = serde_json::to_value(&derived.result).map_err(|error| {
+            ExecutionError::Handler(HostError::Validation {
+                detail: format!("preview result serialization failed: {error}"),
+            })
+        })?;
+        let geometry_fingerprint = result["brep_sha256"]
+            .as_str()
+            .ok_or_else(|| {
+                ExecutionError::Handler(HostError::Validation {
+                    detail: "preview result omitted brep_sha256".to_string(),
+                })
+            })?
+            .to_string();
+        let preview_revision = sha256_hex(
+            format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                .as_bytes(),
+        );
+        self.discard_staged_occt_result(&derived);
         Ok(DomainCommandPreview {
             command,
             source_revision,
@@ -3845,6 +4290,71 @@ impl Host {
                         }
                     })?);
                 }
+                CanonicalIntent::Fillet(fillet) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &source_snapshot,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Fillet(fillet),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Chamfer(chamfer) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &source_snapshot,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Chamfer(chamfer),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Shell(shell) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &source_snapshot,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Shell(shell),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Draft(draft) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &source_snapshot,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Draft(draft),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Loft(loft) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &source_snapshot,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Loft(loft),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
             }
         }
         let reloaded = Bundle::at(root).open()?;
@@ -4814,6 +5324,87 @@ impl Host {
                         &artifact.request_id,
                         provenance,
                         &intent,
+                        bytes,
+                    )
+                } else if artifact.operation == "fillet"
+                    && derived.request.get("selected_edge").is_some()
+                {
+                    let intent = canonical_fillet_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Fillet(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "chamfer"
+                    && derived.request.get("selected_edge").is_some()
+                {
+                    let intent = canonical_chamfer_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Chamfer(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "shell" {
+                    let intent = canonical_shell_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Shell(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "draft" {
+                    let intent = canonical_draft_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Draft(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "loft" {
+                    let intent =
+                        canonical_loft_intent(&derived.request, &derived.source_snapshot, artifact)
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Loft(intent),
                         bytes,
                     )
                 } else {
@@ -7285,6 +7876,242 @@ impl Host {
     }
 }
 
+enum FinishingReplayIntent {
+    Fillet(CanonicalFilletIntent),
+    Chamfer(CanonicalChamferIntent),
+    Shell(CanonicalShellIntent),
+    Draft(CanonicalDraftIntent),
+    Loft(CanonicalLoftIntent),
+}
+
+struct ReplayedGeometry {
+    feature_id: String,
+    path: PathBuf,
+    fingerprint: String,
+}
+
+fn replay_finishing_geometry(
+    root: &Path,
+    source_snapshot: &SnapshotView,
+    loaded: &LoadedBundle,
+    replayed_paths: &HashMap<String, PathBuf>,
+    worker: &OcctWorker,
+    intent: FinishingReplayIntent,
+) -> Result<ReplayedGeometry, HostError> {
+    let expected_worker = expected_occt_worker_fingerprint();
+    let (feature_id, source_revision, worker_requirements) = match &intent {
+        FinishingReplayIntent::Fillet(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Chamfer(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Shell(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Draft(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Loft(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+    };
+    let feature_id = feature_id.ok_or_else(|| HostError::Validation {
+        detail: "finishing intent has no affected feature".to_string(),
+    })?;
+    if worker_requirements != expected_worker {
+        return Err(HostError::WorkerUnavailable {
+            detail: format!(
+                "incompatible finishing worker requirements: expected {expected_worker:?}, found {worker_requirements:?}"
+            ),
+        });
+    }
+    if !loaded.graph.contains_feature(&feature_id) {
+        return Err(HostError::Validation {
+            detail: format!(
+                "finishing replay feature is not in the Revision Snapshot: {feature_id}"
+            ),
+        });
+    }
+
+    let dependency_path = |dependency: &str| -> Result<PathBuf, HostError> {
+        if let Some(path) = replayed_paths.get(dependency) {
+            return Ok(path.clone());
+        }
+        let entry = loaded
+            .log
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| entry.feature_id == dependency && entry.intent.is_some())
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("finishing replay dependency is not canonical: {dependency}"),
+            })?;
+        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
+        let expected_bytes = entry
+            .brep_byte_count
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("finishing replay dependency byte count is invalid: {dependency}"),
+            })?;
+        let expected_sha = entry
+            .brep_sha256
+            .as_deref()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("finishing replay dependency digest is missing: {dependency}"),
+            })?;
+        read_brep_verified(&path, Some((expected_bytes, expected_sha)))
+            .map_err(|detail| HostError::BrepIo { detail })?;
+        Ok(path)
+    };
+
+    let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
+        HostError::BrepIo {
+            detail: format!("create finishing replay stage failed: {error}"),
+        }
+    })?;
+    let stage_root = stage.root().to_path_buf();
+
+    macro_rules! read_result {
+        ($result:expr) => {{
+            let result = $result.map_err(HostError::from)?;
+            if result.status != "ok" {
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(result.request_id),
+                    detail: format!("finishing replay returned status {}", result.status),
+                });
+            }
+            let bytes = read_brep_verified(
+                &result.brep_path,
+                Some((result.brep_bytes, result.brep_sha256.as_str())),
+            )
+            .map_err(|detail| HostError::BrepIo { detail })?;
+            bytes
+        }};
+    }
+
+    let bytes = match intent {
+        FinishingReplayIntent::Fillet(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let edge = SelectedEdgeContext {
+                semantic_id: value.selected_edge.semantic_id,
+                source_feature_id: value.selected_edge.provenance.source_feature_id,
+                source_revision_id: value.selected_edge.provenance.source_revision_id,
+                source_edge_id: value.selected_edge.provenance.source_edge_id,
+                role: value.selected_edge.role,
+                midpoint: value.selected_edge.evidence.midpoint,
+                tangent: value.selected_edge.evidence.tangent,
+                length: value.selected_edge.evidence.length,
+            };
+            let request = FilletRequest::new(value.request_id, base_path, value.radius)
+                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_feature_id(&feature_id)
+                .with_selected_edge(edge);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .fillet(&request)
+            )
+        }
+        FinishingReplayIntent::Chamfer(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let edge = SelectedEdgeContext {
+                semantic_id: value.selected_edge.semantic_id,
+                source_feature_id: value.selected_edge.provenance.source_feature_id,
+                source_revision_id: value.selected_edge.provenance.source_revision_id,
+                source_edge_id: value.selected_edge.provenance.source_edge_id,
+                role: value.selected_edge.role,
+                midpoint: value.selected_edge.evidence.midpoint,
+                tangent: value.selected_edge.evidence.tangent,
+                length: value.selected_edge.evidence.length,
+            };
+            let request = ChamferRequest::new(value.request_id, base_path, value.distance)
+                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_feature_id(&feature_id)
+                .with_selected_edge(edge);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .chamfer(&request)
+            )
+        }
+        FinishingReplayIntent::Shell(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let request = ShellRequest::new(value.request_id, base_path, value.thickness)
+                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_feature_id(&feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .shell(&request)
+            )
+        }
+        FinishingReplayIntent::Draft(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let request = DraftRequest::new(
+                value.request_id,
+                base_path,
+                value.angle,
+                value.pull_direction,
+            )
+            .with_output_path(&stage_root, "replay.brep.partial")
+            .with_feature_id(&feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .draft(&request)
+            )
+        }
+        FinishingReplayIntent::Loft(value) => {
+            let request = LoftRequest::new(value.request_id, value.profiles)
+                .with_solid(value.is_solid)
+                .with_ruled(value.ruled)
+                .with_output_path(&stage_root, "replay.brep.partial")
+                .with_feature_id(&feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .loft(&request)
+            )
+        }
+    };
+    let path = match Bundle::at(root).restore_derived_brep_if_revision(
+        &feature_id,
+        &source_snapshot.revision_hash,
+        &bytes,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = stage.discard();
+            return Err(error.into());
+        }
+    };
+    let _ = stage.discard();
+    let fingerprint = sha256_path(&path).map_err(|error| HostError::BrepIo {
+        detail: format!("hash replayed BREP failed: {error}"),
+    })?;
+    Ok(ReplayedGeometry {
+        feature_id,
+        path,
+        fingerprint,
+    })
+}
+
 impl Drop for Host {
     fn drop(&mut self) {
         for draft in self.drafts.get_mut().values() {
@@ -7859,6 +8686,32 @@ fn boolean_derived_result_json(artifact: &Layer1DerivedResult) -> serde_json::Va
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finishing_response_value(
+    status: &str,
+    operation: &str,
+    feature_id: &str,
+    snapshot: &SnapshotView,
+    brep_path: &Path,
+    brep_sha256: &str,
+    brep_bytes: usize,
+    artifact: &Layer1DerivedResult,
+    schema_version: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "operation": operation,
+        "feature_id": feature_id,
+        "feature_graph_hash": snapshot.feature_graph_hash,
+        "revision_hash": snapshot.revision_hash,
+        "brep_path": brep_path,
+        "brep_sha256": brep_sha256,
+        "brep_bytes": brep_bytes,
+        "derived_result": boolean_derived_result_json(artifact),
+        "schema_version": schema_version,
+    })
+}
+
 fn canonical_boolean_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -8009,6 +8862,241 @@ fn canonical_hole_intent(
             thread_pitch,
             thread_depth,
         },
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, HostError> {
+    request
+        .get("base_feature_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            request["base_path"].as_str().and_then(|path| {
+                Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".brep"))
+                    .map(str::to_string)
+            })
+        })
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical operation base feature is missing".to_string(),
+        })
+}
+
+fn canonical_edge_reference(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+) -> Result<CanonicalEdgeReference, HostError> {
+    let selected = request
+        .get("selected_edge")
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical edge operation requires selected_edge".to_string(),
+        })?;
+    let context = selected_edge_context_from_request(selected.clone())?;
+    Ok(CanonicalEdgeReference {
+        semantic_id: context.semantic_id,
+        provenance: EdgeProvenance {
+            source_feature_id: context.source_feature_id,
+            source_revision_id: context.source_revision_id,
+            source_edge_id: context.source_edge_id,
+        },
+        role: context.role,
+        evidence: EdgeEvidence {
+            midpoint: context.midpoint,
+            tangent: context.tangent,
+            length: context.length,
+        },
+    })
+    .and_then(|reference| {
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "selected edge source revision does not match the command source"
+                    .to_string(),
+            });
+        }
+        Ok(reference)
+    })
+}
+
+fn selected_edge_context_from_request(
+    selected: serde_json::Value,
+) -> Result<SelectedEdgeContext, HostError> {
+    if selected.get("provenance").is_some() {
+        let reference: CanonicalEdgeReference =
+            serde_json::from_value(selected).map_err(|error| HostError::Validation {
+                detail: format!("invalid selected edge reference: {error}"),
+            })?;
+        return Ok(SelectedEdgeContext {
+            semantic_id: reference.semantic_id,
+            source_feature_id: reference.provenance.source_feature_id,
+            source_revision_id: reference.provenance.source_revision_id,
+            source_edge_id: reference.provenance.source_edge_id,
+            role: reference.role,
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        });
+    }
+    serde_json::from_value(selected).map_err(|error| HostError::Validation {
+        detail: format!("invalid selected edge context: {error}"),
+    })
+}
+
+fn canonical_fillet_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalFilletIntent, HostError> {
+    let radius = request["radius"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical fillet radius is missing or invalid".to_string(),
+        })?;
+    let base_feature_id = canonical_base_feature_id(request)?;
+    let intent = CanonicalFilletIntent {
+        schema_version: FILLET_INTENT_SCHEMA_VERSION.to_string(),
+        command: "fillet".to_string(),
+        operation: "fillet".to_string(),
+        base_feature_id,
+        selected_edge: canonical_edge_reference(request, source_snapshot)?,
+        radius,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_chamfer_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalChamferIntent, HostError> {
+    let distance = request["distance"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical chamfer distance is missing or invalid".to_string(),
+        })?;
+    let intent = CanonicalChamferIntent {
+        schema_version: CHAMFER_INTENT_SCHEMA_VERSION.to_string(),
+        command: "chamfer".to_string(),
+        operation: "chamfer".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        selected_edge: canonical_edge_reference(request, source_snapshot)?,
+        distance,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_shell_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalShellIntent, HostError> {
+    let thickness = request["thickness"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical shell thickness is missing or invalid".to_string(),
+        })?;
+    let intent = CanonicalShellIntent {
+        schema_version: SHELL_INTENT_SCHEMA_VERSION.to_string(),
+        command: "shell".to_string(),
+        operation: "shell".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        thickness,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_draft_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalDraftIntent, HostError> {
+    let angle = request["angle"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical draft angle is missing or invalid".to_string(),
+        })?;
+    let pull_direction =
+        serde_json::from_value(request["pull_direction"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("canonical draft pull direction is invalid: {error}"),
+            }
+        })?;
+    let intent = CanonicalDraftIntent {
+        schema_version: DRAFT_INTENT_SCHEMA_VERSION.to_string(),
+        command: "draft".to_string(),
+        operation: "draft".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        angle,
+        pull_direction,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_loft_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalLoftIntent, HostError> {
+    let profiles = serde_json::from_value(request["profiles"].clone()).map_err(|error| {
+        HostError::Validation {
+            detail: format!("canonical loft profiles are invalid: {error}"),
+        }
+    })?;
+    let intent = CanonicalLoftIntent {
+        schema_version: LOFT_INTENT_SCHEMA_VERSION.to_string(),
+        command: "loft".to_string(),
+        operation: "loft".to_string(),
+        profiles,
+        is_solid: request["is_solid"].as_bool().unwrap_or(true),
+        ruled: request["ruled"].as_bool().unwrap_or(false),
+        request_id: artifact.request_id.clone(),
         affected_semantic_ids: vec![artifact.feature_id.clone()],
         source_revision: source_snapshot.revision_hash.clone(),
         worker_requirements: artifact.worker_fingerprint.clone(),

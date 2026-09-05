@@ -44,7 +44,8 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CommandSchema, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, iter,
+    CHAMFER_COMMAND_ID, CommandSchema, DRAFT_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID,
+    IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, SHELL_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -397,7 +398,15 @@ impl McpServer {
 
         if matches!(
             schema_entry.id,
-            IDENTITY_COMMAND_ID | APPLY_COMMAND_ID | BOOLEAN_PATTERN_COMMAND_ID | HOLE_COMMAND_ID
+            IDENTITY_COMMAND_ID
+                | APPLY_COMMAND_ID
+                | BOOLEAN_PATTERN_COMMAND_ID
+                | HOLE_COMMAND_ID
+                | FILLET_COMMAND_ID
+                | CHAMFER_COMMAND_ID
+                | SHELL_COMMAND_ID
+                | DRAFT_COMMAND_ID
+                | LOFT_COMMAND_ID
         ) {
             return self.handle_domain_command(request, schema_entry.id, arguments);
         }

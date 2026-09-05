@@ -12,19 +12,21 @@ use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
     CircularPatternRequest, DraftRequest, FilletRequest, LinearPatternRequest, LoftRequest,
-    MirrorRequest, OcctWorker, Operation, RevolveRequest, ShellRequest, new_request_id,
+    MirrorRequest, OcctWorker, Operation, RevolveRequest, SelectedEdgeContext, ShellRequest,
+    new_request_id,
 };
 use threeterm_protocol::command_execution::{ExecutionError, execute};
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
     BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
-    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
-    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    REATTACH_EDGE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
     TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
@@ -198,12 +200,14 @@ enum DispatchPlan {
         feature_id: String,
         base_feature_id: String,
         radius: f64,
+        selected_edge_file: Option<String>,
     },
     Chamfer {
         bundle: String,
         feature_id: String,
         base_feature_id: String,
         distance: f64,
+        selected_edge_file: Option<String>,
     },
     Hole {
         bundle: String,
@@ -2101,6 +2105,7 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut radius: Option<f64> = None;
+    let mut selected_edge_file: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2134,6 +2139,11 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--selected-edge-file" => {
+                    selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2171,6 +2181,7 @@ fn parse_fillet(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         radius,
+        selected_edge_file,
     }
 }
 
@@ -2184,6 +2195,7 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
     let mut feature_id: Option<String> = None;
     let mut base_feature_id: Option<String> = None;
     let mut distance: Option<f64> = None;
+    let mut selected_edge_file: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_string_lossy();
@@ -2217,6 +2229,11 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
                         };
                     }
                 },
+                "--selected-edge-file" => {
+                    selected_edge_file = Some(value_str.into_owned());
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2254,6 +2271,7 @@ fn parse_chamfer(args: &[OsString]) -> DispatchPlan {
         feature_id,
         base_feature_id,
         distance,
+        selected_edge_file,
     }
 }
 
@@ -3534,11 +3552,13 @@ fn execute_handler(
             feature_id,
             base_feature_id,
             radius,
+            selected_edge_file,
         } => emit_fillet(
             &bundle,
             &feature_id,
             &base_feature_id,
             radius,
+            selected_edge_file.as_deref(),
             stdout,
             stderr,
         ),
@@ -3547,11 +3567,13 @@ fn execute_handler(
             feature_id,
             base_feature_id,
             distance,
+            selected_edge_file,
         } => emit_chamfer(
             &bundle,
             &feature_id,
             &base_feature_id,
             distance,
+            selected_edge_file.as_deref(),
             stdout,
             stderr,
         ),
@@ -3851,6 +3873,11 @@ pub fn dispatch_registered_command(
             | BOOLEAN_COMMON_COMMAND_ID
             | HOLE_COMMAND_ID
             | REATTACH_EDGE_COMMAND_ID
+            | FILLET_COMMAND_ID
+            | CHAMFER_COMMAND_ID
+            | SHELL_COMMAND_ID
+            | DRAFT_COMMAND_ID
+            | LOFT_COMMAND_ID
     ) {
         return host
             .execute_domain_command(command, request)
@@ -4819,6 +4846,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             radius,
+            ..
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "radius": radius })
         }
@@ -4827,6 +4855,7 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             feature_id,
             base_feature_id,
             distance,
+            ..
         } => {
             json!({ "bundle_path": bundle, "feature_id": feature_id, "base_feature_id": base_feature_id, "distance": distance })
         }
@@ -5484,6 +5513,7 @@ fn emit_fillet(
     feature_id: &str,
     base_feature_id: &str,
     radius: f64,
+    selected_edge_file: Option<&str>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -5511,9 +5541,33 @@ fn emit_fillet(
         "{feature_id}-{}.brep",
         threeterm_occt_worker::new_request_id()
     );
-    let request = FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
-        .with_output_path(&staging_dir, &output_filename)
-        .with_feature_id(feature_id);
+    let mut request =
+        FilletRequest::new(threeterm_occt_worker::new_request_id(), &base_path, radius)
+            .with_output_path(&staging_dir, &output_filename)
+            .with_feature_id(feature_id);
+    if let Some(path) = selected_edge_file {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                write_diagnostic(
+                    stderr,
+                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
+                );
+                return EXIT_UNKNOWN_COMMAND;
+            }
+        };
+        let selected: SelectedEdgeContext = match serde_json::from_slice(&bytes) {
+            Ok(selected) => selected,
+            Err(error) => {
+                write_diagnostic(
+                    stderr,
+                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
+                );
+                return EXIT_UNKNOWN_COMMAND;
+            }
+        };
+        request = request.with_selected_edge(selected);
+    }
     match Host::new().fillet(bundle, request, &worker) {
         Ok(view) => write_fillet_view(&view, FILLET_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => emit_host_error(&error, stderr),
@@ -5525,6 +5579,7 @@ fn emit_chamfer(
     feature_id: &str,
     base_feature_id: &str,
     distance: f64,
+    selected_edge_file: Option<&str>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -5552,13 +5607,36 @@ fn emit_chamfer(
         "{feature_id}-{}.brep",
         threeterm_occt_worker::new_request_id()
     );
-    let request = ChamferRequest::new(
+    let mut request = ChamferRequest::new(
         threeterm_occt_worker::new_request_id(),
         &base_path,
         distance,
     )
     .with_output_path(&staging_dir, &output_filename)
     .with_feature_id(feature_id);
+    if let Some(path) = selected_edge_file {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                write_diagnostic(
+                    stderr,
+                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
+                );
+                return EXIT_UNKNOWN_COMMAND;
+            }
+        };
+        let selected: SelectedEdgeContext = match serde_json::from_slice(&bytes) {
+            Ok(selected) => selected,
+            Err(error) => {
+                write_diagnostic(
+                    stderr,
+                    &Diagnostic::invalid_request(&format!("selected edge file: {error}")),
+                );
+                return EXIT_UNKNOWN_COMMAND;
+            }
+        };
+        request = request.with_selected_edge(selected);
+    }
     match Host::new().chamfer(bundle, request, &worker) {
         Ok(view) => write_chamfer_view(&view, CHAMFER_RESPONSE_SCHEMA_VERSION, stdout, stderr),
         Err(error) => emit_host_error(&error, stderr),

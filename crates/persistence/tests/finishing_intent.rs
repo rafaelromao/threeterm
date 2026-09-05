@@ -1,11 +1,11 @@
+use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_persistence::{
-    CHAMFER_INTENT_SCHEMA_VERSION, DRAFT_INTENT_SCHEMA_VERSION, FILLET_INTENT_SCHEMA_VERSION,
-    LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION, Bundle, CanonicalChamferIntent,
+    Bundle, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalChamferIntent, CanonicalDraftIntent,
     CanonicalEdgeReference, CanonicalFilletIntent, CanonicalIntent, CanonicalLoftIntent,
-    CanonicalShellIntent, CanonicalDraftIntent, EdgeEvidence, EdgeProvenance,
+    CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance,
+    FILLET_INTENT_SCHEMA_VERSION, LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION,
     occt_worker_identity, replay_canonical_state,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn selected_edge() -> CanonicalEdgeReference {
     CanonicalEdgeReference {
@@ -62,13 +62,13 @@ fn fillet_intent_round_trips_selected_semantic_edge() {
 fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
     let root = temp_root();
     let bundle = Bundle::create(&root).expect("bundle creates");
+    let base_revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
     let source_revision = bundle
-        .append_feature_with_brep_if_revision(
-            "base",
-            "brep:base",
-            &bundle.open().expect("bundle opens").revision_hash_hex(),
-            b"base-brep",
-        )
+        .append_feature_with_brep_if_revision("base", "brep:base", &base_revision, b"base-brep")
         .expect("base publishes")
         .revision_hash_hex()
         .to_string();
@@ -99,7 +99,11 @@ fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
         .expect("fillet intent publishes");
 
     assert!(matches!(
-        committed.log.entries().last().and_then(|entry| entry.intent.as_ref()),
+        committed
+            .log
+            .entries()
+            .last()
+            .and_then(|entry| entry.intent.as_ref()),
         Some(CanonicalIntent::Fillet(_))
     ));
     let state = replay_canonical_state(&committed.log).expect("fillet log replays");
@@ -164,9 +168,13 @@ fn finishing_intents_capture_replayable_inputs_for_each_operation() {
         }),
     ];
 
-    for (intent, feature_id) in intents.iter().zip(["chamfer-1", "shell-1", "draft-1", "loft-1"])
+    for (intent, feature_id) in intents
+        .iter()
+        .zip(["chamfer-1", "shell-1", "draft-1", "loft-1"])
     {
-        intent.validate(feature_id).expect("finishing intent validates");
+        intent
+            .validate(feature_id)
+            .expect("finishing intent validates");
         let encoded = serde_json::to_string(intent).expect("intent serializes");
         assert_eq!(
             serde_json::from_str::<CanonicalIntent>(&encoded).expect("intent deserializes"),

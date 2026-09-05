@@ -1673,37 +1673,17 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         const TopoDS_Edge selected_source_edge = source_edge_for_context(base, request, "selected_edge");
         const TopoDS_Edge edit_target_edge = source_edge_for_context(base, request, "edit_target");
         BRepFilletAPI_MakeFillet fillet(base);
-        TopoDS_Edge fallback_edit_edge;
-        TopoDS_Vertex selected_first_vertex;
-        TopoDS_Vertex selected_last_vertex;
-        if (!selected_source_edge.IsNull()) {
-            TopExp::Vertices(selected_source_edge, selected_first_vertex, selected_last_vertex);
-        }
         if (!edit_target_edge.IsNull()) {
             fillet.Add(radius, edit_target_edge);
-        }
-        for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edit_target_edge.IsNull() && edge_explorer.More(); edge_explorer.Next()) {
-            TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-            if (!selected_source_edge.IsNull() && edge.IsSame(selected_source_edge)) continue;
-            if (!selected_source_edge.IsNull()) {
-                if (fallback_edit_edge.IsNull()) fallback_edit_edge = edge;
-                TopoDS_Vertex first_vertex;
-                TopoDS_Vertex last_vertex;
-                TopExp::Vertices(edge, first_vertex, last_vertex);
-                if (first_vertex.IsSame(selected_first_vertex) ||
-                    first_vertex.IsSame(selected_last_vertex) ||
-                    last_vertex.IsSame(selected_first_vertex) ||
-                    last_vertex.IsSame(selected_last_vertex)) {
-                    continue;
-                }
-                fillet.Add(radius, edge);
-                fallback_edit_edge = {};
-                break;
+        } else if (!selected_source_edge.IsNull()) {
+            fillet.Add(radius, selected_source_edge);
+        } else {
+            // Legacy worker callers may omit semantic selection; the host's
+            // shared executor rejects that shape, while this compatibility
+            // path preserves the low-level worker contract.
+            for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+                fillet.Add(radius, TopoDS::Edge(edge_explorer.Current()));
             }
-            fillet.Add(radius, edge);
-        }
-        if (!selected_source_edge.IsNull() && !fallback_edit_edge.IsNull()) {
-            fillet.Add(radius, fallback_edit_edge);
         }
         fillet.Build();
         if (!fillet.IsDone()) {
@@ -1999,9 +1979,13 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
 
         try {
             BRepFilletAPI_MakeChamfer chamfer(base);
-            for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
-                TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
-                chamfer.Add(distance, edge);
+            const TopoDS_Edge selected_edge = source_edge_for_context(base, request, "selected_edge");
+            if (!selected_edge.IsNull()) {
+                chamfer.Add(distance, selected_edge);
+            } else {
+                for (TopExp_Explorer edge_explorer(base, TopAbs_EDGE); edge_explorer.More(); edge_explorer.Next()) {
+                    chamfer.Add(distance, TopoDS::Edge(edge_explorer.Current()));
+                }
             }
             chamfer.Build();
             if (!chamfer.IsDone()) {

@@ -3917,6 +3917,29 @@ pub fn dispatch_registered_command(
             let identity = host.identity(string_field("bundle_path")?)?;
             return Ok(identity_value(&identity, schema.response_schema_version));
         }
+        if matches!(
+            command,
+            DEFINE_COMPONENT_COMMAND_ID
+                | CREATE_COMPONENT_INSTANCE_COMMAND_ID
+                | TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID
+                | MAKE_COMPONENT_INDEPENDENT_COMMAND_ID
+                | EDIT_COMPONENT_PARAMETER_COMMAND_ID
+                | COMPONENT_STATE_COMMAND_ID
+                | CAPTURE_COMPONENT_COMMAND_ID
+        ) {
+            return host
+                .execute_domain_command(command, request)
+                .map_err(|error| match error {
+                    ExecutionError::UnknownCommand(command) => {
+                        DispatchError::UnknownCommand(command)
+                    }
+                    ExecutionError::InvalidRequest(detail) => DispatchError::Validation(detail),
+                    ExecutionError::Handler(error) => DispatchError::Host(error),
+                    ExecutionError::InvalidResponse(detail) => DispatchError::Validation(format!(
+                        "response violates registered schema: {detail}"
+                    )),
+                });
+        }
         if command == APPLY_COMMAND_ID {
             let operation = string_field("operation")?;
             let feature_id = string_field("feature_id")?;

@@ -800,6 +800,15 @@ impl ComponentGraph {
                 })?;
             }
             ComponentCommand::CreateInstance { instance } => {
+                if instance.id.is_empty()
+                    || instance.definition_id.is_empty()
+                    || !instance.transform.iter().all(|value| value.is_finite())
+                {
+                    return Err(
+                        "component instance IDs must not be empty and transform must be finite"
+                            .to_string(),
+                    );
+                }
                 self.require_definition(&instance.definition_id)?;
                 if self.id_is_in_use(&instance.id) {
                     return Err("component ID already exists".to_string());

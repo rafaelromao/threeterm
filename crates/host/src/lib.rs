@@ -8429,12 +8429,13 @@ impl Host {
         graph
             .apply(&command)
             .map_err(|detail| HostError::Validation { detail })?;
-        let affected_instances = match &command {
+        let affected_instances: Vec<_> = match &command {
             ComponentCommand::CreateInstance { .. }
             | ComponentCommand::TransformInstance { .. }
             | ComponentCommand::MakeIndependent { .. }
-            | ComponentCommand::EditParameter { .. } => graph.instances.values().cloned().collect(),
-            ComponentCommand::Define { .. } | ComponentCommand::Capture { .. } => Vec::new(),
+            | ComponentCommand::EditParameter { .. }
+            | ComponentCommand::Define { .. }
+            | ComponentCommand::Capture { .. } => graph.instances.values().cloned().collect(),
         };
         let staged_geometry = if let Some(source) = loaded.as_ref() {
             let mut geometry = Vec::new();
@@ -12723,58 +12724,10 @@ fn publish_component_instance_geometries(
     revision: &str,
     geometries: &[(String, Vec<u8>)],
 ) -> Result<(), HostError> {
-    if geometries.is_empty() {
-        return Ok(());
-    }
-    for (instance_id, bytes) in geometries {
-        if !valid_feature_path_component(instance_id) || bytes.is_empty() {
-            return Err(HostError::Validation {
-                detail: "component instance geometry must have a plain ID and non-empty BREP"
-                    .to_string(),
-            });
-        }
-    }
-    let parent = root.join(".derived").join("component-instances");
-    fs::create_dir_all(&parent).map_err(|error| HostError::BrepIo {
-        detail: format!("create component instance geometry directory failed: {error}"),
-    })?;
-    let sequence = TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let stage = parent.join(format!(".batch-{}-{sequence}", std::process::id()));
-    fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-        detail: format!("create component instance batch directory failed: {error}"),
-    })?;
-    for (instance_id, bytes) in geometries {
-        if let Err(error) = fs::write(stage.join(format!("{instance_id}.brep")), bytes) {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(HostError::BrepIo {
-                detail: format!("stage component instance geometry failed: {error}"),
-            });
-        }
-    }
-
-    let target = parent.join(revision);
-    let backup = parent.join(format!(".{revision}.backup-{sequence}"));
-    if let Err(error) = fs::rename(&target, &backup)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        let _ = fs::remove_dir_all(&stage);
-        return Err(HostError::BrepIo {
-            detail: format!("stage existing component geometry failed: {error}"),
-        });
-    }
-    if let Err(error) = fs::rename(&stage, &target) {
-        let restore = fs::rename(&backup, &target);
-        let _ = fs::remove_dir_all(&stage);
-        let detail = match restore {
-            Ok(()) => format!("publish component instance geometry failed: {error}"),
-            Err(restore_error) => format!(
-                "publish component instance geometry failed: {error}; restoring prior results failed: {restore_error}"
-            ),
-        };
-        return Err(HostError::BrepIo { detail });
-    }
-    let _ = fs::remove_dir_all(&backup);
-    Ok(())
+    Bundle::at(root)
+        .restore_component_instance_geometries_if_revision(revision, geometries)
+        .map(|_| ())
+        .map_err(HostError::from)
 }
 
 fn descriptor_for_selected_l_bracket(

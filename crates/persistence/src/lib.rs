@@ -2631,6 +2631,101 @@ impl Bundle {
         })
     }
 
+    /// Restore a complete revision-bound component result set without changing
+    /// canonical state. The revision check and directory replacement share the
+    /// bundle lock so recovery cannot publish results for an obsolete graph.
+    pub fn restore_component_instance_geometries_if_revision(
+        &self,
+        expected_revision: &str,
+        geometries: &[(String, Vec<u8>)],
+    ) -> Result<Vec<PathBuf>, BundleError> {
+        if geometries.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            if loaded.revision_hash_hex() != expected_revision {
+                return Err(BundleError::Invalid(
+                    "component result restore raced with a canonical revision".to_string(),
+                ));
+            }
+
+            let mut instance_ids = std::collections::BTreeSet::new();
+            for (instance_id, bytes) in geometries {
+                if !valid_feature_path_component(instance_id) {
+                    return Err(BundleError::Invalid(
+                        "component instance geometry ID must be a plain path component".to_string(),
+                    ));
+                }
+                if !instance_ids.insert(instance_id) {
+                    return Err(BundleError::Invalid(format!(
+                        "duplicate component instance geometry: {instance_id}"
+                    )));
+                }
+                if bytes.is_empty() {
+                    return Err(BundleError::Invalid(
+                        "component instance geometry must not be empty".to_string(),
+                    ));
+                }
+            }
+
+            let derived_root = self.root.join(".derived");
+            let component_root = derived_root.join("component-instances");
+            fs::create_dir_all(&component_root)?;
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging =
+                component_root.join(format!(".recompute-{}-{sequence}", std::process::id()));
+            let target = component_root.join(expected_revision);
+            let backup = component_root.join(format!(
+                ".{expected_revision}.backup-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&staging)?;
+            for (instance_id, bytes) in geometries {
+                fs::write(staging.join(format!("{instance_id}.brep")), bytes)?;
+            }
+            sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+
+            let had_target = match fs::rename(&target, &backup) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(error.into());
+                }
+            };
+            let promotion = (|| -> Result<(), BundleError> {
+                fs::rename(&staging, &target)?;
+                sync_directory(&component_root, PublicationFailurePoint::BrepDirectorySync)?;
+                Ok(())
+            })();
+            if let Err(error) = promotion {
+                let mut rollback_errors = Vec::new();
+                if let Err(rollback_error) = fs::remove_dir_all(&target)
+                    && rollback_error.kind() != std::io::ErrorKind::NotFound
+                {
+                    rollback_errors.push(rollback_error.to_string());
+                }
+                if had_target && let Err(rollback_error) = fs::rename(&backup, &target) {
+                    rollback_errors.push(rollback_error.to_string());
+                }
+                let _ = fs::remove_dir_all(&staging);
+                if !rollback_errors.is_empty() {
+                    return Err(BundleError::Io(format!(
+                        "component result restore failed: {error}; rollback failed: {}",
+                        rollback_errors.join("; ")
+                    )));
+                }
+                return Err(error);
+            }
+            let _ = fs::remove_dir_all(&backup);
+            Ok(geometries
+                .iter()
+                .map(|(instance_id, _)| target.join(format!("{instance_id}.brep")))
+                .collect())
+        })
+    }
+
     /// The locked body of `open`. Callers must already hold the per-root
     /// write lock; `append_features_locked`, `load_unlocked`, and the
     /// migration staging validation call it from inside the lock.

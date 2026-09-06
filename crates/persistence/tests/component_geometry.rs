@@ -139,3 +139,70 @@ fn component_geometry_failure_preserves_the_prior_revision_and_result_set() {
 
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn component_geometry_restore_is_revision_fenced_and_atomic() {
+    let path = root("restore");
+    let bundle = Bundle::at(&path);
+    let defined = bundle
+        .append_component_command(&definition())
+        .expect("definition publishes");
+    let created = bundle
+        .append_component_command_with_geometry(
+            &ComponentCommand::CreateInstance {
+                instance: ComponentInstance {
+                    id: "first".to_string(),
+                    definition_id: "shared".to_string(),
+                    transform: [0.0, 0.0, 0.0],
+                },
+            },
+            Some(defined.revision_hash_hex()),
+            &[("first".to_string(), b"first-brep".to_vec())],
+        )
+        .expect("instance and geometry publish");
+    let revision = created.revision_hash_hex().to_string();
+    let geometry = path
+        .join(".derived")
+        .join("component-instances")
+        .join(&revision)
+        .join("first.brep");
+
+    bundle
+        .restore_component_instance_geometries_if_revision(
+            &revision,
+            &[("first".to_string(), b"restored-brep".to_vec())],
+        )
+        .expect("derived restore publishes");
+    assert_eq!(
+        fs::read(&geometry).expect("restored geometry reads"),
+        b"restored-brep"
+    );
+
+    fail_next_publication_at(PublicationFailurePoint::BrepDirectorySync);
+    assert!(
+        bundle
+            .restore_component_instance_geometries_if_revision(
+                &revision,
+                &[("first".to_string(), b"failed-brep".to_vec())],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&geometry).expect("rolled-back geometry reads"),
+        b"restored-brep"
+    );
+    assert!(
+        bundle
+            .restore_component_instance_geometries_if_revision(
+                "stale-revision",
+                &[("first".to_string(), b"stale-brep".to_vec())],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(geometry).expect("fenced geometry reads"),
+        b"restored-brep"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}

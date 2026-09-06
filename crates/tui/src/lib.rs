@@ -3005,7 +3005,12 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.coordinator.submit(frame)
     }
 
-    pub fn pick_at(&mut self, x: u32, y: u32) -> Result<PickInputOutcome, TuiViewportError> {
+    pub fn pick_at(
+        &mut self,
+        host: &Host,
+        x: u32,
+        y: u32,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
         let generation = self.tui.state().presentation_generation;
         let request = ViewportRequest::new(
             self.scene.revision.clone(),
@@ -3017,6 +3022,70 @@ impl<R: Renderer> TuiViewportSession<R> {
         .with_colors(self.viewport_colors);
         let pick = ProtocolNeutralViewport::pick(&self.scene, request, x, y)
             .map_err(TuiViewportError::Viewport)?;
+        self.validate_pick_for_host(pick, host)
+    }
+
+    fn validate_pick_for_host(
+        &mut self,
+        pick: PickResult,
+        host: &Host,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
+        let presentation = host.presentation_snapshot().ok_or_else(|| {
+            TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick cannot be validated without a current host snapshot".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("host-pick-validation".to_string()),
+            })
+        })?;
+        let host_revision = presentation.snapshot.revision_hash;
+        if pick.revision != host_revision || self.scene.revision != host_revision {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick result does not match the current host revision".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("host-pick-validation".to_string()),
+            }));
+        }
+        let host_ids = presentation
+            .graph
+            .features()
+            .map(|feature| feature.id.as_str().to_string())
+            .collect::<Vec<_>>();
+        if pick
+            .candidates
+            .iter()
+            .any(|candidate| !host_ids.iter().any(|id| id == &candidate.semantic_id))
+        {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::SelectionIncompatible,
+                detail: "pick candidates are not current host semantic identities".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("host-pick-validation".to_string()),
+            }));
+        }
+        let semantic_ids = pick
+            .candidates
+            .iter()
+            .map(|candidate| candidate.semantic_id.clone())
+            .collect::<Vec<_>>();
+        host.validate_viewport_pick(&pick.revision, &semantic_ids)
+            .map_err(|error| {
+                TuiViewportError::Tui(TuiDiagnostic {
+                    code: TuiDiagnosticCode::StalePick,
+                    detail: format!("host rejected semantic pick: {error:?}"),
+                    canonical_revision: self.tui.state().canonical_revision,
+                    axis: Some(StateAxis::Selection),
+                    event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                    from: Some("host-pick-validation".to_string()),
+                })
+            })?;
         self.validate_pick(pick)
     }
 

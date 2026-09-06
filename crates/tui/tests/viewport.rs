@@ -432,7 +432,7 @@ fn production_pick_validates_semantic_candidates_before_selection() {
             .expect("host-backed viewport accepts the renderer");
 
     let picked = session
-        .pick_at(32, 24)
+        .pick_at(&host, 32, 24)
         .expect("pick returns a semantic candidate");
     assert_eq!(picked.candidates, vec!["feature-a"]);
     assert_eq!(
@@ -484,6 +484,36 @@ fn production_pick_validates_semantic_candidates_before_selection() {
         Some("feature-a")
     );
     assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_pick_rejects_a_candidate_after_host_revision_changes() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let revision = host
+        .current()
+        .expect("canonical revision exists")
+        .revision_hash;
+    host.apply_feature(&root, "remove", "feature-a", None, &revision)
+        .expect("host removes the candidate in a new revision");
+    let pick = session
+        .pick_at(&host, 32, 24)
+        .expect_err("the old candidate cannot be accepted after host removal");
+    match pick {
+        TuiViewportError::Tui(diagnostic) => {
+            assert_eq!(diagnostic.code, threeterm_tui::TuiDiagnosticCode::StalePick);
+        }
+        TuiViewportError::Viewport(_) => panic!("host freshness is a TUI validation error"),
+    }
+    assert!(session.state().selected_target.is_none());
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }

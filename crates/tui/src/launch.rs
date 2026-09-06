@@ -346,7 +346,7 @@ fn run_event_loop<W: InteractiveTerminal>(
             if let Some(input) = decode_terminal_input(&event) {
                 let overlay = match input {
                     TerminalInput::Pick { x, y } if !session.command_input_active() => {
-                        match session.pick_at(x, y) {
+                        match session.pick_at(host, x, y) {
                             Ok(outcome) => outcome.overlay,
                             Err(error) => format!("[warning-glyph] Pick rejected: {error:?}"),
                         }

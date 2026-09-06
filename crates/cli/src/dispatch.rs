@@ -14,7 +14,7 @@ use threeterm_occt_worker::{
     CircularPatternRequest, FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest,
     OcctWorker, Operation, RevolveRequest, new_request_id,
 };
-use threeterm_protocol::command_execution::{ExecutionError, execute};
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
@@ -4049,62 +4049,33 @@ fn execute_registered_with_observer(
     {
         return emit_internal_error("finishing command requires --expected-revision", stderr);
     }
-    if command != threeterm_protocol::schema::REHEARSE_COMMAND_ID {
-        return match Host::new().execute_domain_command(command, request) {
-            Ok(response) => write_success(stdout, &response, stderr),
-            Err(error) => {
-                let error = DispatchError::from(error);
-                if command == threeterm_protocol::schema::LOAD_COMMAND_ID
-                    && let DispatchError::Host(host_error) = &error
-                {
-                    emit_host_error(host_error, stderr)
-                } else {
-                    emit_dispatch_error(&error, stderr)
-                }
-            }
-        };
-    }
-    let result = execute(command, request, |request| {
-        let mut handler_stdout = Vec::new();
-        let mut handler_stderr = Vec::new();
-        let exit = execute_handler(
-            *plan,
-            &request,
-            theme,
-            &mut handler_stdout,
-            &mut handler_stderr,
-        );
-        if exit != EXIT_OK {
-            return Err((exit, handler_stderr));
-        }
-        serde_json::from_slice(&handler_stdout).map_err(|error| {
-            (
-                EXIT_UNKNOWN_COMMAND,
-                format!("command response was not JSON: {error}").into_bytes(),
-            )
-        })
-    });
-
+    let result = dispatch_registered_command(&Host::new(), command, request);
     match result {
         Ok(response) => write_success(stdout, &response, stderr),
-        Err(ExecutionError::Handler((exit, diagnostic))) => {
-            let _ = stderr.write_all(&diagnostic);
-            exit
-        }
-        Err(ExecutionError::InvalidRequest(error))
+        Err(DispatchError::Validation(detail))
             if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID =>
         {
             write_rehearsal_failure(
-                &threeterm_cli_rehearsal_error("argument_parse", json!({"message": error}), None),
+                &threeterm_cli_rehearsal_error("argument_parse", json!({"message": detail}), None),
                 stderr,
             )
         }
-        Err(ExecutionError::InvalidRequest(error)) => emit_internal_error(&error, stderr),
-        Err(ExecutionError::InvalidResponse(error)) => emit_internal_error(
-            &format!("response violates registered schema: {error}"),
-            stderr,
-        ),
-        Err(ExecutionError::UnknownCommand(command)) => emit_unknown_command(command.0, stderr),
+        Err(DispatchError::Host(HostError::Validation { detail }))
+            if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID =>
+        {
+            let diagnostic =
+                serde_json::from_str(&detail).unwrap_or_else(|_| json!({"message": detail}));
+            write_rehearsal_diagnostic(&diagnostic, stderr)
+        }
+        Err(error) => {
+            if command == threeterm_protocol::schema::LOAD_COMMAND_ID
+                && let DispatchError::Host(host_error) = &error
+            {
+                emit_host_error(host_error, stderr)
+            } else {
+                emit_dispatch_error(&error, stderr)
+            }
+        }
     }
 }
 
@@ -4725,14 +4696,18 @@ fn write_rehearsal_failure(
     error: &crate::rehearsal::RehearsalError,
     stderr: &mut dyn Write,
 ) -> i32 {
+    write_rehearsal_diagnostic(&error.diagnostic(), stderr)
+}
+
+fn write_rehearsal_diagnostic(diagnostic: &Value, stderr: &mut dyn Write) -> i32 {
     debug_assert!(
         threeterm_protocol::schema_validator::validate(
             &threeterm_protocol::schema::REHEARSE_FAILURE_DIAGNOSTIC_SCHEMA,
-            &error.diagnostic(),
+            diagnostic,
         )
         .is_ok()
     );
-    let _ = serde_json::to_writer_pretty(&mut *stderr, &error.diagnostic());
+    let _ = serde_json::to_writer_pretty(&mut *stderr, diagnostic);
     let _ = writeln!(stderr);
     EXIT_REHEARSAL_FAILURE
 }

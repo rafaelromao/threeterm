@@ -5,13 +5,15 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_cli::dispatch::{DispatchError, dispatch_registered_command};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, CommandSchema,
+    EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, iter,
 };
+use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
 
 fn root(label: &str) -> PathBuf {
@@ -20,6 +22,304 @@ fn root(label: &str) -> PathBuf {
         .expect("system clock is after the unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("threeterm-parity-{label}-{suffix}"))
+}
+
+fn schema_example(schema: &Value) -> Value {
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return value.clone();
+    }
+    if let Some(alternatives) = schema.get("oneOf").and_then(Value::as_array) {
+        let parent_is_object = schema.get("type").and_then(Value::as_str) == Some("object")
+            || schema.get("properties").is_some();
+        for alternative in alternatives {
+            let mut candidate = if parent_is_object {
+                schema_example_without_combinators(schema)
+            } else {
+                schema_example(alternative)
+            };
+            if parent_is_object {
+                apply_schema_alternative(&mut candidate, schema, alternative);
+            }
+            if validate(schema, &candidate).is_ok() {
+                return candidate;
+            }
+        }
+        panic!("schema has no valid fixture alternative: {schema}");
+    }
+    schema_example_without_combinators(schema)
+}
+
+fn schema_example_without_combinators(schema: &Value) -> Value {
+    let Some(schema_object) = schema.as_object() else {
+        return Value::Null;
+    };
+    let kind = schema_object.get("type").and_then(Value::as_str);
+    if kind == Some("object") || (kind.is_none() && schema_object.contains_key("properties")) {
+        let mut object = serde_json::Map::new();
+        if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                let property = schema_object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get(key))
+                    .unwrap_or_else(|| panic!("required fixture property is missing: {key}"));
+                object.insert(key.to_string(), schema_example(property));
+            }
+        }
+        return Value::Object(object);
+    }
+    match kind {
+        Some("array") => {
+            let count = schema_object
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as usize;
+            let item_schema = schema_object.get("items");
+            Value::Array(
+                (0..count)
+                    .map(|_| item_schema.map_or(Value::Null, schema_example))
+                    .collect(),
+            )
+        }
+        Some("string") => {
+            if schema_object
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| pattern.contains("[0-9a-f]"))
+            {
+                Value::String("0".repeat(64))
+            } else {
+                Value::String("fixture".to_string())
+            }
+        }
+        Some("number") => {
+            let minimum = schema_object
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let exclusive_minimum = schema_object
+                .get("exclusiveMinimum")
+                .and_then(Value::as_f64)
+                .unwrap_or(minimum);
+            json!(minimum.max(exclusive_minimum) + 1.0)
+        }
+        Some("integer") => json!(1),
+        Some("boolean") => json!(false),
+        Some("null") => Value::Null,
+        Some("object") => Value::Object(serde_json::Map::new()),
+        None => Value::Null,
+        Some(other) => panic!("unsupported fixture schema type: {other}"),
+    }
+}
+
+fn apply_schema_alternative(candidate: &mut Value, schema: &Value, alternative: &Value) {
+    let object = candidate
+        .as_object_mut()
+        .expect("oneOf request fixture is an object");
+    let alternative_object = alternative
+        .as_object()
+        .expect("oneOf alternative is an object");
+    if let Some(required) = alternative_object.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(key) {
+                let property = alternative_object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get(key))
+                    .or_else(|| {
+                        schema
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .and_then(|properties| properties.get(key))
+                    })
+                    .unwrap_or_else(|| panic!("oneOf fixture property is missing: {key}"));
+                object.insert(key.to_string(), schema_example(property));
+            }
+        }
+    }
+    if let Some(properties) = alternative_object
+        .get("properties")
+        .and_then(Value::as_object)
+    {
+        for (key, property) in properties {
+            if property == &Value::Bool(false) {
+                object.remove(key);
+            } else {
+                object.insert(key.clone(), schema_example(property));
+            }
+        }
+    }
+}
+
+fn registry_request(schema: &CommandSchema, root: &std::path::Path) -> Value {
+    let mut request = schema_example(&schema.request_schema);
+    let hash = "0".repeat(64);
+    rewrite_fixture_paths(&mut request, root, &hash);
+    validate(&schema.request_schema, &request).unwrap_or_else(|error| {
+        panic!(
+            "generated fixture for {} violates its request schema: {error}",
+            schema.name
+        )
+    });
+    request
+}
+
+fn rewrite_fixture_paths(value: &mut Value, root: &std::path::Path, hash: &str) {
+    let Some(object) = value.as_object_mut() else {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                rewrite_fixture_paths(item, root, hash);
+            }
+        }
+        return;
+    };
+    for (key, item) in object {
+        match key.as_str() {
+            "bundle_path" => *item = json!(root.to_string_lossy().into_owned()),
+            "destination" => {
+                *item = json!(root.join("new-project").to_string_lossy().into_owned());
+            }
+            "output_dir" => {
+                *item = json!(root.join("rehearsal").to_string_lossy().into_owned());
+            }
+            "expected_revision" | "source_revision_id" => *item = json!(hash),
+            _ => rewrite_fixture_paths(item, root, hash),
+        }
+    }
+}
+
+fn prepare_registry_bundle(request: &Value) {
+    if let Some(path) = request.get("bundle_path").and_then(Value::as_str) {
+        Bundle::create(path).expect("registry adapter fixture bundle creates");
+    }
+}
+
+fn assert_cli_registry_result(schema: &CommandSchema, result: Result<Value, DispatchError>) {
+    match result {
+        Ok(response) => validate(&schema.response_schema, &response).unwrap_or_else(|error| {
+            panic!(
+                "CLI response for {} violates its response schema: {error}",
+                schema.name
+            )
+        }),
+        Err(DispatchError::UnknownCommand(command)) => {
+            panic!("CLI registry command {} was not recognized", command.0)
+        }
+        Err(DispatchError::UnsupportedTool { .. }) => {
+            panic!("CLI registry command {} was unsupported", schema.name)
+        }
+        Err(error) => {
+            let detail = error.diagnostic_detail();
+            assert!(
+                !detail.contains("not handled by the domain executor"),
+                "CLI registry command {} has no executable handler: {detail}",
+                schema.name
+            );
+        }
+    }
+}
+
+fn assert_mcp_registry_result(
+    schema: &CommandSchema,
+    response: &threeterm_mcp::server::JsonRpcResponse,
+) {
+    if let Some(error) = &response.error {
+        assert_ne!(
+            error.code,
+            threeterm_mcp::server::ERROR_METHOD_NOT_FOUND,
+            "MCP registry command {} was not recognized: {}",
+            schema.name,
+            error.message
+        );
+        assert_ne!(
+            error.code,
+            threeterm_mcp::server::ERROR_INTERNAL,
+            "MCP registry command {} violated its response contract: {}",
+            schema.name,
+            error.message
+        );
+        return;
+    }
+
+    let result = response
+        .result
+        .as_ref()
+        .expect("MCP response has result or error");
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !text.contains("not handled by the domain executor")
+                && !text.contains("unsupported tool"),
+            "MCP registry command {} has no executable handler: {text}",
+            schema.name
+        );
+        return;
+    }
+
+    let value = result
+        .get("structuredContent")
+        .cloned()
+        .or_else(|| {
+            result
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str(text).ok())
+        })
+        .expect("MCP success contains the structured response");
+    validate(&schema.response_schema, &value).unwrap_or_else(|error| {
+        panic!(
+            "MCP response for {} violates its response schema: {error}",
+            schema.name
+        )
+    });
+}
+
+#[test]
+fn every_registered_command_reaches_cli_and_mcp_executor_and_validates_response() {
+    let root = root("registry-adapter-parity");
+
+    for schema in iter() {
+        let cli_root = root.join("cli").join(schema.name);
+        let mcp_root = root.join("mcp").join(schema.name);
+        let cli_request = registry_request(schema, &cli_root);
+        let mcp_request = registry_request(schema, &mcp_root);
+        prepare_registry_bundle(&cli_request);
+        prepare_registry_bundle(&mcp_request);
+
+        assert_cli_registry_result(
+            schema,
+            dispatch_registered_command(&threeterm_host::Host::new(), schema.id, cli_request),
+        );
+
+        let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+            id: json!(schema.name),
+            is_notification: false,
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": schema.schema_version,
+                "arguments": mcp_request,
+            }),
+        });
+        assert_mcp_registry_result(schema, &mcp);
+    }
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 fn apply_request(root: &std::path::Path, revision: &str) -> Value {

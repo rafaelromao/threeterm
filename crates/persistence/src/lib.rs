@@ -2899,6 +2899,32 @@ impl Bundle {
         })
     }
 
+    /// Recover the canonical boundary for a legacy Named Revision that was
+    /// written before explicit log-position provenance existed. Legacy
+    /// history events were appended after the graph updates they described,
+    /// so the preceding history event marks the requested snapshot.
+    pub fn legacy_named_revision_log_position(
+        &self,
+        name: &str,
+    ) -> Result<Option<u64>, BundleError> {
+        let loaded = self.open()?;
+        let mut previous_history_index = None;
+        for (index, entry) in loaded.log.entries().iter().enumerate() {
+            let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) else {
+                continue;
+            };
+            let event: HistoryEvent = serde_json::from_str(payload)
+                .map_err(|error| BundleError::Invalid(format!("invalid history event: {error}")))?;
+            if event.named_revisions.contains_key(name) {
+                let position =
+                    previous_history_index.map_or(0, |history_index: usize| history_index + 1);
+                return Ok(Some(position as u64));
+            }
+            previous_history_index = Some(index);
+        }
+        Ok(None)
+    }
+
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
         self.open()?.feature_timeline(feature_id)
     }

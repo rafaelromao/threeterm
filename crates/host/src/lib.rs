@@ -853,6 +853,7 @@ fn restore_target_graph(
             })?;
     let position = revision
         .canonical_log_position
+        .or(bundle.legacy_named_revision_log_position(name)?)
         .ok_or_else(|| HostError::Validation {
             detail: format!("named revision has no canonical log position: {name}"),
         })?;

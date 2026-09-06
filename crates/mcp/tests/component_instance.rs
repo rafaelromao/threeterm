@@ -1,12 +1,24 @@
 //! Production CLI/MCP tracer bullet for reusable component commands.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
+use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::schema::{
+    BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CommandId, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    EXPORT_COMMAND_ID, IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+};
+use threeterm_tui::execute_domain_command;
+use threeterm_viewport::SceneSolid;
 
 fn bundle() -> PathBuf {
     let nonce = SystemTime::now()
@@ -95,6 +107,22 @@ fn mcp_response(name: &str, arguments: Value) -> Value {
     let output = child.wait_with_output().expect("MCP exits");
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).expect("MCP returns JSON")
+}
+
+fn required_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
+        {
+            panic!("{test_name}: OCCT worker is required: {error}")
+        }
+        Err(_) => {
+            eprintln!("{test_name}: OCCT worker unavailable; skipping");
+            None
+        }
+    }
 }
 
 fn setup_captured_component(root: &PathBuf) {
@@ -726,4 +754,677 @@ fn cross_document_component_references_are_rejected_atomically() {
 
     let _ = std::fs::remove_dir_all(source);
     let _ = std::fs::remove_dir_all(target);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ComponentAdapter {
+    Cli,
+    Mcp,
+    Tui,
+}
+
+struct ComponentSession {
+    adapter: ComponentAdapter,
+    root: PathBuf,
+    tui_host: Host,
+}
+
+impl ComponentSession {
+    fn new(adapter: ComponentAdapter, root: PathBuf) -> Self {
+        Self {
+            adapter,
+            root,
+            tui_host: Host::new(),
+        }
+    }
+
+    fn command(&self, name: &str, command: CommandId, request: Value, cli_args: &[&str]) -> Value {
+        match self.adapter {
+            ComponentAdapter::Cli => cli_command(name, &self.root, cli_args),
+            ComponentAdapter::Mcp => mcp_command(&format!("threeterm.command.{name}/1"), request),
+            ComponentAdapter::Tui => execute_domain_command(&self.tui_host, command, request)
+                .unwrap_or_else(|error| panic!("TUI {name} command fails: {error:?}")),
+        }
+    }
+
+    fn bracket(&self) -> Value {
+        self.command(
+            "bracket",
+            BRACKET_COMMAND_ID,
+            bracket_request(&self.root),
+            &[
+                "--bracket-id",
+                "bracket",
+                "--length",
+                "60",
+                "--width",
+                "30",
+                "--height",
+                "40",
+                "--thickness",
+                "3",
+            ],
+        )
+    }
+
+    fn capture(&self) -> Value {
+        self.command(
+            "capture-component",
+            CAPTURE_COMPONENT_COMMAND_ID,
+            json!({
+                "bundle_path": self.root.to_string_lossy(),
+                "definition_id": "shared",
+                "selected_feature_ids": component_features(),
+            }),
+            &[
+                "--definition-id",
+                "shared",
+                "--feature-id",
+                "bracket-base",
+                "--feature-id",
+                "bracket-bend",
+                "--feature-id",
+                "bracket-finish",
+                "--feature-id",
+                "bracket-independent-base",
+            ],
+        )
+    }
+
+    fn create_instance(&self, instance_id: &str, transform: [f64; 3]) -> Value {
+        let transform_text = format!("{},{},{}", transform[0], transform[1], transform[2]);
+        self.command(
+            "create-component-instance",
+            CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+            json!({
+                "bundle_path": self.root.to_string_lossy(),
+                "instance_id": instance_id,
+                "definition_id": "shared",
+                "transform": transform,
+            }),
+            &[
+                "--instance-id",
+                instance_id,
+                "--definition-id",
+                "shared",
+                "--transform",
+                transform_text.as_str(),
+            ],
+        )
+    }
+
+    fn transform_instance(&self, instance_id: &str, transform: [f64; 3]) -> Value {
+        let transform_text = format!("{},{},{}", transform[0], transform[1], transform[2]);
+        self.command(
+            "transform-component-instance",
+            TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+            json!({
+                "bundle_path": self.root.to_string_lossy(),
+                "instance_id": instance_id,
+                "transform": transform,
+            }),
+            &[
+                "--instance-id",
+                instance_id,
+                "--transform",
+                transform_text.as_str(),
+            ],
+        )
+    }
+
+    fn make_independent(&self) -> Value {
+        self.command(
+            "make-component-independent",
+            MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+            json!({
+                "bundle_path": self.root.to_string_lossy(),
+                "source_instance_id": "second",
+                "definition_id": "copy",
+                "instance_id": "copy-instance",
+                "feature_id": "copy-feature",
+            }),
+            &[
+                "--source-instance-id",
+                "second",
+                "--definition-id",
+                "copy",
+                "--instance-id",
+                "copy-instance",
+                "--feature-id",
+                "copy-feature",
+            ],
+        )
+    }
+
+    fn edit_parameter(&self, definition_id: &str, parameter: &str, value: f64) -> Value {
+        let value_text = value.to_string();
+        self.command(
+            "edit-component-parameter",
+            EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+            json!({
+                "bundle_path": self.root.to_string_lossy(),
+                "definition_id": definition_id,
+                "parameter": parameter,
+                "value": value,
+            }),
+            &[
+                "--definition-id",
+                definition_id,
+                "--parameter",
+                parameter,
+                "--value",
+                value_text.as_str(),
+            ],
+        )
+    }
+
+    fn state(&self) -> Value {
+        self.command(
+            "component-state",
+            COMPONENT_STATE_COMMAND_ID,
+            json!({"bundle_path": self.root.to_string_lossy()}),
+            &[],
+        )
+    }
+
+    fn identity(&self) -> Value {
+        self.command(
+            "identity",
+            IDENTITY_COMMAND_ID,
+            json!({"bundle_path": self.root.to_string_lossy()}),
+            &[],
+        )
+    }
+
+    fn load(&self) -> Value {
+        self.command(
+            "load",
+            LOAD_COMMAND_ID,
+            json!({"bundle_path": self.root.to_string_lossy()}),
+            &[],
+        )
+    }
+
+    fn export(&self, output_dir: &Path) -> Value {
+        let request = json!({
+            "bundle_path": self.root.to_string_lossy(),
+            "feature_id": "copy-instance",
+            "formats": ["stl", "step"],
+            "output_dir": output_dir.to_string_lossy(),
+            "tessellation_deflection": 0.1,
+            "override_warnings": false,
+            "accept_stale_geometry": false,
+        });
+        match self.adapter {
+            ComponentAdapter::Cli => cli_export(&self.root, output_dir),
+            ComponentAdapter::Mcp => mcp_command("threeterm.command.export/1", request),
+            ComponentAdapter::Tui => {
+                execute_domain_command(&self.tui_host, EXPORT_COMMAND_ID, request)
+                    .unwrap_or_else(|error| panic!("TUI export command fails: {error:?}"))
+            }
+        }
+    }
+
+    fn scene(&self) -> Vec<SceneSolid> {
+        match self.adapter {
+            ComponentAdapter::Tui => component_scene_from_host(&self.tui_host),
+            ComponentAdapter::Cli | ComponentAdapter::Mcp => component_scene(&self.root),
+        }
+    }
+}
+
+fn bracket_request(root: &Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "bracket_id": "bracket",
+        "length": 60.0,
+        "width": 30.0,
+        "height": 40.0,
+        "thickness": 3.0,
+    })
+}
+
+fn component_features() -> Vec<&'static str> {
+    vec![
+        "bracket-base",
+        "bracket-bend",
+        "bracket-finish",
+        "bracket-independent-base",
+    ]
+}
+
+fn cli_export(root: &Path, output_dir: &Path) -> Value {
+    let root = root.to_string_lossy();
+    let output_dir = output_dir.to_string_lossy();
+    let output = Command::new(cli())
+        .args([
+            "--machine",
+            "export",
+            "--bundle",
+            root.as_ref(),
+            "--feature-id",
+            "copy-instance",
+            "--formats",
+            "stl,step",
+            "--output-dir",
+            output_dir.as_ref(),
+            "--tessellation-deflection",
+            "0.1",
+        ])
+        .output()
+        .expect("CLI export starts");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("CLI export returns JSON")
+}
+
+fn portable_component_state(state: &Value) -> Value {
+    let mut portable = state.clone();
+    let instances = portable
+        .get_mut("instances")
+        .and_then(Value::as_object_mut)
+        .expect("component state contains instances");
+    for instance in instances.values_mut() {
+        let object = instance
+            .as_object_mut()
+            .expect("component instance is an object");
+        object.remove("brep_path");
+        object.remove("geometry_revision");
+    }
+    portable
+}
+
+fn component_scene(root: &Path) -> Vec<SceneSolid> {
+    let host = Host::new();
+    host.load_with_geometry_replay(root)
+        .expect("component bundle loads for viewport projection");
+    component_scene_from_host(&host)
+}
+
+fn component_scene_from_host(host: &Host) -> Vec<SceneSolid> {
+    let scene = host
+        .presentation_viewport_scene()
+        .expect("component viewport scene builds");
+    let mut solids: Vec<_> = scene
+        .solids
+        .into_iter()
+        .filter(|solid| {
+            matches!(
+                solid.feature_id.as_str(),
+                "first" | "second" | "copy-instance"
+            )
+        })
+        .collect();
+    solids.sort_by(|left, right| left.feature_id.cmp(&right.feature_id));
+    assert_eq!(solids.len(), 3, "all component instances render");
+    assert!(
+        solids.iter().all(|solid| !solid.triangles.is_empty()),
+        "all component instance solids contain triangles"
+    );
+    solids
+}
+
+fn assert_translated_scene(before: &[SceneSolid], after: &[SceneSolid], offset: [f64; 3]) {
+    let origin = before
+        .iter()
+        .find(|solid| solid.feature_id == "first")
+        .expect("origin instance renders before transform");
+    let translated = after
+        .iter()
+        .find(|solid| solid.feature_id == "second")
+        .expect("transformed instance renders after transform");
+    assert_eq!(translated.triangles.len(), origin.triangles.len());
+    for (translated_triangle, origin_triangle) in translated.triangles.iter().zip(&origin.triangles)
+    {
+        for (translated_vertex, origin_vertex) in translated_triangle
+            .vertices
+            .iter()
+            .zip(origin_triangle.vertices)
+        {
+            for axis in 0..3 {
+                assert!(
+                    (translated_vertex[axis] - (origin_vertex[axis] + offset[axis])).abs() < 1e-9,
+                    "component transform applies the expected translation"
+                );
+            }
+        }
+    }
+}
+
+fn assert_current_component_state(state: &Value, identity: &Value, root: &Path) {
+    let revision = identity["revision_hash"]
+        .as_str()
+        .expect("identity has current revision");
+    for instance_id in ["first", "second", "copy-instance"] {
+        let instance = &state["instances"][instance_id];
+        assert!(
+            instance["geometry_digest"].is_string(),
+            "{instance_id} has materialized geometry"
+        );
+        assert_eq!(instance["geometry_revision"], revision);
+        assert!(
+            Path::new(
+                instance["brep_path"]
+                    .as_str()
+                    .expect("BREP path is a string")
+            )
+            .is_file(),
+            "{instance_id} BREP is present"
+        );
+    }
+    assert!(root.join("brep/bracket.brep").is_file());
+}
+
+fn validate_export(
+    response: &Value,
+    output_dir: &Path,
+    revision: &str,
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["feature_id"], "copy-instance");
+    let mut exports = BTreeMap::new();
+    let mut metadata_by_format = BTreeMap::new();
+    for format in ["stl", "step"] {
+        let path = output_dir.join(format!("copy-instance.{format}"));
+        let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+        assert!(!bytes.is_empty(), "{format} export is non-empty");
+        assert!(
+            response["artifacts"]
+                .as_array()
+                .expect("export artifacts are an array")
+                .iter()
+                .any(|artifact| artifact.as_str() == path.to_str()),
+            "response names {path:?}"
+        );
+        let metadata = response["derived_artifacts"]
+            .as_array()
+            .expect("derived export metadata is an array")
+            .iter()
+            .find(|artifact| artifact["artifact_kind"] == format)
+            .unwrap_or_else(|| panic!("metadata for {format} export is present"));
+        assert_eq!(metadata["artifact_name"], format!("copy-instance.{format}"));
+        assert_eq!(metadata["source_revision_id"], revision);
+        assert_eq!(metadata["byte_count"], bytes.len());
+        assert_eq!(metadata["sha256"], sha256_hex(&bytes));
+        let mut portable_metadata = metadata.clone();
+        portable_metadata
+            .as_object_mut()
+            .expect("export metadata is an object")
+            .remove("source_revision_id");
+        metadata_by_format.insert(format.to_string(), portable_metadata);
+        exports.insert(format.to_string(), bytes);
+    }
+    assert!(
+        fs::read_dir(output_dir)
+            .expect("export directory reads")
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".threeterm-export-")),
+        "export staging is removed"
+    );
+    (exports, metadata_by_format)
+}
+
+fn portable_identity(identity: &Value) -> Value {
+    let mut portable = identity.clone();
+    let object = portable
+        .as_object_mut()
+        .expect("identity response is an object");
+    for field in ["generation_id", "revision_hash", "terminal_log_digest"] {
+        object.remove(field);
+    }
+    portable
+}
+
+struct ComponentSnapshot {
+    state: Value,
+    identity: Value,
+    scene: Vec<SceneSolid>,
+    exports: BTreeMap<String, Vec<u8>>,
+    export_metadata: BTreeMap<String, Value>,
+    manifest: Vec<u8>,
+    log: Vec<u8>,
+    source_brep: Vec<u8>,
+}
+
+fn snapshot_component(session: &ComponentSession, output_name: &str) -> ComponentSnapshot {
+    let state = session.state();
+    let identity = session.identity();
+    assert_current_component_state(&state, &identity, &session.root);
+    let scene = session.scene();
+    let output_dir = session.root.join(output_name);
+    let response = session.export(&output_dir);
+    let (exports, export_metadata) = validate_export(
+        &response,
+        &output_dir,
+        identity["revision_hash"]
+            .as_str()
+            .expect("identity revision is a string"),
+    );
+    ComponentSnapshot {
+        state,
+        identity,
+        scene,
+        exports,
+        export_metadata,
+        manifest: fs::read(session.root.join("manifest.json")).expect("manifest reads"),
+        log: fs::read(session.root.join("transactions.log")).expect("transaction log reads"),
+        source_brep: fs::read(session.root.join("brep/bracket.brep")).expect("source BREP reads"),
+    }
+}
+
+fn prepare_component_workflow(session: &ComponentSession) {
+    session.bracket();
+    session.capture();
+    session.create_instance("first", [0.0, 0.0, 0.0]);
+    session.create_instance("second", [10.0, 0.0, 0.0]);
+    let before_transform = session.state();
+    let before_transform_scene = session.scene();
+    session.transform_instance("second", [0.0, 0.0, 90.0]);
+    let after_transform = session.state();
+    let after_transform_scene = session.scene();
+    assert_eq!(
+        after_transform["instances"]["first"]["geometry_digest"],
+        before_transform["instances"]["first"]["geometry_digest"]
+    );
+    assert_ne!(
+        after_transform["instances"]["second"]["geometry_digest"],
+        before_transform["instances"]["second"]["geometry_digest"]
+    );
+    assert_translated_scene(
+        &before_transform_scene,
+        &after_transform_scene,
+        [0.0, 0.0, 90.0],
+    );
+    session.make_independent();
+    let before_copy_edit = session.state();
+    session.edit_parameter("copy", "length", 75.0);
+    let after_copy_edit = session.state();
+    assert_eq!(
+        after_copy_edit["instances"]["first"]["geometry_digest"],
+        before_copy_edit["instances"]["first"]["geometry_digest"]
+    );
+    assert_eq!(
+        after_copy_edit["instances"]["second"]["geometry_digest"],
+        before_copy_edit["instances"]["second"]["geometry_digest"]
+    );
+    assert_ne!(
+        after_copy_edit["instances"]["copy-instance"]["geometry_digest"],
+        before_copy_edit["instances"]["copy-instance"]["geometry_digest"]
+    );
+    session.edit_parameter("shared", "width", 35.0);
+    let after_shared_edit = session.state();
+    assert_ne!(
+        after_shared_edit["instances"]["first"]["geometry_digest"],
+        after_copy_edit["instances"]["first"]["geometry_digest"]
+    );
+    assert_ne!(
+        after_shared_edit["instances"]["second"]["geometry_digest"],
+        after_copy_edit["instances"]["second"]["geometry_digest"]
+    );
+    assert_eq!(
+        after_shared_edit["instances"]["copy-instance"]["geometry_digest"],
+        after_copy_edit["instances"]["copy-instance"]["geometry_digest"]
+    );
+    assert_eq!(
+        after_shared_edit["definitions"]["shared"]["descriptor"]["width"],
+        35.0
+    );
+    assert_eq!(
+        after_shared_edit["definitions"]["copy"]["descriptor"]["length"],
+        75.0
+    );
+}
+
+fn reload_component_workflow(
+    session: &ComponentSession,
+    before: &ComponentSnapshot,
+) -> ComponentSnapshot {
+    fs::remove_dir_all(session.root.join(".derived")).expect("component derived results remove");
+    fs::remove_dir_all(session.root.join("brep")).expect("canonical BREP results remove");
+    assert!(!session.root.join(".derived").exists());
+    assert!(!session.root.join("brep").exists());
+
+    let loaded = session.load();
+    assert_eq!(loaded["revision_hash"], before.identity["revision_hash"]);
+    let after = snapshot_component(session, "export-after");
+    assert_eq!(after.identity, before.identity);
+    assert_eq!(after.manifest, before.manifest);
+    assert_eq!(after.log, before.log);
+    assert_eq!(after.source_brep, before.source_brep);
+    assert_eq!(after.export_metadata, before.export_metadata);
+    assert_eq!(
+        portable_component_state(&after.state),
+        portable_component_state(&before.state)
+    );
+    assert_eq!(after.scene, before.scene);
+    assert_eq!(after.exports, before.exports);
+    after
+}
+
+#[test]
+fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
+    let Some(_) =
+        required_worker("reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui")
+    else {
+        return;
+    };
+
+    let mut outcomes = Vec::new();
+    for (adapter, label) in [
+        (ComponentAdapter::Cli, "cli"),
+        (ComponentAdapter::Mcp, "mcp"),
+        (ComponentAdapter::Tui, "tui"),
+    ] {
+        let session = ComponentSession::new(adapter, bundle());
+        prepare_component_workflow(&session);
+        let before = snapshot_component(&session, "export-before");
+        let after = reload_component_workflow(&session, &before);
+        assert_eq!(
+            portable_component_state(&after.state),
+            portable_component_state(&before.state),
+            "{label} state survives artifact-free reload"
+        );
+        outcomes.push(after);
+    }
+
+    for pair in outcomes.windows(2) {
+        assert_eq!(
+            portable_component_state(&pair[0].state),
+            portable_component_state(&pair[1].state),
+            "adapter component outcomes match"
+        );
+        assert_eq!(
+            portable_identity(&pair[0].identity),
+            portable_identity(&pair[1].identity),
+            "adapter project identities match"
+        );
+        assert_eq!(
+            pair[0].export_metadata, pair[1].export_metadata,
+            "adapter export metadata matches"
+        );
+        assert_eq!(
+            pair[0].scene, pair[1].scene,
+            "adapter viewport geometry matches"
+        );
+        assert_eq!(
+            pair[0].exports, pair[1].exports,
+            "adapter export bytes match"
+        );
+    }
+}
+
+#[test]
+fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
+    let Some(_) = required_worker("reusable_component_geometry_survives_a_mixed_adapter_handoff")
+    else {
+        return;
+    };
+
+    let root = bundle();
+    let cli = ComponentSession::new(ComponentAdapter::Cli, root.clone());
+    cli.bracket();
+    cli.capture();
+    let mcp = ComponentSession::new(ComponentAdapter::Mcp, root.clone());
+    mcp.create_instance("first", [0.0, 0.0, 0.0]);
+    mcp.create_instance("second", [10.0, 0.0, 0.0]);
+    mcp.transform_instance("second", [0.0, 0.0, 90.0]);
+    mcp.make_independent();
+    let tui = ComponentSession::new(ComponentAdapter::Tui, root.clone());
+    tui.edit_parameter("copy", "length", 75.0);
+    tui.edit_parameter("shared", "width", 35.0);
+
+    let cli_state = cli.state();
+    let mcp_state = mcp.state();
+    let tui_state = tui.state();
+    assert_eq!(
+        portable_component_state(&cli_state),
+        portable_component_state(&mcp_state)
+    );
+    assert_eq!(
+        portable_component_state(&cli_state),
+        portable_component_state(&tui_state)
+    );
+    let identity = tui.identity();
+    assert_current_component_state(&tui_state, &identity, &root);
+
+    let before = snapshot_component(&tui, "mixed-export-before");
+    fs::remove_dir_all(root.join(".derived")).expect("mixed component derived results remove");
+    fs::remove_dir_all(root.join("brep")).expect("mixed canonical BREP results remove");
+    cli.load();
+    mcp.load();
+    tui.load();
+    let reloaded_state = tui.state();
+    assert_eq!(
+        portable_component_state(&reloaded_state),
+        portable_component_state(&before.state)
+    );
+    let scene = component_scene(&root);
+    assert_eq!(scene, before.scene);
+
+    let (cli_exports, cli_metadata) = validate_export(
+        &cli.export(&root.join("mixed-export-cli")),
+        &root.join("mixed-export-cli"),
+        identity["revision_hash"].as_str().unwrap(),
+    );
+    let (mcp_exports, mcp_metadata) = validate_export(
+        &mcp.export(&root.join("mixed-export-mcp")),
+        &root.join("mixed-export-mcp"),
+        identity["revision_hash"].as_str().unwrap(),
+    );
+    let (tui_exports, tui_metadata) = validate_export(
+        &tui.export(&root.join("mixed-export-tui")),
+        &root.join("mixed-export-tui"),
+        identity["revision_hash"].as_str().unwrap(),
+    );
+    assert_eq!(cli_exports, mcp_exports);
+    assert_eq!(cli_exports, tui_exports);
+    assert_eq!(cli_metadata, mcp_metadata);
+    assert_eq!(cli_metadata, tui_metadata);
+    let _ = fs::remove_dir_all(root);
 }

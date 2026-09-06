@@ -233,19 +233,10 @@ fn prepare_3mf_bodies(
     body_ids: &[String],
     stage: &Path,
     deflection: f64,
-    accept_stale_geometry: bool,
     worker: &OcctWorker,
 ) -> Result<Vec<ThreeMfBody>, HostError> {
     let mut bodies = Vec::with_capacity(body_ids.len());
     for body_id in body_ids {
-        let stale_body_features = stale_last_valid_geometry_for_export(&prior.history, body_id);
-        if !accept_stale_geometry && !stale_body_features.is_empty() {
-            return Err(HostError::StaleLastValidGeometry {
-                feature_id: body_id.clone(),
-                active_revision: prior.history.active_snapshot().revision_id.clone(),
-                stale_features: stale_body_features,
-            });
-        }
         let body_brep = if prior.components.instances.contains_key(body_id) {
             component_instance_geometry_path(root, prior.revision_hash_hex(), body_id)
         } else if prior
@@ -1038,7 +1029,7 @@ impl std::fmt::Display for HostError {
                 stale_features,
             } => write!(
                 formatter,
-                "stale last-valid geometry requires explicit acceptance for {feature_id} at {active_revision}: {} stale features",
+                "stale last-valid geometry cannot be exported for {feature_id} at {active_revision}: {} stale features; correct or restore the feature",
                 stale_features.len()
             ),
             Self::Persistence(error) => error.fmt(formatter),
@@ -1815,12 +1806,37 @@ impl Host {
         output_dir: &Path,
         deflection: f64,
         override_warnings: bool,
-        accept_stale_geometry: bool,
+        // Kept for request compatibility; stale geometry is never exportable.
+        _accept_stale_geometry: bool,
         body_ids: &[String],
     ) -> Result<ExportCommitView, HostError> {
         // Export outputs are disposable Derived Results, not canonical BREP
         // mutations. They use the same host-owned private staging and atomic
         // publication discipline, but remain outside the transaction log.
+        let root = root.as_ref();
+        let mut prior = Bundle::at(root).open()?;
+        let export_body_ids = if body_ids.is_empty() {
+            vec![feature_id.to_string()]
+        } else {
+            body_ids.to_vec()
+        };
+        let mut stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
+        if formats.iter().any(|format| format == "3mf") {
+            let mut body_stale_features = export_body_ids
+                .iter()
+                .flat_map(|body_id| stale_last_valid_geometry_for_export(&prior.history, body_id))
+                .collect::<Vec<_>>();
+            stale_features.append(&mut body_stale_features);
+            stale_features.sort_by(|left, right| left.feature_id.cmp(&right.feature_id));
+            stale_features.dedup_by(|left, right| left.feature_id == right.feature_id);
+        }
+        if !stale_features.is_empty() {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: feature_id.to_string(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features,
+            });
+        }
         if deflection > 0.5 && !override_warnings {
             return Err(HostError::Validation {
                 detail: format!(
@@ -1828,20 +1844,10 @@ impl Host {
                 ),
             });
         }
-        let root = root.as_ref();
         let unique_formats = formats.iter().map(String::as_str).collect::<BTreeSet<_>>();
         if unique_formats.len() != formats.len() {
             return Err(HostError::Validation {
                 detail: "duplicate export format".to_string(),
-            });
-        }
-        let mut prior = Bundle::at(root).open()?;
-        let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
-        if !stale_features.is_empty() && !accept_stale_geometry {
-            return Err(HostError::StaleLastValidGeometry {
-                feature_id: feature_id.to_string(),
-                active_revision: prior.history.active_snapshot().revision_id.clone(),
-                stale_features,
             });
         }
         let instance_export = prior.components.instances.contains_key(feature_id);
@@ -1880,11 +1886,7 @@ impl Host {
                 detail: "unsupported export format".to_string(),
             });
         }
-        let body_ids = if body_ids.is_empty() {
-            vec![feature_id.to_string()]
-        } else {
-            body_ids.to_vec()
-        };
+        let body_ids = export_body_ids;
         let unique_bodies = body_ids.iter().collect::<BTreeSet<_>>();
         if unique_bodies.len() != body_ids.len() || body_ids.iter().any(String::is_empty) {
             return Err(HostError::Validation {
@@ -1916,18 +1918,11 @@ impl Host {
             });
         }
         let bodies = if formats.iter().any(|format| format == "3mf") {
-            prepare_3mf_bodies(
-                root,
-                &prior,
-                &body_ids,
-                &stage,
-                deflection,
-                accept_stale_geometry,
-                &worker,
-            )
-            .inspect_err(|_| {
-                let _ = fs::remove_dir_all(&stage);
-            })?
+            prepare_3mf_bodies(root, &prior, &body_ids, &stage, deflection, &worker).inspect_err(
+                |_| {
+                    let _ = fs::remove_dir_all(&stage);
+                },
+            )?
         } else {
             Vec::new()
         };
@@ -12715,14 +12710,14 @@ pub fn stale_last_valid_geometry_for_export(
 ) -> Vec<StaleLastValidGeometryEntry> {
     let snapshot = history.active_snapshot();
     let mut candidates = BTreeSet::new();
+    if snapshot.features.contains_key(export_feature_id) {
+        candidates.insert(export_feature_id.to_string());
+    }
     for suffix in ["-base", "-bend", "-finish"] {
         let candidate = format!("{export_feature_id}{suffix}");
         if snapshot.features.contains_key(&candidate) {
             candidates.insert(candidate);
         }
-    }
-    if candidates.is_empty() && snapshot.features.contains_key(export_feature_id) {
-        candidates.insert(export_feature_id.to_string());
     }
     candidates
         .into_iter()
@@ -14832,18 +14827,69 @@ mod tests {
             .export(
                 &root,
                 "l-bracket",
-                &["stl".to_string()],
+                &["stl".to_string(), "3mf".to_string(), "step".to_string()],
                 &output,
-                0.5,
-                false,
-                false,
+                1.0,
+                true,
+                true,
                 &[],
             )
-            .expect_err("broken family stays gated");
+            .expect_err("broken family stays gated even with stale acceptance");
         assert!(
             matches!(error, HostError::StaleLastValidGeometry { .. }),
             "failed edit keeps the stale gate, got {error:?}"
         );
+        assert!(
+            !output.exists(),
+            "stale export does not create staging output"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(output);
+    }
+
+    #[test]
+    fn stale_secondary_3mf_body_is_rejected_before_export_side_effects() {
+        let root = temp_root("stale-secondary-body");
+        let output = temp_root("stale-secondary-body-output");
+        let host = Host::new();
+        host.save_bracket(&root, "current", 60.0, 30.0, 40.0, 3.0)
+            .expect("first bracket initializes");
+        host.save_bracket(&root, "secondary", 50.0, 25.0, 30.0, 3.0)
+            .expect("second bracket initializes");
+        host.historical_edit(&root, "secondary-base", "length", 0.0)
+            .expect("failing historical edit is committed");
+
+        let error = host
+            .export(
+                &root,
+                "current",
+                &["3mf".to_string()],
+                &output,
+                0.5,
+                true,
+                true,
+                &["secondary".to_string()],
+            )
+            .expect_err("stale secondary body stays gated");
+        match error {
+            HostError::StaleLastValidGeometry {
+                feature_id,
+                stale_features,
+                ..
+            } => {
+                assert_eq!(feature_id, "current");
+                assert_eq!(
+                    stale_features
+                        .iter()
+                        .map(|feature| feature.feature_id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["secondary-base", "secondary-bend", "secondary-finish"]
+                );
+            }
+            other => panic!("unexpected export error: {other:?}"),
+        }
+        assert!(!output.exists(), "stale body does not create export output");
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(output);

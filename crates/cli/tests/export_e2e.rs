@@ -512,8 +512,9 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
     assert_eq!(refused["code"], "stale_last_valid_geometry");
     assert_eq!(refused["feature_id"], "l-bracket");
     assert_eq!(refused["stale_features"].as_array().unwrap().len(), 3);
+    assert_eq!(refused["override_eligible"], false);
     assert!(
-        refused["recovery"]
+        !refused["recovery"]
             .as_str()
             .unwrap()
             .contains("accept-stale-geometry")
@@ -529,7 +530,7 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
     }
     assert_eq!(host.current(), Some(before.clone()));
 
-    let accepted = run_value(
+    let still_refused = run_failed_value(
         bin,
         &[
             "--machine",
@@ -542,15 +543,16 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
             "stl",
             "--output-dir",
             output.to_str().unwrap(),
+            "--tessellation-deflection",
+            "1",
+            "--override-warnings",
             "--accept-stale-geometry",
         ],
     );
-    assert_eq!(accepted["accepted_stale_last_valid_geometry"], true);
-    assert_eq!(
-        accepted["stale_last_valid_geometry"]["feature_id"],
-        "l-bracket"
-    );
-    assert!(output.join("l-bracket.stl").is_file());
+    assert_eq!(still_refused["code"], "stale_last_valid_geometry");
+    assert_eq!(still_refused["override_eligible"], false);
+    assert_eq!(still_refused["feature_id"], "l-bracket");
+    assert!(!output.exists());
     assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
     assert_eq!(host.current(), Some(before));

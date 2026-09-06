@@ -902,6 +902,7 @@ pub struct FeatureTimelineRevision {
     pub revision_id: String,
     pub operation: String,
     pub status: String,
+    pub stale_last_valid_geometry_fingerprint: String,
     pub named_revision_names: Vec<String>,
 }
 
@@ -1311,6 +1312,10 @@ impl TuiSession {
                     revision_id: revision.revision_id.clone(),
                     operation: revision.operation.clone(),
                     status: history_timeline_status_name(&revision.status),
+                    stale_last_valid_geometry_fingerprint: revision
+                        .stale_last_valid_geometry_fingerprint
+                        .clone()
+                        .unwrap_or_default(),
                     named_revision_names: revision.named_revision_names.clone(),
                 })
                 .collect(),

@@ -179,13 +179,6 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
     let state = session.state();
     let timeline = state.feature_timeline.expect("TUI timeline state exists");
     let stale_overlay = session.stale_last_valid_geometry_overlay();
-    let active_stale_fingerprint = state
-        .stale_last_valid_geometry
-        .iter()
-        .find(|feature| feature.feature_id == "l-bracket-base")
-        .map(|feature| feature.last_valid_geometry_fingerprint.clone())
-        .unwrap_or_default();
-    let canonical_revision = state.canonical_revision.clone();
     let revisions = timeline
         .revisions
         .iter()
@@ -194,11 +187,8 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
                 "revision_id": revision.revision_id,
                 "operation": revision.operation,
                 "status": revision.status,
-                "stale_last_valid_geometry_fingerprint": if revision.revision_id == canonical_revision {
-                    active_stale_fingerprint.clone()
-                } else {
-                    String::new()
-                },
+                "stale_last_valid_geometry_fingerprint": revision
+                    .stale_last_valid_geometry_fingerprint,
                 "named_revision_names": revision.named_revision_names,
             })
         })
@@ -468,6 +458,7 @@ fn semantic_stale_features(value: &Value) -> Vec<Value> {
             json!({
                 "id": feature["id"],
                 "status": feature["status"],
+                "active_revision": value["active_revision"],
                 "last_valid_geometry_fingerprint": feature["last_valid_geometry_fingerprint"],
             })
         })
@@ -693,6 +684,7 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
                 json!({
                     "id": feature["feature_id"],
                     "status": feature["status"],
+                    "active_revision": feature["active_revision"],
                     "last_valid_geometry_fingerprint": feature["last_valid_geometry_fingerprint"],
                 })
             })

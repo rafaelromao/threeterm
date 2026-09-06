@@ -179,17 +179,36 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
     let state = session.state();
     let timeline = state.feature_timeline.expect("TUI timeline state exists");
     let stale_overlay = session.stale_last_valid_geometry_overlay();
+    let active_stale_fingerprint = state
+        .stale_last_valid_geometry
+        .iter()
+        .find(|feature| feature.feature_id == "l-bracket-base")
+        .map(|feature| feature.last_valid_geometry_fingerprint.clone())
+        .unwrap_or_default();
+    let canonical_revision = state.canonical_revision.clone();
+    let revisions = timeline
+        .revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "revision_id": revision.revision_id,
+                "operation": revision.operation,
+                "status": revision.status,
+                "stale_last_valid_geometry_fingerprint": if revision.revision_id == canonical_revision {
+                    active_stale_fingerprint.clone()
+                } else {
+                    String::new()
+                },
+                "named_revision_names": revision.named_revision_names,
+            })
+        })
+        .collect::<Vec<_>>();
     (
         session,
         json!({
             "feature_id": timeline.feature_id,
             "active_revision": state.canonical_revision,
-            "revisions": timeline.revisions.iter().map(|revision| json!({
-                "revision_id": revision.revision_id,
-                "operation": revision.operation,
-                "status": revision.status,
-                "named_revision_names": revision.named_revision_names,
-            })).collect::<Vec<_>>(),
+            "revisions": revisions,
             "named_revisions": timeline.named_revisions,
             "stale_last_valid_geometry": state.stale_last_valid_geometry.iter().map(|feature| json!({
                 "feature_id": feature.feature_id,

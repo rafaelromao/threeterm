@@ -4074,7 +4074,16 @@ fn execute_registered_with_observer(
     if command != threeterm_protocol::schema::REHEARSE_COMMAND_ID {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
-            Err(error) => emit_dispatch_error(&DispatchError::from(error), stderr),
+            Err(error) => {
+                let error = DispatchError::from(error);
+                if command == threeterm_protocol::schema::LOAD_COMMAND_ID
+                    && let DispatchError::Host(host_error) = &error
+                {
+                    emit_host_error(host_error, stderr)
+                } else {
+                    emit_dispatch_error(&error, stderr)
+                }
+            }
         };
     }
     let result = execute(command, request, |request| {

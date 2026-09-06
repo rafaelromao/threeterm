@@ -4,8 +4,8 @@
 //! driven by any MCP-compatible client. The registered commands in
 //! `threeterm_protocol::schema::COMMAND_REGISTRY` are advertised as
 //! `tools/list` entries, and `tools/call` dispatches each named tool through
-//! the shared CLI dispatcher (`threeterm_cli::dispatch`) so the CLI and MCP
-//! transports share the same dispatch code path.
+//! the Host's shared domain executor. The CLI and MCP transports therefore
+//! share one semantic execution boundary and differ only in framing.
 //!
 //! Success returns a JSON-RPC success envelope with the validated
 //! response-schema value as `result.structuredContent` (plus a `content`
@@ -21,11 +21,9 @@
 //! successful load (canonical host state preservation is inherited from the
 //! `Host` and `Bundle` layers).
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, BufRead, Read, Write};
 use std::os::fd::AsFd;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -35,17 +33,17 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{
-    DispatchError, EXIT_OK, dispatch_bracket, dispatch_registered_command, host_error_diagnostic,
+    DispatchError, EXIT_OK, dispatch_registered_command, host_error_diagnostic,
 };
-use threeterm_host::{BREP_SUBDIR, Host, HostError};
-use threeterm_occt_worker::{BooleanPatternRequest, BracketRequest, OcctWorker, new_request_id};
+use threeterm_host::{Host, HostError};
+use threeterm_occt_worker::OcctWorker;
+#[cfg(test)]
+use threeterm_occt_worker::new_request_id;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CHAMFER_COMMAND_ID, CommandSchema, DRAFT_COMMAND_ID, EXPORT_COMMAND_ID, FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, SHELL_COMMAND_ID,
+    BRACKET_EDIT_COMMAND_ID, CommandSchema, EXPORT_COMMAND_ID, HOLE_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, find, iter,
 };
 use threeterm_protocol::schema_validator::validate;
@@ -229,11 +227,6 @@ impl JsonRpcResponse {
 /// Driver for the MCP server. The request loop reads newline-framed
 /// JSON-RPC 2.0 envelopes from a `BufRead` source and writes responses
 /// to a `Write` sink. One `McpServer` is constructed per process.
-#[derive(Debug)]
-struct BracketEditSession {
-    host: Host,
-    worker: OcctWorker,
-}
 
 #[derive(Debug)]
 enum RunEvent {
@@ -265,7 +258,7 @@ struct ActiveRequest {
 
 #[derive(Debug, Default)]
 pub struct McpServer {
-    bracket_edits: RefCell<HashMap<(PathBuf, String), BracketEditSession>>,
+    host: Arc<Mutex<Host>>,
     boolean_pattern_worker: Option<OcctWorker>,
 }
 
@@ -288,9 +281,9 @@ impl McpServer {
     }
 
     /// Dispatch one parsed JSON-RPC request. Pure with respect to the
-    /// host state — the caller controls the `Host` instance via the
-    /// `dispatch_bracket` pure function. Frame-level errors are returned
-    /// as a structured `JsonRpcResponse` with code `-32603`.
+    /// host state — the server owns one Host session so stateful drafts remain
+    /// available across calls. Frame-level errors are returned as a structured
+    /// `JsonRpcResponse` with code `-32603`.
     pub fn handle_request(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
         match request.method.as_str() {
             "tools/list" => self.handle_tools_list(request),
@@ -397,91 +390,7 @@ impl McpServer {
             }
         };
 
-        if matches!(
-            schema_entry.id,
-            IDENTITY_COMMAND_ID
-                | APPLY_COMMAND_ID
-                | BOOLEAN_PATTERN_COMMAND_ID
-                | threeterm_protocol::schema::REVOLVE_COMMAND_ID
-                | threeterm_protocol::schema::MIRROR_COMMAND_ID
-                | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
-                | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
-                | HOLE_COMMAND_ID
-                | SKETCH_SOLVE_COMMAND_ID
-                | FILLET_COMMAND_ID
-                | CHAMFER_COMMAND_ID
-                | SHELL_COMMAND_ID
-                | DRAFT_COMMAND_ID
-                | LOFT_COMMAND_ID
-        ) {
-            return self.handle_domain_command(request, schema_entry.id, arguments);
-        }
-
-        if let Err(reason) = validate(&schema_entry.request_schema, &arguments) {
-            return JsonRpcResponse::error(
-                request.id.clone(),
-                ERROR_INVALID_PARAMS,
-                format!("tools/call arguments failed request-schema validation: {reason}"),
-            );
-        }
-        if schema_entry.id == BRACKET_EDIT_COMMAND_ID
-            && arguments.get("phase").and_then(Value::as_str) == Some("update")
-        {
-            for field in ["draft_sequence", "input_fingerprint"] {
-                if !arguments.get(field).is_some_and(|value| !value.is_null()) {
-                    return JsonRpcResponse::error(
-                        request.id.clone(),
-                        ERROR_INVALID_PARAMS,
-                        format!("bracket-edit update requires {field}"),
-                    );
-                }
-            }
-        }
-
-        let result = match schema_entry.id {
-            BRACKET_COMMAND_ID => dispatch_bracket_tool(&arguments),
-            BRACKET_EDIT_COMMAND_ID => self.dispatch_bracket_edit_tool(&arguments),
-            _ => dispatch_registered_command(&Host::new(), schema_entry.id, arguments.clone()),
-        };
-
-        match result {
-            Ok(value) => {
-                if let Err(reason) = validate(&schema_entry.response_schema, &value) {
-                    return JsonRpcResponse::error(
-                        request.id.clone(),
-                        ERROR_INTERNAL,
-                        format!(
-                            "dispatcher produced a response that fails the registered response schema: {reason}"
-                        ),
-                    );
-                }
-                let envelope = tool_result(value, false);
-                JsonRpcResponse::success(request.id.clone(), envelope)
-            }
-            Err(error) => match error {
-                DispatchError::UnsupportedTool { .. } => JsonRpcResponse::error(
-                    request.id.clone(),
-                    ERROR_METHOD_NOT_FOUND,
-                    format!("{error}"),
-                ),
-                DispatchError::Host(error) if schema_entry.id == BRACKET_EDIT_COMMAND_ID => {
-                    let value = bracket_edit_failure_response(&arguments, &error);
-                    JsonRpcResponse::success(request.id.clone(), tool_result(value, true))
-                }
-                DispatchError::Host(error) if schema_entry.id == EXPORT_COMMAND_ID => {
-                    JsonRpcResponse::success(
-                        request.id.clone(),
-                        tool_result(export_failure_value(&error), true),
-                    )
-                }
-                DispatchError::Host(_)
-                | DispatchError::Validation(_)
-                | DispatchError::UnknownCommand(_) => JsonRpcResponse::success(
-                    request.id.clone(),
-                    tool_execution_error(format!("host dispatch failed: {error}")),
-                ),
-            },
-        }
+        return self.handle_domain_command(request, schema_entry.id, arguments);
     }
 
     fn handle_domain_command(
@@ -490,7 +399,24 @@ impl McpServer {
         command: threeterm_protocol::schema::CommandId,
         mut arguments: Value,
     ) -> JsonRpcResponse {
-        let host = Host::new();
+        if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID {
+            return match dispatch_registered_command(&Host::new(), command, arguments) {
+                Ok(value) => {
+                    JsonRpcResponse::success(request.id.clone(), tool_result(value, false))
+                }
+                Err(DispatchError::Validation(detail)) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    ERROR_INVALID_PARAMS,
+                    format!("tools/call arguments failed request-schema validation: {detail}"),
+                ),
+                Err(error) => JsonRpcResponse::success(
+                    request.id.clone(),
+                    tool_execution_error(format!("domain command failed: {error}")),
+                ),
+            };
+        }
+        let host_guard = self.host.lock().expect("MCP host mutex is not poisoned");
+        let host = &*host_guard;
         if command == SKETCH_SOLVE_COMMAND_ID
             && arguments.get("phase").and_then(Value::as_str) != Some("preview")
             && arguments.get("preview_revision").is_none()
@@ -508,7 +434,7 @@ impl McpServer {
             };
             arguments["preview_revision"] = Value::String(preview.preview_revision);
         }
-        match host.execute_domain_command(command, arguments) {
+        match host.execute_domain_command(command, arguments.clone()) {
             Ok(value) => {
                 if let Some(schema) = find(command)
                     && let Err(reason) = validate(&schema.response_schema, &value)
@@ -530,12 +456,16 @@ impl McpServer {
             ),
             Err(ExecutionError::Handler(error)) => JsonRpcResponse::success(
                 request.id.clone(),
-                if command == HOLE_COMMAND_ID {
+                if command == BRACKET_EDIT_COMMAND_ID {
+                    tool_result(bracket_edit_failure_response(&arguments, &error), true)
+                } else if command == HOLE_COMMAND_ID {
                     tool_result(
                         serde_json::to_value(host_error_diagnostic(&error))
                             .expect("diagnostics serialize"),
                         true,
                     )
+                } else if command == EXPORT_COMMAND_ID {
+                    tool_result(export_failure_value(&error), true)
                 } else {
                     tool_execution_error(format!("domain command failed: {error}"))
                 },
@@ -550,220 +480,6 @@ impl McpServer {
                 ERROR_METHOD_NOT_FOUND,
                 format!("command not found: {}", command.0),
             ),
-        }
-    }
-
-    fn dispatch_bracket_edit_tool(&self, arguments: &Value) -> Result<Value, DispatchError> {
-        self.bracket_edits
-            .borrow_mut()
-            .retain(|(root, draft_id), session| {
-                session
-                    .host
-                    .prune_expired_drafts(Duration::from_secs(30 * 60));
-                session.host.has_bracket_parameter_draft(root, draft_id)
-            });
-        let phase = arguments
-            .get("phase")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let bundle = arguments
-            .get("bundle_path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let draft_id = arguments
-            .get("draft_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let bracket_id = arguments
-            .get("bracket_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let draft_sequence = arguments
-            .get("draft_sequence")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX);
-        let input_fingerprint = arguments
-            .get("input_fingerprint")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let request = || {
-            BracketRequest::new(
-                new_request_id(),
-                arguments["length"].as_f64().unwrap_or_default(),
-                arguments["width"].as_f64().unwrap_or_default(),
-                arguments["height"].as_f64().unwrap_or_default(),
-                arguments["thickness"].as_f64().unwrap_or_default(),
-            )
-            .with_output_path(&bundle, "unused.brep")
-            .with_feature_id(&bracket_id)
-        };
-        let canonical_bundle = Bundle::at(&bundle).canonical_root().to_path_buf();
-        let key = (canonical_bundle, draft_id.clone());
-        match phase {
-            "open" => {
-                if let Some(session) = self.bracket_edits.borrow().get(&key) {
-                    let source_revision = session
-                        .host
-                        .bracket_draft_source_revision(&bundle, &draft_id)
-                        .unwrap_or_default();
-                    let current_revision = Bundle::at(&bundle)
-                        .open()
-                        .map(|loaded| loaded.revision_hash_hex().to_string())
-                        .unwrap_or_else(|_| source_revision.clone());
-                    return Err(DispatchError::Host(HostError::DraftInputConflict {
-                        draft_id,
-                        source_revision,
-                        current_revision,
-                        recovery: "use_update_or_refresh_draft",
-                    }));
-                }
-                let worker = OcctWorker::locate().map_err(|error| {
-                    DispatchError::Host(HostError::WorkerUnavailable {
-                        detail: error.to_string(),
-                    })
-                })?;
-                let host = Host::new();
-                let draft =
-                    host.open_bracket_parameter_draft(&bundle, &draft_id, &bracket_id, request())?;
-                let draft_fingerprint = host
-                    .bracket_draft_fingerprint(&bundle, &draft_id)
-                    .expect("open keeps draft");
-                self.bracket_edits
-                    .borrow_mut()
-                    .insert(key, BracketEditSession { host, worker });
-                Ok(bracket_edit_response(
-                    "open",
-                    &draft.draft_id,
-                    &draft.source_revision,
-                    None,
-                    None,
-                    Some(&draft_fingerprint),
-                    Some(draft.sequence),
-                ))
-            }
-            "preview" => {
-                let sessions = self.bracket_edits.borrow();
-                let session = sessions.get(&key).ok_or_else(|| {
-                    DispatchError::Host(HostError::DraftNotFound {
-                        draft_id: draft_id.clone(),
-                    })
-                })?;
-                session.host.validate_bracket_parameter_draft_request(
-                    &bundle,
-                    &draft_id,
-                    request(),
-                )?;
-                let preview = session.host.preview_bracket_parameter_draft(
-                    &bundle,
-                    &draft_id,
-                    &session.worker,
-                )?;
-                Ok(bracket_edit_response(
-                    "preview",
-                    &preview.draft_id,
-                    &preview.source_revision,
-                    Some(&preview.source_revision),
-                    Some(&preview.preview_revision),
-                    Some(&preview.input_fingerprint),
-                    Some(
-                        session
-                            .host
-                            .bracket_draft_sequence(&bundle, &draft_id)
-                            .expect("preview keeps draft"),
-                    ),
-                ))
-            }
-            "commit" => {
-                let mut sessions = self.bracket_edits.borrow_mut();
-                let session = sessions.get_mut(&key).ok_or_else(|| {
-                    DispatchError::Host(HostError::DraftNotFound {
-                        draft_id: draft_id.clone(),
-                    })
-                })?;
-                session.host.validate_bracket_parameter_draft_request(
-                    &bundle,
-                    &draft_id,
-                    request(),
-                )?;
-                let source_revision = session
-                    .host
-                    .bracket_draft_source_revision(&bundle, &draft_id)
-                    .ok_or_else(|| {
-                        DispatchError::Host(HostError::DraftNotFound {
-                            draft_id: draft_id.clone(),
-                        })
-                    })?;
-                let committed = session.host.commit_bracket_parameter_draft(
-                    &bundle,
-                    &draft_id,
-                    &session.worker,
-                )?;
-                sessions.remove(&key);
-                Ok(bracket_edit_response(
-                    "commit",
-                    &draft_id,
-                    &source_revision,
-                    Some(&committed.snapshot.revision_hash),
-                    None,
-                    Some(&committed.input_fingerprint),
-                    None,
-                ))
-            }
-            "discard" => {
-                let mut sessions = self.bracket_edits.borrow_mut();
-                let session = sessions.get_mut(&key).ok_or_else(|| {
-                    DispatchError::Host(HostError::DraftNotFound {
-                        draft_id: draft_id.clone(),
-                    })
-                })?;
-                let source_revision = session
-                    .host
-                    .discard_bracket_parameter_draft(&bundle, &draft_id)?;
-                sessions.remove(&key);
-                Ok(bracket_edit_response(
-                    "discard",
-                    &draft_id,
-                    &source_revision,
-                    None,
-                    None,
-                    None,
-                    None,
-                ))
-            }
-            "update" => {
-                let mut sessions = self.bracket_edits.borrow_mut();
-                let session = sessions.get_mut(&key).ok_or_else(|| {
-                    DispatchError::Host(HostError::DraftNotFound {
-                        draft_id: draft_id.clone(),
-                    })
-                })?;
-                let draft = session.host.update_bracket_parameter_draft(
-                    &bundle,
-                    &draft_id,
-                    draft_sequence,
-                    input_fingerprint,
-                    request(),
-                )?;
-                let draft_fingerprint = session
-                    .host
-                    .bracket_draft_fingerprint(&bundle, &draft_id)
-                    .expect("update keeps draft");
-                Ok(bracket_edit_response(
-                    "update",
-                    &draft.draft_id,
-                    &draft.source_revision,
-                    None,
-                    None,
-                    Some(&draft_fingerprint),
-                    Some(draft.sequence),
-                ))
-            }
-            _ => Err(DispatchError::Validation(
-                "bracket-edit phase is invalid".to_string(),
-            )),
         }
     }
 
@@ -1009,6 +725,7 @@ impl McpServer {
                             let sender = events.clone();
                             let token = progress_token(&request);
                             let configured_worker = self.boolean_pattern_worker.clone();
+                            let host = Arc::clone(&self.host);
                             let event_key = request_key.clone();
                             let worker_shutdown = Arc::clone(&input_shutdown);
                             scope.spawn(move || {
@@ -1040,12 +757,17 @@ impl McpServer {
                                             &worker_shutdown,
                                         );
                                     };
-                                let response = execute_boolean_pattern(
-                                    arguments,
-                                    &worker_cancel,
-                                    &mut on_progress,
-                                    configured_worker.as_ref(),
-                                );
+                                let response = host
+                                    .lock()
+                                    .expect("MCP host mutex is not poisoned")
+                                    .execute_domain_command_with_worker_and_cancel_and_progress(
+                                        threeterm_protocol::schema::BOOLEAN_PATTERN_COMMAND_ID,
+                                        arguments,
+                                        configured_worker.as_ref(),
+                                        &worker_cancel,
+                                        &mut on_progress,
+                                    )
+                                    .map_err(host_execution_error);
                                 let _ = send_until_shutdown(
                                     &sender,
                                     RunEvent::Completed {
@@ -1209,13 +931,6 @@ fn progress_token(request: &JsonRpcRequest) -> Option<Value> {
         .cloned()
 }
 
-fn valid_feature_path_component(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
 fn write_progress<W: Write>(
     writer: &mut W,
     token: &Value,
@@ -1237,97 +952,35 @@ fn write_progress<W: Write>(
     writer.flush()
 }
 
+fn host_execution_error(error: ExecutionError<HostError>) -> HostError {
+    match error {
+        ExecutionError::UnknownCommand(command) => HostError::Validation {
+            detail: format!("unknown domain command: {}", command.0),
+        },
+        ExecutionError::InvalidRequest(detail) => HostError::Validation { detail },
+        ExecutionError::Handler(error) => error,
+        ExecutionError::InvalidResponse(detail) => HostError::Validation {
+            detail: format!("response violates registered schema: {detail}"),
+        },
+    }
+}
+
+#[cfg(test)]
 fn execute_boolean_pattern(
     arguments: Value,
     cancel: &AtomicBool,
     on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
     configured_worker: Option<&OcctWorker>,
 ) -> Result<Value, HostError> {
-    let bundle = arguments
-        .get("bundle_path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HostError::Validation {
-            detail: "missing bundle_path".to_string(),
-        })?;
-    let feature_id = arguments
-        .get("feature_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HostError::Validation {
-            detail: "missing feature_id".to_string(),
-        })?;
-    let base_feature_id = arguments
-        .get("base_feature_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HostError::Validation {
-            detail: "missing base_feature_id".to_string(),
-        })?;
-    let origin: [f64; 3] =
-        serde_json::from_value(arguments["origin"].clone()).map_err(|error| {
-            HostError::Validation {
-                detail: format!("invalid origin: {error}"),
-            }
-        })?;
-    let spacing: [f64; 2] =
-        serde_json::from_value(arguments["spacing"].clone()).map_err(|error| {
-            HostError::Validation {
-                detail: format!("invalid spacing: {error}"),
-            }
-        })?;
-    let columns = arguments["columns"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| HostError::Validation {
-            detail: "invalid columns".to_string(),
-        })?;
-    let rows = arguments["rows"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| HostError::Validation {
-            detail: "invalid rows".to_string(),
-        })?;
-    let diameter = arguments["diameter"]
-        .as_f64()
-        .ok_or_else(|| HostError::Validation {
-            detail: "invalid diameter".to_string(),
-        })?;
-    if !valid_feature_path_component(feature_id) || !valid_feature_path_component(base_feature_id) {
-        return Err(HostError::Validation {
-            detail: "boolean pattern feature IDs must be plain path components".to_string(),
-        });
-    }
-    let root = Bundle::at(bundle).canonical_root().to_path_buf();
-    let request = BooleanPatternRequest::new(
-        new_request_id(),
-        root.join(BREP_SUBDIR)
-            .join(format!("{base_feature_id}.brep")),
-        origin,
-        spacing,
-        columns,
-        rows,
-        diameter,
-    )
-    .with_output_path(root.join("stage"), "boolean-pattern.brep")
-    .with_feature_id(feature_id);
-    let located_worker;
-    let worker = if let Some(worker) = configured_worker {
-        worker
-    } else {
-        located_worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-            detail: error.to_string(),
-        })?;
-        &located_worker
-    };
-    let value = Host::new()
-        .boolean_pattern_with_cancel_and_progress(bundle, request, worker, cancel, on_progress)?
-        .response_value(threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION);
-    validate(
-        &threeterm_protocol::schema::BOOLEAN_PATTERN_RESPONSE_SCHEMA,
-        &value,
-    )
-    .map_err(|reason| HostError::Validation {
-        detail: format!("boolean pattern response failed schema validation: {reason}"),
-    })?;
-    Ok(value)
+    Host::new()
+        .execute_domain_command_with_worker_and_cancel_and_progress(
+            threeterm_protocol::schema::BOOLEAN_PATTERN_COMMAND_ID,
+            arguments,
+            configured_worker,
+            cancel,
+            on_progress,
+        )
+        .map_err(host_execution_error)
 }
 
 fn host_tool_execution_error(error: &HostError) -> Value {
@@ -1565,73 +1218,6 @@ fn bracket_edit_response(
         response["draft_sequence"] = Value::from(draft_sequence);
     }
     response
-}
-
-fn dispatch_bracket_tool(arguments: &Value) -> Result<Value, DispatchError> {
-    let bundle = arguments
-        .get("bundle_path")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let bracket_id = arguments
-        .get("bracket_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let length = arguments
-        .get("length")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let width = arguments
-        .get("width")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let height = arguments
-        .get("height")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let thickness = arguments
-        .get("thickness")
-        .and_then(Value::as_f64)
-        .unwrap_or_default();
-    let view = dispatch_bracket(bundle, bracket_id, length, width, height, thickness)?;
-    Ok(json!({
-        "status": view.result.status,
-        "operation": "bracket",
-        "feature_id": view.result.feature_id,
-        "request_id": view.result.request_id,
-        "source_snapshot": {
-            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
-            "revision_hash": view.source_snapshot.revision_hash,
-        },
-        "feature_graph_hash": view.snapshot.feature_graph_hash,
-        "revision_hash": view.snapshot.revision_hash,
-        "authoritative": true,
-        "artifact_kind": view.artifact.artifact_kind,
-        "artifact_name": view.artifact.artifact_name,
-        "brep_path": view.result.brep_path,
-        "brep_sha256": view.result.brep_sha256,
-        "brep_bytes": view.result.brep_bytes,
-        "worker_fingerprint": {
-            "worker_kind": view.artifact.worker_fingerprint.worker_kind,
-            "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
-            "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
-        },
-        "derived_result": {
-            "request_id": view.artifact.request_id,
-            "operation": view.artifact.operation,
-            "feature_id": view.artifact.feature_id,
-            "source_revision_id": view.source_snapshot.revision_hash,
-            "worker_fingerprint": {
-                "worker_kind": view.artifact.worker_fingerprint.worker_kind,
-                "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
-                "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
-            },
-            "artifact_kind": view.artifact.artifact_kind,
-            "artifact_name": view.artifact.artifact_name,
-            "byte_count": view.artifact.byte_count,
-            "sha256": view.artifact.sha256,
-        },
-        "schema_version": threeterm_protocol::schema::BRACKET_RESPONSE_SCHEMA_VERSION,
-    }))
 }
 
 fn find_by_wire_name(name: &str) -> Option<&'static CommandSchema> {
@@ -2051,6 +1637,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_request_rejects_invalid_rehearsal_arguments_with_invalid_params_code() {
+        let response = McpServer::new().handle_request(&JsonRpcRequest {
+            id: Value::Number(8.into()),
+            is_notification: false,
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "threeterm.command.rehearse/1",
+                "arguments": {}
+            }),
+        });
+        let error = response
+            .error
+            .expect("invalid rehearsal arguments are an error");
+        assert_eq!(error.code, ERROR_INVALID_PARAMS);
+        assert!(error.message.contains("output_dir"));
+    }
+
+    #[test]
     fn run_writes_a_tools_list_envelope_and_returns_count() {
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".to_vec();
         let mut output = Vec::new();
@@ -2307,6 +1911,18 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
         permissions.set_mode(0o755);
         std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
 
+        let loaded = Bundle::at(&root).open().expect("bundle opens");
+        Bundle::at(&root)
+            .append_new_feature_with_brep_if_revision_and_provenance(
+                "base",
+                "brep",
+                loaded.revision_hash_hex(),
+                "seed-base",
+                "test fixture",
+                b"seed-base-brep",
+            )
+            .expect("base BREP publishes");
+
         let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
         let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
         let call = json!({
@@ -2319,7 +1935,7 @@ printf '%s\n' '{"kind":"cancelled","schema_version":"threeterm.protocol/1","requ
                 "arguments": {
                     "bundle_path": root.to_string_lossy(),
                     "feature_id": "pattern",
-                    "base_feature_id": "missing-base",
+                    "base_feature_id": "base",
                     "origin": [0.0, 0.0, 0.0],
                     "spacing": [1.0, 1.0],
                     "columns": 18,
@@ -2415,6 +2031,18 @@ done
         permissions.set_mode(0o755);
         std::fs::set_permissions(&worker_path, permissions).expect("worker is executable");
 
+        let loaded = Bundle::at(&root).open().expect("bundle opens");
+        Bundle::at(&root)
+            .append_new_feature_with_brep_if_revision_and_provenance(
+                "base",
+                "brep",
+                loaded.revision_hash_hex(),
+                "seed-base",
+                "test fixture",
+                b"seed-base-brep",
+            )
+            .expect("base BREP publishes");
+
         let call = json!({
             "jsonrpc": JSONRPC_VERSION,
             "id": "call-1",
@@ -2425,7 +2053,7 @@ done
                 "arguments": {
                     "bundle_path": root.to_string_lossy(),
                     "feature_id": "pattern",
-                    "base_feature_id": "missing-base",
+                    "base_feature_id": "base",
                     "origin": [0.0, 0.0, 0.0],
                     "spacing": [1.0, 1.0],
                     "columns": 18,

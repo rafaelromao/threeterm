@@ -27,7 +27,7 @@ use threeterm_protocol::schema::{
     EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
     HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
     LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REHEARSE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
     RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
     TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find,
     find_by_name, iter,
@@ -3903,6 +3903,39 @@ pub fn dispatch_registered_command(
             })?;
         request["preview_revision"] = Value::String(preview.preview_revision);
     }
+    if command == REHEARSE_COMMAND_ID {
+        return execute(command, request, |request| {
+            let output_dir = request
+                .get("output_dir")
+                .and_then(Value::as_str)
+                .expect("rehearse schema guarantees output_dir");
+            let release_candidate = request
+                .get("release_candidate")
+                .and_then(Value::as_str)
+                .expect("rehearse schema guarantees release_candidate");
+            crate::rehearsal::run_l_bracket_rehearsal(output_dir, release_candidate).map_err(
+                |error| {
+                    DispatchError::Validation(
+                        serde_json::to_string(&error.diagnostic())
+                            .unwrap_or_else(|_| "rehearsal failed".to_string()),
+                    )
+                },
+            )
+        })
+        .map_err(|error| match error {
+            ExecutionError::UnknownCommand(command) => DispatchError::UnknownCommand(command),
+            ExecutionError::InvalidRequest(detail) => DispatchError::Validation(detail),
+            ExecutionError::Handler(error) => error,
+            ExecutionError::InvalidResponse(detail) => {
+                DispatchError::Validation(format!("response violates registered schema: {detail}"))
+            }
+        });
+    }
+    return host
+        .execute_domain_command(command, request)
+        .map_err(DispatchError::from);
+
+    #[allow(unreachable_code)]
     if matches!(
         command,
         IDENTITY_COMMAND_ID
@@ -4657,22 +4690,7 @@ fn execute_registered_with_observer(
     {
         return emit_internal_error("finishing command requires --expected-revision", stderr);
     }
-    if matches!(
-        command,
-        threeterm_protocol::schema::EXTRUDE_COMMAND_ID
-            | threeterm_protocol::schema::REVOLVE_COMMAND_ID
-            | threeterm_protocol::schema::MIRROR_COMMAND_ID
-            | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
-            | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
-            | threeterm_protocol::schema::IDENTITY_COMMAND_ID
-            | threeterm_protocol::schema::APPLY_COMMAND_ID
-            | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
-            | threeterm_protocol::schema::FILLET_COMMAND_ID
-            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
-            | threeterm_protocol::schema::SHELL_COMMAND_ID
-            | threeterm_protocol::schema::DRAFT_COMMAND_ID
-            | threeterm_protocol::schema::LOFT_COMMAND_ID
-    ) {
+    if command != threeterm_protocol::schema::REHEARSE_COMMAND_ID {
         return match Host::new().execute_domain_command(command, request) {
             Ok(response) => write_success(stdout, &response, stderr),
             Err(error) => emit_dispatch_error(&DispatchError::from(error), stderr),

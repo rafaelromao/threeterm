@@ -13,9 +13,8 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_persistence::{Bundle, BundleError, write_v0_fixture};
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, BRACKET_EDIT_RESPONSE_SCHEMA,
-    BRACKET_RESPONSE_SCHEMA, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
-    NEW_PROJECT_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
+    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
     REHEARSE_RUN_RESPONSE_SCHEMA, REHEARSE_RUN_RESPONSE_SCHEMA_VERSION, find,
 };
 use threeterm_protocol::schema_validator::validate;
@@ -662,12 +661,11 @@ fn invoke_registered(
                 project,
             )
         })?;
-    let schema = match command {
-        BRACKET_EDIT_COMMAND_ID => &BRACKET_EDIT_RESPONSE_SCHEMA,
-        BRACKET_COMMAND_ID => &BRACKET_RESPONSE_SCHEMA,
-        _ => &NEW_PROJECT_RESPONSE_SCHEMA,
-    };
-    validate(schema, &response).map_err(|error| {
+    let schema = find(command)
+        .expect("registered command schema is present")
+        .response_schema
+        .clone();
+    validate(&schema, &response).map_err(|error| {
         RehearsalError::new(
             stage,
             json!({"message": format!("production response failed schema validation: {error}")}),

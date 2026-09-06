@@ -13,7 +13,10 @@ use threeterm_host::{
     DomainCommandPreview, HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export,
 };
 use threeterm_protocol::command_execution::ExecutionError;
-use threeterm_protocol::schema::{CommandId, REATTACH_EDGE_COMMAND_ID};
+use threeterm_protocol::schema::{
+    CommandId, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    UNDO_COMMAND_ID,
+};
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -41,6 +44,22 @@ pub fn execute_domain_command(
     request: Value,
 ) -> Result<Value, ExecutionError<HostError>> {
     host.execute_domain_command(command, request)
+}
+
+fn execute_history_command(
+    host: &Host,
+    root: &Path,
+    command: CommandId,
+    request: Value,
+) -> Result<HistoryCommitView, String> {
+    execute_domain_command(host, command, request).map_err(|error| format!("{error:?}"))?;
+    let snapshot = host.load(root).map_err(|error| error.to_string())?;
+    let history = host.history(root).map_err(|error| error.to_string())?;
+    Ok(HistoryCommitView {
+        snapshot,
+        history,
+        evaluation: None,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1354,6 +1373,7 @@ impl TuiSession {
         root: impl AsRef<Path>,
         name: &str,
     ) -> Result<HistoryCommitView, TuiDiagnostic> {
+        let root = root.as_ref();
         let feature_id = self
             .feature_timeline
             .as_ref()
@@ -1374,14 +1394,21 @@ impl TuiSession {
             return Err(diagnostic);
         }
 
-        let view = match host.restore_named_revision(root, &feature_id, name) {
+        let view = match execute_history_command(
+            host,
+            root,
+            RESTORE_REVISION_COMMAND_ID,
+            json!({
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": feature_id,
+                "name": name,
+            }),
+        ) {
             Ok(view) => view,
             Err(error) => {
                 let rejected = self
                     .transition_history(HistoryEvent::ApplyCompleted(
-                        HistoryApplyResult::Rejected {
-                            detail: error.to_string(),
-                        },
+                        HistoryApplyResult::Rejected { detail: error },
                     ))
                     .expect("history rejection returns to the linear state");
                 return Err(rejected
@@ -1452,8 +1479,18 @@ impl TuiSession {
         }
 
         let view = match direction {
-            HistoryDirection::Undo => host.undo(root),
-            HistoryDirection::Redo => host.redo(root),
+            HistoryDirection::Undo => execute_history_command(
+                host,
+                root,
+                UNDO_COMMAND_ID,
+                json!({"bundle_path": root.to_string_lossy()}),
+            ),
+            HistoryDirection::Redo => execute_history_command(
+                host,
+                root,
+                REDO_COMMAND_ID,
+                json!({"bundle_path": root.to_string_lossy()}),
+            ),
             HistoryDirection::NamedRevision { .. } => {
                 return Err(self.operation_diagnostic(
                     TuiDiagnosticCode::HistoryRejected,
@@ -1469,9 +1506,7 @@ impl TuiSession {
             Err(error) => {
                 let rejected = self
                     .transition_history(HistoryEvent::ApplyCompleted(
-                        HistoryApplyResult::Rejected {
-                            detail: error.to_string(),
-                        },
+                        HistoryApplyResult::Rejected { detail: error },
                     ))
                     .expect("history rejection returns to the linear state");
                 return Err(rejected

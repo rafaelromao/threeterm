@@ -3,13 +3,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
+use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID,
+    REVOLVE_COMMAND_ID,
 };
 
 fn root(label: &str) -> std::path::PathBuf {
@@ -216,6 +217,81 @@ fn shared_executor_distinguishes_schema_semantic_and_stale_rejections() {
     assert_ne!(log_before, fs::read(root.join("transactions.log")).unwrap());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));
+}
+
+#[test]
+fn production_reload_recomputes_a_bracket_after_all_brep_results_are_deleted() {
+    let Some(worker) = OcctWorker::locate().ok() else {
+        return;
+    };
+    let root = root("brep-free-bracket-reload");
+    let host = Host::new();
+    let committed = host
+        .create_bracket(
+            &root,
+            BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("l-1"),
+            &worker,
+        )
+        .expect("bracket commits");
+    let identity_before = host.identity(&root).expect("identity loads");
+
+    fs::remove_dir_all(root.join("brep")).expect("derived BREP directory removes");
+
+    let reloaded = host
+        .load_with_geometry_replay(&root)
+        .expect("canonical state reloads without BREP");
+    let identity_after = host.identity(&root).expect("reloaded identity loads");
+
+    assert_eq!(
+        reloaded.feature_graph_hash,
+        committed.snapshot.feature_graph_hash
+    );
+    assert_eq!(reloaded.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(identity_after, identity_before);
+    assert!(root.join("brep/l-1.brep").is_file());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn derived_geometry_commands_reject_unproven_base_breps_before_worker_execution() {
+    let root = root("unproven-base");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let boolean_pattern = host.execute_domain_command(
+        BOOLEAN_PATTERN_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "pattern",
+            "base_feature_id": "missing-base",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        }),
+    );
+    let hole = host.execute_domain_command(
+        HOLE_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "hole",
+            "base_feature_id": "missing-base",
+            "position": [0.0, 0.0, 0.0],
+            "direction": [0.0, 0.0, 1.0],
+            "diameter": 1.0
+        }),
+    );
+
+    for result in [boolean_pattern, hole] {
+        let Err(ExecutionError::Handler(HostError::Validation { detail })) = result else {
+            panic!("unproven base must be rejected before worker execution: {result:?}");
+        };
+        assert!(detail.contains("base feature is missing"));
+    }
+
+    assert_eq!(Bundle::at(&root).open().expect("bundle opens").log.len(), 0);
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

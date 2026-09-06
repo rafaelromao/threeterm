@@ -2,8 +2,10 @@ use threeterm_domain::{
     Feature, FeatureGraph, PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReattachmentOutcome,
     PlanarFaceReference, SketchEntity, SketchPayload, SketchPlacement, SolvedCoordinate,
 };
+use threeterm_theme::{SemanticToken, palette};
 use threeterm_viewport::{
-    CameraState, ProtocolNeutralViewport, SceneSolid, SceneTriangle, ViewportRequest, ViewportScene,
+    CameraState, ProtocolNeutralViewport, SceneSolid, SceneTriangle, ViewportColors,
+    ViewportRequest, ViewportScene,
 };
 
 #[test]
@@ -36,6 +38,66 @@ fn canonical_graph_projection_produces_revision_bound_rgb_frames() {
     )
     .expect("camera projection succeeds");
     assert_ne!(frame.rgb, rotated.rgb);
+}
+
+#[test]
+fn projection_uses_rgb_values_from_the_active_embedded_palette() {
+    let palette = palette("sandman-light").expect("embedded light palette exists");
+    let colors = ViewportColors::from_palette(palette).expect("palette tokens convert to RGB");
+    let scene = ViewportScene {
+        revision: "revision-palette".to_string(),
+        features: Vec::new(),
+        solids: Vec::new(),
+        selected_id: None,
+        layer1_references: Vec::new(),
+        fit_relationships: Vec::new(),
+    };
+
+    let frame = ProtocolNeutralViewport::project(
+        &scene,
+        ViewportRequest::new("revision-palette", 1, 8, 8, CameraState::default())
+            .with_colors(colors),
+    )
+    .expect("palette-backed projection succeeds");
+
+    assert_eq!(&frame.rgb[..3], &colors.grid);
+    assert_eq!(
+        colors.background,
+        [
+            palette.rgb(SemanticToken::ViewportBackground).unwrap().red,
+            palette
+                .rgb(SemanticToken::ViewportBackground)
+                .unwrap()
+                .green,
+            palette.rgb(SemanticToken::ViewportBackground).unwrap().blue,
+        ]
+    );
+}
+
+#[test]
+fn picking_returns_revision_bound_semantic_candidates_from_projected_scene_ownership() {
+    let mut graph = FeatureGraph::empty();
+    graph.add_feature(Feature::new("feature-a", "box").expect("feature is valid"));
+    let scene = ViewportScene::from_feature_graph("revision-pick", &graph, None);
+
+    let pick = ProtocolNeutralViewport::pick(
+        &scene,
+        ViewportRequest::new("revision-pick", 7, 64, 48, CameraState::default()),
+        32,
+        24,
+    )
+    .expect("pick query succeeds");
+
+    assert_eq!(pick.revision, "revision-pick");
+    assert_eq!(pick.generation, 7);
+    assert_eq!(pick.camera, CameraState::default());
+    assert_eq!(
+        pick.candidates
+            .iter()
+            .map(|candidate| candidate.semantic_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["feature-a"]
+    );
 }
 
 #[test]
@@ -96,7 +158,8 @@ fn tessellated_solid_produces_filled_pixels_with_feature_ownership() {
 
     let frame = ProtocolNeutralViewport::project(
         &scene,
-        ViewportRequest::new("revision-solid", 1, 64, 48, CameraState::default()),
+        ViewportRequest::new("revision-solid", 1, 64, 48, CameraState::default())
+            .with_colors(ViewportColors::default()),
     )
     .expect("tessellated solid projection succeeds");
 
@@ -104,7 +167,8 @@ fn tessellated_solid_produces_filled_pixels_with_feature_ownership() {
         frame
             .rgb
             .chunks_exact(3)
-            .any(|pixel| pixel != [18, 22, 31] && pixel != [36, 43, 56]),
+            .any(|pixel| pixel != ViewportColors::default().background
+                && pixel != ViewportColors::default().grid),
         "the solid must contribute pixels distinct from the background and grid"
     );
 }

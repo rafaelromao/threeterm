@@ -18,9 +18,9 @@ use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
 use threeterm_viewport::{
-    CameraState, CapabilityProbeResult, FrameAcknowledgement, ProtocolNeutralViewport,
-    RenderCoordinator, Renderer, SubmitOutcome, ViewportDiagnostic, ViewportDiagnosticCode,
-    ViewportRequest, ViewportScene,
+    CameraState, CapabilityProbeResult, FrameAcknowledgement, PickResult, ProtocolNeutralViewport,
+    RenderCoordinator, Renderer, SubmitOutcome, ViewportColors, ViewportDiagnostic,
+    ViewportDiagnosticCode, ViewportRequest, ViewportScene,
 };
 
 pub use launch::{
@@ -995,6 +995,7 @@ pub enum TuiDiagnosticCode {
     SelectionIncompatible,
     StalePreview,
     ThemeRenderingFailure,
+    StalePick,
 }
 
 impl TuiDiagnosticCode {
@@ -1012,6 +1013,7 @@ impl TuiDiagnosticCode {
             Self::SelectionIncompatible => "selection_incompatible",
             Self::StalePreview => "stale_preview",
             Self::ThemeRenderingFailure => "theme_rendering_failure",
+            Self::StalePick => "stale_pick",
         }
     }
 }
@@ -1517,6 +1519,24 @@ impl TuiSession {
         event: SelectionEvent,
     ) -> Result<StateTransition, TuiDiagnostic> {
         self.handle_selection(event)
+    }
+
+    pub fn validate_semantic_candidates(&self, stable_ids: &[String]) -> Result<(), TuiDiagnostic> {
+        let valid = !stable_ids.is_empty()
+            && stable_ids_are_distinct(stable_ids)
+            && stable_ids
+                .iter()
+                .all(|stable_id| self.targets.iter().any(|target| target.id == *stable_id));
+        if valid {
+            return Ok(());
+        }
+        Err(self.operation_diagnostic(
+            TuiDiagnosticCode::SelectionIncompatible,
+            StateAxis::Selection,
+            StateEventKind::Selection(SelectionEventKind::Nominate),
+            "pick candidates are not authoritative semantic identities".to_string(),
+            "viewport-pick",
+        ))
     }
 
     pub fn transition_interaction(
@@ -2815,6 +2835,14 @@ pub struct KeyboardInputOutcome {
     pub overlay: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickInputOutcome {
+    pub candidates: Vec<String>,
+    pub submission: Option<SubmitOutcome>,
+    pub overlay: String,
+    pub diagnostic: Option<TuiDiagnostic>,
+}
+
 #[derive(Debug)]
 pub struct TuiViewportSession<R: Renderer> {
     tui: TuiSession,
@@ -2824,7 +2852,11 @@ pub struct TuiViewportSession<R: Renderer> {
     camera: CameraState,
     width: u32,
     height: u32,
+    viewport_colors: ViewportColors,
     coordinator: RenderCoordinator<R>,
+    visible_presentation: Option<(u64, CameraState)>,
+    in_flight_presentation: Option<(u64, CameraState)>,
+    pending_presentation: Option<(u64, CameraState)>,
 }
 
 impl<R: Renderer> TuiViewportSession<R> {
@@ -2876,6 +2908,18 @@ impl<R: Renderer> TuiViewportSession<R> {
         )
     }
 
+    pub fn from_host_with_probe_and_theme(
+        host: &Host,
+        width: u32,
+        height: u32,
+        mut renderer: R,
+        probe: &CapabilityProbeResult,
+        theme: ThemeContext,
+    ) -> Result<Self, ViewportDiagnostic> {
+        renderer.admit(&probe.capabilities)?;
+        Self::from_host_parts(host, width, height, renderer, theme)
+    }
+
     fn from_host_parts(
         host: &Host,
         width: u32,
@@ -2908,6 +2952,18 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "load or create a canonical project before starting the viewport",
             )
         })?;
+        let viewport_colors = ViewportColors::from_palette(theme.palette).map_err(|error| {
+            ViewportDiagnostic::new(
+                ViewportDiagnosticCode::PaletteInvalid,
+                format!(
+                    "active palette token {} could not be converted: {}",
+                    error.token.as_str(),
+                    error.detail
+                ),
+                "palette",
+                "select an embedded palette with a valid viewport semantic token set",
+            )
+        })?;
         let revision = presentation.snapshot.revision_hash.clone();
         let mut scene = host.presentation_viewport_scene().map_err(|error| {
             ViewportDiagnostic::new(
@@ -2930,7 +2986,11 @@ impl<R: Renderer> TuiViewportSession<R> {
             camera: CameraState::default(),
             width,
             height,
+            viewport_colors,
             coordinator: RenderCoordinator::new(renderer),
+            visible_presentation: None,
+            in_flight_presentation: None,
+            pending_presentation: None,
         })
     }
 
@@ -2945,9 +3005,177 @@ impl<R: Renderer> TuiViewportSession<R> {
                 self.width,
                 self.height,
                 self.camera,
-            ),
+            )
+            .with_colors(self.viewport_colors),
         )?;
-        self.coordinator.submit(frame)
+        let camera = self.camera;
+        let submission = self.coordinator.submit(frame)?;
+        if let Some(identity) = submission.started.as_ref() {
+            self.in_flight_presentation = Some((identity.generation, camera));
+        }
+        if let Some(identity) = submission.queued.as_ref() {
+            self.pending_presentation = Some((identity.generation, camera));
+        }
+        Ok(submission)
+    }
+
+    pub fn pick_at(
+        &mut self,
+        host: &Host,
+        x: u32,
+        y: u32,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
+        let Some((generation, camera)) = self.visible_presentation else {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick cannot target a frame before its first acknowledgement".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        };
+        if self.coordinator.in_flight().is_some() {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick cannot target a presentation while a newer frame is unacknowledged"
+                    .to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        }
+        let request = ViewportRequest::new(
+            self.scene.revision.clone(),
+            generation,
+            self.width,
+            self.height,
+            camera,
+        )
+        .with_colors(self.viewport_colors);
+        let pick = ProtocolNeutralViewport::pick(&self.scene, request, x, y)
+            .map_err(TuiViewportError::Viewport)?;
+        self.validate_pick_for_host(pick, host, generation, camera)
+    }
+
+    fn validate_pick_for_host(
+        &mut self,
+        pick: PickResult,
+        host: &Host,
+        expected_generation: u64,
+        expected_camera: CameraState,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
+        let semantic_ids = pick
+            .candidates
+            .iter()
+            .map(|candidate| candidate.semantic_id.clone())
+            .collect::<Vec<_>>();
+        host.validate_viewport_pick(&pick.revision, &semantic_ids)
+            .map_err(|error| {
+                let detail = error.to_string();
+                let code = if detail.contains("non-current semantic identity") {
+                    TuiDiagnosticCode::SelectionIncompatible
+                } else {
+                    TuiDiagnosticCode::StalePick
+                };
+                TuiViewportError::Tui(TuiDiagnostic {
+                    code,
+                    detail: format!("host rejected semantic pick: {detail}"),
+                    canonical_revision: self.tui.state().canonical_revision,
+                    axis: Some(StateAxis::Selection),
+                    event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                    from: Some("host-pick-validation".to_string()),
+                })
+            })?;
+        if pick.revision != self.scene.revision
+            || pick.generation != expected_generation
+            || pick.camera != expected_camera
+        {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick result does not match the visible viewport presentation".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        }
+        self.apply_validated_pick(pick)
+    }
+
+    pub fn validate_pick(
+        &mut self,
+        pick: PickResult,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
+        let state = self.tui.state();
+        if pick.revision != self.scene.revision
+            || pick.generation != state.presentation_generation
+            || pick.camera != self.camera
+        {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick result does not match the current viewport presentation".to_string(),
+                canonical_revision: state.canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        }
+        self.apply_validated_pick(pick)
+    }
+
+    fn apply_validated_pick(
+        &mut self,
+        pick: PickResult,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
+        let candidates = pick
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.semantic_id)
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(PickInputOutcome {
+                candidates,
+                submission: None,
+                overlay: "[warning-glyph] Pick: no semantic candidate".to_string(),
+                diagnostic: None,
+            });
+        }
+        self.tui
+            .validate_semantic_candidates(&candidates)
+            .map_err(TuiViewportError::Tui)?;
+        self.tui
+            .transition_selection(SelectionEvent::Nominate {
+                candidates: candidates.clone(),
+            })
+            .map_err(TuiViewportError::Tui)?;
+        let transition = if candidates.len() == 1 {
+            self.tui
+                .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+                    stable_ids: candidates.clone(),
+                }))
+                .map_err(TuiViewportError::Tui)?
+        } else {
+            self.tui
+                .transition_selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
+                    stable_ids: candidates.clone(),
+                }))
+                .map_err(TuiViewportError::Tui)?
+        };
+        self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        let marker = if candidates.len() == 1 {
+            "selection-glyph"
+        } else {
+            "dashed-outline"
+        };
+        Ok(PickInputOutcome {
+            candidates,
+            submission: Some(submission),
+            overlay: format!("[{marker}] Pick: semantic candidate validated"),
+            diagnostic: transition.diagnostic,
+        })
     }
 
     pub fn process_terminal_input(
@@ -3024,6 +3252,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         let input = decode_terminal_input(bytes).ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
         })?;
+        if matches!(input, TerminalInput::Pick { .. }) && self.command_input_active() {
+            return Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            ));
+        }
         if matches!(input, TerminalInput::Arrow(_)) && !self.command_input_active() {
             let outcome = self.process_terminal_input(bytes)?;
             return Ok(KeyboardInputOutcome {
@@ -3039,12 +3272,18 @@ impl<R: Renderer> TuiViewportSession<R> {
         if self.draft.draft().is_some() {
             return self.process_draft_input(input, host, gateway, root);
         }
+        if let TerminalInput::Character(character) = input
+            && let Some(overlay) = self.process_camera_key(character)?
+        {
+            return Ok(overlay);
+        }
         match input {
             TerminalInput::OpenPalette => {
                 self.palette.open();
                 Ok(self.keyboard_overlay(self.palette_overlay()))
             }
             TerminalInput::Arrow(_)
+            | TerminalInput::Pick { .. }
             | TerminalInput::Character(_)
             | TerminalInput::Backspace
             | TerminalInput::Escape
@@ -3052,6 +3291,32 @@ impl<R: Renderer> TuiViewportSession<R> {
             | TerminalInput::Commit
             | TerminalInput::Enter => Ok(self.keyboard_overlay(String::new())),
         }
+    }
+
+    fn process_camera_key(
+        &mut self,
+        character: char,
+    ) -> Result<Option<KeyboardInputOutcome>, TuiViewportError> {
+        let character = character.to_ascii_lowercase();
+        let Some((camera, text)) = (match character {
+            'w' | 'k' => Some((self.camera.panned(0, -5), "Pan up")),
+            'a' | 'h' => Some((self.camera.panned(-5, 0), "Pan left")),
+            's' | 'j' => Some((self.camera.panned(0, 5), "Pan down")),
+            'd' | 'l' => Some((self.camera.panned(5, 0), "Pan right")),
+            '+' | '=' => Some((self.camera.zoomed(5), "Zoom in")),
+            '-' | '_' => Some((self.camera.zoomed(-5), "Zoom out")),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        self.camera = camera;
+        self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        Ok(Some(KeyboardInputOutcome {
+            rendered: None,
+            submission: Some(submission),
+            overlay: format!("[motion-trail] {text}"),
+        }))
     }
 
     fn process_palette_input<G: CommandGateway>(
@@ -3128,6 +3393,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                 )))
             }
             TerminalInput::OpenPalette => Ok(self.keyboard_overlay(self.palette_overlay())),
+            TerminalInput::Pick { .. } => Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            )),
             TerminalInput::Preview | TerminalInput::Commit => Ok(self.keyboard_overlay(
                 "[error-glyph] Failure: select a command before preview or commit".to_string(),
             )),
@@ -3176,6 +3444,9 @@ impl<R: Renderer> TuiViewportSession<R> {
             }
             TerminalInput::Preview => self.preview_draft(gateway, root),
             TerminalInput::Commit => self.commit_draft(host, gateway, root),
+            TerminalInput::Pick { .. } => Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            )),
             TerminalInput::Arrow(_) | TerminalInput::Enter | TerminalInput::OpenPalette => Ok(self
                 .keyboard_overlay(format!(
                     "[outline] Draft: {} input={}",
@@ -3403,7 +3674,27 @@ impl<R: Renderer> TuiViewportSession<R> {
         &mut self,
         acknowledgement: FrameAcknowledgement,
     ) -> Result<threeterm_viewport::AcknowledgeOutcome, ViewportDiagnostic> {
-        self.coordinator.acknowledge(acknowledgement)
+        let active = self.coordinator.in_flight().cloned();
+        let active_presentation = self.in_flight_presentation.take();
+        let outcome = self.coordinator.acknowledge(acknowledgement)?;
+        if outcome.visible.is_some()
+            && let (Some(identity), Some(presentation)) = (active, active_presentation)
+            && identity.generation == presentation.0
+        {
+            self.visible_presentation = Some(presentation);
+        }
+        if let Some(identity) = self.coordinator.in_flight() {
+            if self
+                .in_flight_presentation
+                .as_ref()
+                .is_none_or(|presentation| presentation.0 != identity.generation)
+            {
+                self.in_flight_presentation = self.pending_presentation.take();
+            }
+        } else {
+            self.pending_presentation = None;
+        }
+        Ok(outcome)
     }
 
     pub fn request_cancel(
@@ -3587,6 +3878,7 @@ pub enum TerminalInput {
     Character(char),
     Backspace,
     Arrow(ArrowKey),
+    Pick { x: u32, y: u32 },
     Escape,
     OpenPalette,
     Preview,
@@ -3630,6 +3922,17 @@ impl TerminalInputDecoder {
                 }
                 return None;
             }
+            const SGR_MOUSE_PREFIX: &[u8] = b"\x1b[<";
+            if self.pending.starts_with(SGR_MOUSE_PREFIX) {
+                let payload = &self.pending[SGR_MOUSE_PREFIX.len()..];
+                if let Some(offset) = payload
+                    .iter()
+                    .position(|byte| *byte == b'M' || *byte == b'm')
+                {
+                    return Some(SGR_MOUSE_PREFIX.len() + offset + 1);
+                }
+                return None;
+            }
             let complete: [&[u8]; 5] = [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[13;5u"];
             if let Some(sequence) = complete
                 .iter()
@@ -3659,6 +3962,9 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
     if let Some(key) = decode_arrow(bytes) {
         return Some(TerminalInput::Arrow(key));
     }
+    if let Some((x, y)) = decode_sgr_pick(bytes) {
+        return Some(TerminalInput::Pick { x, y });
+    }
     match bytes {
         b"\x10" => Some(TerminalInput::OpenPalette),
         b"\x16" => Some(TerminalInput::Preview),
@@ -3675,6 +3981,29 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
                 .then_some(TerminalInput::Character(character))
         }
     }
+}
+
+fn decode_sgr_pick(bytes: &[u8]) -> Option<(u32, u32)> {
+    let payload = bytes.strip_prefix(b"\x1b[<")?;
+    let (terminator, payload) = payload.split_last()?;
+    if *terminator != b'M' {
+        return None;
+    }
+    let fields = payload.split(|byte| *byte == b';').collect::<Vec<_>>();
+    if fields.len() != 3 || fields[0] != b"0" {
+        return None;
+    }
+    let x = std::str::from_utf8(fields[1])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
+    let y = std::str::from_utf8(fields[2])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
+    Some((x, y))
 }
 
 fn format_preview(preview: &DomainCommandPreview) -> String {

@@ -22,8 +22,9 @@ pub use kitty::{
     TermiosRestorer, parse_ack,
 };
 pub use projection::{
-    CameraState, MAX_PIXELS, ProtocolNeutralViewport, SceneFeature, SceneSolid, SceneTriangle,
-    ViewportFrame, ViewportRequest, ViewportScene,
+    CameraState, MAX_PIXELS, PickCandidate, PickResult, ProtocolNeutralViewport, SceneFeature,
+    SceneSolid, SceneTriangle, ViewportColorError, ViewportColors, ViewportFrame, ViewportRequest,
+    ViewportScene,
 };
 pub use renderer::{
     AcknowledgeOutcome, CancelOutcome, FrameAcknowledgement, FrameIdentity, RenderCoordinator,

@@ -7,12 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 use threeterm_host::Host;
+use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
     ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
 };
 
-use crate::{TerminalInputDecoder, TuiViewportSession, decode_terminal_input};
+use crate::{TerminalInput, TerminalInputDecoder, TuiViewportSession, decode_terminal_input};
 
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
 pub const EXIT_CAPABILITY_FAILURE: i32 = 10;
@@ -178,8 +179,27 @@ pub fn launch<W: InteractiveTerminal>(
             terminal.restore(),
         ));
     }
+    let theme = resolve_palette(PaletteSources {
+        cli: None,
+        environment: std::env::var("THREETERM_PALETTE").ok().as_deref(),
+        config: None,
+    })
+    .map(ThemeContext::from)
+    .map_err(|error| {
+        with_restore_error(
+            LaunchError::Viewport(ViewportDiagnostic::new(
+                ViewportDiagnosticCode::PaletteInvalid,
+                format!("active palette could not be resolved: {error:?}"),
+                "palette",
+                "unset THREETERM_PALETTE or choose an embedded palette",
+            )),
+            terminal.restore(),
+        )
+    })?;
     let (width, height) = terminal.viewport_size();
-    let launch_result = run_session(host, root, width, height, placement, terminal, &probe);
+    let launch_result = run_session(
+        host, root, width, height, placement, terminal, &probe, theme,
+    );
     let launch_result = with_restore_result(launch_result, terminal.restore());
     launch_result?;
 
@@ -225,6 +245,7 @@ fn with_restore_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_session<W: InteractiveTerminal>(
     host: &Host,
     root: &Path,
@@ -233,13 +254,15 @@ fn run_session<W: InteractiveTerminal>(
     placement: KittyPlacement,
     terminal: &mut W,
     probe: &CapabilityProbeResult,
+    theme: ThemeContext,
 ) -> Result<(), LaunchError> {
-    let session_result = TuiViewportSession::from_host_with_probe(
+    let session_result = TuiViewportSession::from_host_with_probe_and_theme(
         host,
         width,
         height,
         threeterm_viewport::GhosttyRenderer::new(terminal).with_placement(placement),
         probe,
+        theme,
     );
     let launch_result = match session_result {
         Ok(mut session) => {
@@ -320,17 +343,30 @@ fn run_event_loop<W: InteractiveTerminal>(
                     .map_err(LaunchError::Viewport)?;
                 continue;
             }
-            if decode_terminal_input(&event).is_some() {
-                let outcome = session.process_keyboard_input(&event, host, root).map_err(
-                    |error| match error {
-                        crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
-                        crate::TuiViewportError::Tui(error) => {
-                            LaunchError::Runtime(format!("{error:?}"))
+            if let Some(input) = decode_terminal_input(&event) {
+                let overlay = match input {
+                    TerminalInput::Pick { x, y } if !session.command_input_active() => {
+                        match session.pick_at(host, x, y) {
+                            Ok(outcome) => outcome.overlay,
+                            Err(error) => format!("[warning-glyph] Pick rejected: {error:?}"),
                         }
-                    },
-                )?;
+                    }
+                    _ => {
+                        session
+                            .process_keyboard_input(&event, host, root)
+                            .map_err(|error| match error {
+                                crate::TuiViewportError::Viewport(error) => {
+                                    LaunchError::Viewport(error)
+                                }
+                                crate::TuiViewportError::Tui(error) => {
+                                    LaunchError::Runtime(format!("{error:?}"))
+                                }
+                            })?
+                            .overlay
+                    }
+                };
                 let revision = session.state().canonical_revision;
-                let overlay = format!("\r\n{}\r\n", outcome.overlay);
+                let overlay = format!("\r\n{overlay}\r\n");
                 session
                     .coordinator_mut()
                     .renderer_mut()

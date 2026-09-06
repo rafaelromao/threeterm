@@ -8059,6 +8059,41 @@ impl Host {
             .map(|loaded| loaded.graph.clone())
     }
 
+    /// Validate viewport semantic candidates against the current host-owned
+    /// Revision Snapshot immediately before an interactive selection changes.
+    pub fn validate_viewport_pick(
+        &self,
+        expected_revision: &str,
+        semantic_ids: &[String],
+    ) -> Result<(), HostError> {
+        let presentation = self
+            .presentation_snapshot()
+            .ok_or_else(|| HostError::Validation {
+                detail: "viewport pick has no current host presentation".to_string(),
+            })?;
+        if presentation.snapshot.revision_hash != expected_revision {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "viewport pick revision is stale: expected {expected_revision}, current {}",
+                    presentation.snapshot.revision_hash
+                ),
+            });
+        }
+        if semantic_ids.is_empty()
+            || semantic_ids.iter().any(|semantic_id| {
+                !presentation
+                    .graph
+                    .features()
+                    .any(|feature| feature.id.as_str() == semantic_id)
+            })
+        {
+            return Err(HostError::Validation {
+                detail: "viewport pick contains a non-current semantic identity".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Return the replayed component graph. This is a materialized view of
     /// canonical command transactions, never a separately persisted snapshot.
     pub fn component_graph(&self, root: impl AsRef<Path>) -> Result<ComponentGraph, HostError> {

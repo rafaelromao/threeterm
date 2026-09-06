@@ -6,7 +6,9 @@ use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
-use threeterm_tui::{InteractiveTerminal, LaunchError, launch};
+use threeterm_tui::{
+    InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch,
+};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
 #[derive(Debug, Default)]
@@ -121,6 +123,19 @@ fn valid_probe_response(nonce: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+#[test]
+fn sgr_pick_coordinates_are_zero_based_and_reject_zero() {
+    assert_eq!(
+        decode_terminal_input(b"\x1b[<0;33;25M"),
+        Some(TerminalInput::Pick { x: 32, y: 24 })
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[<0;64;48M"),
+        Some(TerminalInput::Pick { x: 63, y: 47 })
+    );
+    assert_eq!(decode_terminal_input(b"\x1b[<0;0;1M"), None);
+}
+
 fn unattached_environment() -> TerminalEnvironment {
     TerminalEnvironment {
         term: Some("xterm-256color".to_string()),
@@ -183,7 +198,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         probe_response: None,
         events: vec![
             b"q".to_vec(),
-            b"\x1b[<0;32;23M".to_vec(),
+            b"\x1b[<0;33;25M".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         ],
         ..Default::default()

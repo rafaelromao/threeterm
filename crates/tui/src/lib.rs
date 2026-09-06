@@ -3993,8 +3993,16 @@ fn decode_sgr_pick(bytes: &[u8]) -> Option<(u32, u32)> {
     if fields.len() != 3 || fields[0] != b"0" {
         return None;
     }
-    let x = std::str::from_utf8(fields[1]).ok()?.parse().ok()?;
-    let y = std::str::from_utf8(fields[2]).ok()?.parse().ok()?;
+    let x = std::str::from_utf8(fields[1])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
+    let y = std::str::from_utf8(fields[2])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
     Some((x, y))
 }
 

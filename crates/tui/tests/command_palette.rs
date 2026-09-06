@@ -104,7 +104,7 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
     );
     assert_eq!(
         decode_terminal_input(b"\x1b[<0;32;24M"),
-        Some(TerminalInput::Pick { x: 32, y: 24 })
+        Some(TerminalInput::Pick { x: 31, y: 23 })
     );
     assert_eq!(decode_terminal_input(b"\x1b"), Some(TerminalInput::Escape));
     assert_eq!(

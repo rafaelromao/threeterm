@@ -220,6 +220,20 @@ fn shared_executor_distinguishes_schema_semantic_and_stale_rejections() {
 }
 
 #[test]
+fn every_registered_command_reaches_the_shared_executor() {
+    let host = Host::new();
+
+    for entry in threeterm_protocol::schema::iter() {
+        let result = host.execute_domain_command(entry.id, json!({}));
+        assert!(
+            !matches!(result, Err(ExecutionError::UnknownCommand(_))),
+            "registered command {} was not recognized by the shared executor",
+            entry.id.0
+        );
+    }
+}
+
+#[test]
 fn production_reload_recomputes_a_bracket_after_all_brep_results_are_deleted() {
     let Some(worker) = OcctWorker::locate().ok() else {
         return;

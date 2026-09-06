@@ -2811,6 +2811,17 @@ impl Host {
         )
     }
 
+    /// Apply the registered command contract to an adapter-owned orchestration
+    /// handler that does not mutate domain state itself.
+    pub fn execute_domain_command_with_handler<E>(
+        &self,
+        command: CommandId,
+        request: serde_json::Value,
+        handler: impl FnOnce(serde_json::Value) -> Result<serde_json::Value, E>,
+    ) -> Result<serde_json::Value, ExecutionError<E>> {
+        execute(command, request, handler)
+    }
+
     /// Execute a registered command through the same semantic boundary while
     /// allowing the production adapter to retain cooperative cancellation and
     /// progress reporting for expensive worker operations.

@@ -32,9 +32,7 @@ use std::time::Duration;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use threeterm_cli::dispatch::{
-    DispatchError, EXIT_OK, dispatch_registered_command, host_error_diagnostic,
-};
+use threeterm_cli::dispatch::{EXIT_OK, host_error_diagnostic};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::OcctWorker;
 #[cfg(test)]
@@ -399,22 +397,6 @@ impl McpServer {
         command: threeterm_protocol::schema::CommandId,
         mut arguments: Value,
     ) -> JsonRpcResponse {
-        if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID {
-            return match dispatch_registered_command(&Host::new(), command, arguments) {
-                Ok(value) => {
-                    JsonRpcResponse::success(request.id.clone(), tool_result(value, false))
-                }
-                Err(DispatchError::Validation(detail)) => JsonRpcResponse::error(
-                    request.id.clone(),
-                    ERROR_INVALID_PARAMS,
-                    format!("tools/call arguments failed request-schema validation: {detail}"),
-                ),
-                Err(error) => JsonRpcResponse::success(
-                    request.id.clone(),
-                    tool_execution_error(format!("domain command failed: {error}")),
-                ),
-            };
-        }
         let host_guard = self.host.lock().expect("MCP host mutex is not poisoned");
         let host = &*host_guard;
         if command == SKETCH_SOLVE_COMMAND_ID
@@ -434,7 +416,16 @@ impl McpServer {
             };
             arguments["preview_revision"] = Value::String(preview.preview_revision);
         }
-        match host.execute_domain_command(command, arguments.clone()) {
+        let result = if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID {
+            host.execute_domain_command_with_handler(
+                command,
+                arguments.clone(),
+                threeterm_cli::rehearsal::execute_rehearsal_command,
+            )
+        } else {
+            host.execute_domain_command(command, arguments.clone())
+        };
+        match result {
             Ok(value) => {
                 if let Some(schema) = find(command)
                     && let Err(reason) = validate(&schema.response_schema, &value)

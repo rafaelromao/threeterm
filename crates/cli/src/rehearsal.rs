@@ -155,6 +155,23 @@ pub fn run_l_bracket_rehearsal(
     Ok(report)
 }
 
+/// Adapt the registered rehearsal request to its non-mutating orchestration
+/// handler; the Host owns request and response contract validation.
+pub fn execute_rehearsal_command(request: Value) -> Result<Value, HostError> {
+    let output_dir = request
+        .get("output_dir")
+        .and_then(Value::as_str)
+        .expect("rehearse schema guarantees output_dir");
+    let release_candidate = request
+        .get("release_candidate")
+        .and_then(Value::as_str)
+        .expect("rehearse schema guarantees release_candidate");
+    run_l_bracket_rehearsal(output_dir, release_candidate).map_err(|error| HostError::Validation {
+        detail: serde_json::to_string(&error.diagnostic())
+            .unwrap_or_else(|_| "rehearsal failed".to_string()),
+    })
+}
+
 fn run_single_l_bracket_rehearsal(
     output_dir: &Path,
     release_candidate: &str,

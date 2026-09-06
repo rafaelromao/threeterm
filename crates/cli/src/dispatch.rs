@@ -3901,31 +3901,9 @@ pub fn dispatch_registered_command(
     if command == REHEARSE_COMMAND_ID {
         return host
             .execute_domain_command_with_handler(command, request, |request| {
-                let output_dir = request
-                    .get("output_dir")
-                    .and_then(Value::as_str)
-                    .expect("rehearse schema guarantees output_dir");
-                let release_candidate = request
-                    .get("release_candidate")
-                    .and_then(Value::as_str)
-                    .expect("rehearse schema guarantees release_candidate");
-                crate::rehearsal::run_l_bracket_rehearsal(output_dir, release_candidate).map_err(
-                    |error| {
-                        DispatchError::Validation(
-                            serde_json::to_string(&error.diagnostic())
-                                .unwrap_or_else(|_| "rehearsal failed".to_string()),
-                        )
-                    },
-                )
+                crate::rehearsal::execute_rehearsal_command(request)
             })
-            .map_err(|error| match error {
-                ExecutionError::UnknownCommand(command) => DispatchError::UnknownCommand(command),
-                ExecutionError::InvalidRequest(detail) => DispatchError::Validation(detail),
-                ExecutionError::Handler(error) => error,
-                ExecutionError::InvalidResponse(detail) => DispatchError::Validation(format!(
-                    "response violates registered schema: {detail}"
-                )),
-            });
+            .map_err(DispatchError::from);
     }
     host.execute_domain_command(command, request)
         .map_err(DispatchError::from)

@@ -3677,12 +3677,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         let active = self.coordinator.in_flight().cloned();
         let active_presentation = self.in_flight_presentation.take();
         let outcome = self.coordinator.acknowledge(acknowledgement)?;
-        if outcome.visible.is_some() {
-            if let (Some(identity), Some(presentation)) = (active, active_presentation) {
-                if identity.generation == presentation.0 {
-                    self.visible_presentation = Some(presentation);
-                }
-            }
+        if outcome.visible.is_some()
+            && let (Some(identity), Some(presentation)) = (active, active_presentation)
+            && identity.generation == presentation.0
+        {
+            self.visible_presentation = Some(presentation);
         }
         if let Some(identity) = self.coordinator.in_flight() {
             if self

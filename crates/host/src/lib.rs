@@ -4976,7 +4976,7 @@ impl Host {
         if component_replay_needed {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             self.recompute_component_instances(root, &worker)?;
-            return Ok(self.load(root)?);
+            return self.load(root);
         }
         Ok(self
             .current

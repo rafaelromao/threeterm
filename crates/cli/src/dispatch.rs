@@ -6279,7 +6279,7 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
         HostError::Validation { detail } => semantic_reference_diagnostic(detail)
-            .unwrap_or_else(|| Diagnostic::invalid_request(&detail)),
+            .unwrap_or_else(|| Diagnostic::invalid_request(detail)),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
         _ => Diagnostic::integrity_failure(&detail),

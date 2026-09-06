@@ -1423,6 +1423,14 @@ impl Host {
             });
         }
         let mut prior = Bundle::at(root).open()?;
+        let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
+        if !stale_features.is_empty() && !accept_stale_geometry {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: feature_id.to_string(),
+                active_revision: prior.history.active_snapshot().revision_id.clone(),
+                stale_features,
+            });
+        }
         let instance_export = prior.components.instances.contains_key(feature_id);
         let brep = if instance_export {
             component_instance_geometry_path(root, prior.revision_hash_hex(), feature_id)
@@ -1442,14 +1450,6 @@ impl Host {
         if !brep.is_file() && !instance_export {
             self.load_with_extrude_replay(root)?;
             prior = Bundle::at(root).open()?;
-        }
-        let stale_features = stale_last_valid_geometry_for_export(&prior.history, feature_id);
-        if !stale_features.is_empty() && !accept_stale_geometry {
-            return Err(HostError::StaleLastValidGeometry {
-                feature_id: feature_id.to_string(),
-                active_revision: prior.history.active_snapshot().revision_id.clone(),
-                stale_features,
-            });
         }
         let brep = if instance_export {
             component_instance_geometry_path(root, prior.revision_hash_hex(), feature_id)

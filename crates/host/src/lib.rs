@@ -5681,6 +5681,8 @@ impl Host {
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
         let mut replayed_paths: HashMap<String, PathBuf> = HashMap::with_capacity(intents.len());
+        let replay_stage = ReplayStage::create(root)?;
+        let replay_stage_root = replay_stage.root();
         for intent in intents {
             let expected_worker = expected_occt_worker_fingerprint();
             if intent.worker_requirements() != &expected_worker {
@@ -5942,15 +5944,51 @@ impl Host {
                     )?;
                     self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
                 }
-                CanonicalIntent::Fillet(_)
-                | CanonicalIntent::Chamfer(_)
-                | CanonicalIntent::Shell(_)
-                | CanonicalIntent::Draft(_)
-                | CanonicalIntent::Loft(_) => {
-                    return Err(HostError::Validation {
-                        detail: "finishing intent replay is unavailable in this path".to_string(),
-                    });
-                }
+                CanonicalIntent::Fillet(inner) => restore_replayed_finishing_geometry(
+                    root,
+                    replay_stage_root,
+                    &source_snapshot,
+                    &loaded,
+                    &replayed_paths,
+                    worker,
+                    FinishingReplayIntent::Fillet(inner.clone()),
+                )?,
+                CanonicalIntent::Chamfer(inner) => restore_replayed_finishing_geometry(
+                    root,
+                    replay_stage_root,
+                    &source_snapshot,
+                    &loaded,
+                    &replayed_paths,
+                    worker,
+                    FinishingReplayIntent::Chamfer(inner.clone()),
+                )?,
+                CanonicalIntent::Shell(inner) => restore_replayed_finishing_geometry(
+                    root,
+                    replay_stage_root,
+                    &source_snapshot,
+                    &loaded,
+                    &replayed_paths,
+                    worker,
+                    FinishingReplayIntent::Shell(inner.clone()),
+                )?,
+                CanonicalIntent::Draft(inner) => restore_replayed_finishing_geometry(
+                    root,
+                    replay_stage_root,
+                    &source_snapshot,
+                    &loaded,
+                    &replayed_paths,
+                    worker,
+                    FinishingReplayIntent::Draft(inner.clone()),
+                )?,
+                CanonicalIntent::Loft(inner) => restore_replayed_finishing_geometry(
+                    root,
+                    replay_stage_root,
+                    &source_snapshot,
+                    &loaded,
+                    &replayed_paths,
+                    worker,
+                    FinishingReplayIntent::Loft(inner.clone()),
+                )?,
             };
             replayed_paths.insert(feature_id.clone(), path.clone());
             feature_ids.push(feature_id);
@@ -11809,6 +11847,34 @@ fn rollback_replay_artifacts(
         }
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+fn restore_replayed_finishing_geometry(
+    root: &Path,
+    replay_stage_root: &Path,
+    source_snapshot: &SnapshotView,
+    loaded: &LoadedBundle,
+    replayed_paths: &HashMap<String, PathBuf>,
+    worker: &OcctWorker,
+    intent: FinishingReplayIntent,
+) -> Result<(PathBuf, String), HostError> {
+    let replayed = replay_finishing_geometry(
+        root,
+        replay_stage_root,
+        loaded,
+        replayed_paths,
+        worker,
+        intent,
+    )?;
+    let path = Bundle::at(root)
+        .restore_derived_brep_if_revision(
+            &replayed.feature_id,
+            &source_snapshot.revision_hash,
+            &replayed.bytes,
+        )
+        .map_err(HostError::from)?;
+    Ok((path, replayed.fingerprint))
 }
 
 #[allow(dead_code)]

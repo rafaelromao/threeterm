@@ -130,3 +130,35 @@ fn feature_timeline_reads_the_canonical_stream_without_publishing() {
 
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn feature_timeline_accepts_the_selected_canonical_feature_identity() {
+    let path = root("canonical-identity");
+    let bundle = Bundle::at(&path);
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("history-canonical-identity"),
+    )
+    .expect("fresh bundle");
+    let state = HistoryState::default();
+    let event = state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("history event");
+    bundle
+        .append_features_with_history(
+            &[
+                ("first", "bracket:length=10;width=5;height=3;thickness=1"),
+                ("first-plate-vertical", "plate-vertical"),
+            ],
+            &event,
+        )
+        .expect("canonical graph publishes");
+
+    let timeline = bundle
+        .feature_timeline("first")
+        .expect("canonical feature resolves to its real timeline");
+    assert_eq!(timeline.feature_id, "first");
+    assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
+
+    let _ = fs::remove_dir_all(path);
+}

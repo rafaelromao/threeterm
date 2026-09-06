@@ -107,7 +107,7 @@ fn portable_bracket_response(value: &Value) -> Value {
     let object = portable
         .as_object_mut()
         .expect("bracket response is an object");
-    for field in ["request_id", "brep_path"] {
+    for field in ["request_id", "generation_id", "brep_path"] {
         object.remove(field);
     }
     if let Some(derived) = object
@@ -244,6 +244,7 @@ struct EditedObservation {
     terminal_log_digest: String,
     worker_fingerprint: Value,
     transaction_shape: Value,
+    lifecycle: Value,
 }
 
 fn transaction_shape(root: &Path) -> Value {
@@ -282,6 +283,9 @@ fn viewport_shape(scene: &ViewportScene) -> Value {
 
 fn portable_export_response(value: &Value) -> Value {
     let mut portable = value.clone();
+    if let Some(object) = portable.as_object_mut() {
+        object.remove("generation_id");
+    }
     if let Some(artifacts) = portable["artifacts"].as_array_mut() {
         for artifact in artifacts {
             let path = artifact
@@ -299,6 +303,15 @@ fn portable_export_response(value: &Value) -> Value {
                 .expect("derived export artifact is an object")
                 .remove("request_id");
         }
+    }
+    portable
+}
+
+fn portable_edit_response(value: &Value) -> Value {
+    let mut portable = value.clone();
+    if let Some(object) = portable.as_object_mut() {
+        object.remove("request_id");
+        object.remove("generation_id");
     }
     portable
 }
@@ -462,6 +475,14 @@ fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
                 .kind
                 .starts_with("bracket:length=65")
         );
+        let lifecycle = json!({
+            "discard_open": portable_edit_response(&opened_discard),
+            "discard": portable_edit_response(&discarded),
+            "open": portable_edit_response(&opened),
+            "update": portable_edit_response(&updated),
+            "preview": portable_edit_response(&preview),
+            "commit": portable_edit_response(&commit),
+        });
         observations.push(EditedObservation {
             commit,
             brep_sha256: sha256_hex(&edited_brep),
@@ -474,6 +495,7 @@ fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
             worker_fingerprint: serde_json::to_value(&loaded.manifest.occt_worker)
                 .expect("worker fingerprint serializes"),
             transaction_shape: transaction_shape(session.root()),
+            lifecycle,
         });
         assert_eq!(created["operation"], "bracket");
     }
@@ -489,6 +511,7 @@ fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
             && observation.terminal_log_digest == observations[0].terminal_log_digest
             && observation.worker_fingerprint == observations[0].worker_fingerprint
             && observation.transaction_shape == observations[0].transaction_shape
+            && observation.lifecycle == observations[0].lifecycle
             && observation.commit["phase"] == "commit"
     }));
 

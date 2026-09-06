@@ -3881,7 +3881,7 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     fn as_error_transition(
-        &self,
+        &mut self,
         mut transition: StateTransition,
     ) -> Result<StateTransition, TuiDiagnostic> {
         let visual = transient_visuals()

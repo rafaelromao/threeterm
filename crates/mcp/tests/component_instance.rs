@@ -97,18 +97,13 @@ fn mcp_response(name: &str, arguments: Value) -> Value {
     serde_json::from_slice(&output.stdout).expect("MCP returns JSON")
 }
 
-#[test]
-fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
-    let root = bundle();
-    let root_text = root.to_string_lossy().into_owned();
+fn setup_captured_component(root: &PathBuf) {
     cli_command(
-        "define-component",
-        &root,
+        "bracket",
+        root,
         &[
-            "--definition-id",
+            "--bracket-id",
             "bracket",
-            "--feature-id",
-            "bracket-feature",
             "--length",
             "60",
             "--width",
@@ -117,6 +112,61 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
             "40",
             "--thickness",
             "3",
+        ],
+    );
+    cli_command(
+        "capture-component",
+        root,
+        &[
+            "--definition-id",
+            "bracket",
+            "--feature-id",
+            "bracket-base",
+            "--feature-id",
+            "bracket-bend",
+            "--feature-id",
+            "bracket-finish",
+            "--feature-id",
+            "bracket-independent-base",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
+    let root = bundle();
+    let root_text = root.to_string_lossy().into_owned();
+    cli_command(
+        "bracket",
+        &root,
+        &[
+            "--bracket-id",
+            "bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ],
+    );
+    cli_command(
+        "capture-component",
+        &root,
+        &[
+            "--definition-id",
+            "bracket",
+            "--feature-id",
+            "bracket-base",
+            "--feature-id",
+            "bracket-bend",
+            "--feature-id",
+            "bracket-finish",
+            "--feature-id",
+            "bracket-independent-base",
         ],
     );
     cli_command(
@@ -136,6 +186,10 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
         json!({"bundle_path":root_text,"instance_id":"second","definition_id":"bracket","transform":[10.0,0.0,0.0]}),
     );
     let before = cli_command("component-state", &root, &[]);
+    assert!(before["instances"]["first"]["geometry_digest"].is_string());
+    assert!(before["instances"]["second"]["geometry_digest"].is_string());
+    let first_geometry_before = before["instances"]["first"]["geometry_digest"].clone();
+    let second_geometry_before = before["instances"]["second"]["geometry_digest"].clone();
     let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
     let log_before = std::fs::read(root.join("transactions.log")).expect("log reads");
     let invalid = mcp_response(
@@ -157,6 +211,13 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
         "threeterm.command.transform-component-instance/1",
         json!({"bundle_path":root.to_string_lossy(),"instance_id":"second","transform":[0.0,0.0,90.0]}),
     );
+    let after_transform = cli_command("component-state", &root, &[]);
+    assert_ne!(
+        after_transform["instances"]["second"]["geometry_digest"],
+        second_geometry_before
+    );
+    let second_geometry_after_transform =
+        after_transform["instances"]["second"]["geometry_digest"].clone();
     mcp_command(
         "threeterm.command.make-component-independent/1",
         json!({"bundle_path":root.to_string_lossy(),"source_instance_id":"second","definition_id":"copy","instance_id":"copy-instance","feature_id":"copy-feature"}),
@@ -165,23 +226,185 @@ fn reusable_component_survives_cli_mcp_copy_edit_and_reopen() {
         "threeterm.command.edit-component-parameter/1",
         json!({"bundle_path":root.to_string_lossy(),"definition_id":"copy","parameter":"length","value":75.0}),
     );
-    let after = cli_command("component-state", &root, &[]);
+    let after_copy_edit = cli_command("component-state", &root, &[]);
     assert_eq!(
-        before["definitions"]["bracket"],
-        after["definitions"]["bracket"]
+        after_copy_edit["definitions"]["bracket"],
+        before["definitions"]["bracket"]
     );
-    assert_eq!(before["instances"]["first"], after["instances"]["first"]);
     assert_eq!(
-        after["instances"]["second"]["transform"],
+        after_copy_edit["instances"]["first"]["geometry_digest"],
+        first_geometry_before
+    );
+    assert_eq!(
+        after_copy_edit["instances"]["second"]["geometry_digest"],
+        second_geometry_after_transform
+    );
+    assert!(after_copy_edit["instances"]["copy-instance"]["geometry_digest"].is_string());
+    assert_ne!(
+        after_copy_edit["instances"]["copy-instance"]["geometry_digest"],
+        before["instances"]["second"]["geometry_digest"]
+    );
+
+    mcp_command(
+        "threeterm.command.edit-component-parameter/1",
+        json!({"bundle_path":root.to_string_lossy(),"definition_id":"bracket","parameter":"width","value":35.0}),
+    );
+    let after_shared_edit = cli_command("component-state", &root, &[]);
+    assert_eq!(
+        after_shared_edit["instances"]["second"]["transform"],
         json!([0.0, 0.0, 90.0])
     );
     assert_eq!(
-        after["instances"]["copy-instance"]["transform"],
+        after_shared_edit["instances"]["copy-instance"]["transform"],
         json!([0.0, 0.0, 90.0])
+    );
+    assert_ne!(
+        after_shared_edit["instances"]["first"]["geometry_digest"],
+        first_geometry_before
+    );
+    assert_ne!(
+        after_shared_edit["instances"]["second"]["geometry_digest"],
+        second_geometry_before
+    );
+    assert_eq!(
+        after_shared_edit["instances"]["copy-instance"]["geometry_digest"],
+        after_copy_edit["instances"]["copy-instance"]["geometry_digest"]
     );
     let reopened = cli_command("component-state", &root, &[]);
-    assert_eq!(reopened, after);
+    assert_eq!(reopened, after_shared_edit);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn cli_and_mcp_component_geometry_outcomes_match() {
+    let cli_root = bundle();
+    let mcp_root = bundle();
+    let mcp_root_text = mcp_root.to_string_lossy().into_owned();
+    setup_captured_component(&cli_root);
+    setup_captured_component(&mcp_root);
+
+    for (root, use_mcp) in [(&cli_root, false), (&mcp_root, true)] {
+        let root_text = root.to_string_lossy().into_owned();
+        if use_mcp {
+            mcp_command(
+                "threeterm.command.create-component-instance/1",
+                json!({"bundle_path":root_text,"instance_id":"first","definition_id":"bracket","transform":[0.0,0.0,0.0]}),
+            );
+            mcp_command(
+                "threeterm.command.create-component-instance/1",
+                json!({"bundle_path":root_text,"instance_id":"second","definition_id":"bracket","transform":[10.0,0.0,0.0]}),
+            );
+            mcp_command(
+                "threeterm.command.transform-component-instance/1",
+                json!({"bundle_path":root_text,"instance_id":"second","transform":[0.0,0.0,90.0]}),
+            );
+            mcp_command(
+                "threeterm.command.make-component-independent/1",
+                json!({"bundle_path":root_text,"source_instance_id":"second","definition_id":"copy","instance_id":"copy-instance","feature_id":"copy-feature"}),
+            );
+            mcp_command(
+                "threeterm.command.edit-component-parameter/1",
+                json!({"bundle_path":root_text,"definition_id":"copy","parameter":"length","value":75.0}),
+            );
+            mcp_command(
+                "threeterm.command.edit-component-parameter/1",
+                json!({"bundle_path":root_text,"definition_id":"bracket","parameter":"width","value":35.0}),
+            );
+        } else {
+            cli_command(
+                "create-component-instance",
+                root,
+                &[
+                    "--instance-id",
+                    "first",
+                    "--definition-id",
+                    "bracket",
+                    "--transform",
+                    "0,0,0",
+                ],
+            );
+            cli_command(
+                "create-component-instance",
+                root,
+                &[
+                    "--instance-id",
+                    "second",
+                    "--definition-id",
+                    "bracket",
+                    "--transform",
+                    "10,0,0",
+                ],
+            );
+            cli_command(
+                "transform-component-instance",
+                root,
+                &["--instance-id", "second", "--transform", "0,0,90"],
+            );
+            cli_command(
+                "make-component-independent",
+                root,
+                &[
+                    "--source-instance-id",
+                    "second",
+                    "--definition-id",
+                    "copy",
+                    "--instance-id",
+                    "copy-instance",
+                    "--feature-id",
+                    "copy-feature",
+                ],
+            );
+            cli_command(
+                "edit-component-parameter",
+                root,
+                &[
+                    "--definition-id",
+                    "copy",
+                    "--parameter",
+                    "length",
+                    "--value",
+                    "75",
+                ],
+            );
+            cli_command(
+                "edit-component-parameter",
+                root,
+                &[
+                    "--definition-id",
+                    "bracket",
+                    "--parameter",
+                    "width",
+                    "--value",
+                    "35",
+                ],
+            );
+        }
+    }
+
+    let cli_state = cli_command("component-state", &cli_root, &[]);
+    let mcp_state = mcp_command(
+        "threeterm.command.component-state/1",
+        json!({"bundle_path":mcp_root_text}),
+    );
+    assert_eq!(cli_state["definitions"], mcp_state["definitions"]);
+    for instance_id in ["first", "second", "copy-instance"] {
+        for field in [
+            "definition_id",
+            "transform",
+            "geometry_digest",
+            "geometry_revision",
+        ] {
+            assert_eq!(
+                cli_state["instances"][instance_id][field],
+                mcp_state["instances"][instance_id][field],
+                "CLI and MCP component {instance_id} {field} differ"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(cli_root);
+    let _ = std::fs::remove_dir_all(mcp_root);
 }
 
 #[test]

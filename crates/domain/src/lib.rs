@@ -1097,8 +1097,10 @@ impl ComponentGraph {
     pub fn apply(&mut self, command: &ComponentCommand) -> Result<(), String> {
         match command {
             ComponentCommand::Define { definition } => {
-                if definition.id.is_empty() || definition.descriptor.feature_id.is_empty() {
-                    return Err("component IDs must not be empty".to_string());
+                if !valid_component_identifier(&definition.id)
+                    || !valid_component_identifier(&definition.descriptor.feature_id)
+                {
+                    return Err("component IDs must be plain identifiers".to_string());
                 }
                 validate_selected_feature_ids(&definition.selected_feature_ids)?;
                 if ![
@@ -1174,9 +1176,9 @@ impl ComponentGraph {
                 let source = self.require_instance(source_instance_id)?.clone();
                 let mut definition = self.require_definition(&source.definition_id)?.clone();
                 if instance_id.is_empty()
-                    || !instance_id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                    || !valid_component_identifier(instance_id)
+                    || !valid_component_identifier(definition_id)
+                    || !valid_component_identifier(feature_id)
                     || definition_id == instance_id
                     || self.id_is_in_use(definition_id)
                     || self.id_is_in_use(instance_id)
@@ -1286,7 +1288,9 @@ impl ComponentGraph {
 }
 
 fn validate_selected_feature_ids(feature_ids: &[String]) -> Result<(), String> {
-    if feature_ids.iter().any(|feature_id| feature_id.is_empty())
+    if feature_ids
+        .iter()
+        .any(|feature_id| !valid_component_identifier(feature_id))
         || feature_ids.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(
@@ -1294,6 +1298,13 @@ fn validate_selected_feature_ids(feature_ids: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn valid_component_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 impl FeatureGraph {
@@ -1736,6 +1747,70 @@ mod tests {
                 },
             }),
             Err("component ID already exists".to_string())
+        );
+    }
+
+    #[test]
+    fn independent_copy_clones_definition_without_mutating_shared_instances() {
+        let mut graph = ComponentGraph::default();
+        graph
+            .apply(&ComponentCommand::Capture {
+                definition_id: "shared".to_string(),
+                selected_feature_ids: vec!["bracket-base".to_string()],
+                descriptor: LBracketDescriptor {
+                    feature_id: "shared-feature".to_string(),
+                    length: 60.0,
+                    width: 30.0,
+                    height: 40.0,
+                    thickness: 3.0,
+                },
+            })
+            .expect("shared definition is valid");
+        for (id, transform) in [("first", [0.0, 0.0, 0.0]), ("second", [10.0, 0.0, 90.0])] {
+            graph
+                .apply(&ComponentCommand::CreateInstance {
+                    instance: ComponentInstance {
+                        id: id.to_string(),
+                        definition_id: "shared".to_string(),
+                        transform,
+                    },
+                })
+                .expect("shared instance is valid");
+        }
+
+        graph
+            .apply(&ComponentCommand::MakeIndependent {
+                source_instance_id: "second".to_string(),
+                definition_id: "copy".to_string(),
+                instance_id: "copy-instance".to_string(),
+                feature_id: "copy-feature".to_string(),
+            })
+            .expect("independent copy is valid");
+        graph
+            .apply(&ComponentCommand::EditParameter {
+                definition_id: "copy".to_string(),
+                parameter: "length".to_string(),
+                value: 75.0,
+            })
+            .expect("copy edit is valid");
+
+        assert_eq!(graph.definitions["shared"].descriptor.length, 60.0);
+        assert_eq!(
+            graph.definitions["shared"].descriptor.feature_id,
+            "shared-feature"
+        );
+        assert_eq!(graph.instances["first"].definition_id, "shared");
+        assert_eq!(graph.instances["second"].definition_id, "shared");
+        assert_eq!(graph.instances["second"].transform, [10.0, 0.0, 90.0]);
+        assert_eq!(graph.definitions["copy"].descriptor.length, 75.0);
+        assert_eq!(
+            graph.definitions["copy"].descriptor.feature_id,
+            "copy-feature"
+        );
+        assert_eq!(graph.instances["copy-instance"].definition_id, "copy");
+        assert_eq!(
+            graph.instances["copy-instance"].transform,
+            [10.0, 0.0, 90.0]
         );
     }
 

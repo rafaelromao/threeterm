@@ -2,8 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use threeterm_domain::{
+    PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReattachmentOutcome, PlanarFaceReference,
     ProjectGeneration, SketchConstraint, SketchDiagnostic, SketchEntity, SketchPayload,
-    SolvedCoordinate,
+    SketchPlacement, SolvedCoordinate,
 };
 use threeterm_persistence::{Bundle, write_fresh};
 
@@ -44,6 +45,9 @@ fn failed_sketch_diagnostics_are_canonical_without_partial_coordinates() {
             constraint_ids: vec!["conflict".to_string()],
         }],
         solved_coordinates: None,
+        support: None,
+        placement: None,
+        reattachment_outcome: None,
     };
     let before = bundle.open().expect("open baseline");
     bundle
@@ -106,6 +110,32 @@ fn solved_sketch_is_canonical_and_replays_after_reload() {
                 y: 0.0,
             },
         ]),
+        support: Some(PlanarFaceReference {
+            semantic_id: "bracket/vertical-face".to_string(),
+            provenance: PlanarFaceProvenance {
+                source_feature_id: "bracket".to_string(),
+                source_revision_id: "revision-0".to_string(),
+                source_face_id: "bracket/vertical-face".to_string(),
+            },
+            role: "sketch-support".to_string(),
+            evidence: PlanarFaceEvidence {
+                topology_kind: "planar_face".to_string(),
+                origin: [0.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 0.0, -1.0],
+                adjacent_feature_ids: Vec::new(),
+            },
+        }),
+        placement: Some(SketchPlacement {
+            origin: [0.0, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, -1.0],
+        }),
+        reattachment_outcome: Some(PlanarFaceReattachmentOutcome::Resolved {
+            semantic_id: "bracket/vertical-face".to_string(),
+        }),
     };
     let before = bundle.open().expect("open baseline");
     let committed = bundle

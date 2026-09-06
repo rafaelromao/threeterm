@@ -20,6 +20,7 @@ notice = "NOTICE"
 source_offer = "SOURCE-OFFER.txt"
 
 [dependencies]
+threeterm-domain = { path = "../../domain" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

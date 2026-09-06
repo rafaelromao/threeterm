@@ -1,3 +1,6 @@
+use threeterm_domain::{
+    PlanarFaceEvidence, PlanarFaceProvenance, PlanarFaceReference, SketchPlacement,
+};
 use threeterm_slvs_worker::{SketchConstraint, SketchEntity, SketchSolveRequest, SlvsWorker};
 
 fn rectangle(request_id: &str) -> SketchSolveRequest {
@@ -74,4 +77,66 @@ fn pinned_libslvs_worker_solves_a_rectangle_with_stable_ids() {
     );
     assert!(result.related_constraint_ids.is_empty());
     assert_eq!(result.solved_coordinates.as_ref().map(Vec::len), Some(4));
+}
+
+#[test]
+fn pinned_libslvs_worker_reports_attached_failure_diagnostics_without_coordinates() {
+    let worker = match SlvsWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+                panic!(
+                    "{{\"code\":\"worker_unavailable\",\"worker\":\"libslvs\",\"detail\":\"{error}\"}}"
+                );
+            }
+            eprintln!("libslvs integration skipped: no configured worker binary: {error}");
+            return;
+        }
+    };
+    let support = PlanarFaceReference {
+        semantic_id: "solid/vertical-face".into(),
+        provenance: PlanarFaceProvenance {
+            source_feature_id: "solid".into(),
+            source_revision_id: "solid-revision".into(),
+            source_face_id: "solid/vertical-face".into(),
+        },
+        role: "sketch-support".into(),
+        evidence: PlanarFaceEvidence {
+            topology_kind: "planar_face".into(),
+            origin: [0.0, 2.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, -1.0],
+            adjacent_feature_ids: vec!["solid/bend".into()],
+        },
+    };
+    let placement = SketchPlacement {
+        origin: [0.0, 2.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 0.0, -1.0],
+    };
+    let request = SketchSolveRequest::new(
+        "real-attached-underconstrained",
+        "attached-sketch",
+        vec![SketchEntity::Point {
+            id: "p0".into(),
+            x: 0.0,
+            y: 0.0,
+        }],
+        Vec::new(),
+    )
+    .with_source_revision("solid-revision")
+    .with_attachment(support.clone(), placement);
+    let result = worker
+        .solve(&request)
+        .expect("real libslvs worker reports underconstraint");
+    assert_eq!(result.status, "underconstrained");
+    assert!(result.dof > 0);
+    assert!(result.related_constraint_ids.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(result.diagnostics[0].code, "solver_underconstrained");
+    assert!(result.solved_coordinates.is_none());
+    assert_eq!(result.support, Some(support));
+    assert_eq!(result.placement, Some(placement));
 }

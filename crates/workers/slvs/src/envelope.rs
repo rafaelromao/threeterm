@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use threeterm_domain::{PlanarFaceReference, SketchPlacement};
 
 pub const SCHEMA_VERSION: &str = "threeterm.workers.slvs/1";
 pub const OPERATION: &str = "sketch_solve";
@@ -76,6 +77,10 @@ pub struct SketchSolveRequest {
     pub source_revision: String,
     pub entities: Vec<SketchEntity>,
     pub constraints: Vec<SketchConstraint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<PlanarFaceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<SketchPlacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +107,7 @@ pub struct SketchSolveResponse {
     pub request_id: String,
     pub operation: String,
     pub feature_id: String,
+    pub source_revision: String,
     pub status: String,
     pub dof: i32,
     pub entity_ids: Vec<String>,
@@ -109,6 +115,12 @@ pub struct SketchSolveResponse {
     pub diagnostics: Vec<SketchDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solved_coordinates: Option<Vec<SolvedCoordinate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<PlanarFaceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<SketchPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reattachment_outcome: Option<String>,
 }
 
 impl SketchSolveRequest {
@@ -126,11 +138,23 @@ impl SketchSolveRequest {
             source_revision: String::new(),
             entities,
             constraints,
+            support: None,
+            placement: None,
         }
     }
 
     pub fn with_source_revision(mut self, revision: impl Into<String>) -> Self {
         self.source_revision = revision.into();
+        self
+    }
+
+    pub fn with_attachment(
+        mut self,
+        support: PlanarFaceReference,
+        placement: SketchPlacement,
+    ) -> Self {
+        self.support = Some(support);
+        self.placement = Some(placement);
         self
     }
 
@@ -198,6 +222,18 @@ impl SketchSolveRequest {
                 return Err(format!("constraint {} value must be finite", constraint.id));
             }
         }
+        if self.support.is_some() != self.placement.is_some() {
+            return Err("sketch support and placement must be provided together".to_string());
+        }
+        if let Some(support) = &self.support {
+            support
+                .validate_placement(
+                    self.placement
+                        .as_ref()
+                        .expect("support and placement presence checked"),
+                )
+                .map_err(|detail| format!("invalid sketch attachment: {detail}"))?;
+        }
         Ok(())
     }
 }
@@ -212,6 +248,7 @@ impl SketchSolveResponse {
             || self.request_id != request.request_id
             || self.operation != OPERATION
             || self.feature_id != request.feature_id
+            || self.source_revision != request.source_revision
         {
             return Err("worker response identity does not match the request".to_string());
         }
@@ -233,6 +270,22 @@ impl SketchSolveResponse {
         }
         if self.status != "solved" && self.solved_coordinates.is_some() {
             return Err("failed worker response must not include coordinates".to_string());
+        }
+        if self.support.is_some() != self.placement.is_some() {
+            return Err(
+                "worker response support and placement must be provided together".to_string(),
+            );
+        }
+        if self.support != request.support || self.placement != request.placement {
+            return Err("worker response attachment does not match the request".to_string());
+        }
+        if let (Some(support), Some(placement)) = (&self.support, &self.placement)
+            && (support.evidence.origin != placement.origin
+                || support.evidence.normal != placement.normal
+                || support.evidence.x_axis != placement.x_axis
+                || support.evidence.y_axis != placement.y_axis)
+        {
+            return Err("worker response placement does not match support frame".to_string());
         }
         if self.entity_ids
             != request

@@ -25,4 +25,7 @@ path = "src/main.rs"
 workspace = true
 
 [dev-dependencies]
+threeterm-domain = { path = "../domain" }
 threeterm-tui = { path = "../tui" }
+threeterm-slvs-worker = { path = "../workers/slvs" }
+threeterm-viewport = { path = "../viewport" }

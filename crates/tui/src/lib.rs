@@ -3299,10 +3299,21 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "[focus-glyph] Pick ignored while command input is active".to_string(),
             ));
         }
-        if matches!(input, TerminalInput::Arrow(_)) && !self.command_input_active() {
+        if let TerminalInput::Arrow(key) = input
+            && !self.command_input_active()
+        {
             let outcome = self.process_terminal_input(bytes)?;
+            let direction = match key {
+                ArrowKey::Up => "up",
+                ArrowKey::Down => "down",
+                ArrowKey::Left => "left",
+                ArrowKey::Right => "right",
+            };
             return Ok(KeyboardInputOutcome {
-                overlay: outcome.rendered.overlay.clone(),
+                overlay: format!(
+                    "{}\n[motion-trail] Orbit {direction}",
+                    outcome.rendered.overlay
+                ),
                 rendered: Some(outcome.rendered),
                 submission: Some(outcome.submission),
             });

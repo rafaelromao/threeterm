@@ -421,6 +421,28 @@ fn production_keyboard_pan_and_zoom_submit_current_camera_requests() {
 }
 
 #[test]
+fn production_keyboard_orbit_has_a_non_color_motion_acknowledgement() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let orbit = session
+        .process_keyboard_input(b"\x1b[C", &host, &root)
+        .expect("right arrow orbits the production viewport");
+
+    assert_eq!(session.camera().yaw_degrees, 5);
+    assert!(orbit.overlay.contains("[motion-trail] Orbit"));
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn production_pick_validates_semantic_candidates_before_selection() {
     let root = temporary_bundle_root();
     let host = Host::new();

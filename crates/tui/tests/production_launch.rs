@@ -9,7 +9,7 @@ use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch,
 };
-use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment};
+use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment, parse_ack};
 
 #[derive(Debug, Default)]
 struct ScriptedTerminal {
@@ -17,6 +17,7 @@ struct ScriptedTerminal {
     probe_response: Option<Vec<u8>>,
     events: Vec<Vec<u8>>,
     queued_events: Vec<Vec<u8>>,
+    read_events: Vec<Vec<u8>>,
     events_read: usize,
     replayed_probe_input: Vec<u8>,
     prepare_fails: bool,
@@ -28,6 +29,8 @@ struct ScriptedTerminal {
     panic_after_events: bool,
     fail_writes_on_read: Option<usize>,
     write_failures_remaining: usize,
+    prepare_calls: usize,
+    restore_calls: usize,
 }
 
 impl Write for ScriptedTerminal {
@@ -89,6 +92,7 @@ impl InteractiveTerminal for ScriptedTerminal {
             .pop()
             .or_else(|| self.events.pop())
             .unwrap_or_default();
+        self.read_events.push(event.clone());
         if self.fail_writes_on_read == Some(self.events_read) {
             self.write_failures_remaining = 1;
         }
@@ -118,6 +122,7 @@ impl InteractiveTerminal for ScriptedTerminal {
     }
 
     fn prepare(&mut self) -> io::Result<()> {
+        self.prepare_calls += 1;
         if self.prepare_fails {
             Err(io::Error::other("injected setup failure"))
         } else {
@@ -126,6 +131,7 @@ impl InteractiveTerminal for ScriptedTerminal {
     }
 
     fn restore(&mut self) -> io::Result<()> {
+        self.restore_calls += 1;
         if self.restore_fails {
             Err(io::Error::other("injected restore failure"))
         } else {
@@ -702,6 +708,153 @@ fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
 
     std::fs::remove_dir_all(root).expect("project is removed");
     std::fs::remove_dir_all(headless_root).expect("headless project is removed");
+}
+
+#[test]
+fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("keyboard-first modeling requires OCCT worker: {error}")
+        }
+        Err(error) => {
+            eprintln!("keyboard-first modeling: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    drop(worker);
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-keyboard-first-modeling-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("keyboard-first seed project persists");
+    let before = host.identity(&root).expect("seed identity reads");
+    let manifest_before = fs::read(root.join("manifest.json")).expect("seed manifest reads");
+    let log_before = fs::read(root.join("transactions.log")).expect("seed log reads");
+    let request = br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+
+    let mut events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ]);
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\r".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b[C".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"w".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("keyboard-only production workflow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, before.transaction_count + 1);
+    assert_ne!(identity.revision_hash, before.revision_hash);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    for acknowledgement in [
+        "[outline] Command Palette",
+        "[selection-glyph]",
+        "feature-a",
+        "[outline] Draft: extrude",
+        "[dashed-outline] Preview: extrude",
+        "[selection-glyph] Commit: extrude",
+        "[cancellation-glyph] Cancellation: command draft discarded",
+        "[motion-trail] Orbit",
+        "[motion-trail] Pan up",
+        "[motion-trail] Zoom in",
+    ] {
+        assert!(
+            output.contains(acknowledgement),
+            "missing acknowledgement: {acknowledgement}"
+        );
+    }
+    assert!(
+        output.contains("a=d,d=I,i=6"),
+        "normal close deletes the latest active Kitty image"
+    );
+    assert!(
+        output.contains("?1049l"),
+        "normal close exits alternate screen"
+    );
+    assert!(
+        output.contains("?1016l"),
+        "normal close disables pixel mouse reporting"
+    );
+    assert!(
+        output.contains("\x1b[0m"),
+        "normal close resets terminal attributes"
+    );
+    assert_eq!(terminal.prepare_calls, 1);
+    assert_eq!(terminal.restore_calls, 1);
+
+    let acknowledgement_ids = terminal
+        .read_events
+        .iter()
+        .filter_map(|event| parse_ack(event).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        terminal
+            .writes
+            .windows(b"a=T,t=d".len())
+            .filter(|window| *window == b"a=T,t=d")
+            .count(),
+        acknowledgement_ids.len(),
+        "every submitted production frame receives exactly one acknowledgement"
+    );
+    assert!(
+        terminal.read_events.iter().all(|event| !matches!(
+            decode_terminal_input(event),
+            Some(
+                TerminalInput::Pick { .. }
+                    | TerminalInput::PointerPressed { .. }
+                    | TerminalInput::PointerMoved { .. }
+                    | TerminalInput::PointerReleased { .. }
+            )
+        )),
+        "keyboard-first workflow does not depend on mouse or pick events"
+    );
+
+    let committed_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let committed_log = fs::read(root.join("transactions.log")).expect("log reads");
+    assert_ne!(committed_manifest, manifest_before);
+    assert_ne!(committed_log, log_before);
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

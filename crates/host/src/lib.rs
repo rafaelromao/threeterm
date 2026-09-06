@@ -5145,12 +5145,12 @@ impl Host {
             .as_ref()
             .map(|target| canonical_graph_compensation(&loaded.graph, target))
             .unwrap_or_default();
-        let staged = if restore_graph.is_some() {
+        let staged = if let Some(target_graph) = restore_graph.as_ref() {
             self.stage_target_bracket_families_for_restore(
                 root,
                 loaded.history.active_snapshot(),
                 &event.active,
-                restore_graph.as_ref().expect("restore graph is present"),
+                target_graph,
                 &expected_revision,
             )?
         } else {
@@ -15001,16 +15001,17 @@ mod tests {
         host.save_bracket(&root, "second", 8.0, 4.0, 2.0, 1.0)
             .expect("divergent bracket persists");
         assert!(
-            host.load(&root)
+            !host
+                .load(&root)
                 .expect("current graph loads")
                 .feature_graph_hash
-                != ""
+                .is_empty()
         );
 
         host.restore_named_revision(&root, "first-plate-vertical", "before-second")
             .expect("canonical identity restores the named revision");
         let restored = host.load(&root).expect("restored graph loads");
-        assert!(restored.feature_graph_hash != "");
+        assert!(!restored.feature_graph_hash.is_empty());
         let loaded = Bundle::at(&root).open().expect("restored bundle opens");
         assert!(loaded.graph.contains_feature("first-plate-vertical"));
         assert!(!loaded.graph.contains_feature("second"));

@@ -946,15 +946,18 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
     host.create_named_revision(&root, "before-edit")
         .expect("named revision persists");
 
-    let mut session = TuiSession::new([FeatureTarget::new("l-base", "base")], "history-revision-2");
+    let mut session = TuiSession::new(
+        [FeatureTarget::new("l-plate-vertical", "plate")],
+        "history-revision-2",
+    );
     session
         .transition_selection(SelectionEvent::Nominate {
-            candidates: vec!["l-base".to_string()],
+            candidates: vec!["l-plate-vertical".to_string()],
         })
         .expect("feature nominates");
     session
         .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-            stable_ids: vec!["l-base".to_string()],
+            stable_ids: vec!["l-plate-vertical".to_string()],
         }))
         .expect("feature selects");
     session
@@ -966,7 +969,7 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
             .feature_timeline
             .as_ref()
             .map(|timeline| timeline.feature_id.as_str()),
-        Some("l-base")
+        Some("l-plate-vertical")
     );
     let timeline = session.state().feature_timeline.expect("timeline state");
     assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");

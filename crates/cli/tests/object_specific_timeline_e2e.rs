@@ -133,6 +133,12 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
             .expect("create revision entry")["named_revision_names"],
         serde_json::json!(["before-second"])
     );
+    let canonical_timeline = timeline(bin, &root, "first");
+    assert_eq!(canonical_timeline["feature_id"], "first");
+    assert_eq!(
+        canonical_timeline["revisions"],
+        created_timeline["revisions"]
+    );
     let manifest_before_rejection = fs::read(root.join("manifest.json")).expect("manifest");
     let log_before_rejection = fs::read(root.join("transactions.log")).expect("log");
     for (name, code) in [
@@ -281,7 +287,7 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
             "restore-revision",
             root.to_str().expect("utf-8 path"),
             "--feature-id",
-            "first-base",
+            "first",
             "--name",
             "before-second",
         ],

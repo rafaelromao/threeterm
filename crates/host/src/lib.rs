@@ -14,7 +14,10 @@ use threeterm_domain::{
     SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
-    history::{HistoryEvaluation, HistorySnapshot, HistoryState, HistoryStatus, HistoryTimeline},
+    history::{
+        HistoryEvaluation, HistoryOperation, HistorySnapshot, HistoryState, HistoryStatus,
+        HistoryTimeline,
+    },
     resolve_edge_reference, resolve_planar_face_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
@@ -808,6 +811,74 @@ fn history_status_name(status: HistoryStatus) -> &'static str {
         HistoryStatus::BlockedByFailure => "blocked-by-failure",
         HistoryStatus::Suppressed => "suppressed",
     }
+}
+
+fn annotate_named_revision_positions(
+    mut event: threeterm_domain::history::HistoryEvent,
+    prior: &HistoryState,
+    canonical_log_position: usize,
+) -> threeterm_domain::history::HistoryEvent {
+    for (name, revision) in &mut event.named_revisions {
+        if !prior.named_revisions().contains_key(name) {
+            revision.canonical_log_position = Some(canonical_log_position as u64);
+        }
+    }
+    event
+}
+
+fn restore_target_graph(
+    bundle: &Bundle,
+    loaded: &LoadedBundle,
+    event: &threeterm_domain::history::HistoryEvent,
+) -> Result<Option<FeatureGraph>, HostError> {
+    let HistoryOperation::RestoreNamedRevision { name, .. } = &event.operation else {
+        return Ok(None);
+    };
+    let revision =
+        loaded
+            .history
+            .named_revisions()
+            .get(name)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("named revision not found: {name}"),
+            })?;
+    let position = revision
+        .canonical_log_position
+        .or(bundle.legacy_named_revision_log_position(name)?)
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("named revision has no canonical log position: {name}"),
+        })?;
+    Ok(Some(
+        bundle.canonical_state_at_log_position(position)?.graph,
+    ))
+}
+
+fn canonical_graph_compensation(
+    current: &FeatureGraph,
+    target: &FeatureGraph,
+) -> Vec<(String, String)> {
+    let current = current
+        .features()
+        .map(|feature| (feature.id.as_str().to_string(), feature.kind.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let target = target
+        .features()
+        .map(|feature| (feature.id.as_str().to_string(), feature.kind.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let mut entries = Vec::new();
+    for feature_id in current.keys().filter(|id| !target.contains_key(*id)) {
+        entries.push((feature_id.clone(), "apply-remove/1".to_string()));
+    }
+    for (feature_id, kind) in &target {
+        match current.get(feature_id) {
+            None => entries.push((feature_id.clone(), format!("apply-add/1:{kind}"))),
+            Some(current_kind) if current_kind != kind => {
+                entries.push((feature_id.clone(), format!("apply-set/1:{kind}")));
+            }
+            Some(_) => {}
+        }
+    }
+    entries
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4995,6 +5066,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
+        let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
         self.commit_history_event_with_geometry(root, "historical-edit", event, Some(evaluation))
     }
 
@@ -5021,6 +5093,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
+        let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
         self.commit_history_event_with_geometry(root, "undo", event, None)
     }
 
@@ -5035,6 +5108,7 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
+        let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
         self.commit_history_event_with_geometry(root, "redo", event, None)
     }
 
@@ -5062,14 +5136,78 @@ impl Host {
         let loaded = bundle.open()?;
         let expected_revision = loaded.revision_hash_hex().to_string();
         let ordinal = loaded.history.event_ordinal() + 1;
-        let staged = self.stage_changed_bracket_families(
-            root,
-            loaded.history.active_snapshot(),
-            &event.active,
-            &expected_revision,
-        )?;
-        let updated = if staged.is_empty() {
-            bundle.append_features_with_history(&[], &event)?
+        let restore_graph = restore_target_graph(&bundle, &loaded, &event)?;
+        let graph_entries = restore_graph
+            .as_ref()
+            .map(|target| canonical_graph_compensation(&loaded.graph, target))
+            .unwrap_or_default();
+        let staged = if let Some(target_graph) = restore_graph.as_ref() {
+            self.stage_target_bracket_families_for_restore(
+                root,
+                loaded.history.active_snapshot(),
+                &event.active,
+                target_graph,
+                &expected_revision,
+            )?
+        } else {
+            self.stage_changed_bracket_families(
+                root,
+                loaded.history.active_snapshot(),
+                &event.active,
+                &expected_revision,
+            )?
+        };
+        let updated = if restore_graph.is_some() {
+            let mut entries = graph_entries;
+            for staged_family in &staged {
+                let kind = bracket_kind(&staged_family.request);
+                if !entries
+                    .iter()
+                    .any(|(feature_id, _)| feature_id == &staged_family.family)
+                {
+                    entries.push((staged_family.family.clone(), format!("apply-set/1:{kind}")));
+                }
+            }
+            let entry_refs = entries
+                .iter()
+                .map(|(feature_id, kind)| (feature_id.as_str(), kind.as_str()))
+                .collect::<Vec<_>>();
+            let brep_refs = staged
+                .iter()
+                .map(|family| (family.family.as_str(), family.bytes.as_slice()))
+                .collect::<Vec<_>>();
+            if staged.is_empty() {
+                if entry_refs.is_empty() {
+                    bundle.append_features_with_history(&[], &event)?
+                } else {
+                    bundle.append_features_with_history_if_revision(
+                        &entry_refs,
+                        &expected_revision,
+                        &event,
+                    )?
+                }
+            } else {
+                bundle.append_features_with_breps_if_revision_and_history(
+                    &entry_refs,
+                    &brep_refs,
+                    &expected_revision,
+                    &event,
+                )?
+            }
+        } else if staged.is_empty() {
+            if graph_entries.is_empty() {
+                bundle.append_features_with_history(&[], &event)?
+            } else {
+                let entries = graph_entries
+                    .iter()
+                    .map(|(feature_id, kind)| (feature_id.as_str(), kind.as_str()))
+                    .collect::<Vec<_>>();
+                bundle.append_features_with_history_if_revision(
+                    &entries,
+                    &expected_revision,
+                    &event,
+                )?
+            }
         } else {
             let key = format!("history-{operation}-{ordinal}");
             let kinds = staged
@@ -5106,6 +5244,13 @@ impl Host {
                 &event,
             )?
         };
+        if let Some(target) = &restore_graph {
+            for feature in loaded.graph.features() {
+                if !target.contains_feature(feature.id.as_str()) {
+                    let _ = fs::remove_file(committed_brep_path(root, feature.id.as_str()));
+                }
+            }
+        }
         let snapshot = SnapshotView::from(&updated);
         let history = updated.history.clone();
         self.current.replace(Some(updated));
@@ -5114,6 +5259,85 @@ impl Host {
             history,
             evaluation,
         })
+    }
+
+    /// Rebuild every target bracket family whose parameters changed or whose
+    /// disposable BREP is missing. Restore cannot rely on the displaced
+    /// generation's Derived Results being present.
+    fn stage_target_bracket_families_for_restore(
+        &self,
+        root: &Path,
+        _before: &HistorySnapshot,
+        after: &HistorySnapshot,
+        target_graph: &FeatureGraph,
+        source_revision: &str,
+    ) -> Result<Vec<StagedBracketFamily>, HostError> {
+        let mut worker = None;
+        let mut staged = Vec::new();
+        for family in bracket_family_ids(after) {
+            if !target_graph.contains_feature(&family) {
+                continue;
+            }
+            let Some(params) = bracket_family_params(after, &family) else {
+                continue;
+            };
+            if !bracket_family_is_current(after, &family) {
+                continue;
+            }
+            let stage = preview_stage_path(root, &format!("history-restore-{family}"));
+            fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+                detail: format!("create restore recompute stage failed: {error}"),
+            })?;
+            let request = BracketRequest::new(
+                threeterm_occt_worker::new_request_id(),
+                params.length,
+                params.width,
+                params.height,
+                params.thickness,
+            )
+            .with_feature_id(&family)
+            .with_output_path(&stage, "restore.brep");
+            request
+                .validate()
+                .map_err(|detail| HostError::Validation { detail })?;
+            let worker = worker.get_or_insert(OcctWorker::locate().map_err(HostError::from)?);
+            let result = match worker
+                .clone()
+                .with_revision_id(source_revision.to_string())
+                .bracket(&request)
+            {
+                Ok(result) if result.is_success() => result,
+                Ok(result) => {
+                    remove_preview_stage(&stage);
+                    return Err(HostError::BrepInvalid {
+                        request_id: Some(request.request_id.clone()),
+                        detail: format!("restore recompute returned status {}", result.status),
+                    });
+                }
+                Err(error) => {
+                    remove_preview_stage(&stage);
+                    return Err(error.into());
+                }
+            };
+            let bytes = match read_verified_worker_brep(&result) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    remove_preview_stage(&stage);
+                    return Err(error);
+                }
+            };
+            let result_sha256 = result.brep_sha256.clone();
+            remove_preview_stage(&stage);
+            staged.push(StagedBracketFamily {
+                family,
+                request,
+                bytes,
+                result_sha256,
+                source_brep_sha256: String::new(),
+                source_revision: source_revision.to_string(),
+            });
+        }
+        Ok(staged)
     }
 
     /// Run the production bracket worker for every committed family whose
@@ -5236,7 +5460,13 @@ impl Host {
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
-        let updated = match bundle.append_features_with_history(&[], &event) {
+        let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
+        let expected_revision = loaded.revision_hash_hex().to_string();
+        let updated = match bundle.append_features_with_history_if_revision(
+            &[],
+            &expected_revision,
+            &event,
+        ) {
             Ok(loaded) => loaded,
             Err(error) => {
                 // Publication can promote before its final parent sync
@@ -5267,12 +5497,14 @@ impl Host {
         let root = root.as_ref();
         let bundle = Bundle::at(root);
         let loaded = bundle.open()?;
+        let history_feature_id = loaded.resolve_history_feature_id(feature_id)?;
         let event = loaded
             .history
-            .restore_named_revision_for_feature(feature_id, name)
+            .restore_named_revision_for_feature(&history_feature_id, name)
             .map_err(|error| HostError::Validation {
                 detail: error.to_string(),
             })?;
+        let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
         self.commit_history_event_with_geometry(root, "restore-revision", event, None)
     }
 
@@ -14750,6 +14982,94 @@ mod tests {
                 .revision_id,
             "history-revision-2"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restoring_a_named_revision_restores_the_canonical_selected_graph() {
+        let root = temp_root("restore-canonical-graph");
+        let host = Host::new();
+        host.save_bracket(&root, "first", 10.0, 5.0, 3.0, 1.0)
+            .expect("first bracket persists");
+        host.create_named_revision(&root, "before-second")
+            .expect("named revision persists");
+        host.save_bracket(&root, "second", 8.0, 4.0, 2.0, 1.0)
+            .expect("divergent bracket persists");
+        assert!(
+            !host
+                .load(&root)
+                .expect("current graph loads")
+                .feature_graph_hash
+                .is_empty()
+        );
+
+        host.restore_named_revision(&root, "first-plate-vertical", "before-second")
+            .expect("canonical identity restores the named revision");
+        let restored = host.load(&root).expect("restored graph loads");
+        assert!(!restored.feature_graph_hash.is_empty());
+        let loaded = Bundle::at(&root).open().expect("restored bundle opens");
+        assert!(loaded.graph.contains_feature("first-plate-vertical"));
+        assert!(!loaded.graph.contains_feature("second"));
+        assert!(
+            !loaded
+                .history
+                .active_snapshot()
+                .features
+                .contains_key("second-base")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn divergent_work_after_undo_preserves_and_restores_the_canonical_future() {
+        let root = temp_root("divergent-future");
+        let host = Host::new();
+        host.save_bracket(&root, "first", 10.0, 5.0, 3.0, 1.0)
+            .expect("first bracket persists");
+        host.save_bracket(&root, "second", 8.0, 4.0, 2.0, 1.0)
+            .expect("second bracket persists");
+        host.undo(&root).expect("undo preserves the future");
+        let preserved = "recovered-before-undo-3";
+        assert!(
+            host.history(&root)
+                .expect("history opens after undo")
+                .named_revisions()
+                .contains_key(preserved)
+        );
+        host.save_bracket(&root, "third", 7.0, 3.0, 2.0, 1.0)
+            .expect("divergent work persists");
+        let before_restore = Bundle::at(&root).open().expect("pre-restore bundle opens");
+        assert!(
+            before_restore
+                .graph
+                .contains_feature("second-plate-vertical")
+        );
+        assert!(
+            before_restore
+                .history
+                .named_revisions()
+                .contains_key(preserved)
+        );
+        assert!(
+            before_restore.history.named_revisions()[preserved]
+                .snapshot
+                .features
+                .contains_key("second-base")
+        );
+        assert_eq!(
+            host.timeline(&root, "second-plate-vertical")
+                .expect("timeline opens for a preserved canonical object")
+                .timeline
+                .feature_id,
+            "second-plate-vertical"
+        );
+        host.restore_named_revision(&root, "second-plate-vertical", preserved)
+            .expect("preserved future restores through canonical identity");
+        let loaded = Bundle::at(&root).open().expect("restored bundle opens");
+        assert!(loaded.graph.contains_feature("second-plate-vertical"));
+        assert!(!loaded.graph.contains_feature("third-plate-vertical"));
 
         let _ = std::fs::remove_dir_all(root);
     }

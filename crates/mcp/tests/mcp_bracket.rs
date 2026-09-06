@@ -1029,6 +1029,23 @@ fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
     assert_eq!(timeline["revisions"][0]["ordinal"], 1);
     assert_eq!(timeline["revisions"][0]["status"], "current-valid");
 
+    let canonical_timeline = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.timeline/1",
+            "arguments": {
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": "l-1"
+            }
+        }
+    })]);
+    assert_eq!(
+        canonical_timeline[0]["result"]["structuredContent"]["feature_id"],
+        "l-1"
+    );
+
     let named = Command::new(threeterm_binary())
         .args(["--machine", "create-revision"])
         .arg(&root)
@@ -1044,7 +1061,7 @@ fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
             "name": "threeterm.command.restore-revision/1",
             "arguments": {
                 "bundle_path": root.to_string_lossy(),
-                "feature_id": "l-1-base",
+                "feature_id": "l-1",
                 "name": "before-restore"
             }
         }

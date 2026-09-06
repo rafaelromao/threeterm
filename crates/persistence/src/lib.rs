@@ -2061,8 +2061,45 @@ impl LoadedBundle {
     }
 
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
-        project_feature_timeline(&self.history_events, feature_id)
-            .map_err(|error| BundleError::Invalid(error.to_string()))
+        let history_feature_id = self.resolve_history_feature_id(feature_id)?;
+        let mut timeline = project_feature_timeline(&self.history_events, &history_feature_id)
+            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+        // History events retain their role-level IDs for persisted replay, but
+        // callers must see the canonical identity they selected.
+        timeline.feature_id = feature_id.to_string();
+        Ok(timeline)
+    }
+
+    /// Resolve a public canonical graph identity to the persisted history
+    /// feature that owns its object timeline. Direct history IDs remain
+    /// readable for old bundles and headless callers.
+    pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
+        if project_feature_timeline(&self.history_events, feature_id).is_ok() {
+            return Ok(feature_id.to_string());
+        }
+        if !self.graph.contains_feature(feature_id) {
+            return Err(BundleError::Invalid(format!(
+                "history feature not found: {feature_id}"
+            )));
+        }
+        let family = feature_id
+            .strip_suffix("-plate-vertical")
+            .or_else(|| feature_id.strip_suffix("-plate-horizontal"))
+            .unwrap_or(feature_id);
+        let history_feature_id = format!("{family}-base");
+        if project_feature_timeline(&self.history_events, &history_feature_id).is_ok()
+            || self
+                .history
+                .named_revisions()
+                .values()
+                .any(|revision| revision.snapshot.features.contains_key(&history_feature_id))
+        {
+            Ok(history_feature_id)
+        } else {
+            Err(BundleError::Invalid(format!(
+                "history feature not found: {feature_id}"
+            )))
+        }
     }
 }
 
@@ -2811,6 +2848,27 @@ impl Bundle {
         })
     }
 
+    /// Publish a history event and its canonical graph compensation only if
+    /// the caller is still operating on the same sealed generation.
+    pub fn append_features_with_history_if_revision(
+        &self,
+        entries: &[(&str, &str)],
+        expected_revision: &str,
+        event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                entries,
+                Some(expected_revision),
+                &[],
+                &[],
+                None,
+                None,
+                Some(event),
+            )
+        })
+    }
+
     /// Replay the authenticated history event stream twice without touching
     /// the bundle. The two states are independent materializations used by
     /// the host's determinism verification boundary.
@@ -2819,6 +2877,52 @@ impl Bundle {
         let first = replay_history_events(&loaded.log)?;
         let second = replay_history_events(&loaded.log)?;
         Ok((first, second))
+    }
+
+    /// Reconstruct the canonical graph at a sealed transaction-log boundary.
+    /// Named Revisions store this boundary; no Derived Result is consulted.
+    pub fn canonical_state_at_log_position(
+        &self,
+        position: u64,
+    ) -> Result<CanonicalState, BundleError> {
+        let loaded = self.open()?;
+        let position = usize::try_from(position).map_err(|_| {
+            BundleError::Invalid("canonical log position overflows usize".to_string())
+        })?;
+        if position > loaded.log.len() {
+            return Err(BundleError::Invalid(format!(
+                "canonical log position {position} is beyond the current log"
+            )));
+        }
+        replay_canonical_state(&TransactionLog {
+            entries: loaded.log.entries()[..position].to_vec(),
+        })
+    }
+
+    /// Recover the canonical boundary for a legacy Named Revision that was
+    /// written before explicit log-position provenance existed. Legacy
+    /// history events were appended after the graph updates they described,
+    /// so the preceding history event marks the requested snapshot.
+    pub fn legacy_named_revision_log_position(
+        &self,
+        name: &str,
+    ) -> Result<Option<u64>, BundleError> {
+        let loaded = self.open()?;
+        let mut previous_history_index = None;
+        for (index, entry) in loaded.log.entries().iter().enumerate() {
+            let Some(payload) = entry.kind.strip_prefix(HISTORY_EVENT_KIND_PREFIX) else {
+                continue;
+            };
+            let event: HistoryEvent = serde_json::from_str(payload)
+                .map_err(|error| BundleError::Invalid(format!("invalid history event: {error}")))?;
+            if event.named_revisions.contains_key(name) {
+                let position =
+                    previous_history_index.map_or(0, |history_index: usize| history_index + 1);
+                return Ok(Some(position as u64));
+            }
+            previous_history_index = Some(index);
+        }
+        Ok(None)
     }
 
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
@@ -3134,6 +3238,29 @@ impl Bundle {
                 entries,
                 Some(expected_revision),
                 &[(brep_feature_id, brep_bytes)],
+                &[],
+                None,
+                None,
+                Some(history_event),
+            )
+        })
+    }
+
+    /// Publish several verified BREP results and one history event in one
+    /// revision-guarded generation. Unlike source-authenticated replacement,
+    /// this is also used to rebuild a missing Derived Result during restore.
+    pub fn append_features_with_breps_if_revision_and_history(
+        &self,
+        entries: &[(&str, &str)],
+        breps: &[(&str, &[u8])],
+        expected_revision: &str,
+        history_event: &HistoryEvent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked(
+                entries,
+                Some(expected_revision),
+                breps,
                 &[],
                 None,
                 None,
@@ -3901,6 +4028,44 @@ impl Bundle {
                 )));
             }
         }
+        // History events mark the canonical state that existed before this
+        // transaction's graph and Derived Result updates. This gives durable
+        // Named Revision positions an unambiguous replay boundary.
+        if let Some(event) = history_event {
+            let rebased_event = if event.ordinal == loaded.history.event_ordinal() + 1 {
+                event.clone()
+            } else if let HistoryOperation::InitializeLBracket {
+                bracket_id,
+                length,
+                width,
+                height,
+                thickness,
+            } = &event.operation
+            {
+                loaded
+                    .history
+                    .initialize_l_bracket(bracket_id, *length, *width, *height, *thickness)
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?
+            } else {
+                return Err(BundleError::Invalid(format!(
+                    "stale history event ordinal {}, current ordinal {}",
+                    event.ordinal,
+                    loaded.history.event_ordinal()
+                )));
+            };
+            loaded
+                .history
+                .apply_event(&rebased_event)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            let payload = serde_json::to_string(&rebased_event)
+                .map_err(|error| BundleError::Invalid(error.to_string()))?;
+            let feature_id = format!("history-event-{}", loaded.log.len());
+            loaded.log.append_feature(
+                &feature_id,
+                &format!("{HISTORY_EVENT_KIND_PREFIX}{payload}"),
+            );
+        }
+
         for (feature_id, kind) in entries {
             let sketch_payload = kind
                 .strip_prefix(SKETCH_COMMAND_KIND_PREFIX)
@@ -3986,41 +4151,6 @@ impl Bundle {
             loaded.log.append_feature(
                 &format!("fit-dimension-{}", loaded.log.len()),
                 &format!("{FIT_DIMENSION_KIND_PREFIX}{payload}"),
-            );
-        }
-
-        if let Some(event) = history_event {
-            let rebased_event = if event.ordinal == loaded.history.event_ordinal() + 1 {
-                event.clone()
-            } else if let HistoryOperation::InitializeLBracket {
-                bracket_id,
-                length,
-                width,
-                height,
-                thickness,
-            } = &event.operation
-            {
-                loaded
-                    .history
-                    .initialize_l_bracket(bracket_id, *length, *width, *height, *thickness)
-                    .map_err(|error| BundleError::Invalid(error.to_string()))?
-            } else {
-                return Err(BundleError::Invalid(format!(
-                    "stale history event ordinal {}, current ordinal {}",
-                    event.ordinal,
-                    loaded.history.event_ordinal()
-                )));
-            };
-            loaded
-                .history
-                .apply_event(&rebased_event)
-                .map_err(|error| BundleError::Invalid(error.to_string()))?;
-            let payload = serde_json::to_string(&rebased_event)
-                .map_err(|error| BundleError::Invalid(error.to_string()))?;
-            let feature_id = format!("history-event-{}", loaded.log.len());
-            loaded.log.append_feature(
-                &feature_id,
-                &format!("{HISTORY_EVENT_KIND_PREFIX}{payload}"),
             );
         }
 

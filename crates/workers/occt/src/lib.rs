@@ -54,6 +54,7 @@ pub use envelope::{
     LoftResult, MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate,
     PlanarFaceEvidenceRequest, PlanarFaceEvidenceResult, RevolveRequest, RevolveResult,
     SCHEMA_VERSION, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
+    TranslateRequest, TranslateResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -862,6 +863,17 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_mirror()
+    }
+
+    /// Translate `request` by spawning the worker process. See module
+    /// docs for the disposable-worker contract.
+    pub fn translate(&self, request: &TranslateRequest) -> Result<TranslateResult, WorkerError> {
+        let bytes = bounded_serialize(request, "translate", &request.request_id)?;
+        self.invoke(
+            &bytes,
+            expected_output_path(&request.output_dir, &request.output_filename),
+        )?
+        .into_translate()
     }
 
     /// Linear pattern `request` by spawning the worker process. See
@@ -1775,6 +1787,10 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_translate(self) -> Result<TranslateResult, WorkerError> {
+        self.bounded()
+    }
+
     fn into_linear_pattern(self) -> Result<LinearPatternResult, WorkerError> {
         self.bounded()
     }
@@ -1865,6 +1881,10 @@ pub fn parse_revolve_request(raw: &str) -> Result<RevolveRequest, serde_json::Er
 }
 
 pub fn parse_mirror_request(raw: &str) -> Result<MirrorRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_translate_request(raw: &str) -> Result<TranslateRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 

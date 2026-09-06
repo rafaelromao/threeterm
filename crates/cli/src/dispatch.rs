@@ -3949,6 +3949,29 @@ pub fn dispatch_registered_command(
             let identity = host.identity(string_field("bundle_path")?)?;
             return Ok(identity_value(&identity, schema.response_schema_version));
         }
+        if matches!(
+            command,
+            DEFINE_COMPONENT_COMMAND_ID
+                | CREATE_COMPONENT_INSTANCE_COMMAND_ID
+                | TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID
+                | MAKE_COMPONENT_INDEPENDENT_COMMAND_ID
+                | EDIT_COMPONENT_PARAMETER_COMMAND_ID
+                | COMPONENT_STATE_COMMAND_ID
+                | CAPTURE_COMPONENT_COMMAND_ID
+        ) {
+            return host
+                .execute_domain_command(command, request)
+                .map_err(|error| match error {
+                    ExecutionError::UnknownCommand(command) => {
+                        DispatchError::UnknownCommand(command)
+                    }
+                    ExecutionError::InvalidRequest(detail) => DispatchError::Validation(detail),
+                    ExecutionError::Handler(error) => DispatchError::Host(error),
+                    ExecutionError::InvalidResponse(detail) => DispatchError::Validation(format!(
+                        "response violates registered schema: {detail}"
+                    )),
+                });
+        }
         if command == APPLY_COMMAND_ID {
             let operation = string_field("operation")?;
             let feature_id = string_field("feature_id")?;
@@ -5104,6 +5127,12 @@ fn emit_export(
         Err(HostError::Validation { detail }) if detail.starts_with('{') => {
             let _ = writeln!(stderr, "{detail}");
             EXIT_BREP_INVALID
+        }
+        Err(HostError::Validation { detail }) => {
+            let diagnostic = semantic_reference_diagnostic(&detail)
+                .unwrap_or_else(|| Diagnostic::invalid_request(&detail));
+            write_diagnostic(stderr, &diagnostic);
+            EXIT_INTEGRITY_FAILURE
         }
         Err(error) => {
             let _ = writeln!(
@@ -7204,19 +7233,23 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         | HostError::WorkerUnavailable { .. }
         | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
-        HostError::Validation { .. } if detail.starts_with("reference is ambiguous") => {
-            Diagnostic::reference_ambiguous(&detail)
-        }
-        HostError::Validation { .. } if detail.starts_with("reference is lost") => {
-            Diagnostic::reference_lost(&detail)
-        }
-        HostError::Validation { .. } if detail.starts_with("reference is incompatible") => {
-            Diagnostic::reference_incompatible(&detail)
-        }
-        HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { detail } => semantic_reference_diagnostic(detail)
+            .unwrap_or_else(|| Diagnostic::invalid_request(detail)),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
         _ => Diagnostic::integrity_failure(&detail),
+    }
+}
+
+fn semantic_reference_diagnostic(detail: &str) -> Option<Diagnostic> {
+    if detail.contains("reference is ambiguous") {
+        Some(Diagnostic::reference_ambiguous(detail))
+    } else if detail.contains("reference is lost") {
+        Some(Diagnostic::reference_lost(detail))
+    } else if detail.contains("reference is incompatible") {
+        Some(Diagnostic::reference_incompatible(detail))
+    } else {
+        None
     }
 }
 

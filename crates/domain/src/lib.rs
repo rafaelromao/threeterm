@@ -1137,6 +1137,19 @@ impl ComponentGraph {
                 })?;
             }
             ComponentCommand::CreateInstance { instance } => {
+                if instance.id.is_empty()
+                    || instance.definition_id.is_empty()
+                    || !instance
+                        .id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                    || !instance.transform.iter().all(|value| value.is_finite())
+                {
+                    return Err(
+                        "component instance ID must be a plain identifier and transform must be finite"
+                            .to_string(),
+                    );
+                }
                 self.require_definition(&instance.definition_id)?;
                 if self.id_is_in_use(&instance.id) {
                     return Err("component ID already exists".to_string());
@@ -1160,7 +1173,11 @@ impl ComponentGraph {
             } => {
                 let source = self.require_instance(source_instance_id)?.clone();
                 let mut definition = self.require_definition(&source.definition_id)?.clone();
-                if definition_id == instance_id
+                if instance_id.is_empty()
+                    || !instance_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                    || definition_id == instance_id
                     || self.id_is_in_use(definition_id)
                     || self.id_is_in_use(instance_id)
                     || self.feature_id_is_in_use(feature_id)

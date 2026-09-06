@@ -440,6 +440,26 @@ fn production_pick_validates_semantic_candidates_before_selection() {
         Some("feature-a")
     );
     assert!(picked.overlay.contains("selection-glyph"));
+    let identity = picked
+        .submission
+        .as_ref()
+        .and_then(|submission| submission.started.as_ref())
+        .expect("validated pick submits a frame")
+        .clone();
+    let visible = session
+        .acknowledge(FrameAcknowledgement::from(&identity))
+        .expect("validated pick frame is acknowledged")
+        .visible
+        .expect("validated pick frame is visible");
+    let selected = threeterm_theme::default_dark()
+        .rgb(SemanticToken::ViewportSelectedBody)
+        .expect("selected body token converts");
+    assert!(
+        visible
+            .rgb
+            .chunks_exact(3)
+            .any(|pixel| { pixel == [selected.red, selected.green, selected.blue] })
+    );
     assert_eq!(host.current(), Some(before.clone()));
 
     let stale = session

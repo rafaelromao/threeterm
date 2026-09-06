@@ -8429,39 +8429,82 @@ impl Host {
         graph
             .apply(&command)
             .map_err(|detail| HostError::Validation { detail })?;
-        let affected_instances: Vec<_> = match &command {
-            ComponentCommand::CreateInstance { .. }
-            | ComponentCommand::TransformInstance { .. }
-            | ComponentCommand::MakeIndependent { .. }
-            | ComponentCommand::EditParameter { .. }
-            | ComponentCommand::Define { .. }
-            | ComponentCommand::Capture { .. } => graph.instances.values().cloned().collect(),
+        let affected_instance_ids: BTreeSet<String> = match &command {
+            ComponentCommand::CreateInstance { instance } => {
+                [instance.id.clone()].into_iter().collect()
+            }
+            ComponentCommand::TransformInstance { instance_id, .. } => {
+                [instance_id.clone()].into_iter().collect()
+            }
+            ComponentCommand::MakeIndependent { instance_id, .. } => {
+                [instance_id.clone()].into_iter().collect()
+            }
+            ComponentCommand::EditParameter { definition_id, .. } => graph
+                .instances
+                .values()
+                .filter(|instance| instance.definition_id == *definition_id)
+                .map(|instance| instance.id.clone())
+                .collect(),
+            ComponentCommand::Define { .. } | ComponentCommand::Capture { .. } => BTreeSet::new(),
         };
         let staged_geometry = if let Some(source) = loaded.as_ref() {
             let mut geometry = Vec::new();
+            let instances: Vec<_> = graph.instances.values().cloned().collect();
+            let old_revision = source.revision_hash_hex().to_string();
             let mut geometry_loaded = source.clone();
             geometry_loaded.components = graph;
-            let needs_worker = affected_instances.iter().any(|instance| {
+            let needs_worker = instances.iter().any(|instance| {
                 geometry_loaded
                     .components
                     .definitions
                     .get(&instance.definition_id)
-                    .is_some_and(|definition| !definition.selected_feature_ids.is_empty())
+                    .is_some_and(|definition| {
+                        !definition.selected_feature_ids.is_empty()
+                            && (affected_instance_ids.contains(&instance.id)
+                                || !component_instance_geometry_path(
+                                    root,
+                                    &old_revision,
+                                    &instance.id,
+                                )
+                                .is_file())
+                    })
             });
-            if needs_worker {
-                let worker =
+            let worker = if needs_worker {
+                Some(
                     OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                         detail: error.to_string(),
-                    })?;
-                for instance in &affected_instances {
+                    })?,
+                )
+            } else {
+                None
+            };
+            for instance in &instances {
+                let Some(definition) = geometry_loaded
+                    .components
+                    .definitions
+                    .get(&instance.definition_id)
+                else {
+                    continue;
+                };
+                if definition.selected_feature_ids.is_empty() {
+                    continue;
+                }
+                let prior_path =
+                    component_instance_geometry_path(root, &old_revision, &instance.id);
+                if affected_instance_ids.contains(&instance.id) || !prior_path.is_file() {
+                    let worker = worker.as_ref().expect("affected component has a worker");
                     if let Some(materialized) = materialize_component_instance_geometry_with_worker(
                         root,
                         &geometry_loaded,
                         instance,
-                        &worker,
+                        worker,
                     )? {
                         geometry.push(materialized);
                     }
+                } else {
+                    let bytes = read_brep_verified(&prior_path, None)
+                        .map_err(|detail| HostError::BrepIo { detail })?;
+                    geometry.push((instance.id.clone(), bytes));
                 }
             }
             geometry

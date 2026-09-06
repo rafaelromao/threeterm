@@ -834,8 +834,7 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     )
     .expect_err("MCP stale export fails");
     let tui_error = tui_export(&tui_root, &output_roots[2]).expect_err("TUI stale export fails");
-    let stale_errors =
-        [&cli_error, &mcp_error, &tui_error].map(|error| semantic_stale_export_error(error));
+    let stale_errors = [&cli_error, &mcp_error, &tui_error].map(semantic_stale_export_error);
     assert_eq!(stale_errors[0], stale_errors[1]);
     assert_eq!(stale_errors[0], stale_errors[2]);
     assert_eq!(stale_errors[0]["severity"], "error");

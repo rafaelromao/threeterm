@@ -6,9 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use serde_json::{Value, json};
-use threeterm_domain::{
-    ComponentCommand, ComponentDefinition, ComponentInstance, LBracketDescriptor, ProjectGeneration,
-};
+use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError, SnapshotView};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
@@ -16,21 +14,19 @@ use threeterm_occt_worker::{
     CircularPatternRequest, FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest,
     OcctWorker, Operation, RevolveRequest, new_request_id,
 };
-use threeterm_protocol::command_execution::{ExecutionError, execute};
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
-    BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
-    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
-    CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
-    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
-    LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
-    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
-    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find,
-    find_by_name, iter,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
+    CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID,
+    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
+    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REHEARSE_COMMAND_ID,
+    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+    UNDO_COMMAND_ID, find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
@@ -45,7 +41,6 @@ pub use threeterm_protocol::schema::{
     SAVE_RESPONSE_SCHEMA_VERSION, SHELL_RESPONSE_SCHEMA_VERSION,
     SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION, TIMELINE_RESPONSE_SCHEMA_VERSION,
 };
-use threeterm_slvs_worker::{SketchSolveRequest, SlvsWorker};
 use threeterm_theme::{
     PaletteError, PaletteSource, PaletteSources, ResolvedPalette, ThemeContext, resolve_palette,
 };
@@ -3903,426 +3898,15 @@ pub fn dispatch_registered_command(
             })?;
         request["preview_revision"] = Value::String(preview.preview_revision);
     }
-    if matches!(
-        command,
-        IDENTITY_COMMAND_ID
-            | APPLY_COMMAND_ID
-            | EXTRUDE_COMMAND_ID
-            | REVOLVE_COMMAND_ID
-            | MIRROR_COMMAND_ID
-            | LINEAR_PATTERN_COMMAND_ID
-            | CIRCULAR_PATTERN_COMMAND_ID
-            | BOOLEAN_PATTERN_COMMAND_ID
-            | BOOLEAN_FUSE_COMMAND_ID
-            | BOOLEAN_CUT_COMMAND_ID
-            | BOOLEAN_COMMON_COMMAND_ID
-            | HOLE_COMMAND_ID
-            | REATTACH_EDGE_COMMAND_ID
-            | SKETCH_SOLVE_COMMAND_ID
-            | FILLET_COMMAND_ID
-            | CHAMFER_COMMAND_ID
-            | SHELL_COMMAND_ID
-            | DRAFT_COMMAND_ID
-            | LOFT_COMMAND_ID
-    ) {
+    if command == REHEARSE_COMMAND_ID {
         return host
-            .execute_domain_command(command, request)
+            .execute_domain_command_with_handler(command, request, |request| {
+                crate::rehearsal::execute_rehearsal_command(request)
+            })
             .map_err(DispatchError::from);
     }
-    let schema = find(command).ok_or(DispatchError::UnknownCommand(command))?;
-    let result = execute(command, request, |request| {
-        let string_field = |name: &str| {
-            request
-                .get(name)
-                .and_then(Value::as_str)
-                .ok_or_else(|| DispatchError::Validation(format!("missing string field {name:?}")))
-        };
-        let number_field = |name: &str| {
-            request
-                .get(name)
-                .and_then(Value::as_f64)
-                .ok_or_else(|| DispatchError::Validation(format!("missing number field {name:?}")))
-        };
-        if command == BRACKET_EDIT_COMMAND_ID {
-            return dispatch_bracket_edit_command(host, &request);
-        }
-        if command == IDENTITY_COMMAND_ID {
-            let identity = host.identity(string_field("bundle_path")?)?;
-            return Ok(identity_value(&identity, schema.response_schema_version));
-        }
-        if command == EXPORT_COMMAND_ID {
-            let formats = request["formats"]
-                .as_array()
-                .expect("export schema guarantees formats")
-                .iter()
-                .map(|format| {
-                    format
-                        .as_str()
-                        .expect("export formats are strings")
-                        .to_string()
-                })
-                .collect::<Vec<_>>();
-            let body_ids = request
-                .get("body_ids")
-                .and_then(Value::as_array)
-                .map(|body_ids| {
-                    body_ids
-                        .iter()
-                        .map(|body_id| {
-                            body_id
-                                .as_str()
-                                .expect("export body IDs are strings")
-                                .to_string()
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let view = host.export(
-                string_field("bundle_path")?,
-                string_field("feature_id")?,
-                &formats,
-                Path::new(string_field("output_dir")?),
-                number_field("tessellation_deflection")?,
-                request["override_warnings"]
-                    .as_bool()
-                    .expect("export schema guarantees override_warnings"),
-                request["accept_stale_geometry"]
-                    .as_bool()
-                    .expect("export schema guarantees accept_stale_geometry"),
-                &body_ids,
-            )?;
-            return Ok(export_view_value(&view, schema.response_schema_version));
-        }
-        if matches!(
-            command,
-            DEFINE_COMPONENT_COMMAND_ID
-                | CREATE_COMPONENT_INSTANCE_COMMAND_ID
-                | TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID
-                | MAKE_COMPONENT_INDEPENDENT_COMMAND_ID
-                | EDIT_COMPONENT_PARAMETER_COMMAND_ID
-                | COMPONENT_STATE_COMMAND_ID
-                | CAPTURE_COMPONENT_COMMAND_ID
-        ) {
-            return host
-                .execute_domain_command(command, request)
-                .map_err(|error| match error {
-                    ExecutionError::UnknownCommand(command) => {
-                        DispatchError::UnknownCommand(command)
-                    }
-                    ExecutionError::InvalidRequest(detail) => DispatchError::Validation(detail),
-                    ExecutionError::Handler(error) => DispatchError::Host(error),
-                    ExecutionError::InvalidResponse(detail) => DispatchError::Validation(format!(
-                        "response violates registered schema: {detail}"
-                    )),
-                });
-        }
-        if command == APPLY_COMMAND_ID {
-            let operation = string_field("operation")?;
-            let feature_id = string_field("feature_id")?;
-            let kind = request.get("kind").and_then(Value::as_str);
-            if matches!(operation, "add" | "set") && kind.is_none() {
-                return Err(DispatchError::Validation(format!(
-                    "{operation} requires kind"
-                )));
-            }
-            if operation == "remove" && kind.is_some() {
-                return Err(DispatchError::Validation(
-                    "remove does not accept kind".to_string(),
-                ));
-            }
-            let view = host.apply_feature(
-                string_field("bundle_path")?,
-                operation,
-                feature_id,
-                kind,
-                string_field("expected_revision")?,
-            )?;
-            return Ok(json!({
-                "status": "committed",
-                "operation": view.operation,
-                "feature_id": view.feature_id,
-                "generation_id": view.identity.generation_id,
-                "revision_id": view.identity.revision_id,
-                "feature_graph_hash": view.identity.feature_graph_hash,
-                "revision_hash": view.identity.revision_hash,
-                "transaction_count": view.identity.transaction_count,
-                "terminal_log_digest": view.identity.terminal_log_digest,
-                "schema_version": schema.response_schema_version,
-            }));
-        }
-        if command == COMPONENT_STATE_COMMAND_ID {
-            let graph = host.component_graph(string_field("bundle_path")?)?;
-            return Ok(
-                json!({"definitions": graph.definitions, "instances": graph.instances, "schema_version": schema.response_schema_version}),
-            );
-        }
-        if command == SKETCH_SOLVE_COMMAND_ID {
-            let request_id = request
-                .get("request_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(new_request_id);
-            let typed_request =
-                SketchSolveRequest::new(
-                    request_id,
-                    string_field("feature_id")?,
-                    serde_json::from_value(request.get("entities").cloned().ok_or_else(|| {
-                        DispatchError::Validation("missing entities".to_string())
-                    })?)
-                    .map_err(|error| {
-                        DispatchError::Validation(format!("invalid sketch entities: {error}"))
-                    })?,
-                    serde_json::from_value(request.get("constraints").cloned().ok_or_else(
-                        || DispatchError::Validation("missing constraints".to_string()),
-                    )?)
-                    .map_err(|error| {
-                        DispatchError::Validation(format!("invalid sketch constraints: {error}"))
-                    })?,
-                )
-                .with_source_revision(
-                    request
-                        .get("source_revision")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                );
-            let phase = request
-                .get("phase")
-                .and_then(Value::as_str)
-                .unwrap_or("commit");
-            let mut response = if phase == "preview" {
-                let result =
-                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
-                serde_json::to_value(result)
-            } else if phase == "commit" {
-                let preview =
-                    host.preview_sketch_solve(string_field("bundle_path")?, &typed_request)?;
-                if !preview.is_success() {
-                    serde_json::to_value(preview)
-                } else {
-                    let worker = SlvsWorker::locate().map_err(|error| {
-                        DispatchError::Host(HostError::WorkerUnavailable {
-                            detail: error.to_string(),
-                        })
-                    })?;
-                    let view = host.commit_sketch_solve_with_worker(
-                        string_field("bundle_path")?,
-                        &typed_request,
-                        &worker,
-                    )?;
-                    serde_json::to_value(view.result)
-                }
-            } else {
-                return Err(DispatchError::Validation(
-                    "phase must be preview or commit".to_string(),
-                ));
-            }
-            .map_err(|error| DispatchError::Validation(error.to_string()))?;
-            response["schema_version"] = Value::String(schema.response_schema_version.to_string());
-            return Ok(response);
-        }
-        if command == FIT_DIMENSION_COMMAND_ID {
-            let fit = host.fit_dimension(
-                string_field("bundle_path")?,
-                string_field("expected_revision")?,
-                string_field("source_feature_id")?,
-                string_field("target_feature_id")?,
-                string_field("source_dimension_id")?,
-                string_field("target_dimension_id")?,
-                string_field("dimension")?,
-                number_field("clearance")?,
-            )?;
-            return Ok(json!({
-                "fit": fit.fit,
-                "feature_graph_hash": fit.snapshot.feature_graph_hash,
-                "revision_hash": fit.snapshot.revision_hash,
-                "schema_version": schema.response_schema_version,
-            }));
-        }
-        if command == CAPTURE_COMPONENT_COMMAND_ID {
-            let selected_feature_ids = request
-                .get("selected_feature_ids")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    DispatchError::Validation("missing selected_feature_ids".to_string())
-                })?
-                .iter()
-                .map(|value| {
-                    value.as_str().map(str::to_string).ok_or_else(|| {
-                        DispatchError::Validation(
-                            "selected_feature_ids must contain strings".to_string(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let view = host.capture_component(
-                string_field("bundle_path")?,
-                string_field("definition_id")?,
-                &selected_feature_ids,
-            )?;
-            return Ok(json!({
-                "feature_graph_hash": view.feature_graph_hash,
-                "revision_hash": view.revision_hash,
-                "schema_version": schema.response_schema_version,
-            }));
-        }
-        if command == HISTORICAL_EDIT_COMMAND_ID {
-            let view = host.historical_edit(
-                string_field("bundle_path")?,
-                string_field("feature_id")?,
-                string_field("parameter")?,
-                number_field("value")?,
-            )?;
-            return Ok(history_commit_response(
-                "historical-edit",
-                schema.response_schema_version,
-                &view,
-            ));
-        }
-        if command == CREATE_REVISION_COMMAND_ID {
-            let view =
-                host.create_named_revision(string_field("bundle_path")?, string_field("name")?)?;
-            return Ok(history_commit_response(
-                "create-revision",
-                schema.response_schema_version,
-                &view,
-            ));
-        }
-        if command == RESTORE_REVISION_COMMAND_ID {
-            let view = host.restore_named_revision(
-                string_field("bundle_path")?,
-                string_field("feature_id")?,
-                string_field("name")?,
-            )?;
-            return Ok(history_commit_response(
-                "restore-revision",
-                schema.response_schema_version,
-                &view,
-            ));
-        }
-        if command == TIMELINE_COMMAND_ID {
-            let view = host.timeline(string_field("bundle_path")?, string_field("feature_id")?)?;
-            return Ok(timeline_response(schema.response_schema_version, &view));
-        }
-        if command == UNDO_COMMAND_ID {
-            let view = host.undo(string_field("bundle_path")?)?;
-            return Ok(history_commit_response(
-                "undo",
-                schema.response_schema_version,
-                &view,
-            ));
-        }
-        if command == REDO_COMMAND_ID {
-            let view = host.redo(string_field("bundle_path")?)?;
-            return Ok(history_commit_response(
-                "redo",
-                schema.response_schema_version,
-                &view,
-            ));
-        }
-        if command == REPLAY_VERIFY_COMMAND_ID {
-            let verification = host.verify_history_replay(string_field("bundle_path")?)?;
-            return Ok(json!({
-                "deterministic": verification.deterministic,
-                "fingerprint": verification.fingerprint,
-                "model_state_fingerprint": verification.model_state_fingerprint,
-                "geometry_fingerprints": verification.geometry_fingerprints,
-                "mismatch": verification.mismatch.unwrap_or_default(),
-                "schema_version": schema.response_schema_version,
-            }));
-        }
-        if command == BRACKET_COMMAND_ID {
-            let view = dispatch_bracket_with_host(
-                host,
-                string_field("bundle_path")?,
-                string_field("bracket_id")?,
-                number_field("length")?,
-                number_field("width")?,
-                number_field("height")?,
-                number_field("thickness")?,
-            )?;
-            return Ok(bracket_view_value(&view, schema.response_schema_version));
-        }
-        let view = {
-            let transform = || -> Result<[f64; 3], DispatchError> {
-                let values = request
-                    .get("transform")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| DispatchError::Validation("missing transform".to_string()))?;
-                let values: Vec<f64> = values
-                    .iter()
-                    .map(|value| {
-                        value.as_f64().ok_or_else(|| {
-                            DispatchError::Validation(
-                                "transform values must be numbers".to_string(),
-                            )
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                values.try_into().map_err(|_| {
-                    DispatchError::Validation("transform must have three values".to_string())
-                })
-            };
-            let component = match command {
-                DEFINE_COMPONENT_COMMAND_ID => ComponentCommand::Define {
-                    definition: ComponentDefinition {
-                        id: string_field("definition_id")?.to_string(),
-                        selected_feature_ids: Vec::new(),
-                        descriptor: LBracketDescriptor {
-                            feature_id: string_field("feature_id")?.to_string(),
-                            length: number_field("length")?,
-                            width: number_field("width")?,
-                            height: number_field("height")?,
-                            thickness: number_field("thickness")?,
-                        },
-                    },
-                },
-                CREATE_COMPONENT_INSTANCE_COMMAND_ID => ComponentCommand::CreateInstance {
-                    instance: ComponentInstance {
-                        id: string_field("instance_id")?.to_string(),
-                        definition_id: string_field("definition_id")?.to_string(),
-                        transform: transform()?,
-                    },
-                },
-                TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID => ComponentCommand::TransformInstance {
-                    instance_id: string_field("instance_id")?.to_string(),
-                    transform: transform()?,
-                },
-                MAKE_COMPONENT_INDEPENDENT_COMMAND_ID => ComponentCommand::MakeIndependent {
-                    source_instance_id: string_field("source_instance_id")?.to_string(),
-                    definition_id: string_field("definition_id")?.to_string(),
-                    instance_id: string_field("instance_id")?.to_string(),
-                    feature_id: string_field("feature_id")?.to_string(),
-                },
-                EDIT_COMPONENT_PARAMETER_COMMAND_ID => ComponentCommand::EditParameter {
-                    definition_id: string_field("definition_id")?.to_string(),
-                    parameter: string_field("parameter")?.to_string(),
-                    value: number_field("value")?,
-                },
-                _ => {
-                    return Err(DispatchError::UnsupportedTool {
-                        wire_name: schema.name.to_string(),
-                        schema_version: schema.schema_version.to_string(),
-                        _command: command,
-                    });
-                }
-            };
-            host.apply_component_command(string_field("bundle_path")?, component)?
-        };
-        Ok(json!({
-            "feature_graph_hash": view.feature_graph_hash,
-            "revision_hash": view.revision_hash,
-            "schema_version": schema.response_schema_version,
-        }))
-    });
-    match result {
-        Ok(response) => Ok(response),
-        Err(ExecutionError::UnknownCommand(command)) => Err(DispatchError::UnknownCommand(command)),
-        Err(ExecutionError::InvalidRequest(detail)) => Err(DispatchError::Validation(detail)),
-        Err(ExecutionError::Handler(error)) => Err(error),
-        Err(ExecutionError::InvalidResponse(detail)) => Err(DispatchError::Validation(format!(
-            "response violates registered schema: {detail}"
-        ))),
-    }
+    host.execute_domain_command(command, request)
+        .map_err(DispatchError::from)
 }
 
 fn dispatch_bracket_with_host(
@@ -4343,198 +3927,6 @@ fn dispatch_bracket_with_host(
         .with_feature_id(bracket_id);
     host.create_bracket(bundle, request, &worker)
         .map_err(DispatchError::from)
-}
-
-fn dispatch_bracket_edit_command(host: &Host, request: &Value) -> Result<Value, DispatchError> {
-    let string_field = |name: &str| {
-        request
-            .get(name)
-            .and_then(Value::as_str)
-            .ok_or_else(|| DispatchError::Validation(format!("missing string field {name:?}")))
-    };
-    let number_field = |name: &str| {
-        request
-            .get(name)
-            .and_then(Value::as_f64)
-            .ok_or_else(|| DispatchError::Validation(format!("missing number field {name:?}")))
-    };
-    let phase = string_field("phase")?;
-    let bundle = string_field("bundle_path")?;
-    let draft_id = string_field("draft_id")?;
-    let bracket_id = string_field("bracket_id")?;
-    let dimensions = || -> Result<BracketRequest, DispatchError> {
-        Ok(BracketRequest::new(
-            new_request_id(),
-            number_field("length")?,
-            number_field("width")?,
-            number_field("height")?,
-            number_field("thickness")?,
-        )
-        .with_feature_id(bracket_id)
-        .with_output_path(bundle, "unused.brep"))
-    };
-
-    match phase {
-        "open" => {
-            let draft =
-                host.open_bracket_parameter_draft(bundle, draft_id, bracket_id, dimensions()?)?;
-            Ok(json!({
-                "status": "ok",
-                "phase": "open",
-                "draft_id": draft.draft_id,
-                "source_revision": draft.source_revision,
-                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
-                "draft_sequence": draft.sequence,
-                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-            }))
-        }
-        "update" => {
-            let sequence = request
-                .get("draft_sequence")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    DispatchError::Validation(
-                        "missing integer field \"draft_sequence\"".to_string(),
-                    )
-                })?;
-            let input_fingerprint = request
-                .get("input_fingerprint")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    DispatchError::Validation(
-                        "missing string field \"input_fingerprint\"".to_string(),
-                    )
-                })?;
-            let draft = host.update_bracket_parameter_draft(
-                bundle,
-                draft_id,
-                sequence,
-                input_fingerprint,
-                dimensions()?,
-            )?;
-            Ok(json!({
-                "status": "ok",
-                "phase": "update",
-                "draft_id": draft.draft_id,
-                "source_revision": draft.source_revision,
-                "input_fingerprint": host.bracket_draft_fingerprint(bundle, draft_id),
-                "draft_sequence": draft.sequence,
-                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-            }))
-        }
-        "preview" => {
-            host.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
-            let worker = OcctWorker::locate().map_err(|error| {
-                DispatchError::Host(HostError::WorkerUnavailable {
-                    detail: error.to_string(),
-                })
-            })?;
-            let preview = host.preview_bracket_parameter_draft(bundle, draft_id, &worker)?;
-            Ok(json!({
-                "status": "ok",
-                "phase": "preview",
-                "draft_id": preview.draft_id,
-                "source_revision": preview.source_revision,
-                "current_revision": preview.source_revision,
-                "preview_revision": preview.preview_revision,
-                "input_fingerprint": preview.input_fingerprint,
-                "draft_sequence": host
-                    .bracket_draft_sequence(bundle, draft_id)
-                    .expect("preview keeps draft"),
-                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-            }))
-        }
-        "commit" => {
-            host.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
-            let source_revision = host
-                .bracket_draft_source_revision(bundle, draft_id)
-                .ok_or_else(|| {
-                    DispatchError::Host(HostError::DraftNotFound {
-                        draft_id: draft_id.to_string(),
-                    })
-                })?;
-            let worker = OcctWorker::locate().map_err(|error| {
-                DispatchError::Host(HostError::WorkerUnavailable {
-                    detail: error.to_string(),
-                })
-            })?;
-            let committed = host.commit_bracket_parameter_draft(bundle, draft_id, &worker)?;
-            Ok(json!({
-                "status": "ok",
-                "phase": "commit",
-                "draft_id": draft_id,
-                "source_revision": source_revision,
-                "current_revision": committed.snapshot.revision_hash,
-                "input_fingerprint": committed.input_fingerprint,
-                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-            }))
-        }
-        "discard" => {
-            let source_revision = host.discard_bracket_parameter_draft(bundle, draft_id)?;
-            Ok(json!({
-                "status": "ok",
-                "phase": "discard",
-                "draft_id": draft_id,
-                "source_revision": source_revision,
-                "schema_version": BRACKET_EDIT_RESPONSE_SCHEMA_VERSION,
-            }))
-        }
-        _ => Err(DispatchError::Validation(
-            "bracket-edit phase is invalid".to_string(),
-        )),
-    }
-}
-
-fn history_commit_response(
-    operation: &str,
-    schema_version: &'static str,
-    view: &threeterm_host::HistoryCommitView,
-) -> Value {
-    threeterm_host::history_commit_value(operation, schema_version, view)
-}
-
-fn timeline_response(
-    schema_version: &'static str,
-    view: &threeterm_host::HistoryTimelineView,
-) -> Value {
-    let timeline = &view.timeline;
-    let revisions = timeline
-        .revisions
-        .iter()
-        .map(|revision| {
-            json!({
-                "ordinal": revision.ordinal,
-                "revision_id": revision.revision_id,
-                "operation": revision.operation,
-                "status": serde_json::to_value(&revision.status).expect("timeline status serializes"),
-                "stale_last_valid_geometry_fingerprint": revision
-                    .stale_last_valid_geometry_fingerprint
-                    .clone()
-                    .unwrap_or_default(),
-                "named_revision_names": revision.named_revision_names,
-            })
-        })
-        .collect::<Vec<_>>();
-    let named_revisions = timeline
-        .named_revisions
-        .iter()
-        .map(|revision| {
-            json!({
-                "name": revision.name,
-                "revision_id": revision.revision_id,
-                "provenance": revision.provenance,
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "feature_id": timeline.feature_id,
-        "active_revision": timeline.active_revision,
-        "revisions": revisions,
-        "named_revisions": named_revisions,
-        "feature_graph_hash": view.snapshot.feature_graph_hash,
-        "revision_hash": view.snapshot.revision_hash,
-        "schema_version": schema_version,
-    })
 }
 
 /// Structured failure modes emitted by the shared CLI/MCP dispatcher. The
@@ -4657,68 +4049,33 @@ fn execute_registered_with_observer(
     {
         return emit_internal_error("finishing command requires --expected-revision", stderr);
     }
-    if matches!(
-        command,
-        threeterm_protocol::schema::EXTRUDE_COMMAND_ID
-            | threeterm_protocol::schema::REVOLVE_COMMAND_ID
-            | threeterm_protocol::schema::MIRROR_COMMAND_ID
-            | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
-            | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
-            | threeterm_protocol::schema::IDENTITY_COMMAND_ID
-            | threeterm_protocol::schema::APPLY_COMMAND_ID
-            | threeterm_protocol::schema::REATTACH_EDGE_COMMAND_ID
-            | threeterm_protocol::schema::FILLET_COMMAND_ID
-            | threeterm_protocol::schema::CHAMFER_COMMAND_ID
-            | threeterm_protocol::schema::SHELL_COMMAND_ID
-            | threeterm_protocol::schema::DRAFT_COMMAND_ID
-            | threeterm_protocol::schema::LOFT_COMMAND_ID
-    ) {
-        return match Host::new().execute_domain_command(command, request) {
-            Ok(response) => write_success(stdout, &response, stderr),
-            Err(error) => emit_dispatch_error(&DispatchError::from(error), stderr),
-        };
-    }
-    let result = execute(command, request, |request| {
-        let mut handler_stdout = Vec::new();
-        let mut handler_stderr = Vec::new();
-        let exit = execute_handler(
-            *plan,
-            &request,
-            theme,
-            &mut handler_stdout,
-            &mut handler_stderr,
-        );
-        if exit != EXIT_OK {
-            return Err((exit, handler_stderr));
-        }
-        serde_json::from_slice(&handler_stdout).map_err(|error| {
-            (
-                EXIT_UNKNOWN_COMMAND,
-                format!("command response was not JSON: {error}").into_bytes(),
-            )
-        })
-    });
-
+    let result = dispatch_registered_command(&Host::new(), command, request);
     match result {
         Ok(response) => write_success(stdout, &response, stderr),
-        Err(ExecutionError::Handler((exit, diagnostic))) => {
-            let _ = stderr.write_all(&diagnostic);
-            exit
-        }
-        Err(ExecutionError::InvalidRequest(error))
+        Err(DispatchError::Validation(detail))
             if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID =>
         {
             write_rehearsal_failure(
-                &threeterm_cli_rehearsal_error("argument_parse", json!({"message": error}), None),
+                &threeterm_cli_rehearsal_error("argument_parse", json!({"message": detail}), None),
                 stderr,
             )
         }
-        Err(ExecutionError::InvalidRequest(error)) => emit_internal_error(&error, stderr),
-        Err(ExecutionError::InvalidResponse(error)) => emit_internal_error(
-            &format!("response violates registered schema: {error}"),
-            stderr,
-        ),
-        Err(ExecutionError::UnknownCommand(command)) => emit_unknown_command(command.0, stderr),
+        Err(DispatchError::Host(HostError::Validation { detail }))
+            if command == threeterm_protocol::schema::REHEARSE_COMMAND_ID =>
+        {
+            let diagnostic =
+                serde_json::from_str(&detail).unwrap_or_else(|_| json!({"message": detail}));
+            write_rehearsal_diagnostic(&diagnostic, stderr)
+        }
+        Err(error) => {
+            if command == threeterm_protocol::schema::LOAD_COMMAND_ID
+                && let DispatchError::Host(host_error) = &error
+            {
+                emit_host_error(host_error, stderr)
+            } else {
+                emit_dispatch_error(&error, stderr)
+            }
+        }
     }
 }
 
@@ -5339,14 +4696,18 @@ fn write_rehearsal_failure(
     error: &crate::rehearsal::RehearsalError,
     stderr: &mut dyn Write,
 ) -> i32 {
+    write_rehearsal_diagnostic(&error.diagnostic(), stderr)
+}
+
+fn write_rehearsal_diagnostic(diagnostic: &Value, stderr: &mut dyn Write) -> i32 {
     debug_assert!(
         threeterm_protocol::schema_validator::validate(
             &threeterm_protocol::schema::REHEARSE_FAILURE_DIAGNOSTIC_SCHEMA,
-            &error.diagnostic(),
+            diagnostic,
         )
         .is_ok()
     );
-    let _ = serde_json::to_writer_pretty(&mut *stderr, &error.diagnostic());
+    let _ = serde_json::to_writer_pretty(&mut *stderr, diagnostic);
     let _ = writeln!(stderr);
     EXIT_REHEARSAL_FAILURE
 }

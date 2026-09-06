@@ -13,9 +13,8 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{Host, HostError};
 use threeterm_persistence::{Bundle, BundleError, write_v0_fixture};
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, BRACKET_EDIT_RESPONSE_SCHEMA,
-    BRACKET_RESPONSE_SCHEMA, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
-    NEW_PROJECT_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
+    BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID, REHEARSE_RESPONSE_SCHEMA, REHEARSE_RESPONSE_SCHEMA_VERSION,
     REHEARSE_RUN_RESPONSE_SCHEMA, REHEARSE_RUN_RESPONSE_SCHEMA_VERSION, find,
 };
 use threeterm_protocol::schema_validator::validate;
@@ -154,6 +153,23 @@ pub fn run_l_bracket_rehearsal(
         )
     })?;
     Ok(report)
+}
+
+/// Adapt the registered rehearsal request to its non-mutating orchestration
+/// handler; the Host owns request and response contract validation.
+pub fn execute_rehearsal_command(request: Value) -> Result<Value, HostError> {
+    let output_dir = request
+        .get("output_dir")
+        .and_then(Value::as_str)
+        .expect("rehearse schema guarantees output_dir");
+    let release_candidate = request
+        .get("release_candidate")
+        .and_then(Value::as_str)
+        .expect("rehearse schema guarantees release_candidate");
+    run_l_bracket_rehearsal(output_dir, release_candidate).map_err(|error| HostError::Validation {
+        detail: serde_json::to_string(&error.diagnostic())
+            .unwrap_or_else(|_| "rehearsal failed".to_string()),
+    })
 }
 
 fn run_single_l_bracket_rehearsal(
@@ -662,12 +678,11 @@ fn invoke_registered(
                 project,
             )
         })?;
-    let schema = match command {
-        BRACKET_EDIT_COMMAND_ID => &BRACKET_EDIT_RESPONSE_SCHEMA,
-        BRACKET_COMMAND_ID => &BRACKET_RESPONSE_SCHEMA,
-        _ => &NEW_PROJECT_RESPONSE_SCHEMA,
-    };
-    validate(schema, &response).map_err(|error| {
+    let schema = find(command)
+        .expect("registered command schema is present")
+        .response_schema
+        .clone();
+    validate(&schema, &response).map_err(|error| {
         RehearsalError::new(
             stage,
             json!({"message": format!("production response failed schema validation: {error}")}),

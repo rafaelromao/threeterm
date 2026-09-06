@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, EdgeReattachmentOutcome, FeatureGraph, FitDimension,
     PlanarFaceCandidate, PlanarFaceReattachmentOutcome, PlanarFaceReference, PostEditEdgeCandidate,
-    SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
+    ProjectGeneration, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
     history::{
@@ -51,13 +51,17 @@ use threeterm_protocol::command_execution::{ExecutionError, execute, validate_re
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
-    BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
-    CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
+    BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
+    CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
-    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
+    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    MIRROR_COMMAND_ID, NEW_PROJECT_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
+    UNDO_COMMAND_ID, find, iter,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -798,6 +802,110 @@ pub fn history_commit_value(
         "diagnostics": diagnostics,
         "named_revisions": named_revisions,
         "features": features,
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "schema_version": schema_version,
+    })
+}
+
+fn snapshot_response_value(view: &SnapshotView, schema_version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "feature_graph_hash": view.feature_graph_hash,
+        "revision_hash": view.revision_hash,
+        "schema_version": schema_version,
+    })
+}
+
+fn bracket_response_value(view: &BracketCommitView, schema_version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": view.result.status,
+        "operation": "bracket",
+        "feature_id": view.result.feature_id,
+        "request_id": view.result.request_id,
+        "source_snapshot": {
+            "feature_graph_hash": view.source_snapshot.feature_graph_hash,
+            "revision_hash": view.source_snapshot.revision_hash,
+        },
+        "feature_graph_hash": view.snapshot.feature_graph_hash,
+        "revision_hash": view.snapshot.revision_hash,
+        "authoritative": true,
+        "artifact_kind": view.artifact.artifact_kind,
+        "artifact_name": view.artifact.artifact_name,
+        "brep_path": view.result.brep_path,
+        "brep_sha256": view.result.brep_sha256,
+        "brep_bytes": view.result.brep_bytes,
+        "worker_fingerprint": {
+            "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+            "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+            "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+        },
+        "derived_result": {
+            "request_id": view.artifact.request_id,
+            "operation": view.artifact.operation,
+            "feature_id": view.artifact.feature_id,
+            "source_revision_id": view.artifact.source_revision_id,
+            "worker_fingerprint": {
+                "worker_kind": view.artifact.worker_fingerprint.worker_kind,
+                "worker_schema_version": view.artifact.worker_fingerprint.worker_schema_version,
+                "protocol_schema_version": view.artifact.worker_fingerprint.protocol_schema_version,
+            },
+            "artifact_kind": view.artifact.artifact_kind,
+            "artifact_name": view.artifact.artifact_name,
+            "byte_count": view.artifact.byte_count,
+            "sha256": view.artifact.sha256,
+        },
+        "schema_version": schema_version,
+    })
+}
+
+fn export_response_value(view: &ExportCommitView, schema_version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "feature_id": view.stale_last_valid_geometry_acceptance.feature_id,
+        "artifacts": view.artifacts,
+        "source_revision_id": view.source_snapshot.revision_hash,
+        "derived_artifacts": view.derived_artifacts,
+        "accepted_stale_last_valid_geometry": false,
+        "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
+        "schema_version": schema_version,
+    })
+}
+
+fn timeline_response_value(view: &HistoryTimelineView, schema_version: &str) -> serde_json::Value {
+    let timeline = &view.timeline;
+    let revisions = timeline
+        .revisions
+        .iter()
+        .map(|revision| {
+            serde_json::json!({
+                "ordinal": revision.ordinal,
+                "revision_id": revision.revision_id,
+                "operation": revision.operation,
+                "status": serde_json::to_value(&revision.status).expect("timeline status serializes"),
+                "stale_last_valid_geometry_fingerprint": revision
+                    .stale_last_valid_geometry_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
+                "named_revision_names": revision.named_revision_names,
+            })
+        })
+        .collect::<Vec<_>>();
+    let named_revisions = timeline
+        .named_revisions
+        .iter()
+        .map(|revision| {
+            serde_json::json!({
+                "name": revision.name,
+                "revision_id": revision.revision_id,
+                "provenance": revision.provenance,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "feature_id": timeline.feature_id,
+        "active_revision": timeline.active_revision,
+        "revisions": revisions,
+        "named_revisions": named_revisions,
         "feature_graph_hash": view.snapshot.feature_graph_hash,
         "revision_hash": view.snapshot.revision_hash,
         "schema_version": schema_version,
@@ -2692,6 +2800,39 @@ impl Host {
         command: CommandId,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ExecutionError<HostError>> {
+        let cancel = AtomicBool::new(false);
+        let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        self.execute_domain_command_with_worker_and_cancel_and_progress(
+            command,
+            request,
+            None,
+            &cancel,
+            &mut ignore_progress,
+        )
+    }
+
+    /// Apply the registered command contract to an adapter-owned orchestration
+    /// handler that does not mutate domain state itself.
+    pub fn execute_domain_command_with_handler<E>(
+        &self,
+        command: CommandId,
+        request: serde_json::Value,
+        handler: impl FnOnce(serde_json::Value) -> Result<serde_json::Value, E>,
+    ) -> Result<serde_json::Value, ExecutionError<E>> {
+        execute(command, request, handler)
+    }
+
+    /// Execute a registered command through the same semantic boundary while
+    /// allowing the production adapter to retain cooperative cancellation and
+    /// progress reporting for expensive worker operations.
+    pub fn execute_domain_command_with_worker_and_cancel_and_progress(
+        &self,
+        command: CommandId,
+        request: serde_json::Value,
+        worker_override: Option<&OcctWorker>,
+        cancel: &AtomicBool,
+        on_progress: &mut dyn FnMut(&threeterm_protocol::supervisor::Progress),
+    ) -> Result<serde_json::Value, ExecutionError<HostError>> {
         execute(command, request, |request| {
             let string_field = |name: &str| {
                 request
@@ -2752,6 +2893,259 @@ impl Host {
             }
             if command == COMPONENT_STATE_COMMAND_ID {
                 return self.component_state_value(string_field("bundle_path")?);
+            }
+            if command == LIST_COMMAND_ID {
+                return iter()
+                    .map(|entry| {
+                        serde_json::to_value(entry).map_err(|error| HostError::Validation {
+                            detail: format!("command registry serialization failed: {error}"),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(serde_json::Value::Array);
+            }
+            if command == NEW_PROJECT_COMMAND_ID {
+                let destination = string_field("destination")?;
+                let manifest = threeterm_persistence::write_fresh(
+                    Path::new(destination),
+                    ProjectGeneration::fresh(),
+                )?;
+                return Ok(serde_json::json!({
+                    "generation_id": manifest.generation_id,
+                    "manifest": manifest,
+                }));
+            }
+            if command == SAVE_COMMAND_ID {
+                let view = self.save(
+                    string_field("bundle_path")?,
+                    string_field("feature_id")?,
+                    string_field("kind")?,
+                )?;
+                return Ok(snapshot_response_value(
+                    &view,
+                    find(command)
+                        .expect("save is registered")
+                        .response_schema_version,
+                ));
+            }
+            if command == LOAD_COMMAND_ID {
+                let view = self.load_with_geometry_replay(string_field("bundle_path")?)?;
+                return Ok(serde_json::json!({
+                    "feature_graph_hash": view.feature_graph_hash,
+                    "revision_hash": view.revision_hash,
+                    "recovered_from_previous": view.recovered_from_previous,
+                    "schema_version": find(command).expect("load is registered").response_schema_version,
+                }));
+            }
+            if command == EXPORT_COMMAND_ID {
+                let formats = request["formats"]
+                    .as_array()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "export formats must be an array".to_string(),
+                    })?
+                    .iter()
+                    .map(|format| {
+                        format
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| HostError::Validation {
+                                detail: "export formats must contain strings".to_string(),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let body_ids = request
+                    .get("body_ids")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|body_ids| {
+                        body_ids
+                            .iter()
+                            .map(|body_id| {
+                                body_id.as_str().map(str::to_string).ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "export body_ids must contain strings".to_string(),
+                                    }
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let view = self.export(
+                    string_field("bundle_path")?,
+                    string_field("feature_id")?,
+                    &formats,
+                    Path::new(string_field("output_dir")?),
+                    request["tessellation_deflection"].as_f64().ok_or_else(|| {
+                        HostError::Validation {
+                            detail: "export tessellation_deflection must be a number".to_string(),
+                        }
+                    })?,
+                    request["override_warnings"].as_bool().ok_or_else(|| {
+                        HostError::Validation {
+                            detail: "export override_warnings must be a boolean".to_string(),
+                        }
+                    })?,
+                    request["accept_stale_geometry"].as_bool().ok_or_else(|| {
+                        HostError::Validation {
+                            detail: "export accept_stale_geometry must be a boolean".to_string(),
+                        }
+                    })?,
+                    &body_ids,
+                )?;
+                return Ok(export_response_value(
+                    &view,
+                    find(command)
+                        .expect("export is registered")
+                        .response_schema_version,
+                ));
+            }
+            if command == FIT_DIMENSION_COMMAND_ID {
+                let view = self.fit_dimension(
+                    string_field("bundle_path")?,
+                    string_field("expected_revision")?,
+                    string_field("source_feature_id")?,
+                    string_field("target_feature_id")?,
+                    string_field("source_dimension_id")?,
+                    string_field("target_dimension_id")?,
+                    string_field("dimension")?,
+                    request["clearance"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "fit clearance must be a number".to_string(),
+                        })?,
+                )?;
+                return Ok(serde_json::json!({
+                    "fit": view.fit,
+                    "feature_graph_hash": view.snapshot.feature_graph_hash,
+                    "revision_hash": view.snapshot.revision_hash,
+                    "schema_version": find(command).expect("fit dimension is registered").response_schema_version,
+                }));
+            }
+            if command == HISTORICAL_EDIT_COMMAND_ID {
+                let view = self.historical_edit(
+                    string_field("bundle_path")?,
+                    string_field("feature_id")?,
+                    string_field("parameter")?,
+                    request["value"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "historical edit value must be a number".to_string(),
+                        })?,
+                )?;
+                return Ok(history_commit_value(
+                    "historical-edit",
+                    find(command)
+                        .expect("historical edit is registered")
+                        .response_schema_version,
+                    &view,
+                ));
+            }
+            if command == CREATE_REVISION_COMMAND_ID {
+                let view = self
+                    .create_named_revision(string_field("bundle_path")?, string_field("name")?)?;
+                return Ok(history_commit_value(
+                    "create-revision",
+                    find(command)
+                        .expect("create revision is registered")
+                        .response_schema_version,
+                    &view,
+                ));
+            }
+            if command == RESTORE_REVISION_COMMAND_ID {
+                let view = self.restore_named_revision(
+                    string_field("bundle_path")?,
+                    string_field("feature_id")?,
+                    string_field("name")?,
+                )?;
+                return Ok(history_commit_value(
+                    "restore-revision",
+                    find(command)
+                        .expect("restore revision is registered")
+                        .response_schema_version,
+                    &view,
+                ));
+            }
+            if command == TIMELINE_COMMAND_ID {
+                let view =
+                    self.timeline(string_field("bundle_path")?, string_field("feature_id")?)?;
+                return Ok(timeline_response_value(
+                    &view,
+                    find(command)
+                        .expect("timeline is registered")
+                        .response_schema_version,
+                ));
+            }
+            if command == UNDO_COMMAND_ID || command == REDO_COMMAND_ID {
+                let operation = if command == UNDO_COMMAND_ID {
+                    "undo"
+                } else {
+                    "redo"
+                };
+                let view = if command == UNDO_COMMAND_ID {
+                    self.undo(string_field("bundle_path")?)?
+                } else {
+                    self.redo(string_field("bundle_path")?)?
+                };
+                return Ok(history_commit_value(
+                    operation,
+                    find(command)
+                        .expect("cursor command is registered")
+                        .response_schema_version,
+                    &view,
+                ));
+            }
+            if command == REPLAY_VERIFY_COMMAND_ID {
+                let verification = self.verify_history_replay(string_field("bundle_path")?)?;
+                return Ok(serde_json::json!({
+                    "deterministic": verification.deterministic,
+                    "fingerprint": verification.fingerprint,
+                    "model_state_fingerprint": verification.model_state_fingerprint,
+                    "geometry_fingerprints": verification.geometry_fingerprints,
+                    "mismatch": verification.mismatch.unwrap_or_default(),
+                    "schema_version": find(command).expect("replay verify is registered").response_schema_version,
+                }));
+            }
+            if command == BRACKET_COMMAND_ID {
+                let bundle_path = string_field("bundle_path")?;
+                let bracket_id = string_field("bracket_id")?;
+                let request = BracketRequest::new(
+                    new_request_id(),
+                    request["length"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "bracket length must be a number".to_string(),
+                        })?,
+                    request["width"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "bracket width must be a number".to_string(),
+                        })?,
+                    request["height"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "bracket height must be a number".to_string(),
+                        })?,
+                    request["thickness"]
+                        .as_f64()
+                        .ok_or_else(|| HostError::Validation {
+                            detail: "bracket thickness must be a number".to_string(),
+                        })?,
+                )
+                .with_feature_id(bracket_id);
+                let worker =
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?;
+                let view = self.create_bracket(bundle_path, request, &worker)?;
+                return Ok(bracket_response_value(
+                    &view,
+                    find(command)
+                        .expect("bracket is registered")
+                        .response_schema_version,
+                ));
+            }
+            if command == BRACKET_EDIT_COMMAND_ID {
+                return self.execute_bracket_edit_command(&request);
             }
 
             match command {
@@ -3013,9 +3407,7 @@ impl Host {
                         });
                     }
                     let root = Bundle::at(bundle_path).canonical_root().to_path_buf();
-                    let base_path = root
-                        .join(BREP_SUBDIR)
-                        .join(format!("{base_feature_id}.brep"));
+                    let base_path = authenticated_base_brep(&root, base_feature_id)?;
                     let request = BooleanPatternRequest::new(
                         threeterm_occt_worker::new_request_id(),
                         base_path,
@@ -3027,11 +3419,23 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "boolean-pattern.brep")
                     .with_feature_id(feature_id);
-                    let worker =
-                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-                            detail: error.to_string(),
-                        })?;
-                    let view = self.boolean_pattern(bundle_path, request, &worker)?;
+                    let located_worker;
+                    let worker = if let Some(worker) = worker_override {
+                        worker
+                    } else {
+                        located_worker =
+                            OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                                detail: error.to_string(),
+                            })?;
+                        &located_worker
+                    };
+                    let view = self.boolean_pattern_with_cancel_and_progress(
+                        bundle_path,
+                        request,
+                        worker,
+                        cancel,
+                        on_progress,
+                    )?;
                     Ok(view.response_value(
                         find(command)
                             .expect("boolean pattern is registered")
@@ -3294,55 +3698,9 @@ impl Host {
                             detail: "boolean operand is incompatible: not a solid".to_string(),
                         });
                     }
-                    let bundle_root = PathBuf::from(bundle_path);
-                    let base_path = bundle_root
-                        .join("brep")
-                        .join(format!("{base_feature_id}.brep"));
-                    let tool_path = bundle_root
-                        .join("brep")
-                        .join(format!("{tool_feature_id}.brep"));
-                    // Provenance check: the committed BREP bytes must match the
-                    // canonical log entry, otherwise the operand is lost.
-                    for (operand_id, operand_path) in [
-                        (&base_feature_id, &base_path),
-                        (&tool_feature_id, &tool_path),
-                    ] {
-                        let entry = loaded
-                            .log
-                            .entries()
-                            .iter()
-                            .rev()
-                            .find(|entry| {
-                                entry.feature_id == **operand_id
-                                    && entry.brep_byte_count.is_some()
-                                    && entry.brep_sha256.is_some()
-                            })
-                            .ok_or_else(|| HostError::Validation {
-                                detail: format!(
-                                    "boolean operand has no committed BREP: {operand_id}"
-                                ),
-                            })?;
-                        let expected_bytes = entry
-                            .brep_byte_count
-                            .and_then(|value| usize::try_from(value).ok());
-                        let expected_sha = entry.brep_sha256.as_deref();
-                        match (expected_bytes, expected_sha) {
-                            (Some(expected_bytes), Some(expected_sha)) => {
-                                read_brep_verified(
-                                    operand_path,
-                                    Some((expected_bytes, expected_sha)),
-                                )
-                                .map_err(|detail| HostError::Validation { detail })?;
-                            }
-                            _ => {
-                                return Err(HostError::Validation {
-                                    detail: format!(
-                                        "boolean operand BREP provenance is invalid: {operand_id}"
-                                    ),
-                                });
-                            }
-                        }
-                    }
+                    let bundle_root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+                    let base_path = authenticated_base_brep(&bundle_root, base_feature_id)?;
+                    let tool_path = authenticated_base_brep(&bundle_root, tool_feature_id)?;
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
@@ -3456,10 +3814,14 @@ impl Host {
                     let thread_depth = request
                         .get("thread_depth")
                         .and_then(serde_json::Value::as_f64);
-                    let bundle_root = PathBuf::from(bundle_path);
-                    let base_path = bundle_root
-                        .join("brep")
-                        .join(format!("{base_feature_id}.brep"));
+                    let bundle_root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+                    let loaded = Bundle::at(bundle_path).open()?;
+                    if !loaded.graph.contains_feature(base_feature_id) {
+                        return Err(HostError::Validation {
+                            detail: format!("hole base feature is missing: {base_feature_id}"),
+                        });
+                    }
+                    let base_path = authenticated_base_brep(&bundle_root, base_feature_id)?;
                     let output_dir = bundle_root.join("stage");
                     let mut hole_request = HoleRequest::new(
                         threeterm_occt_worker::new_request_id(),
@@ -3487,12 +3849,6 @@ impl Host {
                         .map_err(|detail| HostError::Validation {
                             detail: format!("hole request is invalid: {detail}"),
                         })?;
-                    let loaded = Bundle::at(bundle_path).open()?;
-                    if !loaded.graph.contains_feature(base_feature_id) {
-                        return Err(HostError::Validation {
-                            detail: format!("hole base feature is missing: {base_feature_id}"),
-                        });
-                    }
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
@@ -3792,6 +4148,158 @@ impl Host {
                 }),
             }
         })
+    }
+
+    fn execute_bracket_edit_command(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        let string_field = |name: &str| {
+            request
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("missing string field {name:?}"),
+                })
+        };
+        let number_field = |name: &str| {
+            request
+                .get(name)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("missing number field {name:?}"),
+                })
+        };
+        let bundle = string_field("bundle_path")?;
+        let draft_id = string_field("draft_id")?;
+        let bracket_id = string_field("bracket_id")?;
+        let dimensions = || {
+            Ok::<_, HostError>(
+                BracketRequest::new(
+                    new_request_id(),
+                    number_field("length")?,
+                    number_field("width")?,
+                    number_field("height")?,
+                    number_field("thickness")?,
+                )
+                .with_feature_id(bracket_id)
+                .with_output_path(bundle, "unused.brep"),
+            )
+        };
+        let phase = string_field("phase")?;
+        let schema_version = find(BRACKET_EDIT_COMMAND_ID)
+            .expect("bracket edit is registered")
+            .response_schema_version;
+
+        match phase {
+            "open" => {
+                let draft =
+                    self.open_bracket_parameter_draft(bundle, draft_id, bracket_id, dimensions()?)?;
+                let input_fingerprint = self
+                    .bracket_draft_fingerprint(bundle, draft_id)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "opened bracket draft has no input fingerprint".to_string(),
+                    })?;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "phase": "open",
+                    "draft_id": draft.draft_id,
+                    "source_revision": draft.source_revision,
+                    "input_fingerprint": input_fingerprint,
+                    "draft_sequence": draft.sequence,
+                    "schema_version": schema_version,
+                }))
+            }
+            "update" => {
+                let draft_sequence = request
+                    .get("draft_sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "missing integer field \"draft_sequence\"".to_string(),
+                    })?;
+                let input_fingerprint = string_field("input_fingerprint")?;
+                let draft = self.update_bracket_parameter_draft(
+                    bundle,
+                    draft_id,
+                    draft_sequence,
+                    input_fingerprint,
+                    dimensions()?,
+                )?;
+                let input_fingerprint = self
+                    .bracket_draft_fingerprint(bundle, draft_id)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "updated bracket draft has no input fingerprint".to_string(),
+                    })?;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "phase": "update",
+                    "draft_id": draft.draft_id,
+                    "source_revision": draft.source_revision,
+                    "input_fingerprint": input_fingerprint,
+                    "draft_sequence": draft.sequence,
+                    "schema_version": schema_version,
+                }))
+            }
+            "preview" => {
+                self.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
+                let worker =
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?;
+                let preview = self.preview_bracket_parameter_draft(bundle, draft_id, &worker)?;
+                let draft_sequence =
+                    self.bracket_draft_sequence(bundle, draft_id)
+                        .ok_or_else(|| HostError::DraftNotFound {
+                            draft_id: draft_id.to_string(),
+                        })?;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "phase": "preview",
+                    "draft_id": preview.draft_id,
+                    "source_revision": preview.source_revision,
+                    "current_revision": preview.source_revision,
+                    "preview_revision": preview.preview_revision,
+                    "input_fingerprint": preview.input_fingerprint,
+                    "draft_sequence": draft_sequence,
+                    "schema_version": schema_version,
+                }))
+            }
+            "commit" => {
+                self.validate_bracket_parameter_draft_request(bundle, draft_id, dimensions()?)?;
+                let source_revision = self
+                    .bracket_draft_source_revision(bundle, draft_id)
+                    .ok_or_else(|| HostError::DraftNotFound {
+                        draft_id: draft_id.to_string(),
+                    })?;
+                let worker =
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?;
+                let committed = self.commit_bracket_parameter_draft(bundle, draft_id, &worker)?;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "phase": "commit",
+                    "draft_id": draft_id,
+                    "source_revision": source_revision,
+                    "current_revision": committed.snapshot.revision_hash,
+                    "input_fingerprint": committed.input_fingerprint,
+                    "schema_version": schema_version,
+                }))
+            }
+            "discard" => {
+                let source_revision = self.discard_bracket_parameter_draft(bundle, draft_id)?;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "phase": "discard",
+                    "draft_id": draft_id,
+                    "source_revision": source_revision,
+                    "schema_version": schema_version,
+                }))
+            }
+            _ => Err(HostError::Validation {
+                detail: "bracket-edit phase is invalid".to_string(),
+            }),
+        }
     }
 
     /// Evaluate a registered command without publishing its worker result.
@@ -5706,13 +6214,6 @@ impl Host {
                     && bracket_family_params(loaded.history.active_snapshot(), &family).is_some()
                     && !committed_brep_path(root, &family).is_file()
             });
-        let snapshot = if replay_needed {
-            let worker = OcctWorker::locate().map_err(HostError::from)?;
-            self.reload_and_recompute_canonical_intents(root, &worker)?
-                .snapshot
-        } else {
-            view
-        };
         if bracket_replay_needed {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             let loaded = Bundle::at(root).open()?;
@@ -5720,6 +6221,16 @@ impl Host {
             Bundle::at(root)
                 .restore_derived_breps_if_revision(loaded.revision_hash_hex(), &artifacts)?;
         }
+        // Bracket families are history-backed semantic inputs for later
+        // canonical intents, so restore them before replaying dependent
+        // geometry when the entire Derived Results directory is gone.
+        let snapshot = if replay_needed {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            self.reload_and_recompute_canonical_intents(root, &worker)?
+                .snapshot
+        } else {
+            view
+        };
         let mut projected = Bundle::at(root).open()?;
         for feature in projected.graph.features().collect::<Vec<_>>() {
             if projected
@@ -14740,6 +15251,19 @@ mod tests {
                 .expect("clock is after epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn domain_executor_runs_the_registered_list_command() {
+        let response = Host::new()
+            .execute_domain_command(LIST_COMMAND_ID, serde_json::json!({}))
+            .expect("list executes through the domain boundary");
+
+        let entries = response.as_array().expect("list response is an array");
+        assert_eq!(entries.len(), iter().count());
+        assert!(entries.iter().any(|entry| {
+            entry.get("id").and_then(serde_json::Value::as_str) == Some(LIST_COMMAND_ID.0)
+        }));
     }
 
     #[test]

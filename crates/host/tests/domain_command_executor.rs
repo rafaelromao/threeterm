@@ -3,14 +3,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
+use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID, REVOLVE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID,
+    REHEARSE_COMMAND_ID, REVOLVE_COMMAND_ID,
 };
+use threeterm_protocol::schema_validator::validate;
 
 fn root(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -92,6 +94,315 @@ fn transform_request(
     };
     request["expected_revision"] = revision.into();
     request
+}
+
+fn registry_request(name: &str, path: &std::path::Path, revision: &str) -> Value {
+    let bundle_path = path.to_string_lossy();
+    let edge = json!({
+        "semantic_id": "edge",
+        "provenance": {
+            "source_feature_id": "base",
+            "source_revision_id": revision,
+            "source_edge_id": "edge"
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": [0.0, 0.0, 0.0],
+            "tangent": [1.0, 0.0, 0.0],
+            "length": 1.0
+        }
+    });
+
+    match name {
+        "list" => json!({}),
+        "new-project" => json!({
+            "destination": path.join("new-project").to_string_lossy()
+        }),
+        "identity" | "load" | "component-state" | "replay-verify" | "undo" | "redo" => {
+            json!({"bundle_path": bundle_path})
+        }
+        "rehearse" => json!({
+            "output_dir": path.join("rehearsal").to_string_lossy(),
+            "release_candidate": "rc-1"
+        }),
+        "apply" => apply_request(path, revision, Some("cube")),
+        "save" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "box",
+            "kind": "cube"
+        }),
+        "bracket" => json!({
+            "bundle_path": bundle_path,
+            "bracket_id": "bracket",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0
+        }),
+        "define-component" => json!({
+            "bundle_path": bundle_path,
+            "definition_id": "definition",
+            "feature_id": "box",
+            "length": 10.0,
+            "width": 5.0,
+            "height": 3.0,
+            "thickness": 1.0
+        }),
+        "create-component-instance" => json!({
+            "bundle_path": bundle_path,
+            "instance_id": "instance",
+            "definition_id": "definition",
+            "transform": [0.0, 0.0, 0.0]
+        }),
+        "transform-component-instance" => json!({
+            "bundle_path": bundle_path,
+            "instance_id": "instance",
+            "transform": [1.0, 0.0, 0.0]
+        }),
+        "make-component-independent" => json!({
+            "bundle_path": bundle_path,
+            "source_instance_id": "instance",
+            "definition_id": "definition",
+            "instance_id": "independent",
+            "feature_id": "independent-feature"
+        }),
+        "edit-component-parameter" => json!({
+            "bundle_path": bundle_path,
+            "definition_id": "definition",
+            "parameter": "length",
+            "value": 11.0
+        }),
+        "sketch-solve" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "sketch",
+            "phase": "preview",
+            "entities": [{"kind": "point", "id": "point", "x": 0.0, "y": 0.0}],
+            "constraints": []
+        }),
+        "bracket-edit" => json!({
+            "phase": "discard",
+            "bundle_path": bundle_path,
+            "draft_id": "draft",
+            "bracket_id": "bracket",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0
+        }),
+        "capture-component" => json!({
+            "bundle_path": bundle_path,
+            "definition_id": "definition",
+            "selected_feature_ids": ["box"]
+        }),
+        "historical-edit" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "box",
+            "parameter": "length",
+            "value": 11.0
+        }),
+        "create-revision" => json!({
+            "bundle_path": bundle_path,
+            "name": "checkpoint"
+        }),
+        "restore-revision" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "box",
+            "name": "checkpoint"
+        }),
+        "timeline" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "box"
+        }),
+        "extrude" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "extrude",
+            "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            "height": 2.0,
+            "mode": "additive"
+        }),
+        "fit-dimension" => json!({
+            "bundle_path": bundle_path,
+            "expected_revision": revision,
+            "source_feature_id": "source",
+            "target_feature_id": "target",
+            "source_dimension_id": "source-length",
+            "target_dimension_id": "target-length",
+            "dimension": "length",
+            "clearance": 1.0
+        }),
+        "boolean-fuse" | "boolean-cut" | "boolean-common" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "result",
+            "base_feature_id": "base",
+            "tool_feature_id": "tool"
+        }),
+        "boolean-pattern" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "pattern",
+            "base_feature_id": "base",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        }),
+        "fillet" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "fillet",
+            "base_feature_id": "base",
+            "radius": 0.2,
+            "expected_revision": revision,
+            "selected_edge": edge
+        }),
+        "chamfer" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "chamfer",
+            "base_feature_id": "base",
+            "distance": 0.2,
+            "expected_revision": revision,
+            "selected_edge": edge
+        }),
+        "reattach-edge" => json!({
+            "bundle_path": bundle_path,
+            "expected_revision": revision,
+            "edit_feature_id": "edge-edit",
+            "edit_kind": "split",
+            "base_feature_id": "base",
+            "radius": 0.2,
+            "plane_point": [0.0, 0.0, 0.0],
+            "plane_normal": [1.0, 0.0, 0.0],
+            "reference": edge,
+            "edit_target": edge
+        }),
+        "hole" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "hole",
+            "base_feature_id": "base",
+            "position": [0.0, 0.0, 0.0],
+            "direction": [0.0, 0.0, 1.0],
+            "diameter": 1.0,
+            "hole_kind": "drilled"
+        }),
+        "revolve" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "revolve",
+            "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_direction": [0.0, 1.0, 0.0],
+            "angle": std::f64::consts::PI
+        }),
+        "mirror" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "mirror",
+            "base_feature_id": "base",
+            "plane_point": [0.0, 0.0, 0.0],
+            "plane_normal": [1.0, 0.0, 0.0]
+        }),
+        "linear-pattern" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "linear-pattern",
+            "base_feature_id": "base",
+            "direction": [1.0, 0.0, 0.0],
+            "count": 2,
+            "spacing": 1.0
+        }),
+        "circular-pattern" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "circular-pattern",
+            "base_feature_id": "base",
+            "axis_point": [0.0, 0.0, 0.0],
+            "axis_normal": [0.0, 0.0, 1.0],
+            "angle_step": 1.0,
+            "count": 2
+        }),
+        "shell" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "shell",
+            "base_feature_id": "base",
+            "thickness": 0.2,
+            "expected_revision": revision
+        }),
+        "draft" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "draft",
+            "base_feature_id": "base",
+            "angle": 0.2,
+            "pull_direction": [0.0, 0.0, 1.0],
+            "expected_revision": revision
+        }),
+        "loft" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "loft",
+            "profiles": [
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+            ],
+            "expected_revision": revision,
+            "is_solid": true,
+            "ruled": false
+        }),
+        "export" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "base",
+            "formats": ["step"],
+            "output_dir": path.join("export").to_string_lossy(),
+            "tessellation_deflection": 0.1,
+            "override_warnings": false,
+            "accept_stale_geometry": false
+        }),
+        other => panic!("registry fixture is missing for {other}"),
+    }
+}
+
+fn rehearsal_response_fixture() -> Value {
+    let classes = [
+        "project_create",
+        "bracket_create",
+        "edit_open",
+        "edit_update",
+        "edit_preview",
+        "edit_commit",
+        "reload",
+        "export",
+        "catalog",
+    ];
+    let run = |prefix: &str| {
+        json!({
+            "schema_version": "threeterm.command.rehearse.run.response/1",
+            "release_candidate": "rc-1",
+            "project_path": format!("{prefix}/project"),
+            "export_path": format!("{prefix}/export"),
+            "catalog_path": format!("{prefix}/sha256-manifest.json"),
+            "timings": classes.iter().map(|class| json!({
+                "class": class,
+                "unit": "ms",
+                "sample_count": 1,
+                "samples_ms": [1.0],
+                "p50_ms": 1.0,
+                "p95_ms": 1.0,
+                "p99_ms": 1.0
+            })).collect::<Vec<_>>(),
+            "artifacts": []
+        })
+    };
+    let comparison = |class: &str| {
+        json!({
+            "class": class,
+            "run_1": {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0},
+            "run_2": {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0},
+            "same_order_of_magnitude": true
+        })
+    };
+    json!({
+        "schema_version": "threeterm.command.rehearse.response/2",
+        "release_candidates": ["rc-1", "rc-2"],
+        "fixture": "l-bracket",
+        "run_count": 2,
+        "sample_policy": "nearest-rank",
+        "promoted": false,
+        "runs": [run("run-1"), run("run-2")],
+        "comparisons": classes.iter().map(|class| comparison(class)).collect::<Vec<_>>()
+    })
 }
 
 #[test]
@@ -216,6 +527,155 @@ fn shared_executor_distinguishes_schema_semantic_and_stale_rejections() {
     assert_ne!(log_before, fs::read(root.join("transactions.log")).unwrap());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(format!("{}.previous-generation", root.display()));
+}
+
+#[test]
+fn every_registered_command_reaches_the_shared_executor_and_validates_response() {
+    let host = Host::new();
+    let root = root("registry-execution");
+
+    for entry in threeterm_protocol::schema::iter() {
+        let command_root = root.join(entry.name);
+        let revision = if matches!(entry.id.0, "list" | "new-project" | "rehearse") {
+            String::new()
+        } else {
+            Bundle::create(&command_root).expect("registry fixture bundle creates");
+            Bundle::at(&command_root)
+                .open()
+                .expect("registry fixture bundle opens")
+                .revision_hash_hex()
+                .to_string()
+        };
+        let request = registry_request(entry.name, &command_root, &revision);
+        validate(&entry.request_schema, &request).unwrap_or_else(|error| {
+            panic!(
+                "registry fixture for {} violates its request schema: {error}",
+                entry.name
+            )
+        });
+
+        if entry.id == REHEARSE_COMMAND_ID {
+            let result = host.execute_domain_command_with_handler(entry.id, request, |_| {
+                Ok::<Value, ()>(rehearsal_response_fixture())
+            });
+            assert!(
+                result.is_ok(),
+                "rehearsal must use the shared registered handler contract: {result:?}"
+            );
+            continue;
+        }
+
+        let result = host.execute_domain_command(entry.id, request);
+        match result {
+            Ok(response) => validate(&entry.response_schema, &response).unwrap_or_else(|error| {
+                panic!(
+                    "response for {} violates its response schema: {error}",
+                    entry.name
+                )
+            }),
+            Err(ExecutionError::UnknownCommand(command)) => {
+                panic!("registered command {} was not recognized", command.0)
+            }
+            Err(ExecutionError::InvalidRequest(error)) => {
+                panic!(
+                    "valid registry fixture for {} was rejected: {error}",
+                    entry.name
+                )
+            }
+            Err(ExecutionError::InvalidResponse(error)) => {
+                panic!(
+                    "response for {} violates its response schema: {error}",
+                    entry.name
+                )
+            }
+            Err(ExecutionError::Handler(HostError::Validation { detail }))
+                if detail.contains("not handled by the domain executor") =>
+            {
+                panic!(
+                    "registered command {} has no executable handler",
+                    entry.name
+                )
+            }
+            Err(ExecutionError::Handler(_)) => {}
+        }
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn production_reload_recomputes_a_bracket_after_all_brep_results_are_deleted() {
+    let Some(worker) = OcctWorker::locate().ok() else {
+        return;
+    };
+    let root = root("brep-free-bracket-reload");
+    let host = Host::new();
+    let committed = host
+        .create_bracket(
+            &root,
+            BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("l-1"),
+            &worker,
+        )
+        .expect("bracket commits");
+    let identity_before = host.identity(&root).expect("identity loads");
+
+    fs::remove_dir_all(root.join("brep")).expect("derived BREP directory removes");
+
+    let reloaded = host
+        .load_with_geometry_replay(&root)
+        .expect("canonical state reloads without BREP");
+    let identity_after = host.identity(&root).expect("reloaded identity loads");
+
+    assert_eq!(
+        reloaded.feature_graph_hash,
+        committed.snapshot.feature_graph_hash
+    );
+    assert_eq!(reloaded.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(identity_after, identity_before);
+    assert!(root.join("brep/l-1.brep").is_file());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn derived_geometry_commands_reject_unproven_base_breps_before_worker_execution() {
+    let root = root("unproven-base");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let boolean_pattern = host.execute_domain_command(
+        BOOLEAN_PATTERN_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "pattern",
+            "base_feature_id": "missing-base",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        }),
+    );
+    let hole = host.execute_domain_command(
+        HOLE_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "hole",
+            "base_feature_id": "missing-base",
+            "position": [0.0, 0.0, 0.0],
+            "direction": [0.0, 0.0, 1.0],
+            "diameter": 1.0
+        }),
+    );
+
+    for result in [boolean_pattern, hole] {
+        let Err(ExecutionError::Handler(HostError::Validation { detail })) = result else {
+            panic!("unproven base must be rejected before worker execution: {result:?}");
+        };
+        assert!(detail.contains("base feature is missing"));
+    }
+
+    assert_eq!(Bundle::at(&root).open().expect("bundle opens").log.len(), 0);
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

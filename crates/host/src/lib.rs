@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -3472,12 +3472,39 @@ impl Host {
             .iter()
             .any(|entry| entry.intent.is_some());
         let expected_geometry = canonical_geometry_fingerprints(&loaded);
-        let recomputed = if has_geometry_intent {
-            let worker = OcctWorker::locate().map_err(HostError::from)?;
-            Some(self.reload_and_recompute_geometry(root.as_ref(), &worker)?)
+        let has_component_geometry = loaded.components.instances.values().any(|instance| {
+            loaded
+                .components
+                .definitions
+                .get(&instance.definition_id)
+                .is_some_and(|definition| !definition.selected_feature_ids.is_empty())
+        });
+        let (component_before, component_before_complete) =
+            component_geometry_fingerprint_map(root.as_ref(), &loaded);
+        let worker = if has_geometry_intent || has_component_geometry {
+            Some(OcctWorker::locate().map_err(HostError::from)?)
         } else {
             None
         };
+        let recomputed = if has_geometry_intent {
+            Some(self.reload_and_recompute_geometry(
+                root.as_ref(),
+                worker.as_ref().expect("worker is present"),
+            )?)
+        } else {
+            None
+        };
+        let component_after = if has_component_geometry {
+            self.recompute_all_component_instances(
+                root.as_ref(),
+                worker.as_ref().expect("worker is present"),
+            )?;
+            let reloaded = bundle.open()?;
+            component_geometry_fingerprint_map(root.as_ref(), &reloaded).0
+        } else {
+            BTreeMap::new()
+        };
+        let component_mismatch = component_before_complete && component_before != component_after;
         let first_model = recomputed.as_ref().map_or_else(
             || canonical_model_fingerprint(&loaded),
             |replayed| replayed.model_state_fingerprint.clone(),
@@ -3504,8 +3531,10 @@ impl Host {
                 (authenticated.0 != expected_geometry)
                     .then_some("recomputed geometry differs from canonical provenance".to_string())
             });
+            let mut fingerprints = authenticated.0;
+            fingerprints.extend(component_after.values().cloned());
             (
-                authenticated.0,
+                fingerprints,
                 mismatch.or_else(|| {
                     (geometry_fingerprint_map(
                         &replayed.feature_ids,
@@ -3521,10 +3550,19 @@ impl Host {
                     "authenticated geometry differs from canonical provenance".to_string(),
                 )
             });
-            (authenticated.0, mismatch)
+            let mut fingerprints = authenticated.0;
+            fingerprints.extend(component_after.values().cloned());
+            (fingerprints, mismatch)
         };
         if mismatch.is_none() {
-            mismatch = geometry_mismatch;
+            mismatch = if component_mismatch {
+                Some(
+                    "recomputed component instance geometry differs from its prior result"
+                        .to_string(),
+                )
+            } else {
+                geometry_mismatch
+            };
         }
         Ok(ReplayVerification {
             deterministic: mismatch.is_none(),
@@ -4600,6 +4638,36 @@ impl Host {
             let path =
                 component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id);
             if path.is_file() {
+                continue;
+            }
+            let Some((instance_id, bytes)) = materialize_component_instance_geometry_with_worker(
+                root, &loaded, instance, worker,
+            )?
+            else {
+                continue;
+            };
+            publish_component_instance_geometry(
+                root,
+                loaded.revision_hash_hex(),
+                &instance_id,
+                &bytes,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn recompute_all_component_instances(
+        &self,
+        root: &Path,
+        worker: &OcctWorker,
+    ) -> Result<(), HostError> {
+        let loaded = Bundle::at(root).open()?;
+        for instance in loaded.components.instances.values() {
+            let Some(definition) = loaded.components.definitions.get(&instance.definition_id)
+            else {
+                continue;
+            };
+            if definition.selected_feature_ids.is_empty() {
                 continue;
             }
             let Some((instance_id, bytes)) = materialize_component_instance_geometry_with_worker(
@@ -7932,6 +8000,33 @@ fn component_instance_geometry_path(root: &Path, revision: &str, instance_id: &s
         .join("component-instances")
         .join(revision)
         .join(format!("{instance_id}.brep"))
+}
+
+fn component_geometry_fingerprint_map(
+    root: &Path,
+    loaded: &LoadedBundle,
+) -> (BTreeMap<String, String>, bool) {
+    let mut fingerprints = BTreeMap::new();
+    let mut complete = true;
+    for instance in loaded.components.instances.values() {
+        let Some(definition) = loaded.components.definitions.get(&instance.definition_id) else {
+            continue;
+        };
+        if definition.selected_feature_ids.is_empty() {
+            continue;
+        }
+        let path = component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id);
+        if !path.is_file() {
+            complete = false;
+            continue;
+        }
+        if let Ok(digest) = sha256_path(&path) {
+            fingerprints.insert(instance.id.clone(), digest);
+        } else {
+            complete = false;
+        }
+    }
+    (fingerprints, complete)
 }
 
 fn component_source_brep(

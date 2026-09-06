@@ -7953,6 +7953,29 @@ fn component_source_brep(
             detail: format!("component source feature reference is lost: {family}"),
         });
     }
+    let entry = loaded
+        .log
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| entry.feature_id == family && entry.brep_sha256.is_some())
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("component source geometry provenance is lost: {family}"),
+        })?;
+    let byte_count = entry
+        .brep_byte_count
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("component source geometry byte count is invalid: {family}"),
+        })?;
+    let digest = entry
+        .brep_sha256
+        .as_deref()
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("component source geometry digest is lost: {family}"),
+        })?;
+    read_brep_verified(&path, Some((byte_count, digest)))
+        .map_err(|detail| HostError::BrepIo { detail })?;
     Ok(Some(path))
 }
 

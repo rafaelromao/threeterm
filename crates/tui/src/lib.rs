@@ -2829,6 +2829,13 @@ pub struct ViewportInputOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResizeInputOutcome {
+    pub started: StateTransition,
+    pub completed: StateTransition,
+    pub submission: SubmitOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyboardInputOutcome {
     pub rendered: Option<RenderedInput>,
     pub submission: Option<SubmitOutcome>,
@@ -3290,6 +3297,19 @@ impl<R: Renderer> TuiViewportSession<R> {
             | TerminalInput::Preview
             | TerminalInput::Commit
             | TerminalInput::Enter => Ok(self.keyboard_overlay(String::new())),
+            TerminalInput::FocusLost
+            | TerminalInput::FocusIn
+            | TerminalInput::Resize { .. }
+            | TerminalInput::TerminalReset => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: lifecycle input requires the production event loop"
+                    .to_string(),
+            )),
+            TerminalInput::PointerPressed { .. }
+            | TerminalInput::PointerMoved { .. }
+            | TerminalInput::PointerReleased { .. } => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: pointer input requires the production event loop"
+                    .to_string(),
+            )),
         }
     }
 
@@ -3399,6 +3419,19 @@ impl<R: Renderer> TuiViewportSession<R> {
             TerminalInput::Preview | TerminalInput::Commit => Ok(self.keyboard_overlay(
                 "[error-glyph] Failure: select a command before preview or commit".to_string(),
             )),
+            TerminalInput::FocusLost
+            | TerminalInput::FocusIn
+            | TerminalInput::Resize { .. }
+            | TerminalInput::TerminalReset => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: lifecycle input requires the production event loop"
+                    .to_string(),
+            )),
+            TerminalInput::PointerPressed { .. }
+            | TerminalInput::PointerMoved { .. }
+            | TerminalInput::PointerReleased { .. } => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: pointer input requires the production event loop"
+                    .to_string(),
+            )),
         }
     }
 
@@ -3453,6 +3486,19 @@ impl<R: Renderer> TuiViewportSession<R> {
                     self.draft.draft().expect("draft remains").command.0,
                     self.draft.input_text()
                 ))),
+            TerminalInput::FocusLost
+            | TerminalInput::FocusIn
+            | TerminalInput::Resize { .. }
+            | TerminalInput::TerminalReset => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: lifecycle input requires the production event loop"
+                    .to_string(),
+            )),
+            TerminalInput::PointerPressed { .. }
+            | TerminalInput::PointerMoved { .. }
+            | TerminalInput::PointerReleased { .. } => Ok(self.keyboard_overlay(
+                "[error-glyph] Failure: pointer input requires the production event loop"
+                    .to_string(),
+            )),
         }
     }
 
@@ -3697,6 +3743,43 @@ impl<R: Renderer> TuiViewportSession<R> {
         Ok(outcome)
     }
 
+    pub fn handle_focus_event(
+        &mut self,
+        event: FocusCaptureEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.tui.transition_focus_capture(event)
+    }
+
+    pub fn handle_interaction_event(
+        &mut self,
+        event: InteractionEvent,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        self.tui.transition_interaction(event)
+    }
+
+    pub fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<ResizeInputOutcome, TuiViewportError> {
+        let started = self
+            .tui
+            .transition_lifecycle(LifecycleEvent::ResizeStarted)
+            .map_err(TuiViewportError::Tui)?;
+        self.width = width;
+        self.height = height;
+        let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        let completed = self
+            .tui
+            .transition_lifecycle(LifecycleEvent::ResizeCompleted)
+            .map_err(TuiViewportError::Tui)?;
+        Ok(ResizeInputOutcome {
+            started,
+            completed,
+            submission,
+        })
+    }
+
     pub fn request_cancel(
         &mut self,
     ) -> Result<threeterm_viewport::CancelOutcome, ViewportDiagnostic> {
@@ -3705,10 +3788,12 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn report_acknowledgement_timeout(&mut self) -> Result<StateTransition, TuiDiagnostic> {
         let diagnostic = self.coordinator.acknowledgement_timeout();
-        self.tui
+        let transition = self
+            .tui
             .transition_lifecycle(LifecycleEvent::RuntimeFailure {
                 detail: diagnostic.to_string(),
-            })
+            })?;
+        self.as_error_transition(transition)
     }
 
     pub fn report_terminal_reset(
@@ -3716,10 +3801,12 @@ impl<R: Renderer> TuiViewportSession<R> {
         detail: impl Into<String>,
     ) -> Result<StateTransition, TuiDiagnostic> {
         let diagnostic = self.coordinator.terminal_reset(detail);
-        self.tui
+        let transition = self
+            .tui
             .transition_lifecycle(LifecycleEvent::RuntimeFailure {
                 detail: diagnostic.to_string(),
-            })
+            })?;
+        self.as_error_transition(transition)
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
@@ -3785,10 +3872,36 @@ impl<R: Renderer> TuiViewportSession<R> {
         diagnostic: &ViewportDiagnostic,
     ) -> Result<StateTransition, TuiDiagnostic> {
         self.coordinator.invalidate();
-        self.tui
+        let transition = self
+            .tui
             .transition_lifecycle(LifecycleEvent::RuntimeFailure {
                 detail: diagnostic.to_string(),
-            })
+            })?;
+        self.as_error_transition(transition)
+    }
+
+    fn as_error_transition(
+        &self,
+        mut transition: StateTransition,
+    ) -> Result<StateTransition, TuiDiagnostic> {
+        let visual = transient_visuals()
+            .iter()
+            .find(|visual| visual.state == TransientState::Error)
+            .expect("theme error state mapping is complete");
+        transition.acknowledgement.marker = visual.marker.expect("theme marker is present");
+        transition.acknowledgement.color = visual.color;
+        transition.acknowledgement.background = visual.background;
+        self.tui.last_transition_acknowledgement = Some(transition.acknowledgement.clone());
+        transition.overlay = render_overlay_text(
+            transition.acknowledgement.marker,
+            &transition.acknowledgement.text,
+            transition.acknowledgement.color,
+            transition.acknowledgement.background,
+            &self.tui.theme,
+        )
+        .map_err(|error| self.tui.theme_diagnostic(error))?;
+        transition.state = self.tui.state();
+        Ok(transition)
     }
 
     pub fn complete_viewport_restore(&mut self) -> Result<StateTransition, TuiDiagnostic> {
@@ -3879,6 +3992,13 @@ pub enum TerminalInput {
     Backspace,
     Arrow(ArrowKey),
     Pick { x: u32, y: u32 },
+    PointerPressed { button: u32, x: u32, y: u32 },
+    PointerMoved { x: u32, y: u32 },
+    PointerReleased { x: u32, y: u32 },
+    FocusLost,
+    FocusIn,
+    Resize { rows: u32, columns: u32 },
+    TerminalReset,
     Escape,
     OpenPalette,
     Preview,
@@ -3933,7 +4053,22 @@ impl TerminalInputDecoder {
                 }
                 return None;
             }
-            let complete: [&[u8]; 5] = [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[13;5u"];
+            if self.pending.starts_with(b"\x1b[8;") {
+                if let Some(offset) = self.pending[4..].iter().position(|byte| *byte == b't') {
+                    return Some(4 + offset + 1);
+                }
+                return None;
+            }
+            let complete: [&[u8]; 8] = [
+                b"\x1b[A",
+                b"\x1b[B",
+                b"\x1b[C",
+                b"\x1b[D",
+                b"\x1b[I",
+                b"\x1b[O",
+                b"\x1b[13;5u",
+                b"\x1bc",
+            ];
             if let Some(sequence) = complete
                 .iter()
                 .find(|sequence| self.pending.starts_with(sequence))
@@ -3964,6 +4099,35 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
     }
     if let Some((x, y)) = decode_sgr_pick(bytes) {
         return Some(TerminalInput::Pick { x, y });
+    }
+    if let Some(mouse) = decode_sgr_mouse(bytes) {
+        return Some(match mouse.action {
+            SgrMouseAction::Press => TerminalInput::PointerPressed {
+                button: mouse.button,
+                x: mouse.x,
+                y: mouse.y,
+            },
+            SgrMouseAction::Move => TerminalInput::PointerMoved {
+                x: mouse.x,
+                y: mouse.y,
+            },
+            SgrMouseAction::Release => TerminalInput::PointerReleased {
+                x: mouse.x,
+                y: mouse.y,
+            },
+        });
+    }
+    if bytes == b"\x1b[I" {
+        return Some(TerminalInput::FocusIn);
+    }
+    if bytes == b"\x1b[O" {
+        return Some(TerminalInput::FocusLost);
+    }
+    if bytes == b"\x1bc" {
+        return Some(TerminalInput::TerminalReset);
+    }
+    if let Some((rows, columns)) = decode_resize(bytes) {
+        return Some(TerminalInput::Resize { rows, columns });
     }
     match bytes {
         b"\x10" => Some(TerminalInput::OpenPalette),
@@ -4004,6 +4168,73 @@ fn decode_sgr_pick(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .checked_sub(1)?;
     Some((x, y))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SgrMouseAction {
+    Press,
+    Move,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SgrMouse {
+    action: SgrMouseAction,
+    button: u32,
+    x: u32,
+    y: u32,
+}
+
+fn decode_sgr_mouse(bytes: &[u8]) -> Option<SgrMouse> {
+    let payload = bytes.strip_prefix(b"\x1b[<")?;
+    let (terminator, payload) = payload.split_last()?;
+    let action = match *terminator {
+        b'M' => SgrMouseAction::Press,
+        b'm' => SgrMouseAction::Release,
+        _ => return None,
+    };
+    let fields = payload.split(|byte| *byte == b';').collect::<Vec<_>>();
+    if fields.len() != 3 {
+        return None;
+    }
+    let button = std::str::from_utf8(fields[0]).ok()?.parse::<u32>().ok()?;
+    let x = std::str::from_utf8(fields[1])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
+    let y = std::str::from_utf8(fields[2])
+        .ok()?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)?;
+    Some(SgrMouse {
+        action: if action == SgrMouseAction::Press && button & 32 != 0 {
+            SgrMouseAction::Move
+        } else {
+            action
+        },
+        button,
+        x,
+        y,
+    })
+}
+
+fn decode_resize(bytes: &[u8]) -> Option<(u32, u32)> {
+    let payload = bytes.strip_prefix(b"\x1b[8;")?.strip_suffix(b"t")?;
+    let mut fields = payload.split(|byte| *byte == b';');
+    let rows = std::str::from_utf8(fields.next()?)
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    let columns = std::str::from_utf8(fields.next()?)
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    if fields.next().is_some() || rows == 0 || columns == 0 {
+        return None;
+    }
+    Some((rows, columns))
 }
 
 fn format_preview(preview: &DomainCommandPreview) -> String {

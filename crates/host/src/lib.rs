@@ -4499,6 +4499,13 @@ impl Host {
         graph
             .apply(&command)
             .map_err(|detail| HostError::Validation { detail })?;
+        let expected_revision = if bundle.canonical_root().exists()
+            || previous_generation_path(bundle.canonical_root()).exists()
+        {
+            Some(bundle.open()?.revision_hash_hex().to_string())
+        } else {
+            None
+        };
         let geometry = match &command {
             ComponentCommand::CreateInstance { instance } => {
                 let loaded = bundle.open()?;
@@ -4522,7 +4529,12 @@ impl Host {
             }
             _ => None,
         };
-        let loaded = bundle.append_component_command(&command)?;
+        let loaded = match expected_revision.as_deref() {
+            Some(expected_revision) => {
+                bundle.append_component_command_if_revision(&command, expected_revision)?
+            }
+            None => bundle.append_component_command(&command)?,
+        };
         if let Some((instance_id, bytes)) = geometry {
             publish_component_instance_geometry(
                 root,
@@ -7952,6 +7964,21 @@ fn component_source_brep(
         return Err(HostError::Validation {
             detail: format!("component source feature reference is lost: {family}"),
         });
+    }
+    for feature_id in &definition.selected_feature_ids {
+        let feature = loaded
+            .history
+            .active_snapshot()
+            .features
+            .get(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("component feature reference is lost: {feature_id}"),
+            })?;
+        if feature.status != HistoryStatus::CurrentValid {
+            return Err(HostError::Validation {
+                detail: format!("component source geometry is stale: {feature_id}"),
+            });
+        }
     }
     let entry = loaded
         .log

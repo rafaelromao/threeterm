@@ -648,6 +648,7 @@ dependencies = [
  "serde",
  "threeterm-domain",
  "threeterm-protocol",
+ "threeterm-theme",
 ]
 
 [[package]]

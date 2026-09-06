@@ -4,11 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::Host;
 use threeterm_occt_worker::{LoftRequest, OcctWorker};
 use threeterm_persistence::Bundle;
-use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
+use threeterm_theme::{PaletteSources, SemanticToken, ThemeContext, resolve_palette};
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
-    CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer,
-    TerminalCapabilityVector, ViewportDiagnosticCode,
+    CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer, PickCandidate,
+    PickResult, TerminalCapabilityVector, ViewportDiagnosticCode,
 };
 
 #[derive(Debug, Default)]
@@ -370,6 +370,99 @@ fn host_viewport_path_emits_themed_marker_overlay_without_host_mutation() {
     assert!(outcome.rendered.overlay.contains("[selection-glyph]"));
     assert!(outcome.rendered.overlay.contains("\x1b[38;2;"));
     assert!(outcome.rendered.overlay.ends_with("\x1b[0m"));
+    let identity = outcome.submission.started.expect("the frame is in flight");
+    let visible = session
+        .acknowledge(FrameAcknowledgement::from(&identity))
+        .expect("the themed frame is acknowledged")
+        .visible
+        .expect("the themed frame is visible");
+    let selected = theme
+        .palette
+        .rgb(SemanticToken::ViewportSelectedBody)
+        .expect("selected body token converts");
+    assert!(
+        visible
+            .rgb
+            .chunks_exact(3)
+            .any(|pixel| { pixel == [selected.red, selected.green, selected.blue] })
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_keyboard_pan_and_zoom_submit_current_camera_requests() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let pan = session
+        .process_keyboard_input(b"w", &host, &root)
+        .expect("w pans the production viewport");
+    let zoom = session
+        .process_keyboard_input(b"+", &host, &root)
+        .expect("plus zooms the production viewport");
+
+    assert_eq!(session.camera().pan_y, -5);
+    assert_eq!(session.camera().zoom_percent, 105);
+    assert!(pan.submission.unwrap().started.is_some());
+    assert_eq!(zoom.submission.unwrap().queued.unwrap().generation, 2);
+    assert_eq!(session.coordinator().dropped_frames().len(), 0);
+    assert_eq!(session.state().presentation_generation, 2);
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_pick_validates_semantic_candidates_before_selection() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let picked = session
+        .pick_at(32, 24)
+        .expect("pick returns a semantic candidate");
+    assert_eq!(picked.candidates, vec!["feature-a"]);
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("feature-a")
+    );
+    assert!(picked.overlay.contains("selection-glyph"));
+    assert_eq!(host.current(), Some(before.clone()));
+
+    let stale = session
+        .validate_pick(PickResult {
+            revision: before.revision_hash.clone(),
+            generation: 0,
+            camera: session.camera(),
+            candidates: vec![PickCandidate {
+                semantic_id: "feature-a".to_string(),
+                depth: 0.0,
+            }],
+        })
+        .expect_err("a pick from an older presentation is rejected");
+    match stale {
+        TuiViewportError::Tui(diagnostic) => {
+            assert_eq!(diagnostic.code, threeterm_tui::TuiDiagnosticCode::StalePick);
+        }
+        TuiViewportError::Viewport(_) => panic!("stale pick is a TUI validation error"),
+    }
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("feature-a")
+    );
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");

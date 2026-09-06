@@ -9,6 +9,7 @@ pub const SCHEMA_VERSION: &str = "threeterm.viewport/1";
 pub enum ViewportDiagnosticCode {
     InvalidDimensions,
     InvalidScene,
+    PaletteInvalid,
     ProjectionFailed,
     FrameDropped,
     FrameCancelled,
@@ -28,6 +29,7 @@ impl ViewportDiagnosticCode {
         match self {
             Self::InvalidDimensions => "invalid_dimensions",
             Self::InvalidScene => "invalid_scene",
+            Self::PaletteInvalid => "palette_invalid",
             Self::ProjectionFailed => "projection_failed",
             Self::FrameDropped => "frame_dropped",
             Self::FrameCancelled => "frame_cancelled",

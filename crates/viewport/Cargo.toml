@@ -12,6 +12,7 @@ flate2 = { workspace = true }
 serde = { workspace = true }
 threeterm-domain = { path = "../domain" }
 threeterm-protocol = { path = "../protocol" }
+threeterm-theme = { path = "../theme" }
 
 [lints]
 workspace = true

@@ -1,16 +1,76 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity, SketchPlacement};
+use threeterm_theme::{Palette, SemanticToken};
 
 use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 
 pub const MAX_PIXELS: u64 = 16_777_216;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportColors {
+    pub background: [u8; 3],
+    pub body: [u8; 3],
+    pub edge: [u8; 3],
+    pub grid: [u8; 3],
+    pub selected_body: [u8; 3],
+    pub selected_edge: [u8; 3],
+    pub candidate_body: [u8; 3],
+    pub candidate_edge: [u8; 3],
+    pub drag_feedback: [u8; 3],
+    pub overlay: [u8; 3],
+    pub warning: [u8; 3],
+    pub error: [u8; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewportColorError {
+    pub token: SemanticToken,
+    pub detail: String,
+}
+
+impl ViewportColors {
+    pub fn from_palette(palette: &Palette) -> Result<Self, ViewportColorError> {
+        let color = |token| {
+            palette
+                .rgb(token)
+                .map(|rgb| [rgb.red, rgb.green, rgb.blue])
+                .map_err(|error| ViewportColorError {
+                    token,
+                    detail: format!("{error:?}"),
+                })
+        };
+        Ok(Self {
+            background: color(SemanticToken::ViewportBackground)?,
+            body: color(SemanticToken::ViewportBody)?,
+            edge: color(SemanticToken::ViewportEdge)?,
+            grid: color(SemanticToken::ViewportGrid)?,
+            selected_body: color(SemanticToken::ViewportSelectedBody)?,
+            selected_edge: color(SemanticToken::ViewportSelectedEdge)?,
+            candidate_body: color(SemanticToken::ViewportCandidateBody)?,
+            candidate_edge: color(SemanticToken::ViewportCandidateEdge)?,
+            drag_feedback: color(SemanticToken::ViewportDragFeedback)?,
+            overlay: color(SemanticToken::ViewportOverlay)?,
+            warning: color(SemanticToken::ViewportWarning)?,
+            error: color(SemanticToken::ViewportError)?,
+        })
+    }
+}
+
+impl Default for ViewportColors {
+    fn default() -> Self {
+        Self::from_palette(threeterm_theme::default_dark())
+            .expect("the embedded default palette has valid viewport colors")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CameraState {
     pub yaw_degrees: i16,
     pub pitch_degrees: i16,
     pub zoom_percent: u16,
+    pub pan_x: i16,
+    pub pan_y: i16,
 }
 
 impl Default for CameraState {
@@ -19,6 +79,8 @@ impl Default for CameraState {
             yaw_degrees: 0,
             pitch_degrees: 20,
             zoom_percent: 100,
+            pan_x: 0,
+            pan_y: 0,
         }
     }
 }
@@ -26,21 +88,54 @@ impl Default for CameraState {
 impl CameraState {
     pub const MIN_ZOOM_PERCENT: u16 = 25;
     pub const MAX_ZOOM_PERCENT: u16 = 400;
+    pub const MIN_PAN: i16 = -10_000;
+    pub const MAX_PAN: i16 = 10_000;
 
     pub fn new(yaw_degrees: i16, pitch_degrees: i16, zoom_percent: u16) -> Self {
         Self {
             yaw_degrees: normalize_yaw(yaw_degrees),
             pitch_degrees: pitch_degrees.clamp(-89, 89),
             zoom_percent: zoom_percent.clamp(Self::MIN_ZOOM_PERCENT, Self::MAX_ZOOM_PERCENT),
+            pan_x: 0,
+            pan_y: 0,
         }
     }
 
     pub fn rotated(self, yaw_delta: i16, pitch_delta: i16) -> Self {
-        Self::new(
+        let mut rotated = Self::new(
             self.yaw_degrees.saturating_add(yaw_delta),
             self.pitch_degrees.saturating_add(pitch_delta),
             self.zoom_percent,
-        )
+        );
+        rotated.pan_x = self.pan_x;
+        rotated.pan_y = self.pan_y;
+        rotated
+    }
+
+    pub fn panned(self, x_delta: i16, y_delta: i16) -> Self {
+        Self {
+            pan_x: self
+                .pan_x
+                .saturating_add(x_delta)
+                .clamp(Self::MIN_PAN, Self::MAX_PAN),
+            pan_y: self
+                .pan_y
+                .saturating_add(y_delta)
+                .clamp(Self::MIN_PAN, Self::MAX_PAN),
+            ..self
+        }
+    }
+
+    pub fn zoomed(self, delta: i16) -> Self {
+        Self {
+            zoom_percent: i32::from(self.zoom_percent)
+                .saturating_add(i32::from(delta))
+                .clamp(
+                    i32::from(Self::MIN_ZOOM_PERCENT),
+                    i32::from(Self::MAX_ZOOM_PERCENT),
+                ) as u16,
+            ..self
+        }
     }
 }
 
@@ -221,6 +316,7 @@ pub struct ViewportRequest {
     pub width: u32,
     pub height: u32,
     pub camera: CameraState,
+    pub colors: ViewportColors,
 }
 
 impl ViewportRequest {
@@ -237,7 +333,13 @@ impl ViewportRequest {
             width,
             height,
             camera,
+            colors: ViewportColors::default(),
         }
+    }
+
+    pub fn with_colors(mut self, colors: ViewportColors) -> Self {
+        self.colors = colors;
+        self
     }
 }
 
@@ -251,6 +353,20 @@ pub struct ViewportFrame {
     pub frame_token: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickCandidate {
+    pub semantic_id: String,
+    pub depth: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickResult {
+    pub revision: String,
+    pub generation: u64,
+    pub camera: CameraState,
+    pub candidates: Vec<PickCandidate>,
+}
+
 impl ViewportFrame {
     pub fn with_frame_token(mut self, frame_token: u64) -> Self {
         self.frame_token = Some(frame_token);
@@ -262,6 +378,113 @@ impl ViewportFrame {
 pub struct ProtocolNeutralViewport;
 
 impl ProtocolNeutralViewport {
+    pub fn pick(
+        scene: &ViewportScene,
+        request: ViewportRequest,
+        x: u32,
+        y: u32,
+    ) -> Result<PickResult, ViewportDiagnostic> {
+        if scene.revision.is_empty() || request.revision != scene.revision {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::InvalidScene,
+                "pick request revision does not match the scene revision",
+                &scene.revision,
+                "discard the pick and rebuild it from the current presentation snapshot",
+            )
+            .with_generation(request.generation));
+        }
+        if request.width == 0 || request.height == 0 || x >= request.width || y >= request.height {
+            return Err(diagnostic(
+                ViewportDiagnosticCode::InvalidDimensions,
+                "pick coordinate is outside the viewport bounds",
+                &scene.revision,
+                "provide a pixel coordinate inside the current viewport",
+            )
+            .with_generation(request.generation));
+        }
+
+        let width = request.width as usize;
+        let height = request.height as usize;
+        let mut candidates = BTreeMap::<String, f64>::new();
+        let Some((min, max)) = scene
+            .solids
+            .iter()
+            .flat_map(|solid| solid.triangles.iter())
+            .fold(None, |bounds: Option<([f64; 3], [f64; 3])>, triangle| {
+                let mut bounds = bounds.unwrap_or((triangle.vertices[0], triangle.vertices[0]));
+                for vertex in triangle.vertices {
+                    for (axis, coordinate) in vertex.iter().enumerate() {
+                        bounds.0[axis] = bounds.0[axis].min(*coordinate);
+                        bounds.1[axis] = bounds.1[axis].max(*coordinate);
+                    }
+                }
+                Some(bounds)
+            })
+        else {
+            return Ok(PickResult {
+                revision: scene.revision.clone(),
+                generation: request.generation,
+                camera: request.camera,
+                candidates: pick_feature_markers(scene, &request, x, y),
+            });
+        };
+        let center = [
+            (min[0] + max[0]) / 2.0,
+            (min[1] + max[1]) / 2.0,
+            (min[2] + max[2]) / 2.0,
+        ];
+        let extent = (0..3)
+            .map(|axis| max[axis] - min[axis])
+            .fold(1.0_f64, f64::max);
+        let scale = width.min(height) as f64 * 0.72 * f64::from(request.camera.zoom_percent)
+            / (100.0 * extent);
+        let yaw = f64::from(request.camera.yaw_degrees).to_radians();
+        let pitch = f64::from(request.camera.pitch_degrees).to_radians();
+        for solid in &scene.solids {
+            for triangle in &solid.triangles {
+                let projected = triangle.vertices.map(|vertex| {
+                    project_solid_vertex(
+                        vertex,
+                        center,
+                        scale,
+                        request.camera,
+                        width,
+                        height,
+                        yaw,
+                        pitch,
+                    )
+                });
+                if let Some(depth) = triangle_depth((x as i32, y as i32), projected) {
+                    candidates
+                        .entry(solid.feature_id.clone())
+                        .and_modify(|current| *current = current.min(depth))
+                        .or_insert(depth);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            for candidate in pick_feature_markers(scene, &request, x, y) {
+                candidates.insert(candidate.semantic_id, candidate.depth);
+            }
+        }
+        let candidates = candidates
+            .into_iter()
+            .map(|(semantic_id, depth)| PickCandidate { semantic_id, depth })
+            .collect::<Vec<_>>();
+        let mut candidates = candidates;
+        candidates.sort_by(|left, right| {
+            left.depth
+                .total_cmp(&right.depth)
+                .then_with(|| left.semantic_id.cmp(&right.semantic_id))
+        });
+        Ok(PickResult {
+            revision: scene.revision.clone(),
+            generation: request.generation,
+            camera: request.camera,
+            candidates,
+        })
+    }
+
     pub fn project(
         scene: &ViewportScene,
         request: ViewportRequest,
@@ -319,8 +542,8 @@ impl ProtocolNeutralViewport {
         let width = request.width as usize;
         let height = request.height as usize;
         let mut rgb = vec![0; width * height * 3];
-        fill_background(&mut rgb);
-        draw_grid(&mut rgb, width, height);
+        fill_background(&mut rgb, request.colors.background);
+        draw_grid(&mut rgb, width, height, request.colors.grid);
 
         for solid in &scene.solids {
             if solid.feature_id.is_empty() || solid.triangles.is_empty() {
@@ -379,14 +602,20 @@ impl ProtocolNeutralViewport {
             let rotated_z = x * yaw.sin() + z * yaw.cos();
             let rotated_y = y * pitch.cos() - rotated_z * pitch.sin();
             let center_x = (width as f64 / 2.0
+                + f64::from(request.camera.pan_x)
                 + rotated_x * min_dimension / (columns.max(1) as f64 + 0.8))
                 .round() as i32;
             let center_y = (height as f64 / 2.0
+                + f64::from(request.camera.pan_y)
                 + rotated_y * min_dimension / (rows.max(1) as f64 + 0.8))
                 .round() as i32;
             let selected = scene.selected_id.as_deref() == Some(feature.id.as_str());
-            let color = marker_color(feature, selected);
-            draw_beveled_cuboid(&mut rgb, width, center_x, center_y, marker_size, color);
+            let colors = if selected {
+                (request.colors.selected_body, request.colors.selected_edge)
+            } else {
+                (request.colors.body, request.colors.edge)
+            };
+            draw_beveled_cuboid(&mut rgb, width, center_x, center_y, marker_size, colors);
         }
 
         draw_solids(&mut rgb, width, height, scene, &request);
@@ -402,6 +631,7 @@ impl ProtocolNeutralViewport {
                     height as f64 / 2.0,
                     sketch_scale,
                     request.camera,
+                    request.colors.edge,
                 );
                 continue;
             }
@@ -414,6 +644,7 @@ impl ProtocolNeutralViewport {
                     height as f64 / 2.0,
                     sketch_scale,
                     request.camera,
+                    request.colors.edge,
                 );
                 continue;
             }
@@ -435,7 +666,7 @@ impl ProtocolNeutralViewport {
                     first.1,
                     second.0,
                     second.1,
-                    [105, 220, 190],
+                    request.colors.edge,
                 );
             }
         }
@@ -516,6 +747,7 @@ fn arc_points(center: [f64; 3], start: [f64; 3], end: [f64; 3]) -> Vec<[f64; 3]>
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_sketch_polyline(
     rgb: &mut [u8],
     width: usize,
@@ -524,18 +756,13 @@ fn draw_sketch_polyline(
     center_y: f64,
     scale: f64,
     camera: CameraState,
+    color: [u8; 3],
 ) {
     for pair in points.windows(2) {
         let first = project_sketch_point(pair[0], center_x, center_y, scale, camera);
         let second = project_sketch_point(pair[1], center_x, center_y, scale, camera);
         draw_sketch_line(
-            &mut *rgb,
-            width,
-            first.0,
-            first.1,
-            second.0,
-            second.1,
-            [105, 220, 190],
+            &mut *rgb, width, first.0, first.1, second.0, second.1, color,
         );
     }
 }
@@ -603,28 +830,134 @@ fn draw_solids(
     let pitch = f64::from(request.camera.pitch_degrees).to_radians();
     let mut depth = vec![f64::INFINITY; width * height];
     for solid in &scene.solids {
-        let color = solid_color(
-            solid.feature_id.as_bytes(),
-            scene.selected_id.as_deref() == Some(solid.feature_id.as_str()),
-        );
+        let color = if scene.selected_id.as_deref() == Some(solid.feature_id.as_str()) {
+            (request.colors.selected_body, request.colors.selected_edge)
+        } else {
+            (request.colors.body, request.colors.edge)
+        };
         for triangle in &solid.triangles {
             let projected = triangle.vertices.map(|vertex| {
-                let x = vertex[0] - center[0];
-                let y = vertex[1] - center[1];
-                let z = vertex[2] - center[2];
-                let yaw_x = x * yaw.cos() - z * yaw.sin();
-                let yaw_z = x * yaw.sin() + z * yaw.cos();
-                let rotated_y = y * pitch.cos() - yaw_z * pitch.sin();
-                let rotated_z = y * pitch.sin() + yaw_z * pitch.cos();
-                (
-                    (width as f64 / 2.0 + yaw_x * scale).round() as i32,
-                    (height as f64 / 2.0 - rotated_y * scale).round() as i32,
-                    rotated_z,
+                project_solid_vertex(
+                    vertex,
+                    center,
+                    scale,
+                    request.camera,
+                    width,
+                    height,
+                    yaw,
+                    pitch,
                 )
             });
-            fill_depth_triangle(rgb, &mut depth, width, height, projected, color);
+            fill_depth_triangle(rgb, &mut depth, width, height, projected, color.0);
         }
     }
+}
+
+fn pick_feature_markers(
+    scene: &ViewportScene,
+    request: &ViewportRequest,
+    x: u32,
+    y: u32,
+) -> Vec<PickCandidate> {
+    let columns = (scene.features.len().max(1) as f64).sqrt().ceil() as usize;
+    let rows = scene.features.len().div_ceil(columns.max(1));
+    let scale = f64::from(request.camera.zoom_percent) / 100.0;
+    let yaw = f64::from(request.camera.yaw_degrees).to_radians();
+    let pitch = f64::from(request.camera.pitch_degrees).to_radians();
+    let min_dimension = request.width.min(request.height) as f64;
+    let marker_size = (min_dimension / (rows.max(1) as f64 + 2.0) * scale)
+        .round()
+        .clamp(3.0, (min_dimension * 0.4).max(3.0));
+    scene
+        .features
+        .iter()
+        .enumerate()
+        .filter_map(|(index, feature)| {
+            let column = index % columns.max(1);
+            let row = index / columns.max(1);
+            let x_offset = column as f64 - (columns.saturating_sub(1) as f64 / 2.0);
+            let y_offset = row as f64 - (rows.saturating_sub(1) as f64 / 2.0);
+            let z = 0.6 + (index % 3) as f64 * 0.18;
+            let rotated_x = x_offset * yaw.cos() - z * yaw.sin();
+            let rotated_z = x_offset * yaw.sin() + z * yaw.cos();
+            let rotated_y = y_offset * pitch.cos() - rotated_z * pitch.sin();
+            let center_x = request.width as f64 / 2.0
+                + f64::from(request.camera.pan_x)
+                + rotated_x * min_dimension / (columns.max(1) as f64 + 0.8);
+            let center_y = request.height as f64 / 2.0
+                + f64::from(request.camera.pan_y)
+                + rotated_y * min_dimension / (rows.max(1) as f64 + 0.8);
+            ((f64::from(x) - center_x).abs() <= marker_size / 2.0
+                && (f64::from(y) - center_y).abs() <= marker_size / 2.0)
+                .then_some(PickCandidate {
+                    semantic_id: feature.id.clone(),
+                    depth: rotated_z,
+                })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_solid_vertex(
+    vertex: [f64; 3],
+    center: [f64; 3],
+    scale: f64,
+    camera: CameraState,
+    width: usize,
+    height: usize,
+    yaw: f64,
+    pitch: f64,
+) -> (i32, i32, f64) {
+    let x = vertex[0] - center[0];
+    let y = vertex[1] - center[1];
+    let z = vertex[2] - center[2];
+    let yaw_x = x * yaw.cos() - z * yaw.sin();
+    let yaw_z = x * yaw.sin() + z * yaw.cos();
+    let rotated_y = y * pitch.cos() - yaw_z * pitch.sin();
+    let rotated_z = y * pitch.sin() + yaw_z * pitch.cos();
+    (
+        (width as f64 / 2.0 + f64::from(camera.pan_x) + yaw_x * scale).round() as i32,
+        (height as f64 / 2.0 + f64::from(camera.pan_y) - rotated_y * scale).round() as i32,
+        rotated_z,
+    )
+}
+
+fn triangle_depth(point: (i32, i32), points: [(i32, i32, f64); 3]) -> Option<f64> {
+    let area = edge(
+        (points[0].0, points[0].1),
+        (points[1].0, points[1].1),
+        (points[2].0, points[2].1),
+    );
+    if area == 0 {
+        return None;
+    }
+    let weights = [
+        edge(
+            (points[1].0, points[1].1),
+            (points[2].0, points[2].1),
+            point,
+        ),
+        edge(
+            (points[2].0, points[2].1),
+            (points[0].0, points[0].1),
+            point,
+        ),
+        edge(
+            (points[0].0, points[0].1),
+            (points[1].0, points[1].1),
+            point,
+        ),
+    ];
+    let inside =
+        weights.iter().all(|weight| *weight >= 0) || weights.iter().all(|weight| *weight <= 0);
+    inside.then(|| {
+        weights
+            .into_iter()
+            .zip(points)
+            .map(|(weight, point)| weight as f64 * point.2)
+            .sum::<f64>()
+            / area as f64
+    })
 }
 
 fn fill_depth_triangle(
@@ -695,18 +1028,6 @@ fn fill_depth_triangle(
     }
 }
 
-fn solid_color(feature_id: &[u8], selected: bool) -> [u8; 3] {
-    if selected {
-        return [245, 194, 66];
-    }
-    let hash = stable_hash(feature_id, b"solid");
-    [
-        100 + ((hash & 0x7f) as u8),
-        100 + (((hash >> 8) & 0x7f) as u8),
-        120 + (((hash >> 16) & 0x7f) as u8),
-    ]
-}
-
 fn diagnostic(
     code: ViewportDiagnosticCode,
     detail: &str,
@@ -721,36 +1042,24 @@ fn normalize_yaw(yaw_degrees: i16) -> i16 {
     normalized as i16
 }
 
-fn fill_background(rgb: &mut [u8]) {
+fn fill_background(rgb: &mut [u8], color: [u8; 3]) {
     for pixel in rgb.chunks_exact_mut(3) {
-        pixel.copy_from_slice(&[18, 22, 31]);
+        pixel.copy_from_slice(&color);
     }
 }
 
-fn draw_grid(rgb: &mut [u8], width: usize, height: usize) {
+fn draw_grid(rgb: &mut [u8], width: usize, height: usize, color: [u8; 3]) {
     let spacing = 16;
     for y in (0..height).step_by(spacing) {
         for x in 0..width {
-            set_pixel(rgb, width, x as i32, y as i32, [36, 43, 56]);
+            set_pixel(rgb, width, x as i32, y as i32, color);
         }
     }
     for x in (0..width).step_by(spacing) {
         for y in 0..height {
-            set_pixel(rgb, width, x as i32, y as i32, [36, 43, 56]);
+            set_pixel(rgb, width, x as i32, y as i32, color);
         }
     }
-}
-
-fn marker_color(feature: &SceneFeature, selected: bool) -> [u8; 3] {
-    if selected {
-        return [245, 194, 66];
-    }
-    let hash = stable_hash(feature.id.as_bytes(), feature.kind.as_bytes());
-    [
-        70 + ((hash & 0x7f) as u8),
-        80 + (((hash >> 8) & 0x7f) as u8),
-        100 + (((hash >> 16) & 0x7f) as u8),
-    ]
 }
 
 fn sketch_point(placement: Option<&SketchPlacement>, point: [f64; 2]) -> [f64; 3] {
@@ -836,8 +1145,8 @@ fn project_sketch_point(
     let yaw_z = point[0] * yaw.sin() + point[2] * yaw.cos();
     let rotated_y = point[1] * pitch.cos() - yaw_z * pitch.sin();
     (
-        (center_x + yaw_x * scale).round() as i32,
-        (center_y - rotated_y * scale).round() as i32,
+        (center_x + f64::from(camera.pan_x) + yaw_x * scale).round() as i32,
+        (center_y + f64::from(camera.pan_y) - rotated_y * scale).round() as i32,
     )
 }
 
@@ -874,23 +1183,15 @@ fn draw_sketch_line(
     }
 }
 
-fn stable_hash(first: &[u8], second: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325;
-    for byte in first.iter().chain(second).copied() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn draw_beveled_cuboid(
     rgb: &mut [u8],
     width: usize,
     center_x: i32,
     center_y: i32,
     size: i32,
-    color: [u8; 3],
+    colors: ([u8; 3], [u8; 3]),
 ) {
+    let (body, edge) = colors;
     let half = size / 2;
     let depth = (size / 4).max(1);
     let bevel = (size / 8).max(1);
@@ -904,15 +1205,15 @@ fn draw_beveled_cuboid(
         (right - depth, top - depth),
         (left - depth, top - depth),
     ];
-    fill_quad(rgb, width, top_face, lighten(color, 35));
+    fill_quad(rgb, width, top_face, edge);
     let side_face = [
         (right, top),
         (right - depth, top - depth),
         (right - depth, bottom - depth),
         (right, bottom),
     ];
-    fill_quad(rgb, width, side_face, darken(color, 30));
-    draw_rect(rgb, width, left, top, size, size, color);
+    fill_quad(rgb, width, side_face, edge);
+    draw_rect(rgb, width, left, top, size, size, body);
     draw_rect(
         rgb,
         width,
@@ -920,17 +1221,11 @@ fn draw_beveled_cuboid(
         top + bevel,
         (size - bevel * 2).max(1),
         (size - bevel * 2).max(1),
-        darken(color, 10),
+        body,
     );
-    draw_line(rgb, width, (left, top), (right, top), lighten(color, 45));
-    draw_line(rgb, width, (left, top), (left, bottom), lighten(color, 45));
-    draw_line(
-        rgb,
-        width,
-        (right, top),
-        (right - depth, top - depth),
-        lighten(color, 20),
-    );
+    draw_line(rgb, width, (left, top), (right, top), edge);
+    draw_line(rgb, width, (left, top), (left, bottom), edge);
+    draw_line(rgb, width, (right, top), (right - depth, top - depth), edge);
 }
 
 fn fill_quad(rgb: &mut [u8], width: usize, points: [(i32, i32); 4], color: [u8; 3]) {
@@ -984,22 +1279,6 @@ fn draw_line(rgb: &mut [u8], width: usize, start: (i32, i32), end: (i32, i32), c
             y += sy;
         }
     }
-}
-
-fn lighten(color: [u8; 3], amount: u8) -> [u8; 3] {
-    [
-        color[0].saturating_add(amount),
-        color[1].saturating_add(amount),
-        color[2].saturating_add(amount),
-    ]
-}
-
-fn darken(color: [u8; 3], amount: u8) -> [u8; 3] {
-    [
-        color[0].saturating_sub(amount),
-        color[1].saturating_sub(amount),
-        color[2].saturating_sub(amount),
-    ]
 }
 
 fn draw_rect(

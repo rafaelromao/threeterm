@@ -118,6 +118,33 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
     );
     assert_eq!(decode_terminal_input(b"\x1b[13;2u"), None);
     assert_eq!(decode_terminal_input(b"\x03"), Some(TerminalInput::Escape));
+    assert_eq!(
+        decode_terminal_input(b"\x1b[O"),
+        Some(TerminalInput::FocusLost)
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[I"),
+        Some(TerminalInput::FocusIn)
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[8;30;100t"),
+        Some(TerminalInput::Resize {
+            rows: 30,
+            columns: 100,
+        })
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[<32;4;5M"),
+        Some(TerminalInput::PointerMoved { x: 3, y: 4 })
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[<0;4;5m"),
+        Some(TerminalInput::PointerReleased { x: 3, y: 4 })
+    );
+    assert_eq!(
+        decode_terminal_input(b"\x1bc"),
+        Some(TerminalInput::TerminalReset)
+    );
 
     let mut decoder = TerminalInputDecoder::default();
     assert_eq!(

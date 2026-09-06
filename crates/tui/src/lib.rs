@@ -3161,6 +3161,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         let input = decode_terminal_input(bytes).ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
         })?;
+        if matches!(input, TerminalInput::Pick { .. }) && self.command_input_active() {
+            return Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            ));
+        }
         if matches!(input, TerminalInput::Arrow(_)) && !self.command_input_active() {
             let outcome = self.process_terminal_input(bytes)?;
             return Ok(KeyboardInputOutcome {
@@ -3187,6 +3192,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 Ok(self.keyboard_overlay(self.palette_overlay()))
             }
             TerminalInput::Arrow(_)
+            | TerminalInput::Pick { .. }
             | TerminalInput::Character(_)
             | TerminalInput::Backspace
             | TerminalInput::Escape
@@ -3296,6 +3302,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                 )))
             }
             TerminalInput::OpenPalette => Ok(self.keyboard_overlay(self.palette_overlay())),
+            TerminalInput::Pick { .. } => Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            )),
             TerminalInput::Preview | TerminalInput::Commit => Ok(self.keyboard_overlay(
                 "[error-glyph] Failure: select a command before preview or commit".to_string(),
             )),
@@ -3344,6 +3353,9 @@ impl<R: Renderer> TuiViewportSession<R> {
             }
             TerminalInput::Preview => self.preview_draft(gateway, root),
             TerminalInput::Commit => self.commit_draft(host, gateway, root),
+            TerminalInput::Pick { .. } => Ok(self.keyboard_overlay(
+                "[focus-glyph] Pick ignored while command input is active".to_string(),
+            )),
             TerminalInput::Arrow(_) | TerminalInput::Enter | TerminalInput::OpenPalette => Ok(self
                 .keyboard_overlay(format!(
                     "[outline] Draft: {} input={}",
@@ -3755,6 +3767,7 @@ pub enum TerminalInput {
     Character(char),
     Backspace,
     Arrow(ArrowKey),
+    Pick { x: u32, y: u32 },
     Escape,
     OpenPalette,
     Preview,
@@ -3798,6 +3811,17 @@ impl TerminalInputDecoder {
                 }
                 return None;
             }
+            const SGR_MOUSE_PREFIX: &[u8] = b"\x1b[<";
+            if self.pending.starts_with(SGR_MOUSE_PREFIX) {
+                let payload = &self.pending[SGR_MOUSE_PREFIX.len()..];
+                if let Some(offset) = payload
+                    .iter()
+                    .position(|byte| *byte == b'M' || *byte == b'm')
+                {
+                    return Some(SGR_MOUSE_PREFIX.len() + offset + 1);
+                }
+                return None;
+            }
             let complete: [&[u8]; 5] = [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[13;5u"];
             if let Some(sequence) = complete
                 .iter()
@@ -3827,6 +3851,9 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
     if let Some(key) = decode_arrow(bytes) {
         return Some(TerminalInput::Arrow(key));
     }
+    if let Some((x, y)) = decode_sgr_pick(bytes) {
+        return Some(TerminalInput::Pick { x, y });
+    }
     match bytes {
         b"\x10" => Some(TerminalInput::OpenPalette),
         b"\x16" => Some(TerminalInput::Preview),
@@ -3843,6 +3870,21 @@ pub fn decode_terminal_input(bytes: &[u8]) -> Option<TerminalInput> {
                 .then_some(TerminalInput::Character(character))
         }
     }
+}
+
+fn decode_sgr_pick(bytes: &[u8]) -> Option<(u32, u32)> {
+    let payload = bytes.strip_prefix(b"\x1b[<")?;
+    let (terminator, payload) = payload.split_last()?;
+    if *terminator != b'M' {
+        return None;
+    }
+    let fields = payload.split(|byte| *byte == b';').collect::<Vec<_>>();
+    if fields.len() != 3 || fields[0] != b"0" {
+        return None;
+    }
+    let x = std::str::from_utf8(fields[1]).ok()?.parse().ok()?;
+    let y = std::str::from_utf8(fields[2]).ok()?.parse().ok()?;
+    Some((x, y))
 }
 
 fn format_preview(preview: &DomainCommandPreview) -> String {

@@ -102,6 +102,10 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
         decode_terminal_input(b"\x1b[B"),
         Some(TerminalInput::Arrow(threeterm_tui::ArrowKey::Down))
     );
+    assert_eq!(
+        decode_terminal_input(b"\x1b[<0;32;24M"),
+        Some(TerminalInput::Pick { x: 32, y: 24 })
+    );
     assert_eq!(decode_terminal_input(b"\x1b"), Some(TerminalInput::Escape));
     assert_eq!(
         decode_terminal_input(b"\x10"),
@@ -125,6 +129,12 @@ fn terminal_decoder_covers_the_palette_vocabulary() {
     );
     assert!(decoder.feed(b"\x1b[13;").is_empty());
     assert_eq!(decoder.feed(b"5u"), vec![b"\x1b[13;5u".to_vec()]);
+    let mut decoder = TerminalInputDecoder::default();
+    assert!(decoder.feed(b"\x1b[<0;32;").is_empty());
+    assert_eq!(
+        decoder.feed(b"24Mq"),
+        vec![b"\x1b[<0;32;24M".to_vec(), b"q".to_vec()]
+    );
     let mut decoder = TerminalInputDecoder::default();
     assert!(decoder.feed(b"\x1b_Gi=2;").is_empty());
     assert_eq!(

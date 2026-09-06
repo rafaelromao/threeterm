@@ -181,7 +181,11 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         .expect("project is persisted");
     let mut terminal = ScriptedTerminal {
         probe_response: None,
-        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b[<0;32;23M".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
         ..Default::default()
     };
 
@@ -212,7 +216,10 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 3);
+    assert_eq!(terminal.events_read, 4);
+    assert!(
+        String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
+    );
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

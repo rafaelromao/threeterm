@@ -13,7 +13,7 @@ use threeterm_viewport::{
     ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
 };
 
-use crate::{TerminalInputDecoder, TuiViewportSession, decode_terminal_input};
+use crate::{TerminalInput, TerminalInputDecoder, TuiViewportSession, decode_terminal_input};
 
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
 pub const EXIT_CAPABILITY_FAILURE: i32 = 10;
@@ -343,17 +343,30 @@ fn run_event_loop<W: InteractiveTerminal>(
                     .map_err(LaunchError::Viewport)?;
                 continue;
             }
-            if decode_terminal_input(&event).is_some() {
-                let outcome = session.process_keyboard_input(&event, host, root).map_err(
-                    |error| match error {
-                        crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
-                        crate::TuiViewportError::Tui(error) => {
-                            LaunchError::Runtime(format!("{error:?}"))
+            if let Some(input) = decode_terminal_input(&event) {
+                let overlay = match input {
+                    TerminalInput::Pick { x, y } if !session.command_input_active() => {
+                        match session.pick_at(x, y) {
+                            Ok(outcome) => outcome.overlay,
+                            Err(error) => format!("[warning-glyph] Pick rejected: {error:?}"),
                         }
-                    },
-                )?;
+                    }
+                    _ => {
+                        session
+                            .process_keyboard_input(&event, host, root)
+                            .map_err(|error| match error {
+                                crate::TuiViewportError::Viewport(error) => {
+                                    LaunchError::Viewport(error)
+                                }
+                                crate::TuiViewportError::Tui(error) => {
+                                    LaunchError::Runtime(format!("{error:?}"))
+                                }
+                            })?
+                            .overlay
+                    }
+                };
                 let revision = session.state().canonical_revision;
-                let overlay = format!("\r\n{}\r\n", outcome.overlay);
+                let overlay = format!("\r\n{overlay}\r\n");
                 session
                     .coordinator_mut()
                     .renderer_mut()

@@ -964,6 +964,13 @@ impl ComponentSession {
             }
         }
     }
+
+    fn scene(&self) -> Vec<SceneSolid> {
+        match self.adapter {
+            ComponentAdapter::Tui => component_scene_from_host(&self.tui_host),
+            ComponentAdapter::Cli | ComponentAdapter::Mcp => component_scene(&self.root),
+        }
+    }
 }
 
 fn bracket_request(root: &Path) -> Value {
@@ -1034,6 +1041,10 @@ fn component_scene(root: &Path) -> Vec<SceneSolid> {
     let host = Host::new();
     host.load_with_geometry_replay(root)
         .expect("component bundle loads for viewport projection");
+    component_scene_from_host(&host)
+}
+
+fn component_scene_from_host(host: &Host) -> Vec<SceneSolid> {
     let scene = host
         .presentation_viewport_scene()
         .expect("component viewport scene builds");
@@ -1185,7 +1196,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
     let state = session.state();
     let identity = session.identity();
     assert_current_component_state(&state, &identity, &session.root);
-    let scene = component_scene(&session.root);
+    let scene = session.scene();
     let output_dir = session.root.join(output_name);
     let response = session.export(&output_dir);
     let (exports, export_metadata) = validate_export(
@@ -1213,10 +1224,10 @@ fn prepare_component_workflow(session: &ComponentSession) {
     session.create_instance("first", [0.0, 0.0, 0.0]);
     session.create_instance("second", [10.0, 0.0, 0.0]);
     let before_transform = session.state();
-    let before_transform_scene = component_scene(&session.root);
+    let before_transform_scene = session.scene();
     session.transform_instance("second", [0.0, 0.0, 90.0]);
     let after_transform = session.state();
-    let after_transform_scene = component_scene(&session.root);
+    let after_transform_scene = session.scene();
     assert_eq!(
         after_transform["instances"]["first"]["geometry_digest"],
         before_transform["instances"]["first"]["geometry_digest"]
@@ -1297,7 +1308,6 @@ fn reload_component_workflow(
 }
 
 #[test]
-#[ignore = "slow: requires the pinned native OCCT worker"]
 fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
     let Some(_) =
         required_worker("reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui")
@@ -1350,7 +1360,6 @@ fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
 }
 
 #[test]
-#[ignore = "slow: requires the pinned native OCCT worker"]
 fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
     let Some(_) = required_worker("reusable_component_geometry_survives_a_mixed_adapter_handoff")
     else {

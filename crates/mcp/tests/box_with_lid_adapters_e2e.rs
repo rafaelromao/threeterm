@@ -259,6 +259,12 @@ fn assert_viewport_evidence(host: &Host) {
     assert!(scene.features.iter().any(|feature| feature.id == "box"));
     assert!(scene.features.iter().any(|feature| feature.id == "lid"));
     assert_eq!(scene.fit_relationships.len(), 1);
+    let fit = &scene.fit_relationships[0];
+    assert_eq!(fit.source_feature_id, "box-sketch");
+    assert_eq!(fit.target_feature_id, "lid-sketch");
+    assert_near(fit.source_value, 10.0);
+    assert_near(fit.target_value, 9.6);
+    assert_near(fit.clearance, 0.2);
 
     let (box_min, box_max) = solid_bounds(&scene, "box");
     assert_near(box_max[0] - box_min[0], 10.0);
@@ -355,6 +361,11 @@ where
     let before_geometry = geometry_evidence(root);
     let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
     let before_log = fs::read(root.join("transactions.log")).expect("transaction log reads");
+    let before_revision = Bundle::at(root)
+        .open()
+        .expect("bundle opens before invalid geometry")
+        .revision_hash_hex()
+        .to_string();
     let error = call(EXTRUDE_COMMAND_ID, invalid_extrude_request(root))
         .expect_err("self-intersecting profile must fail");
     assert!(!error.is_empty());
@@ -371,6 +382,13 @@ where
         before_manifest
     );
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), before_log);
+    assert_eq!(
+        Bundle::at(root)
+            .open()
+            .expect("bundle opens after invalid geometry")
+            .revision_hash_hex(),
+        before_revision
+    );
     assert_eq!(geometry_evidence(root), before_geometry);
 }
 

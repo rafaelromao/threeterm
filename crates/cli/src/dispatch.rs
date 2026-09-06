@@ -3927,9 +3927,8 @@ pub fn dispatch_registered_command(
                 )),
             });
     }
-    return host
-        .execute_domain_command(command, request)
-        .map_err(DispatchError::from);
+    host.execute_domain_command(command, request)
+        .map_err(DispatchError::from)
 }
 
 fn dispatch_bracket_with_host(

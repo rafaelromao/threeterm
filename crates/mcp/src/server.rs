@@ -390,7 +390,7 @@ impl McpServer {
             }
         };
 
-        return self.handle_domain_command(request, schema_entry.id, arguments);
+        self.handle_domain_command(request, schema_entry.id, arguments)
     }
 
     fn handle_domain_command(

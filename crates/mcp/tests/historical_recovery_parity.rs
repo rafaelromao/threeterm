@@ -536,6 +536,10 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
         results[0]["dirty_features"],
         json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
     );
+    assert_eq!(
+        results[0]["evaluated_features"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
     assert_eq!(results[0]["blocked_features"], json!([]));
 
     for (root, prior) in [&cli_root, &mcp_root, &tui_root].into_iter().zip(before) {
@@ -556,6 +560,10 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
             "successful edit preserves the independent feature"
         );
     }
+    let successful_canonical =
+        [&cli_root, &mcp_root, &tui_root].map(|root| canonical_semantics(root));
+    assert_eq!(successful_canonical[0], successful_canonical[1]);
+    assert_eq!(successful_canonical[0], successful_canonical[2]);
 
     let output_roots = [
         temp_root("cli-success-export"),
@@ -820,6 +828,10 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
         assert_eq!(canonical_semantics(root), expected_canonical);
         assert_eq!(current_brep(root), previous_geometry);
     }
+    let restored_canonical =
+        [&cli_root, &mcp_root, &tui_root].map(|root| canonical_semantics(root));
+    assert_eq!(restored_canonical[0], restored_canonical[1]);
+    assert_eq!(restored_canonical[0], restored_canonical[2]);
 
     let restored_output_roots = [
         temp_root("cli-restored-export"),
@@ -890,6 +902,8 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
         semantic_history(&successful[2])
     );
     let future_semantics = [&cli_root, &mcp_root, &tui_root].map(|root| canonical_semantics(root));
+    assert_eq!(future_semantics[0], future_semantics[1]);
+    assert_eq!(future_semantics[0], future_semantics[2]);
     let future_geometry = [&cli_root, &mcp_root, &tui_root].map(|root| current_brep(root));
 
     let future_output_roots = [
@@ -989,6 +1003,14 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
         assert_eq!(canonical_semantics(root), expected);
         assert_eq!(current_brep(root), expected_geometry);
     }
+    assert_eq!(
+        canonical_semantics(&cli_root),
+        canonical_semantics(&mcp_root)
+    );
+    assert_eq!(
+        canonical_semantics(&cli_root),
+        canonical_semantics(&tui_root)
+    );
 
     let restored_output_roots = [
         temp_root("cli-future-restored-export"),

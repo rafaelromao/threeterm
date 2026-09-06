@@ -94,3 +94,9 @@ The versioned domain input that selects additive prism creation or subtractive p
 
 **Semantic Extrusion Target**:
 The stable feature identity of the canonical solid consumed by a subtractive extrusion. The host resolves and authenticates its disposable BREP from canonical provenance; worker paths are never persisted as the target.
+
+**Planar-Face Support**:
+The semantic reference to one planar face in a canonical solid. It records stable feature and face provenance, semantic role, planar geometric evidence, and an explicit reattachment outcome; it never records a topology index or native worker handle.
+
+**Sketch Placement**:
+A revision-bound right-handed orthonormal frame mapping local sketch coordinates to world coordinates. Its origin and axes are durable intent and are validated against the selected planar-face frame before solving or rendering.

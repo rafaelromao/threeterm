@@ -48,12 +48,13 @@ pub use envelope::{
     BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
-    ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult,
-    HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult,
-    MirrorRequest, MirrorResult, Operation, RevolveRequest, RevolveResult, SCHEMA_VERSION,
-    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest,
-    TranslateResult,
+    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, EdgeInspectionResult,
+    ExportRequest, ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest,
+    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
+    LoftResult, MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate,
+    PlanarFaceEvidenceRequest, PlanarFaceEvidenceResult, RevolveRequest, RevolveResult,
+    SCHEMA_VERSION, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
+    TranslateRequest, TranslateResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -782,6 +783,34 @@ impl OcctWorker {
         .into_fillet()
     }
 
+    /// Enumerate semantic edge evidence from a source BREP without creating
+    /// an artifact. The host uses this transient result to resolve a single
+    /// selected edge before dispatching the finishing operation.
+    pub fn inspect_edges(
+        &self,
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        feature_id: impl Into<String>,
+        source_revision_id: impl Into<String>,
+        selected_edge: serde_json::Value,
+    ) -> Result<EdgeInspectionResult, WorkerError> {
+        let request_id = request_id.into();
+        let bytes = bounded_serialize(
+            &serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": request_id,
+                "operation": Operation::InspectEdges,
+                "base_path": base_path.into(),
+                "feature_id": feature_id.into(),
+                "source_revision_id": source_revision_id.into(),
+                "selected_edge": selected_edge,
+            }),
+            Operation::InspectEdges.as_str(),
+            &request_id,
+        )?;
+        self.invoke(&bytes, None)?.into_edge_inspection()
+    }
+
     /// Split `request` with an explicit OCCT plane.
     pub fn split(&self, request: &SplitRequest) -> Result<SplitResult, WorkerError> {
         let bytes = bounded_serialize(request, "split", &request.request_id)?;
@@ -914,6 +943,18 @@ impl OcctWorker {
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_export()
+    }
+
+    pub fn planar_face_evidence(
+        &self,
+        request: &PlanarFaceEvidenceRequest,
+    ) -> Result<PlanarFaceEvidenceResult, WorkerError> {
+        let bytes = bounded_serialize(request, "planar_face_evidence", &request.request_id)?;
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
+        self.invoke(&bytes, None)?
+            .into_planar_face_evidence(request)
     }
 
     fn invoke(
@@ -1714,6 +1755,18 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_edge_inspection(self) -> Result<EdgeInspectionResult, WorkerError> {
+        let RawResult {
+            value, request_id, ..
+        } = self;
+        serde_json::from_value(value).map_err(|error| {
+            malformed_for_request(
+                &request_id,
+                format!("edge inspection result could not be parsed: {error}"),
+            )
+        })
+    }
+
     fn into_split(self) -> Result<SplitResult, WorkerError> {
         self.bounded()
     }
@@ -1759,6 +1812,23 @@ impl RawResult {
     }
     fn into_export(self) -> Result<ExportResult, WorkerError> {
         self.bounded()
+    }
+
+    fn into_planar_face_evidence(
+        self,
+        request: &PlanarFaceEvidenceRequest,
+    ) -> Result<PlanarFaceEvidenceResult, WorkerError> {
+        let result: PlanarFaceEvidenceResult =
+            serde_json::from_value(self.value).map_err(|error| {
+                malformed_for_request(
+                    &self.request_id,
+                    format!("planar face evidence response could not be parsed: {error}"),
+                )
+            })?;
+        result
+            .validate_for(request)
+            .map_err(|detail| malformed_for_request(&self.request_id, detail))?;
+        Ok(result)
     }
 }
 

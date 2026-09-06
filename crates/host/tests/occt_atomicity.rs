@@ -3149,6 +3149,41 @@ fn shell_commits_brep_into_a_new_revision() {
 }
 
 #[test]
+fn shell_replays_from_canonical_intent_after_derived_results_are_deleted() {
+    let Some(worker) = locate_worker() else {
+        return;
+    };
+    let root = fresh_bundle_with_feature("shell-replay", "box-seed", "box");
+    let host = Host::new();
+    let base_request = rectangle_extrude_request("shell-replay-base")
+        .with_output_path(root.join("stage"), "shell-base.brep")
+        .with_feature_id("shell-replay-base-1");
+    host.extrude(&root, base_request, &worker)
+        .expect("base extrude");
+    let base_path = committed_brep_path(&root, "shell-replay-base-1");
+    let shell_request = shell_request("shell-replay", "shell-replay-1", &base_path)
+        .with_output_path(root.join("stage"), "shell-replay.brep");
+    let committed = host
+        .shell(&root, shell_request, &worker)
+        .expect("shell commits");
+    let expected =
+        fs::read(committed_brep_path(&root, "shell-replay-1")).expect("committed shell reads");
+    fs::remove_file(&base_path).expect("base derived result deletes");
+    fs::remove_file(committed_brep_path(&root, "shell-replay-1"))
+        .expect("shell derived result deletes");
+
+    let replayed = Host::new()
+        .load_with_geometry_replay(&root)
+        .expect("canonical shell replay succeeds");
+    assert_eq!(replayed.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(
+        fs::read(committed_brep_path(&root, "shell-replay-1")).expect("replayed shell reads"),
+        expected
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn shell_on_l_bracket_shows_shelled_solid_in_viewport() {
     // Demoable L-bracket end-to-end:
     //   1. Extrude a 10x5x3 base slab and a 3x10x3 vertical leg.

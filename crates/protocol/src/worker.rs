@@ -604,6 +604,13 @@ impl WorkerHost for SubprocessWorkerHost {
                 // signal instead of a bare closed-stream error.
                 self.fail_closed_on_overflow()?;
                 self.reap_if_exited()?;
+                if self.reaped_status.is_none() {
+                    let reap_deadline = deadline.min(Instant::now() + REAP_WAIT);
+                    while self.reaped_status.is_none() && Instant::now() < reap_deadline {
+                        std::thread::sleep(REAP_POLL);
+                        self.reap_if_exited()?;
+                    }
+                }
                 if let Some(signal) = self.exit_signal() {
                     return Err(WorkerError::Signalled { signal });
                 }

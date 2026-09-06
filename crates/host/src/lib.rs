@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use threeterm_domain::{
     ComponentCommand, ComponentGraph, EdgeReattachmentOutcome, FeatureGraph, FitDimension,
-    PostEditEdgeCandidate, SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
+    PlanarFaceCandidate, PlanarFaceReattachmentOutcome, PlanarFaceReference, PostEditEdgeCandidate,
+    SelectedEdgeReference, SketchConstraint as DomainSketchConstraint,
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
     history::{HistoryEvaluation, HistorySnapshot, HistoryState, HistoryStatus, HistoryTimeline},
-    resolve_edge_reference, resolve_split_edge_reference,
+    resolve_edge_reference, resolve_planar_face_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
@@ -23,15 +24,20 @@ use threeterm_occt_worker::{
     CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
     ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
     HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
-    MirrorResult, OcctDiagnostic, OcctWorker, RevolveRequest, RevolveResult, SelectedEdgeContext,
-    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, WorkerError,
+    MirrorResult, OcctDiagnostic, OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest,
+    RevolveResult, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
+    TranslateRequest, WorkerError,
 };
 use threeterm_persistence::{
-    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-    CanonicalExtrudeIntent, CanonicalHoleIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
-    ExtrudeDeterministicInputs, HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement,
-    HoleDeterministicInputs, LoadPolicy, LoadedBundle, load, load_with_policy,
-    previous_generation_path, replay_canonical_state,
+    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
+    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalDraftIntent, CanonicalEdgeReference,
+    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
+    CanonicalLoftIntent, CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION,
+    EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs,
+    FILLET_INTENT_SCHEMA_VERSION, HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement,
+    HoleDeterministicInputs, LOFT_INTENT_SCHEMA_VERSION, LoadPolicy, LoadedBundle,
+    SHELL_INTENT_SCHEMA_VERSION, load, load_with_policy, previous_generation_path,
+    replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -40,10 +46,12 @@ use threeterm_protocol::command_execution::{ExecutionError, execute, validate_re
 use threeterm_protocol::diagnostic::{Diagnostic, DiagnosticCode};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID,
-    BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
-    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
+    BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
+    COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID,
+    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, find,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -1319,11 +1327,327 @@ fn sketch_payload(
         related_constraint_ids: result.related_constraint_ids.clone(),
         diagnostics,
         solved_coordinates,
+        support: request.support.clone(),
+        placement: request.placement,
+        reattachment_outcome: request.support.as_ref().map(|support| {
+            PlanarFaceReattachmentOutcome::Resolved {
+                semantic_id: support.semantic_id.clone(),
+            }
+        }),
     };
     payload
         .validate()
         .map_err(|detail| HostError::Validation { detail })?;
     Ok(payload)
+}
+
+fn sketch_request_from_value(
+    request: &serde_json::Value,
+    _loaded: &LoadedBundle,
+) -> Result<SketchSolveRequest, HostError> {
+    let request_id = request
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("sketch-request")
+        .to_string();
+    let feature_id = request
+        .get("feature_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HostError::Validation {
+            detail: "missing sketch feature_id".to_string(),
+        })?;
+    let entities = serde_json::from_value(request.get("entities").cloned().ok_or_else(|| {
+        HostError::Validation {
+            detail: "missing sketch entities".to_string(),
+        }
+    })?)
+    .map_err(|error| HostError::Validation {
+        detail: format!("invalid sketch entities: {error}"),
+    })?;
+    let constraints =
+        serde_json::from_value(request.get("constraints").cloned().ok_or_else(|| {
+            HostError::Validation {
+                detail: "missing sketch constraints".to_string(),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch constraints: {error}"),
+        })?;
+    let mut typed = SketchSolveRequest::new(request_id, feature_id, entities, constraints)
+        .with_source_revision(
+            request
+                .get("source_revision")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+    let support = request
+        .get("support")
+        .cloned()
+        .map(serde_json::from_value::<PlanarFaceReference>)
+        .transpose()
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch support: {error}"),
+        })?;
+    let placement: Option<threeterm_domain::SketchPlacement> = request
+        .get("placement")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| HostError::Validation {
+            detail: format!("invalid sketch placement: {error}"),
+        })?;
+    match (support, placement) {
+        (Some(support), Some(placement)) => {
+            if let Err(detail) = support.validate_placement(&placement) {
+                return Err(HostError::Validation { detail });
+            }
+            typed = typed.with_attachment(support, placement);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(HostError::Validation {
+                detail: "sketch support and placement must be provided together".to_string(),
+            });
+        }
+    }
+    typed
+        .validate()
+        .map_err(|detail| HostError::Validation { detail })?;
+    Ok(typed)
+}
+
+fn sketch_request_from_payload(
+    payload: &SketchPayload,
+    source_revision: &str,
+) -> Result<SketchSolveRequest, HostError> {
+    let entities =
+        serde_json::from_value(serde_json::to_value(&payload.entities).map_err(|error| {
+            HostError::Validation {
+                detail: format!("sketch entities serialization failed: {error}"),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("sketch entities conversion failed: {error}"),
+        })?;
+    let constraints =
+        serde_json::from_value(serde_json::to_value(&payload.constraints).map_err(|error| {
+            HostError::Validation {
+                detail: format!("sketch constraints serialization failed: {error}"),
+            }
+        })?)
+        .map_err(|error| HostError::Validation {
+            detail: format!("sketch constraints conversion failed: {error}"),
+        })?;
+    let mut request = SketchSolveRequest::new(
+        format!("reload-{}", payload.feature_id),
+        payload.feature_id.clone(),
+        entities,
+        constraints,
+    )
+    .with_source_revision(source_revision);
+    if let (Some(support), Some(placement)) = (&payload.support, payload.placement) {
+        request = request.with_attachment(support.clone(), placement);
+    }
+    request
+        .validate()
+        .map_err(|detail| HostError::Validation { detail })?;
+    Ok(request)
+}
+
+fn resolve_sketch_support(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+    candidates: &[PlanarFaceCandidate],
+) -> Result<PlanarFaceReattachmentOutcome, HostError> {
+    let Some(reference) = &request.support else {
+        return Ok(PlanarFaceReattachmentOutcome::Resolved {
+            semantic_id: String::new(),
+        });
+    };
+    if !loaded
+        .graph
+        .contains_feature(&reference.provenance.source_feature_id)
+    {
+        return Ok(PlanarFaceReattachmentOutcome::Lost);
+    }
+    let feature_kind = loaded
+        .graph
+        .features()
+        .find(|feature| feature.id.as_str() == reference.provenance.source_feature_id)
+        .map(|feature| feature.kind)
+        .unwrap_or_default();
+    if !(feature_kind.starts_with("brep:")
+        || feature_kind.starts_with("bracket:")
+        || feature_kind == "brep")
+    {
+        return Ok(PlanarFaceReattachmentOutcome::Incompatible {
+            candidate_ids: Vec::new(),
+        });
+    }
+    Ok(resolve_planar_face_reference(
+        reference,
+        candidates.iter().cloned(),
+    ))
+}
+
+fn production_planar_face_candidates(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+    let Some(reference) = &request.support else {
+        return Ok(Vec::new());
+    };
+    if !loaded
+        .graph
+        .contains_feature(&reference.provenance.source_feature_id)
+    {
+        return Ok(Vec::new());
+    }
+    let Some(source_revision) =
+        loaded.feature_brep_source_revision(&reference.provenance.source_feature_id)
+    else {
+        return Ok(Vec::new());
+    };
+    if source_revision != reference.provenance.source_revision_id {
+        return Ok(Vec::new());
+    }
+    let brep = bundle_root(&loaded.canonical_root)
+        .join(BREP_SUBDIR)
+        .join(format!("{}.brep", reference.provenance.source_feature_id));
+    if !brep.is_file() {
+        return Ok(Vec::new());
+    }
+    let worker = OcctWorker::locate().map_err(HostError::from)?;
+    let evidence = worker
+        .with_revision_id(loaded.revision_hash_hex())
+        .planar_face_evidence(&PlanarFaceEvidenceRequest::new(
+            format!("face-evidence-{}", request.feature_id),
+            brep,
+            reference.provenance.source_feature_id.clone(),
+            source_revision,
+        ))
+        .map_err(HostError::from)?;
+    if !evidence.is_success()
+        || evidence.feature_id != reference.provenance.source_feature_id
+        || evidence.source_revision_id != reference.provenance.source_revision_id
+    {
+        return Ok(Vec::new());
+    }
+    Ok(evidence
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let geometry_hash = sha256_hex(
+                &serde_json::to_vec(&candidate).expect("planar face geometry evidence serializes"),
+            );
+            let semantic_id = format!(
+                "{}/face-{}",
+                reference.provenance.source_feature_id,
+                &geometry_hash[..24]
+            );
+            PlanarFaceCandidate {
+                semantic_id: semantic_id.clone(),
+                provenance: threeterm_domain::PlanarFaceProvenance {
+                    source_feature_id: reference.provenance.source_feature_id.clone(),
+                    source_revision_id: reference.provenance.source_revision_id.clone(),
+                    source_face_id: semantic_id,
+                },
+                role: "sketch-support".to_string(),
+                evidence: threeterm_domain::PlanarFaceEvidence {
+                    topology_kind: candidate.topology_kind,
+                    origin: candidate.origin,
+                    normal: candidate.normal,
+                    x_axis: candidate.x_axis,
+                    y_axis: candidate.y_axis,
+                    adjacent_feature_ids: candidate.adjacent_feature_ids,
+                },
+            }
+        })
+        .collect())
+}
+
+fn fresh_planar_face_candidates(
+    loaded: &LoadedBundle,
+    request: &SketchSolveRequest,
+    _supplied_candidates: &[PlanarFaceCandidate],
+) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+    // Candidate evidence is always derived from the current authenticated BREP;
+    // callers cannot authorize an attachment with fabricated or stale values.
+    production_planar_face_candidates(loaded, request)
+}
+
+fn reattachment_outcome_name(outcome: &PlanarFaceReattachmentOutcome) -> &'static str {
+    match outcome {
+        PlanarFaceReattachmentOutcome::Resolved { .. } => "resolved",
+        PlanarFaceReattachmentOutcome::Ambiguous { .. } => "ambiguous",
+        PlanarFaceReattachmentOutcome::Lost => "lost",
+        PlanarFaceReattachmentOutcome::Incompatible { .. } => "incompatible",
+    }
+}
+
+fn sketch_input_fingerprint(request: &serde_json::Value) -> String {
+    let mut input = request.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("phase");
+        object.remove("preview_revision");
+        object.remove("expected_revision");
+    }
+    sha256_hex(input.to_string().as_bytes())
+}
+
+fn sketch_preview_revision(
+    request: &serde_json::Value,
+    source_revision: &str,
+    result: &SketchSolveResponse,
+) -> String {
+    let input_fingerprint = sketch_input_fingerprint(request);
+    let geometry_fingerprint = sha256_hex(
+        serde_json::to_string(result)
+            .expect("sketch preview serializes")
+            .as_bytes(),
+    );
+    sha256_hex(
+        format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}").as_bytes(),
+    )
+}
+
+fn sketch_support_failure_response(
+    request: &SketchSolveRequest,
+    outcome: &PlanarFaceReattachmentOutcome,
+) -> SketchSolveResponse {
+    let candidate_ids = match outcome {
+        PlanarFaceReattachmentOutcome::Ambiguous { candidate_ids }
+        | PlanarFaceReattachmentOutcome::Incompatible { candidate_ids } => candidate_ids.clone(),
+        PlanarFaceReattachmentOutcome::Resolved { .. } | PlanarFaceReattachmentOutcome::Lost => {
+            Vec::new()
+        }
+    };
+    SketchSolveResponse {
+        schema_version: threeterm_slvs_worker::SCHEMA_VERSION.to_string(),
+        request_id: request.request_id.clone(),
+        operation: "sketch_solve".to_string(),
+        feature_id: request.feature_id.clone(),
+        source_revision: request.source_revision.clone(),
+        status: "invalid_request".to_string(),
+        dof: 0,
+        entity_ids: request
+            .entities
+            .iter()
+            .map(|entity| entity.id().to_string())
+            .collect(),
+        related_constraint_ids: Vec::new(),
+        diagnostics: vec![threeterm_slvs_worker::SketchDiagnostic {
+            code: format!("sketch_support_{}", reattachment_outcome_name(outcome)),
+            detail: format!(
+                "planar face reattachment outcome: {outcome:?}; candidate_ids={candidate_ids:?}"
+            ),
+            constraint_ids: Vec::new(),
+        }],
+        solved_coordinates: None,
+        support: request.support.clone(),
+        placement: request.placement,
+        reattachment_outcome: Some(reattachment_outcome_name(outcome).to_string()),
+    }
 }
 
 fn sketch_dimension_value(
@@ -1390,6 +1714,91 @@ fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeC
             },
         })
         .collect()
+}
+
+fn canonical_finishing_edge_candidates(
+    result: &[EdgeCandidateEvidence],
+) -> Vec<PostEditEdgeCandidate> {
+    result
+        .iter()
+        .map(|candidate| {
+            let semantic_id = canonical_edge_semantic_id(candidate);
+            PostEditEdgeCandidate {
+                semantic_id: semantic_id.clone(),
+                provenance: threeterm_domain::EdgeProvenance {
+                    source_feature_id: candidate.source_feature_id.clone(),
+                    source_revision_id: candidate.source_revision_id.clone(),
+                    source_edge_id: candidate.source_edge_id.clone(),
+                },
+                role: candidate.role.clone(),
+                evidence: threeterm_domain::EdgeGeometricEvidence {
+                    midpoint: candidate.midpoint,
+                    tangent: candidate.tangent,
+                    length: candidate.length,
+                },
+            }
+        })
+        .collect()
+}
+
+fn canonical_edge_semantic_id(candidate: &EdgeCandidateEvidence) -> String {
+    let identity = serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+        .expect("edge evidence serializes");
+    format!("edge-{}", sha256_hex(&identity))
+}
+
+fn canonical_edge_semantic_id_from_reference(reference: &SelectedEdgeReference) -> String {
+    let identity = serde_json::to_vec(&(
+        reference.evidence.midpoint,
+        reference.evidence.tangent,
+        reference.evidence.length,
+    ))
+    .expect("edge evidence serializes");
+    format!("edge-{}", sha256_hex(&identity))
+}
+
+fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value {
+    let semantic_id = canonical_edge_semantic_id(candidate);
+    serde_json::json!({
+        "semantic_id": semantic_id.clone(),
+        "provenance": {
+            "source_feature_id": candidate.source_feature_id,
+            "source_revision_id": candidate.source_revision_id,
+            "source_edge_id": candidate.source_edge_id,
+        },
+        "role": candidate.role,
+        "evidence": {
+            "midpoint": candidate.midpoint,
+            "tangent": candidate.tangent,
+            "length": candidate.length,
+        }
+    })
+}
+
+fn validate_replayed_edge_reference(
+    reference: &CanonicalEdgeReference,
+    candidates: &[EdgeCandidateEvidence],
+) -> Result<(), HostError> {
+    let selected = SelectedEdgeReference {
+        semantic_id: reference.semantic_id.clone(),
+        provenance: threeterm_domain::EdgeProvenance {
+            source_feature_id: reference.provenance.source_feature_id.clone(),
+            source_revision_id: reference.provenance.source_revision_id.clone(),
+            source_edge_id: reference.provenance.source_edge_id.clone(),
+        },
+        role: reference.role.clone(),
+        evidence: threeterm_domain::EdgeGeometricEvidence {
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        },
+    };
+    match resolve_edge_reference(&selected, canonical_finishing_edge_candidates(candidates)) {
+        EdgeReattachmentOutcome::Resolved { .. } => Ok(()),
+        outcome => Err(HostError::Validation {
+            detail: format!("replayed semantic edge selection failed: {outcome:?}"),
+        }),
+    }
 }
 
 impl Host {
@@ -1607,10 +2016,75 @@ impl Host {
         Self::default()
     }
 
+    /// Obtain fresh host-authenticated planar-face evidence for a solid. The
+    /// returned semantic IDs are derived by the host from the worker's
+    /// geometry-only evidence.
+    pub fn planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        source_feature_id: &str,
+    ) -> Result<Vec<PlanarFaceCandidate>, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let source_revision = loaded
+            .feature_brep_source_revision(source_feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("feature has no authenticated BREP: {source_feature_id}"),
+            })?;
+        let frame = threeterm_domain::SketchPlacement {
+            origin: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let support = PlanarFaceReference {
+            semantic_id: format!("{source_feature_id}/probe"),
+            provenance: threeterm_domain::PlanarFaceProvenance {
+                source_feature_id: source_feature_id.to_string(),
+                source_revision_id: source_revision,
+                source_face_id: format!("{source_feature_id}/probe"),
+            },
+            role: "sketch-support".to_string(),
+            evidence: threeterm_domain::PlanarFaceEvidence {
+                topology_kind: "planar_face".to_string(),
+                origin: frame.origin,
+                normal: frame.normal,
+                x_axis: frame.x_axis,
+                y_axis: frame.y_axis,
+                adjacent_feature_ids: Vec::new(),
+            },
+        };
+        let request = SketchSolveRequest::new(
+            format!("face-evidence-{source_feature_id}"),
+            "face-evidence",
+            vec![threeterm_slvs_worker::SketchEntity::Point {
+                id: "p0".to_string(),
+                x: 0.0,
+                y: 0.0,
+            }],
+            Vec::new(),
+        )
+        .with_source_revision(loaded.revision_hash_hex())
+        .with_attachment(support, frame);
+        production_planar_face_candidates(&loaded, &request)
+    }
+
     pub fn preview_sketch_solve(
         &self,
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let candidates = production_planar_face_candidates(&loaded, request)?;
+        self.preview_sketch_solve_with_planar_face_candidates(root, request, &candidates)
+    }
+
+    pub fn preview_sketch_solve_with_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+        supplied_candidates: &[PlanarFaceCandidate],
     ) -> Result<SketchSolveResponse, HostError> {
         let loaded = Bundle::at(root.as_ref()).open()?;
         let source_revision = if request.source_revision.is_empty() {
@@ -1632,10 +2106,22 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
-        SlvsWorker::locate()?
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
+        if !matches!(
+            support_outcome,
+            PlanarFaceReattachmentOutcome::Resolved { .. }
+        ) {
+            return Ok(sketch_support_failure_response(&request, &support_outcome));
+        }
+        let result = SlvsWorker::locate()?
             .with_revision_id(source_revision)
             .solve(&request)
-            .map_err(HostError::from)
+            .map_err(HostError::from)?;
+        Ok(SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        })
     }
 
     pub fn commit_sketch_solve(
@@ -1647,11 +2133,152 @@ impl Host {
         self.commit_sketch_solve_with_worker(root, request, &worker)
     }
 
+    /// Recompute a canonical sketch from its durable intent after disposable
+    /// solver results have been removed. No transaction or derived artifact is
+    /// published by this method.
+    pub fn reload_sketch(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let worker = SlvsWorker::locate()?;
+        self.reload_sketch_with_worker(root, feature_id, &worker)
+    }
+
+    pub fn reload_sketch_with_worker(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        worker: &SlvsWorker,
+    ) -> Result<SketchSolveResponse, HostError> {
+        let root = root.as_ref();
+        let initial = Bundle::at(root).open()?;
+        let source_feature_id = initial
+            .graph
+            .sketch(feature_id)
+            .and_then(|payload| payload.support.as_ref())
+            .map(|support| support.provenance.source_feature_id.clone());
+        if let Some(source_feature_id) = source_feature_id {
+            let source_brep = bundle_root(root)
+                .join(BREP_SUBDIR)
+                .join(format!("{source_feature_id}.brep"));
+            if !source_brep.is_file() {
+                let occt = OcctWorker::locate().map_err(HostError::from)?;
+                self.reload_and_recompute_geometry(root, &occt)?;
+            }
+        }
+        let loaded = Bundle::at(root).open()?;
+        let payload = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
+        let candidates = production_planar_face_candidates(&loaded, &request)?;
+        self.reload_sketch_with_worker_and_planar_face_candidates(
+            root,
+            feature_id,
+            worker,
+            &candidates,
+        )
+    }
+
+    pub fn reload_sketch_with_worker_and_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+        worker: &SlvsWorker,
+        supplied_candidates: &[PlanarFaceCandidate],
+    ) -> Result<SketchSolveResponse, HostError> {
+        let loaded = Bundle::at(root.as_ref()).open()?;
+        let payload = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(payload, loaded.revision_hash_hex())?;
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
+        if !matches!(outcome, PlanarFaceReattachmentOutcome::Resolved { .. }) {
+            return Ok(sketch_support_failure_response(&request, &outcome));
+        }
+        let result = worker
+            .clone()
+            .with_revision_id(loaded.revision_hash_hex())
+            .solve(&request)
+            .map_err(HostError::from)?;
+        Ok(SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        })
+    }
+
+    /// Build a presentation scene from a freshly recomputed sketch result.
+    /// This keeps reload independent from any discarded canonical solve cache.
+    pub fn presentation_viewport_scene_after_sketch_reload(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<ViewportScene, HostError> {
+        let root = root.as_ref();
+        let result = self.reload_sketch(root, feature_id)?;
+        if !result.is_success() {
+            return Err(HostError::Validation {
+                detail: serde_json::to_string(&result).expect("sketch reload response serializes"),
+            });
+        }
+        let loaded = Bundle::at(root).open()?;
+        let feature = loaded
+            .graph
+            .features()
+            .find(|feature| feature.id.as_str() == feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch feature is missing: {feature_id}"),
+            })?;
+        let existing = loaded
+            .graph
+            .sketch(feature_id)
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("sketch is missing: {feature_id}"),
+            })?;
+        let request = sketch_request_from_payload(existing, loaded.revision_hash_hex())?;
+        let payload = sketch_payload(&request, &result)?;
+        let mut graph = loaded.graph.clone();
+        graph
+            .add_sketch(feature, payload)
+            .map_err(|detail| HostError::Validation { detail })?;
+        Ok(ViewportScene::from_feature_graph(
+            loaded.revision_hash_hex(),
+            &graph,
+            None,
+        ))
+    }
+
     pub fn commit_sketch_solve_with_worker(
         &self,
         root: impl AsRef<Path>,
         request: &SketchSolveRequest,
         worker: &SlvsWorker,
+    ) -> Result<SketchSolveCommitView, HostError> {
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let candidates = production_planar_face_candidates(&loaded, request)?;
+        self.commit_sketch_solve_with_worker_and_planar_face_candidates(
+            root,
+            request,
+            worker,
+            &candidates,
+        )
+    }
+
+    pub fn commit_sketch_solve_with_worker_and_planar_face_candidates(
+        &self,
+        root: impl AsRef<Path>,
+        request: &SketchSolveRequest,
+        worker: &SlvsWorker,
+        supplied_candidates: &[PlanarFaceCandidate],
     ) -> Result<SketchSolveCommitView, HostError> {
         let root = root.as_ref();
         let bundle = Bundle::at(root);
@@ -1675,11 +2302,29 @@ impl Host {
         request
             .validate()
             .map_err(|detail| HostError::Validation { detail })?;
+        let candidates = fresh_planar_face_candidates(&loaded, &request, supplied_candidates)?;
+        let support_outcome = resolve_sketch_support(&loaded, &request, &candidates)?;
+        if !matches!(
+            support_outcome,
+            PlanarFaceReattachmentOutcome::Resolved { .. }
+        ) {
+            return Err(HostError::Validation {
+                detail: serde_json::to_string(&sketch_support_failure_response(
+                    &request,
+                    &support_outcome,
+                ))
+                .expect("sketch support response serializes"),
+            });
+        }
         let result = worker
             .clone()
             .with_revision_id(source_revision.clone())
             .solve(&request)
             .map_err(HostError::from)?;
+        let result = SketchSolveResponse {
+            reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
+            ..result
+        };
         if !result.is_success() {
             return Err(HostError::Validation {
                 detail: serde_json::to_string(&result).expect("sketch result serializes"),
@@ -1800,6 +2445,80 @@ impl Host {
             }
 
             match command {
+                SKETCH_SOLVE_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?;
+                    let loaded = Bundle::at(bundle_path).open()?;
+                    if let Some(expected_revision) = request
+                        .get("expected_revision")
+                        .and_then(serde_json::Value::as_str)
+                        && expected_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "sketch source revision {expected_revision:?} does not match current revision {:?}",
+                                loaded.revision_hash_hex()
+                            ),
+                        });
+                    }
+                    let typed_request = sketch_request_from_value(&request, &loaded)?;
+                    let phase = request
+                        .get("phase")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("commit");
+                    let (result, revision_hash) = match phase {
+                        "preview" => (
+                            self.preview_sketch_solve(bundle_path, &typed_request)?,
+                            None,
+                        ),
+                        "commit" => {
+                            let expected_preview = request
+                                .get("preview_revision")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| HostError::Validation {
+                                    detail: "sketch commit requires a current preview".to_string(),
+                                })?;
+                            let preview = self.preview_sketch_solve(bundle_path, &typed_request)?;
+                            if expected_preview
+                                != sketch_preview_revision(
+                                    &request,
+                                    loaded.revision_hash_hex(),
+                                    &preview,
+                                )
+                            {
+                                return Err(HostError::Validation {
+                                    detail:
+                                        "sketch preview is stale; preview the current draft again"
+                                            .to_string(),
+                                });
+                            }
+                            if !preview.is_success() {
+                                (preview, None)
+                            } else {
+                                let view = self.commit_sketch_solve(bundle_path, &typed_request)?;
+                                (view.result, Some(view.snapshot.revision_hash))
+                            }
+                        }
+                        _ => {
+                            return Err(HostError::Validation {
+                                detail: "phase must be preview or commit".to_string(),
+                            });
+                        }
+                    };
+                    let mut response =
+                        serde_json::to_value(result).map_err(|error| HostError::Validation {
+                            detail: format!("sketch response serialization failed: {error}"),
+                        })?;
+                    response["schema_version"] = serde_json::Value::String(
+                        find(command)
+                            .expect("sketch solve is registered")
+                            .response_schema_version
+                            .to_string(),
+                    );
+                    if let Some(revision_hash) = revision_hash {
+                        response["revision_hash"] = serde_json::Value::String(revision_hash);
+                    }
+                    Ok(response)
+                }
                 IDENTITY_COMMAND_ID => {
                     let identity = self.identity(string_field("bundle_path")?)?;
                     Ok(serde_json::json!({
@@ -2478,6 +3197,277 @@ impl Host {
                         "schema_version": find(command).expect("hole is registered").response_schema_version,
                     }))
                 }
+                FILLET_COMMAND_ID | CHAMFER_COMMAND_ID | SHELL_COMMAND_ID | DRAFT_COMMAND_ID
+                | LOFT_COMMAND_ID => {
+                    let bundle_path = string_field("bundle_path")?.to_string();
+                    let feature_id = string_field("feature_id")?.to_string();
+                    let expected_revision = string_field("expected_revision")?;
+                    let current = self.load(&bundle_path)?;
+                    if current.revision_hash != expected_revision {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "{} source revision does not match current revision {:?}",
+                                command.0, current.revision_hash
+                            ),
+                        });
+                    }
+                    let loaded = Bundle::at(&bundle_path).open()?;
+                    let base_feature_id = request
+                        .get("base_feature_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    validate_finishing_request(
+                        command,
+                        &loaded,
+                        &feature_id,
+                        base_feature_id.as_deref(),
+                        &request,
+                    )?;
+                    let base_path = base_feature_id.as_deref().map(|base| {
+                        Path::new(&bundle_path)
+                            .join(BREP_SUBDIR)
+                            .join(format!("{base}.brep"))
+                    });
+                    let output_dir = Path::new(&bundle_path).join("stage");
+                    let output_name = format!("{feature_id}-domain.brep");
+                    let worker =
+                        OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })?;
+                    let mut request = request;
+                    if matches!(command, FILLET_COMMAND_ID | CHAMFER_COMMAND_ID) {
+                        let base = base_feature_id.as_deref().expect("validated base feature");
+                        let selected = request.get("selected_edge").cloned().ok_or_else(|| {
+                            HostError::Validation {
+                                detail: "edge finishing operation requires selected_edge"
+                                    .to_string(),
+                            }
+                        })?;
+                        request["selected_edge"] = resolve_selected_edge_with_worker(
+                            &worker,
+                            base_path.clone().expect("validated base path"),
+                            base,
+                            &current.revision_hash,
+                            selected,
+                        )?;
+                    }
+                    let schema_version = find(command)
+                        .expect("finishing command is registered")
+                        .response_schema_version;
+                    match command {
+                        FILLET_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "fillet requires base_feature_id".to_string(),
+                            })?;
+                            let selected_edge = selected_edge_context_from_request(
+                                request.get("selected_edge").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "fillet requires selected_edge".to_string(),
+                                    }
+                                })?,
+                            )?;
+                            let radius = request["radius"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing fillet radius".to_string(),
+                                }
+                            })?;
+                            let request = FilletRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                radius,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            )
+                            .with_selected_edge(selected_edge);
+                            let view = self.fillet(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "fillet",
+                                &view.result.feature_id,
+                                &view.source_snapshot,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                Some(&view.result.edge_candidates),
+                                schema_version,
+                            ))
+                        }
+                        CHAMFER_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "chamfer requires base_feature_id".to_string(),
+                            })?;
+                            let selected_edge = selected_edge_context_from_request(
+                                request.get("selected_edge").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "chamfer requires selected_edge".to_string(),
+                                    }
+                                })?,
+                            )?;
+                            let distance = request["distance"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing chamfer distance".to_string(),
+                                }
+                            })?;
+                            let request = ChamferRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                distance,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            )
+                            .with_selected_edge(selected_edge);
+                            let view = self.chamfer(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "chamfer",
+                                &view.result.feature_id,
+                                &view.source_snapshot,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                Some(&view.result.edge_candidates),
+                                schema_version,
+                            ))
+                        }
+                        SHELL_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "shell requires base_feature_id".to_string(),
+                            })?;
+                            let thickness = request["thickness"].as_f64().ok_or_else(|| {
+                                HostError::Validation {
+                                    detail: "missing shell thickness".to_string(),
+                                }
+                            })?;
+                            let request = ShellRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                thickness,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            );
+                            let view = self.shell(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "shell",
+                                &view.result.feature_id,
+                                &view.source_snapshot,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                None,
+                                schema_version,
+                            ))
+                        }
+                        DRAFT_COMMAND_ID => {
+                            let base_path = base_path.ok_or_else(|| HostError::Validation {
+                                detail: "draft requires base_feature_id".to_string(),
+                            })?;
+                            let angle =
+                                request["angle"]
+                                    .as_f64()
+                                    .ok_or_else(|| HostError::Validation {
+                                        detail: "missing draft angle".to_string(),
+                                    })?;
+                            let pull_direction = serde_json::from_value(
+                                request.get("pull_direction").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "missing draft pull_direction".to_string(),
+                                    }
+                                })?,
+                            )
+                            .map_err(|error| {
+                                HostError::Validation {
+                                    detail: format!("invalid draft pull_direction: {error}"),
+                                }
+                            })?;
+                            let request = DraftRequest::new(
+                                threeterm_occt_worker::new_request_id(),
+                                base_path,
+                                angle,
+                                pull_direction,
+                            )
+                            .with_output_path(output_dir, output_name)
+                            .with_feature_id(feature_id)
+                            .with_base_feature_id(
+                                base_feature_id.as_deref().expect("validated base feature"),
+                            );
+                            let view = self.draft(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "draft",
+                                &view.result.feature_id,
+                                view.source_snapshot
+                                    .as_ref()
+                                    .expect("draft source snapshot"),
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                view.artifact.as_ref().expect("draft artifact exists"),
+                                None,
+                                schema_version,
+                            ))
+                        }
+                        LOFT_COMMAND_ID => {
+                            let profiles = serde_json::from_value(
+                                request.get("profiles").cloned().ok_or_else(|| {
+                                    HostError::Validation {
+                                        detail: "missing loft profiles".to_string(),
+                                    }
+                                })?,
+                            )
+                            .map_err(|error| {
+                                HostError::Validation {
+                                    detail: format!("invalid loft profiles: {error}"),
+                                }
+                            })?;
+                            let request =
+                                LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
+                                    .with_solid(request["is_solid"].as_bool().ok_or_else(|| {
+                                        HostError::Validation {
+                                            detail: "missing loft is_solid".to_string(),
+                                        }
+                                    })?)
+                                    .with_ruled(request["ruled"].as_bool().ok_or_else(|| {
+                                        HostError::Validation {
+                                            detail: "missing loft ruled".to_string(),
+                                        }
+                                    })?)
+                                    .with_output_path(output_dir, output_name)
+                                    .with_feature_id(feature_id);
+                            let view = self.loft(&bundle_path, request, &worker)?;
+                            Ok(finishing_response_value(
+                                &view.result.status,
+                                "loft",
+                                &view.result.feature_id,
+                                &view.source_snapshot,
+                                &view.snapshot,
+                                &view.result.brep_path,
+                                &view.result.brep_sha256,
+                                view.result.brep_bytes,
+                                &view.artifact,
+                                None,
+                                schema_version,
+                            ))
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 _ => Err(HostError::Validation {
                     detail: format!(
                         "command {} is not handled by the domain executor",
@@ -2501,6 +3491,37 @@ impl Host {
                 ExecutionError::UnknownCommand(command) => ExecutionError::UnknownCommand(command),
                 ExecutionError::InvalidRequest(detail) => ExecutionError::InvalidRequest(detail),
                 ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
+            });
+        }
+        if command == SKETCH_SOLVE_COMMAND_ID {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let loaded = Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?;
+            let typed_request =
+                sketch_request_from_value(&request, &loaded).map_err(ExecutionError::Handler)?;
+            let result = self
+                .preview_sketch_solve(bundle_path, &typed_request)
+                .map_err(ExecutionError::Handler)?;
+            let source_revision = loaded.revision_hash_hex().to_string();
+            let input_fingerprint = sketch_input_fingerprint(&request);
+            let geometry_fingerprint = sha256_hex(
+                serde_json::to_string(&result)
+                    .expect("sketch preview serializes")
+                    .as_bytes(),
+            );
+            return Ok(DomainCommandPreview {
+                command,
+                source_revision: source_revision.clone(),
+                preview_revision: sha256_hex(
+                    format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                        .as_bytes(),
+                ),
+                input_fingerprint,
+                geometry_fingerprint,
             });
         }
         if command == HOLE_COMMAND_ID {
@@ -2639,6 +3660,16 @@ impl Host {
         }
 
         if command != EXTRUDE_COMMAND_ID {
+            if matches!(
+                command,
+                FILLET_COMMAND_ID
+                    | CHAMFER_COMMAND_ID
+                    | SHELL_COMMAND_ID
+                    | DRAFT_COMMAND_ID
+                    | LOFT_COMMAND_ID
+            ) {
+                return self.preview_finishing_command(command, &request);
+            }
             return Err(ExecutionError::Handler(HostError::Validation {
                 detail: format!(
                     "command {} is discoverable but has no interactive preview handler",
@@ -2736,6 +3767,267 @@ impl Host {
             input_fingerprint,
             geometry_fingerprint,
         })
+    }
+
+    fn preview_finishing_command(
+        &self,
+        command: CommandId,
+        request: &serde_json::Value,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        let bundle_path = request
+            .get("bundle_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+        let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+        let expected_revision = request
+            .get("expected_revision")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ExecutionError::InvalidRequest(
+                    "finishing preview requires expected_revision".to_string(),
+                )
+            })?;
+        if expected_revision != current.revision_hash {
+            return Err(ExecutionError::Handler(HostError::Validation {
+                detail: format!(
+                    "{} source revision does not match current revision {:?}",
+                    command.0, current.revision_hash
+                ),
+            }));
+        }
+        let feature_id = request
+            .get("feature_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ExecutionError::InvalidRequest("missing feature_id".to_string()))?;
+        let base_feature_id = request
+            .get("base_feature_id")
+            .and_then(serde_json::Value::as_str);
+        validate_finishing_request(
+            command,
+            &Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?,
+            feature_id,
+            base_feature_id,
+            request,
+        )
+        .map_err(ExecutionError::Handler)?;
+        let bundle_root = Bundle::at(bundle_path).canonical_root().to_path_buf();
+        let base_feature_id = request
+            .get("base_feature_id")
+            .and_then(serde_json::Value::as_str);
+        let base_path =
+            base_feature_id.map(|base| bundle_root.join(BREP_SUBDIR).join(format!("{base}.brep")));
+        let worker = OcctWorker::locate().map_err(|error| {
+            ExecutionError::Handler(HostError::WorkerUnavailable {
+                detail: error.to_string(),
+            })
+        })?;
+        let mut request = request.clone();
+        if matches!(command, FILLET_COMMAND_ID | CHAMFER_COMMAND_ID) {
+            let base = base_feature_id.expect("validated base feature");
+            let selected = request.get("selected_edge").cloned().ok_or_else(|| {
+                ExecutionError::Handler(HostError::Validation {
+                    detail: "edge finishing operation requires selected_edge".to_string(),
+                })
+            })?;
+            request["selected_edge"] = resolve_selected_edge_with_worker(
+                &worker,
+                base_path.clone().expect("validated base path"),
+                base,
+                expected_revision,
+                selected,
+            )
+            .map_err(ExecutionError::Handler)?;
+        }
+        match command {
+            FILLET_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "fillet requires base_feature_id".to_string(),
+                    })
+                })?;
+                let selected_edge = selected_edge_context_from_request(
+                    request.get("selected_edge").cloned().ok_or_else(|| {
+                        ExecutionError::Handler(HostError::Validation {
+                            detail: "fillet requires selected_edge".to_string(),
+                        })
+                    })?,
+                )
+                .map_err(ExecutionError::Handler)?;
+                let radius = request["radius"]
+                    .as_f64()
+                    .ok_or_else(|| ExecutionError::InvalidRequest("missing radius".to_string()))?;
+                let typed = self
+                    .stage_occt_result::<FilletResult>(
+                        Path::new(bundle_path),
+                        &FilletRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            radius,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature"))
+                        .with_selected_edge(selected_edge),
+                        threeterm_occt_worker::Operation::Fillet,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, &request, typed)
+            }
+            CHAMFER_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "chamfer requires base_feature_id".to_string(),
+                    })
+                })?;
+                let selected_edge = selected_edge_context_from_request(
+                    request.get("selected_edge").cloned().ok_or_else(|| {
+                        ExecutionError::Handler(HostError::Validation {
+                            detail: "chamfer requires selected_edge".to_string(),
+                        })
+                    })?,
+                )
+                .map_err(ExecutionError::Handler)?;
+                let distance = request["distance"].as_f64().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing distance".to_string())
+                })?;
+                let typed = self
+                    .stage_occt_result::<ChamferResult>(
+                        Path::new(bundle_path),
+                        &ChamferRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            distance,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature"))
+                        .with_selected_edge(selected_edge),
+                        threeterm_occt_worker::Operation::Chamfer,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, &request, typed)
+            }
+            SHELL_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "shell requires base_feature_id".to_string(),
+                    })
+                })?;
+                let thickness = request["thickness"].as_f64().ok_or_else(|| {
+                    ExecutionError::InvalidRequest("missing thickness".to_string())
+                })?;
+                let typed = self
+                    .stage_occt_result::<ShellResult>(
+                        Path::new(bundle_path),
+                        &ShellRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            thickness,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature")),
+                        threeterm_occt_worker::Operation::Shell,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, &request, typed)
+            }
+            DRAFT_COMMAND_ID => {
+                let base_path = base_path.ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "draft requires base_feature_id".to_string(),
+                    })
+                })?;
+                let angle = request["angle"]
+                    .as_f64()
+                    .ok_or_else(|| ExecutionError::InvalidRequest("missing angle".to_string()))?;
+                let pull_direction =
+                    serde_json::from_value(request.get("pull_direction").cloned().ok_or_else(
+                        || ExecutionError::InvalidRequest("missing pull_direction".to_string()),
+                    )?)
+                    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+                let typed = self
+                    .stage_occt_result::<DraftResult>(
+                        Path::new(bundle_path),
+                        &DraftRequest::new(
+                            threeterm_occt_worker::new_request_id(),
+                            base_path,
+                            angle,
+                            pull_direction,
+                        )
+                        .with_feature_id(feature_id)
+                        .with_base_feature_id(base_feature_id.expect("validated base feature")),
+                        threeterm_occt_worker::Operation::Draft,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, &request, typed)
+            }
+            LOFT_COMMAND_ID => {
+                let profiles =
+                    serde_json::from_value(request.get("profiles").cloned().ok_or_else(|| {
+                        ExecutionError::InvalidRequest("missing profiles".to_string())
+                    })?)
+                    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+                let typed = self
+                    .stage_occt_result::<LoftResult>(
+                        Path::new(bundle_path),
+                        &LoftRequest::new(threeterm_occt_worker::new_request_id(), profiles)
+                            .with_solid(request["is_solid"].as_bool().ok_or_else(|| {
+                                ExecutionError::InvalidRequest("missing is_solid".to_string())
+                            })?)
+                            .with_ruled(request["ruled"].as_bool().ok_or_else(|| {
+                                ExecutionError::InvalidRequest("missing ruled".to_string())
+                            })?)
+                            .with_feature_id(feature_id),
+                        threeterm_occt_worker::Operation::Loft,
+                        &worker,
+                    )
+                    .map_err(ExecutionError::Handler)?;
+                self.preview_staged_result(command, &request, typed)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn preview_staged_result<R: Serialize>(
+        &self,
+        command: CommandId,
+        request: &serde_json::Value,
+        derived: StagedOcctResult<R>,
+    ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        let source_revision = derived.source_snapshot.revision_hash.clone();
+        let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+        let result = (|| {
+            let result = serde_json::to_value(&derived.result).map_err(|error| {
+                ExecutionError::Handler(HostError::Validation {
+                    detail: format!("preview result serialization failed: {error}"),
+                })
+            })?;
+            let geometry_fingerprint = result["brep_sha256"]
+                .as_str()
+                .ok_or_else(|| {
+                    ExecutionError::Handler(HostError::Validation {
+                        detail: "preview result omitted brep_sha256".to_string(),
+                    })
+                })?
+                .to_string();
+            let preview_revision = sha256_hex(
+                format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                    .as_bytes(),
+            );
+            Ok(DomainCommandPreview {
+                command,
+                source_revision,
+                preview_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+            })
+        })();
+        self.discard_staged_occt_result(&derived);
+        result
     }
 
     /// Run a real OCCT fillet, resolve the selected edge against evidence
@@ -3647,16 +4939,51 @@ impl Host {
                 && !component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id)
                     .is_file()
         });
-        if !replay_needed && !component_replay_needed {
-            return Ok(view);
-        }
-        let worker = OcctWorker::locate().map_err(HostError::from)?;
-        if replay_needed {
-            Ok(self.reload_and_recompute_geometry(root, &worker)?.snapshot)
+        let snapshot = if replay_needed {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            self.reload_and_recompute_geometry(root, &worker)?.snapshot
         } else {
-            self.recompute_component_instances(root, &worker)?;
-            Ok(self.load(root)?)
+            view
+        };
+        let mut projected = Bundle::at(root).open()?;
+        for feature in projected.graph.features().collect::<Vec<_>>() {
+            if projected
+                .graph
+                .sketch(feature.id.as_str())
+                .is_some_and(|sketch| sketch.support.is_some())
+            {
+                let result = self.reload_sketch(root, feature.id.as_str())?;
+                if !result.is_success() {
+                    return Err(HostError::Validation {
+                        detail: serde_json::to_string(&result)
+                            .expect("sketch reload response serializes"),
+                    });
+                }
+                let existing = projected.graph.sketch(feature.id.as_str()).ok_or_else(|| {
+                    HostError::Validation {
+                        detail: format!("sketch is missing: {}", feature.id.as_str()),
+                    }
+                })?;
+                let request = sketch_request_from_payload(existing, projected.revision_hash_hex())?;
+                let payload = sketch_payload(&request, &result)?;
+                projected
+                    .graph
+                    .add_sketch(feature, payload)
+                    .map_err(|detail| HostError::Validation { detail })?;
+            }
         }
+        self.current.replace(Some(projected));
+        if component_replay_needed {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            self.recompute_component_instances(root, &worker)?;
+            return Ok(self.load(root)?);
+        }
+        Ok(self
+            .current
+            .borrow()
+            .as_ref()
+            .map(SnapshotView::from)
+            .unwrap_or(snapshot))
     }
 
     /// Reload canonical extrude intents and rebuild their disposable BREP
@@ -3760,6 +5087,9 @@ impl Host {
         let mut feature_ids = Vec::with_capacity(intents.len());
         let mut geometry_fingerprints = Vec::with_capacity(intents.len());
         let mut replayed_paths = HashMap::with_capacity(intents.len());
+        let replay_stage = ReplayStage::create(root)?;
+        let replay_stage_root = replay_stage.root().to_path_buf();
+        let mut replay_artifacts = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
                 CanonicalIntent::Extrude(extrude) => {
@@ -3907,19 +5237,10 @@ impl Host {
                             ),
                         });
                     }
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4107,19 +5428,10 @@ impl Host {
                                 return Err(error);
                             }
                         };
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4252,19 +5564,10 @@ impl Host {
                             return Err(HostError::BrepIo { detail });
                         }
                     };
-                    let path = match Bundle::at(root).restore_derived_brep_if_revision(
-                        &feature_id,
-                        &source_snapshot.revision_hash,
-                        &bytes,
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let _ = stage.discard();
-                            return Err(error.into());
-                        }
-                    };
+                    let path = stage_replay_artifact(&replay_stage_root, &feature_id, &bytes)?;
                     let _ = stage.discard();
                     replayed_paths.insert(feature_id.clone(), path.clone());
+                    replay_artifacts.push((feature_id.clone(), bytes));
                     feature_ids.push(feature_id);
                     geometry_fingerprints.push(sha256_path(&path).map_err(|error| {
                         HostError::BrepIo {
@@ -4272,14 +5575,128 @@ impl Host {
                         }
                     })?);
                 }
+                CanonicalIntent::Fillet(fillet) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &replay_stage_root,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Fillet(fillet),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Chamfer(chamfer) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &replay_stage_root,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Chamfer(chamfer),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Shell(shell) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &replay_stage_root,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Shell(shell),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Draft(draft) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &replay_stage_root,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Draft(draft),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
+                CanonicalIntent::Loft(loft) => {
+                    let replayed = replay_finishing_geometry(
+                        root,
+                        &replay_stage_root,
+                        &loaded,
+                        &replayed_paths,
+                        worker,
+                        FinishingReplayIntent::Loft(loft),
+                    )?;
+                    replayed_paths.insert(replayed.feature_id.clone(), replayed.path.clone());
+                    replay_artifacts.push((replayed.feature_id.clone(), replayed.bytes));
+                    feature_ids.push(replayed.feature_id);
+                    geometry_fingerprints.push(replayed.fingerprint);
+                }
             }
         }
+        let prior_replay_artifacts = replay_artifacts
+            .iter()
+            .map(|(feature_id, _)| {
+                let path = committed_brep_path(root, feature_id);
+                let prior = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        Some(fs::read(&path).map_err(|error| HostError::BrepIo {
+                            detail: format!("read prior replay BREP failed: {error}"),
+                        })?)
+                    }
+                    Ok(_) => {
+                        return Err(HostError::BrepIo {
+                            detail: format!("prior replay BREP is not a regular file: {path:?}"),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(HostError::BrepIo {
+                            detail: format!("stat prior replay BREP failed: {error}"),
+                        });
+                    }
+                };
+                Ok((feature_id.clone(), prior))
+            })
+            .collect::<Result<Vec<_>, HostError>>()?;
+        Bundle::at(root)
+            .restore_derived_breps_if_revision(&source_snapshot.revision_hash, &replay_artifacts)?;
+        replay_stage.discard();
+        let _reloaded = match Bundle::at(root).open() {
+            Ok(reloaded) => reloaded,
+            Err(error) => {
+                rollback_replay_artifacts(
+                    root,
+                    &source_snapshot.revision_hash,
+                    &prior_replay_artifacts,
+                )?;
+                return Err(error.into());
+            }
+        };
         self.recompute_component_instances(root, worker)?;
         let reloaded = Bundle::at(root).open()?;
         let snapshot = SnapshotView::from(&reloaded);
         if snapshot.revision_hash != source_snapshot.revision_hash
             || canonical_model_fingerprint(&reloaded) != source_model_state
         {
+            rollback_replay_artifacts(
+                root,
+                &source_snapshot.revision_hash,
+                &prior_replay_artifacts,
+            )?;
             return Err(HostError::Validation {
                 detail: "geometry replay changed the canonical model state".to_string(),
             });
@@ -5268,6 +6685,51 @@ impl Host {
                 ),
             });
         }
+        if matches!(
+            operation,
+            threeterm_occt_worker::Operation::Fillet | threeterm_occt_worker::Operation::Chamfer
+        ) && canonical_request.get("edit_target").is_none()
+        {
+            let selected = canonical_request
+                .get("selected_edge")
+                .cloned()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "edge finishing operation requires selected_edge".to_string(),
+                })?;
+            let context = selected_edge_context_from_request(selected)?;
+            let reference = SelectedEdgeReference {
+                semantic_id: context.semantic_id,
+                provenance: threeterm_domain::EdgeProvenance {
+                    source_feature_id: context.source_feature_id,
+                    source_revision_id: context.source_revision_id,
+                    source_edge_id: context.source_edge_id,
+                },
+                role: context.role,
+                evidence: threeterm_domain::EdgeGeometricEvidence {
+                    midpoint: context.midpoint,
+                    tangent: context.tangent,
+                    length: context.length,
+                },
+            };
+            let outcome = resolve_edge_reference(
+                &reference,
+                domain_edge_candidates(
+                    &typed_value["edge_candidates"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| serde_json::from_value(value).ok())
+                        .collect::<Vec<EdgeCandidateEvidence>>(),
+                ),
+            );
+            if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+                let _ = completion.stage.discard();
+                return Err(HostError::Validation {
+                    detail: format!("semantic edge selection failed: {outcome:?}"),
+                });
+            }
+        }
         let artifact = self
             .accept_staged_occt_result(
                 completion.stage,
@@ -5419,6 +6881,87 @@ impl Host {
                         &artifact.request_id,
                         provenance,
                         &intent,
+                        bytes,
+                    )
+                } else if artifact.operation == "fillet"
+                    && derived.request.get("selected_edge").is_some()
+                {
+                    let intent = canonical_fillet_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Fillet(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "chamfer"
+                    && derived.request.get("selected_edge").is_some()
+                {
+                    let intent = canonical_chamfer_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Chamfer(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "shell" {
+                    let intent = canonical_shell_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Shell(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "draft" {
+                    let intent = canonical_draft_intent(
+                        &derived.request,
+                        &derived.source_snapshot,
+                        artifact,
+                    )
+                    .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Draft(intent),
+                        bytes,
+                    )
+                } else if artifact.operation == "loft" {
+                    let intent =
+                        canonical_loft_intent(&derived.request, &derived.source_snapshot, artifact)
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                    bundle.append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+                        feature_id,
+                        &kind,
+                        &current.manifest.revision_hash,
+                        &artifact.request_id,
+                        provenance,
+                        &CanonicalIntent::Loft(intent),
                         bytes,
                     )
                 } else {
@@ -7890,6 +9433,356 @@ impl Host {
     }
 }
 
+enum FinishingReplayIntent {
+    Fillet(CanonicalFilletIntent),
+    Chamfer(CanonicalChamferIntent),
+    Shell(CanonicalShellIntent),
+    Draft(CanonicalDraftIntent),
+    Loft(CanonicalLoftIntent),
+}
+
+struct ReplayedGeometry {
+    feature_id: String,
+    path: PathBuf,
+    fingerprint: String,
+    bytes: Vec<u8>,
+}
+
+struct ReplayStage {
+    stage: Option<Stage>,
+    root: PathBuf,
+}
+
+impl ReplayStage {
+    fn create(root: &Path) -> Result<Self, HostError> {
+        let stage =
+            Stage::create_fresh(root.join(".derived"), "replay-generation").map_err(|error| {
+                HostError::BrepIo {
+                    detail: format!("create replay generation stage failed: {error}"),
+                }
+            })?;
+        Ok(Self {
+            root: stage.root().to_path_buf(),
+            stage: Some(stage),
+        })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn discard(mut self) {
+        if let Some(stage) = self.stage.take() {
+            let _ = stage.discard();
+        }
+    }
+}
+
+impl Drop for ReplayStage {
+    fn drop(&mut self) {
+        if let Some(stage) = self.stage.take() {
+            let _ = stage.discard();
+        }
+    }
+}
+
+fn stage_replay_artifact(
+    stage_root: &Path,
+    feature_id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, HostError> {
+    if !valid_feature_path_component(feature_id) {
+        return Err(HostError::Validation {
+            detail: "replayed feature_id must be a plain path component".to_string(),
+        });
+    }
+    let path = stage_root.join(format!("{feature_id}.brep"));
+    fs::write(&path, bytes).map_err(|error| HostError::BrepIo {
+        detail: format!("stage replayed BREP failed: {error}"),
+    })?;
+    Ok(path)
+}
+
+fn rollback_replay_artifacts(
+    root: &Path,
+    expected_revision: &str,
+    prior_artifacts: &[(String, Option<Vec<u8>>)],
+) -> Result<(), HostError> {
+    let prior = prior_artifacts
+        .iter()
+        .filter_map(|(feature_id, bytes)| {
+            bytes
+                .as_ref()
+                .map(|bytes| (feature_id.clone(), bytes.clone()))
+        })
+        .collect::<Vec<_>>();
+    if !prior.is_empty() {
+        Bundle::at(root)
+            .restore_derived_breps_if_revision(expected_revision, &prior)
+            .map_err(HostError::from)?;
+    }
+    for (feature_id, bytes) in prior_artifacts {
+        if bytes.is_none() {
+            let path = committed_brep_path(root, feature_id);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(HostError::BrepIo {
+                        detail: format!("remove replay BREP during rollback failed: {error}"),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replay_finishing_geometry(
+    root: &Path,
+    replay_stage_root: &Path,
+    loaded: &LoadedBundle,
+    replayed_paths: &HashMap<String, PathBuf>,
+    worker: &OcctWorker,
+    intent: FinishingReplayIntent,
+) -> Result<ReplayedGeometry, HostError> {
+    let expected_worker = expected_occt_worker_fingerprint();
+    let (feature_id, source_revision, worker_requirements) = match &intent {
+        FinishingReplayIntent::Fillet(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Chamfer(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Shell(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Draft(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+        FinishingReplayIntent::Loft(value) => (
+            value.affected_semantic_ids.first().cloned(),
+            value.source_revision.clone(),
+            value.worker_requirements.clone(),
+        ),
+    };
+    let feature_id = feature_id.ok_or_else(|| HostError::Validation {
+        detail: "finishing intent has no affected feature".to_string(),
+    })?;
+    if worker_requirements != expected_worker {
+        return Err(HostError::WorkerUnavailable {
+            detail: format!(
+                "incompatible finishing worker requirements: expected {expected_worker:?}, found {worker_requirements:?}"
+            ),
+        });
+    }
+    if !loaded.graph.contains_feature(&feature_id) {
+        return Err(HostError::Validation {
+            detail: format!(
+                "finishing replay feature is not in the Revision Snapshot: {feature_id}"
+            ),
+        });
+    }
+
+    let dependency_path = |dependency: &str| -> Result<PathBuf, HostError> {
+        if !valid_feature_path_component(dependency) {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "finishing replay dependency is not a plain feature ID: {dependency}"
+                ),
+            });
+        }
+        if let Some(path) = replayed_paths.get(dependency) {
+            return Ok(path.clone());
+        }
+        let entry = loaded
+            .log
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| entry.feature_id == dependency && entry.intent.is_some())
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("finishing replay dependency is not canonical: {dependency}"),
+            })?;
+        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
+        let expected_bytes = entry
+            .brep_byte_count
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("finishing replay dependency byte count is invalid: {dependency}"),
+            })?;
+        let expected_sha = entry
+            .brep_sha256
+            .as_deref()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("finishing replay dependency digest is missing: {dependency}"),
+            })?;
+        read_brep_verified(&path, Some((expected_bytes, expected_sha)))
+            .map_err(|detail| HostError::BrepIo { detail })?;
+        Ok(path)
+    };
+
+    macro_rules! read_result {
+        ($result:expr, $validate:expr) => {{
+            let result = $result.map_err(HostError::from)?;
+            if result.status != "ok" {
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(result.request_id),
+                    detail: format!("finishing replay returned status {}", result.status),
+                });
+            }
+            $validate(&result)?;
+            let bytes = read_brep_verified(
+                &result.brep_path,
+                Some((result.brep_bytes, result.brep_sha256.as_str())),
+            )
+            .map_err(|detail| HostError::BrepIo { detail })?;
+            bytes
+        }};
+    }
+
+    let bytes = match intent {
+        FinishingReplayIntent::Fillet(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let edge_reference = value.selected_edge.clone();
+            let replay_reference = edge_reference.clone();
+            let edge = SelectedEdgeContext {
+                semantic_id: edge_reference.semantic_id,
+                source_feature_id: edge_reference.provenance.source_feature_id,
+                source_revision_id: edge_reference.provenance.source_revision_id,
+                source_edge_id: edge_reference.provenance.source_edge_id,
+                role: edge_reference.role,
+                midpoint: edge_reference.evidence.midpoint,
+                tangent: edge_reference.evidence.tangent,
+                length: edge_reference.evidence.length,
+            };
+            let request = FilletRequest::new(value.request_id, base_path, value.radius)
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id)
+                .with_selected_edge(edge);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .fillet(&request),
+                |result: &FilletResult| {
+                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
+                }
+            )
+        }
+        FinishingReplayIntent::Chamfer(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let edge_reference = value.selected_edge.clone();
+            let replay_reference = edge_reference.clone();
+            let edge = SelectedEdgeContext {
+                semantic_id: edge_reference.semantic_id,
+                source_feature_id: edge_reference.provenance.source_feature_id,
+                source_revision_id: edge_reference.provenance.source_revision_id,
+                source_edge_id: edge_reference.provenance.source_edge_id,
+                role: edge_reference.role,
+                midpoint: edge_reference.evidence.midpoint,
+                tangent: edge_reference.evidence.tangent,
+                length: edge_reference.evidence.length,
+            };
+            let request = ChamferRequest::new(value.request_id, base_path, value.distance)
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id)
+                .with_selected_edge(edge);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .chamfer(&request),
+                |result: &ChamferResult| {
+                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
+                }
+            )
+        }
+        FinishingReplayIntent::Shell(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let request = ShellRequest::new(value.request_id, base_path, value.thickness)
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .shell(&request),
+                |_result: &ShellResult| Ok::<(), HostError>(())
+            )
+        }
+        FinishingReplayIntent::Draft(value) => {
+            let base_path = dependency_path(&value.base_feature_id)?;
+            let request = DraftRequest::new(
+                value.request_id,
+                base_path,
+                value.angle,
+                value.pull_direction,
+            )
+            .with_output_path(
+                replay_stage_root,
+                format!("{feature_id}.worker.brep.partial"),
+            )
+            .with_feature_id(&feature_id)
+            .with_base_feature_id(&value.base_feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .draft(&request),
+                |_result: &DraftResult| Ok::<(), HostError>(())
+            )
+        }
+        FinishingReplayIntent::Loft(value) => {
+            let request = LoftRequest::new(value.request_id, value.profiles)
+                .with_solid(value.is_solid)
+                .with_ruled(value.ruled)
+                .with_output_path(
+                    replay_stage_root,
+                    format!("{feature_id}.worker.brep.partial"),
+                )
+                .with_feature_id(&feature_id);
+            read_result!(
+                worker
+                    .clone()
+                    .with_revision_id(source_revision)
+                    .loft(&request),
+                |_result: &LoftResult| Ok::<(), HostError>(())
+            )
+        }
+    };
+    let path = stage_replay_artifact(replay_stage_root, &feature_id, &bytes)?;
+    let fingerprint = sha256_path(&path).map_err(|error| HostError::BrepIo {
+        detail: format!("hash replayed BREP failed: {error}"),
+    })?;
+    Ok(ReplayedGeometry {
+        feature_id,
+        path,
+        fingerprint,
+        bytes,
+    })
+}
+
 impl Drop for Host {
     fn drop(&mut self) {
         for draft in self.drafts.get_mut().values() {
@@ -8851,6 +10744,66 @@ fn boolean_derived_result_json(artifact: &Layer1DerivedResult) -> serde_json::Va
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finishing_response_value(
+    status: &str,
+    operation: &str,
+    feature_id: &str,
+    source_snapshot: &SnapshotView,
+    snapshot: &SnapshotView,
+    brep_path: &Path,
+    brep_sha256: &str,
+    brep_bytes: usize,
+    artifact: &Layer1DerivedResult,
+    edge_candidates: Option<&[EdgeCandidateEvidence]>,
+    schema_version: &str,
+) -> serde_json::Value {
+    let mut response = serde_json::json!({
+        "status": status,
+        "operation": operation,
+        "feature_id": feature_id,
+        "request_id": artifact.request_id,
+        "source_snapshot": {
+            "feature_graph_hash": source_snapshot.feature_graph_hash,
+            "revision_hash": source_snapshot.revision_hash,
+        },
+        "feature_graph_hash": snapshot.feature_graph_hash,
+        "revision_hash": snapshot.revision_hash,
+        "authoritative": true,
+        "artifact_kind": artifact.artifact_kind,
+        "artifact_name": artifact.artifact_name,
+        "brep_path": brep_path,
+        "brep_sha256": brep_sha256,
+        "brep_bytes": brep_bytes,
+        "derived_result": boolean_derived_result_json(artifact),
+        "schema_version": schema_version,
+    });
+    if let Some(edge_candidates) = edge_candidates {
+        response["edge_candidates"] = serde_json::Value::Array(
+            canonical_finishing_edge_candidates(edge_candidates)
+                .into_iter()
+                .map(|candidate| {
+                    serde_json::json!({
+                        "semantic_id": candidate.semantic_id,
+                        "provenance": {
+                            "source_feature_id": candidate.provenance.source_feature_id,
+                            "source_revision_id": candidate.provenance.source_revision_id,
+                            "source_edge_id": candidate.provenance.source_edge_id,
+                        },
+                        "role": candidate.role,
+                        "evidence": {
+                            "midpoint": candidate.evidence.midpoint,
+                            "tangent": candidate.evidence.tangent,
+                            "length": candidate.evidence.length,
+                        }
+                    })
+                })
+                .collect(),
+        );
+    }
+    response
+}
+
 fn canonical_boolean_intent(
     request: &serde_json::Value,
     source_snapshot: &SnapshotView,
@@ -9001,6 +10954,483 @@ fn canonical_hole_intent(
             thread_pitch,
             thread_depth,
         },
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, HostError> {
+    request
+        .get("base_feature_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical operation requires base_feature_id".to_string(),
+        })
+}
+
+fn canonical_edge_reference(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+) -> Result<CanonicalEdgeReference, HostError> {
+    let selected = request
+        .get("selected_edge")
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical edge operation requires selected_edge".to_string(),
+        })?;
+    let context = selected_edge_context_from_request(selected.clone())?;
+    Ok(CanonicalEdgeReference {
+        semantic_id: context.semantic_id,
+        provenance: EdgeProvenance {
+            source_feature_id: context.source_feature_id,
+            source_revision_id: context.source_revision_id,
+            source_edge_id: context.source_edge_id,
+        },
+        role: context.role,
+        evidence: EdgeEvidence {
+            midpoint: context.midpoint,
+            tangent: context.tangent,
+            length: context.length,
+        },
+    })
+    .and_then(|reference| {
+        if reference.provenance.source_revision_id != source_snapshot.revision_hash {
+            return Err(HostError::Validation {
+                detail: "selected edge source revision does not match the command source"
+                    .to_string(),
+            });
+        }
+        Ok(reference)
+    })
+}
+
+fn selected_edge_context_from_request(
+    selected: serde_json::Value,
+) -> Result<SelectedEdgeContext, HostError> {
+    if selected.get("provenance").is_some() {
+        let reference: CanonicalEdgeReference =
+            serde_json::from_value(selected).map_err(|error| HostError::Validation {
+                detail: format!("invalid selected edge reference: {error}"),
+            })?;
+        return Ok(SelectedEdgeContext {
+            semantic_id: reference.semantic_id,
+            source_feature_id: reference.provenance.source_feature_id,
+            source_revision_id: reference.provenance.source_revision_id,
+            source_edge_id: reference.provenance.source_edge_id,
+            role: reference.role,
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        });
+    }
+    serde_json::from_value(selected).map_err(|error| HostError::Validation {
+        detail: format!("invalid selected edge context: {error}"),
+    })
+}
+
+fn selected_edge_reference_from_value(
+    selected: serde_json::Value,
+) -> Result<SelectedEdgeReference, HostError> {
+    let reference: CanonicalEdgeReference =
+        serde_json::from_value(selected).map_err(|error| HostError::Validation {
+            detail: format!("invalid selected edge reference: {error}"),
+        })?;
+    Ok(SelectedEdgeReference {
+        semantic_id: reference.semantic_id,
+        provenance: threeterm_domain::EdgeProvenance {
+            source_feature_id: reference.provenance.source_feature_id,
+            source_revision_id: reference.provenance.source_revision_id,
+            source_edge_id: reference.provenance.source_edge_id,
+        },
+        role: reference.role,
+        evidence: threeterm_domain::EdgeGeometricEvidence {
+            midpoint: reference.evidence.midpoint,
+            tangent: reference.evidence.tangent,
+            length: reference.evidence.length,
+        },
+    })
+}
+
+fn resolve_selected_edge_with_worker(
+    worker: &OcctWorker,
+    base_path: PathBuf,
+    base_feature_id: &str,
+    source_revision: &str,
+    selected: serde_json::Value,
+) -> Result<serde_json::Value, HostError> {
+    let reference = selected_edge_reference_from_value(selected.clone())?;
+    if reference.semantic_id != canonical_edge_semantic_id_from_reference(&reference) {
+        return Err(HostError::Validation {
+            detail:
+                "reference is incompatible: selected edge semantic ID does not match its evidence"
+                    .to_string(),
+        });
+    }
+    let inspection = worker
+        .clone()
+        .with_revision_id(source_revision)
+        .inspect_edges(
+            threeterm_occt_worker::new_request_id(),
+            base_path,
+            base_feature_id,
+            source_revision,
+            selected,
+        )
+        .map_err(HostError::from)?;
+    let outcome = resolve_edge_reference(
+        &reference,
+        canonical_finishing_edge_candidates(&inspection.edge_candidates),
+    );
+    let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
+        return Err(HostError::Validation {
+            detail: edge_selection_failure_detail(&outcome),
+        });
+    };
+    let candidate = inspection
+        .edge_candidates
+        .iter()
+        .find(|candidate| canonical_edge_semantic_id(candidate) == semantic_id)
+        .ok_or_else(|| HostError::Validation {
+            detail: "resolved semantic edge candidate is missing".to_string(),
+        })?;
+    Ok(canonical_edge_value(candidate))
+}
+
+fn edge_selection_failure_detail(outcome: &EdgeReattachmentOutcome) -> String {
+    let prefix = match outcome {
+        EdgeReattachmentOutcome::Lost => "reference is lost",
+        EdgeReattachmentOutcome::Ambiguous { .. } => "reference is ambiguous",
+        EdgeReattachmentOutcome::Incompatible { .. } => "reference is incompatible",
+        EdgeReattachmentOutcome::Resolved { .. } => return "reference is resolved".to_string(),
+    };
+    format!("{prefix}: semantic edge selection failed: {outcome:?}")
+}
+
+fn validate_finishing_request(
+    command: CommandId,
+    loaded: &LoadedBundle,
+    feature_id: &str,
+    base_feature_id: Option<&str>,
+    request: &serde_json::Value,
+) -> Result<(), HostError> {
+    if !valid_feature_path_component(feature_id) {
+        return Err(HostError::Validation {
+            detail: "finishing feature_id must be a plain path component".to_string(),
+        });
+    }
+    if loaded.graph.contains_feature(feature_id) {
+        return Err(HostError::Validation {
+            detail: format!("feature ID already exists: {feature_id}"),
+        });
+    }
+    let requires_base = !matches!(command, LOFT_COMMAND_ID);
+    if requires_base {
+        let base = base_feature_id.ok_or_else(|| HostError::Validation {
+            detail: format!("{} requires base_feature_id", command.0),
+        })?;
+        if base == feature_id || !valid_feature_path_component(base) {
+            return Err(HostError::Validation {
+                detail: "finishing base_feature_id is invalid".to_string(),
+            });
+        }
+        let is_brep_feature = loaded
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == base && feature.kind.starts_with("brep:"));
+        if !is_brep_feature {
+            return Err(HostError::Validation {
+                detail: format!("finishing base feature is missing: {base}"),
+            });
+        }
+        let replayable = loaded.log.entries().iter().any(|entry| {
+            entry.feature_id == base
+                && entry.intent.as_ref().is_some_and(|intent| {
+                    intent.affected_semantic_ids().iter().any(|id| id == base)
+                })
+        });
+        if !replayable {
+            return Err(HostError::Validation {
+                detail: format!("finishing base feature is not canonical and replayable: {base}"),
+            });
+        }
+    }
+
+    match command {
+        FILLET_COMMAND_ID | CHAMFER_COMMAND_ID => {
+            let selected = request
+                .get("selected_edge")
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("{} requires selected_edge", command.0),
+                })?;
+            if selected.get("provenance").is_none() || selected.get("evidence").is_none() {
+                return Err(HostError::Validation {
+                    detail: "selected_edge must be the nested semantic edge reference".to_string(),
+                });
+            }
+            let context = selected_edge_context_from_request(selected.clone())?;
+            let base = base_feature_id.expect("edge finishing operations require a base");
+            if context.source_feature_id != base
+                || context.source_revision_id != loaded.revision_hash_hex()
+                || context.semantic_id.is_empty()
+                || context.source_edge_id.is_empty()
+                || context.role.is_empty()
+                || !context.midpoint.iter().all(|value| value.is_finite())
+                || context.midpoint.iter().any(|value| value.abs() > 1e9)
+                || !context.tangent.iter().all(|value| value.is_finite())
+                || context
+                    .tangent
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    <= f64::EPSILON
+                || !context.length.is_finite()
+                || !(0.0 < context.length && context.length < 1e9)
+            {
+                return Err(HostError::Validation {
+                    detail:
+                        "selected_edge provenance or evidence does not match the source snapshot"
+                            .to_string(),
+                });
+            }
+            let parameter = request
+                .get(if command == FILLET_COMMAND_ID {
+                    "radius"
+                } else {
+                    "distance"
+                })
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| HostError::Validation {
+                    detail: format!("{} finishing parameter is missing", command.0),
+                })?;
+            if !parameter.is_finite() || !(0.0 < parameter && parameter < 1e6) {
+                return Err(HostError::Validation {
+                    detail: format!("{} finishing parameter is out of bounds", command.0),
+                });
+            }
+        }
+        SHELL_COMMAND_ID => {
+            let thickness = request["thickness"]
+                .as_f64()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "shell thickness is missing".to_string(),
+                })?;
+            if !thickness.is_finite() || !(0.0 < thickness && thickness < 1e6) {
+                return Err(HostError::Validation {
+                    detail: "shell thickness is out of bounds".to_string(),
+                });
+            }
+        }
+        DRAFT_COMMAND_ID => {
+            let angle = request["angle"]
+                .as_f64()
+                .ok_or_else(|| HostError::Validation {
+                    detail: "draft angle is missing".to_string(),
+                })?;
+            let pull: [f64; 3] =
+                serde_json::from_value(request.get("pull_direction").cloned().ok_or_else(
+                    || HostError::Validation {
+                        detail: "draft pull_direction is missing".to_string(),
+                    },
+                )?)
+                .map_err(|error| HostError::Validation {
+                    detail: format!("invalid draft pull_direction: {error}"),
+                })?;
+            let norm = pull.iter().map(|value| value * value).sum::<f64>();
+            if !angle.is_finite()
+                || !(0.0 < angle && angle < std::f64::consts::FRAC_PI_2)
+                || !pull
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() <= 1e9)
+                || !norm.is_finite()
+                || norm <= f64::EPSILON
+            {
+                return Err(HostError::Validation {
+                    detail: "draft inputs are out of bounds".to_string(),
+                });
+            }
+        }
+        LOFT_COMMAND_ID => {
+            let profiles: Vec<Vec<[f64; 3]>> =
+                serde_json::from_value(request.get("profiles").cloned().ok_or_else(|| {
+                    HostError::Validation {
+                        detail: "loft profiles are missing".to_string(),
+                    }
+                })?)
+                .map_err(|error| HostError::Validation {
+                    detail: format!("invalid loft profiles: {error}"),
+                })?;
+            if !(2..=32).contains(&profiles.len())
+                || profiles.iter().any(|profile| {
+                    !(3..=128).contains(&profile.len())
+                        || profile
+                            .iter()
+                            .flatten()
+                            .any(|value| !value.is_finite() || value.abs() > 1e9)
+                        || profile.first() == profile.last()
+                })
+            {
+                return Err(HostError::Validation {
+                    detail: "loft profiles are out of bounds".to_string(),
+                });
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn canonical_fillet_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalFilletIntent, HostError> {
+    let radius = request["radius"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical fillet radius is missing or invalid".to_string(),
+        })?;
+    let base_feature_id = canonical_base_feature_id(request)?;
+    let intent = CanonicalFilletIntent {
+        schema_version: FILLET_INTENT_SCHEMA_VERSION.to_string(),
+        command: "fillet".to_string(),
+        operation: "fillet".to_string(),
+        base_feature_id,
+        selected_edge: canonical_edge_reference(request, source_snapshot)?,
+        radius,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_chamfer_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalChamferIntent, HostError> {
+    let distance = request["distance"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical chamfer distance is missing or invalid".to_string(),
+        })?;
+    let intent = CanonicalChamferIntent {
+        schema_version: CHAMFER_INTENT_SCHEMA_VERSION.to_string(),
+        command: "chamfer".to_string(),
+        operation: "chamfer".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        selected_edge: canonical_edge_reference(request, source_snapshot)?,
+        distance,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_shell_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalShellIntent, HostError> {
+    let thickness = request["thickness"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical shell thickness is missing or invalid".to_string(),
+        })?;
+    let intent = CanonicalShellIntent {
+        schema_version: SHELL_INTENT_SCHEMA_VERSION.to_string(),
+        command: "shell".to_string(),
+        operation: "shell".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        thickness,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_draft_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalDraftIntent, HostError> {
+    let angle = request["angle"]
+        .as_f64()
+        .ok_or_else(|| HostError::Validation {
+            detail: "canonical draft angle is missing or invalid".to_string(),
+        })?;
+    let pull_direction =
+        serde_json::from_value(request["pull_direction"].clone()).map_err(|error| {
+            HostError::Validation {
+                detail: format!("canonical draft pull direction is invalid: {error}"),
+            }
+        })?;
+    let intent = CanonicalDraftIntent {
+        schema_version: DRAFT_INTENT_SCHEMA_VERSION.to_string(),
+        command: "draft".to_string(),
+        operation: "draft".to_string(),
+        base_feature_id: canonical_base_feature_id(request)?,
+        angle,
+        pull_direction,
+        request_id: artifact.request_id.clone(),
+        affected_semantic_ids: vec![artifact.feature_id.clone()],
+        source_revision: source_snapshot.revision_hash.clone(),
+        worker_requirements: artifact.worker_fingerprint.clone(),
+    };
+    intent
+        .validate(&artifact.feature_id)
+        .map_err(|error| HostError::Validation {
+            detail: error.to_string(),
+        })?;
+    Ok(intent)
+}
+
+fn canonical_loft_intent(
+    request: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+    artifact: &Layer1DerivedResult,
+) -> Result<CanonicalLoftIntent, HostError> {
+    let profiles = serde_json::from_value(request["profiles"].clone()).map_err(|error| {
+        HostError::Validation {
+            detail: format!("canonical loft profiles are invalid: {error}"),
+        }
+    })?;
+    let intent = CanonicalLoftIntent {
+        schema_version: LOFT_INTENT_SCHEMA_VERSION.to_string(),
+        command: "loft".to_string(),
+        operation: "loft".to_string(),
+        profiles,
+        is_solid: request["is_solid"].as_bool().unwrap_or(true),
+        ruled: request["ruled"].as_bool().unwrap_or(false),
+        request_id: artifact.request_id.clone(),
         affected_semantic_ids: vec![artifact.feature_id.clone()],
         source_revision: source_snapshot.revision_hash.clone(),
         worker_requirements: artifact.worker_fingerprint.clone(),

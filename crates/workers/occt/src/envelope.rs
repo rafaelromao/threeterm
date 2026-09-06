@@ -58,6 +58,8 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    PlanarFaceEvidence,
+    InspectEdges,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +101,146 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::PlanarFaceEvidence => "planar_face_evidence",
+            Self::InspectEdges => "inspect_edges",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub feature_id: String,
+    pub source_revision_id: String,
+}
+
+impl PlanarFaceEvidenceRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        feature_id: impl Into<String>,
+        source_revision_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::PlanarFaceEvidence,
+            base_path: base_path.into(),
+            feature_id: feature_id.into(),
+            source_revision_id: source_revision_id.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version)
+            || !is_request_id(&self.request_id)
+            || !is_feature_id(&self.feature_id)
+            || self.operation != Operation::PlanarFaceEvidence
+            || self.base_path.as_os_str().is_empty()
+            || self.source_revision_id.is_empty()
+        {
+            return Err("planar face evidence request has invalid identity or path".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceCandidate {
+    pub topology_kind: String,
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    #[serde(default)]
+    pub adjacent_feature_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanarFaceEvidenceResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+    pub source_revision_id: String,
+    pub candidates: Vec<PlanarFaceEvidenceCandidate>,
+}
+
+impl PlanarFaceEvidenceResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+
+    pub fn validate_for(&self, request: &PlanarFaceEvidenceRequest) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION
+            || self.request_id != request.request_id
+            || self.operation != Operation::PlanarFaceEvidence
+            || self.feature_id != request.feature_id
+            || self.source_revision_id != request.source_revision_id
+            || self.status != "ok"
+        {
+            return Err("planar face evidence response identity is invalid".to_string());
+        }
+        for candidate in &self.candidates {
+            if candidate.topology_kind != "planar_face"
+                || candidate
+                    .origin
+                    .into_iter()
+                    .chain(candidate.normal)
+                    .chain(candidate.x_axis)
+                    .chain(candidate.y_axis)
+                    .any(|value| !value.is_finite())
+                || candidate.adjacent_feature_ids.len() > 32
+                || candidate.adjacent_feature_ids.iter().any(|id| {
+                    id.is_empty()
+                        || id.len() > 128
+                        || !id.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || matches!(character, '-' | '_' | '.' | '/')
+                        })
+                })
+            {
+                return Err("planar face evidence candidate is malformed".to_string());
+            }
+            let norm = |vector: [f64; 3]| {
+                vector
+                    .into_iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt()
+            };
+            let dot = |left: [f64; 3], right: [f64; 3]| {
+                left.into_iter().zip(right).map(|(a, b)| a * b).sum::<f64>()
+            };
+            if (norm(candidate.normal) - 1.0).abs() > 1e-6
+                || (norm(candidate.x_axis) - 1.0).abs() > 1e-6
+                || (norm(candidate.y_axis) - 1.0).abs() > 1e-6
+                || dot(candidate.normal, candidate.x_axis).abs() > 1e-6
+                || dot(candidate.normal, candidate.y_axis).abs() > 1e-6
+                || dot(candidate.x_axis, candidate.y_axis).abs() > 1e-6
+            {
+                return Err("planar face evidence frame is not orthonormal".to_string());
+            }
+            let cross = [
+                candidate.x_axis[1] * candidate.y_axis[2]
+                    - candidate.x_axis[2] * candidate.y_axis[1],
+                candidate.x_axis[2] * candidate.y_axis[0]
+                    - candidate.x_axis[0] * candidate.y_axis[2],
+                candidate.x_axis[0] * candidate.y_axis[1]
+                    - candidate.x_axis[1] * candidate.y_axis[0],
+            ];
+            if dot(cross, candidate.normal) < 1.0 - 1e-6 {
+                return Err("planar face evidence frame is not right-handed".to_string());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -781,6 +922,8 @@ pub struct FilletRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_edge: Option<SelectedEdgeContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_target: Option<SelectedEdgeContext>,
 }
 
@@ -796,6 +939,7 @@ impl FilletRequest {
             output_filename: String::new(),
             feature_id: String::new(),
             selected_edge: None,
+            base_feature_id: None,
             edit_target: None,
         }
     }
@@ -817,6 +961,11 @@ impl FilletRequest {
 
     pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
         self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -891,6 +1040,17 @@ pub struct EdgeCandidateEvidence {
     pub length: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeInspectionResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
+}
+
 /// Chamfer request: apply a constant-distance chamfer to every edge of
 /// the BREP at `base_path` and write the result to
 /// `<output_dir>/<output_filename>`.
@@ -910,6 +1070,11 @@ pub struct ChamferRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    /// Semantic edge evidence resolved by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_edge: Option<SelectedEdgeContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl ChamferRequest {
@@ -927,6 +1092,8 @@ impl ChamferRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            selected_edge: None,
+            base_feature_id: None,
         }
     }
 
@@ -942,6 +1109,16 @@ impl ChamferRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
+        self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -1147,6 +1324,8 @@ pub struct ChamferResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default)]
+    pub edge_candidates: Vec<EdgeCandidateEvidence>,
 }
 
 impl ChamferResult {
@@ -2096,6 +2275,8 @@ pub struct ShellRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl ShellRequest {
@@ -2113,6 +2294,7 @@ impl ShellRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            base_feature_id: None,
         }
     }
 
@@ -2128,6 +2310,11 @@ impl ShellRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -2219,6 +2406,8 @@ pub struct DraftRequest {
     pub output_filename: String,
     /// Stable ThreeTerm feature id the host will commit.
     pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_feature_id: Option<String>,
 }
 
 impl DraftRequest {
@@ -2238,6 +2427,7 @@ impl DraftRequest {
             output_dir: PathBuf::new(),
             output_filename: String::new(),
             feature_id: String::new(),
+            base_feature_id: None,
         }
     }
 
@@ -2253,6 +2443,11 @@ impl DraftRequest {
 
     pub fn with_feature_id(mut self, feature_id: impl Into<String>) -> Self {
         self.feature_id = feature_id.into();
+        self
+    }
+
+    pub fn with_base_feature_id(mut self, base_feature_id: impl Into<String>) -> Self {
+        self.base_feature_id = Some(base_feature_id.into());
         self
     }
 
@@ -2903,6 +3098,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "chamfer-1".to_string(),
+            edge_candidates: Vec::new(),
         };
         assert!(result.is_success());
 

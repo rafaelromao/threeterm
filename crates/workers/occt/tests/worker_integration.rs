@@ -104,6 +104,45 @@ fn extrude_rectangle_returns_ok_with_real_brep() {
 }
 
 #[test]
+fn edge_inspection_returns_transient_source_evidence_without_an_artifact() {
+    let Some(worker) = required_fixture_worker("edge_inspection") else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!(
+        "threeterm-occt-edge-inspection-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+    let result = worker
+        .extrude(&rectangle_extrude_request().with_output_path(&temp, "rect.brep"))
+        .expect("extrude returns");
+    let inspection = worker
+        .inspect_edges(
+            unique_request_id("inspect"),
+            result.brep_path.clone(),
+            "box-rect",
+            "revision-1",
+            serde_json::json!({
+                "semantic_id": "requested-edge",
+                "source_feature_id": "box-rect",
+                "source_revision_id": "revision-1",
+                "source_edge_id": "source-edge",
+                "role": "outer-perimeter",
+                "midpoint": [0.0, 0.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 1.0
+            }),
+        )
+        .expect("edge inspection returns");
+    assert_eq!(inspection.operation, Operation::InspectEdges);
+    assert_eq!(inspection.status, "ok");
+    assert!(!inspection.edge_candidates.is_empty());
+    assert!(!temp.join("inspect_edges.brep").exists());
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn subtractive_extrude_cuts_a_semantic_target_solid() {
     let Some(worker) = locate_worker() else {
         return;

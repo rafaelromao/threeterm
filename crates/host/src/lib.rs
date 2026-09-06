@@ -829,7 +829,7 @@ fn annotate_named_revision_positions(
 ) -> threeterm_domain::history::HistoryEvent {
     for (name, revision) in &mut event.named_revisions {
         if !prior.named_revisions().contains_key(name) {
-            revision.canonical_log_position = canonical_log_position as u64;
+            revision.canonical_log_position = Some(canonical_log_position as u64);
         }
     }
     event
@@ -851,10 +851,13 @@ fn restore_target_graph(
             .ok_or_else(|| HostError::Validation {
                 detail: format!("named revision not found: {name}"),
             })?;
+    let position = revision
+        .canonical_log_position
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("named revision has no canonical log position: {name}"),
+        })?;
     Ok(Some(
-        bundle
-            .canonical_state_at_log_position(revision.canonical_log_position)?
-            .graph,
+        bundle.canonical_state_at_log_position(position)?.graph,
     ))
 }
 
@@ -5268,7 +5271,7 @@ impl Host {
     fn stage_target_bracket_families_for_restore(
         &self,
         root: &Path,
-        before: &HistorySnapshot,
+        _before: &HistorySnapshot,
         after: &HistorySnapshot,
         target_graph: &FeatureGraph,
         source_revision: &str,
@@ -5282,10 +5285,6 @@ impl Host {
             let Some(params) = bracket_family_params(after, &family) else {
                 continue;
             };
-            let path = committed_brep_path(root, &family);
-            if bracket_family_params(before, &family) == Some(params.clone()) && path.is_file() {
-                continue;
-            }
             if !bracket_family_is_current(after, &family) {
                 continue;
             }
@@ -5466,7 +5465,12 @@ impl Host {
                 detail: error.to_string(),
             })?;
         let event = annotate_named_revision_positions(event, &loaded.history, loaded.log.len());
-        let updated = match bundle.append_features_with_history(&[], &event) {
+        let expected_revision = loaded.revision_hash_hex().to_string();
+        let updated = match bundle.append_features_with_history_if_revision(
+            &[],
+            &expected_revision,
+            &event,
+        ) {
             Ok(loaded) => loaded,
             Err(error) => {
                 // Publication can promote before its final parent sync

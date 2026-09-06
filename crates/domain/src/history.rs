@@ -48,7 +48,7 @@ pub struct NamedRevision {
     pub snapshot: HistorySnapshot,
     pub provenance: String,
     #[serde(default)]
-    pub canonical_log_position: u64,
+    pub canonical_log_position: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,7 +256,7 @@ impl HistoryState {
                 name: preserved_name.clone(),
                 snapshot: self.active.clone(),
                 provenance: format!("historical-edit:{feature_id}"),
-                canonical_log_position: 0,
+                canonical_log_position: None,
             },
         );
 
@@ -376,7 +376,7 @@ impl HistoryState {
                 name: name.to_string(),
                 snapshot: self.active.clone(),
                 provenance: "explicit-create".to_string(),
-                canonical_log_position: 0,
+                canonical_log_position: None,
             },
         );
         Ok(self.event(
@@ -405,7 +405,7 @@ impl HistoryState {
                 name: displaced_name.clone(),
                 snapshot: self.active.clone(),
                 provenance: format!("restore:{name}"),
-                canonical_log_position: 0,
+                canonical_log_position: None,
             },
         );
         Ok(self.event(
@@ -461,7 +461,7 @@ impl HistoryState {
                 name: preserved_name.clone(),
                 snapshot: self.active.clone(),
                 provenance: "undo".to_string(),
-                canonical_log_position: 0,
+                canonical_log_position: None,
             },
         );
         Ok(self.event(
@@ -493,7 +493,7 @@ impl HistoryState {
                 name: preserved_name.clone(),
                 snapshot: self.active.clone(),
                 provenance: "redo".to_string(),
-                canonical_log_position: 0,
+                canonical_log_position: None,
             },
         );
         Ok(self.event(

@@ -3706,10 +3706,11 @@ fn execute_handler(
         DispatchPlan::Loft { .. } => {
             emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
         }
-        DispatchPlan::Export { .. } => {
+        DispatchPlan::Export { feature_id, .. } => {
             let host = Host::new();
             match dispatch_registered_command(&host, EXPORT_COMMAND_ID, request.clone()) {
                 Ok(response) => write_success(stdout, &response, stderr),
+                Err(DispatchError::Host(error)) => emit_export_error(&feature_id, &error, stderr),
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
@@ -4449,6 +4450,58 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
         }
     };
     Ok(request)
+}
+
+fn emit_export_error(feature_id: &str, error: &HostError, stderr: &mut dyn Write) -> i32 {
+    match error {
+        HostError::StaleLastValidGeometry {
+            feature_id,
+            active_revision,
+            stale_features,
+        } => {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                json!({
+                    "severity": "error",
+                    "code": "stale_last_valid_geometry",
+                    "feature_id": feature_id,
+                    "active_revision": active_revision,
+                    "stale_features": stale_features,
+                    "recovery": "correct or restore the feature and recompute current geometry",
+                    "override_eligible": false,
+                    "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
+                })
+            );
+            EXIT_BREP_INVALID
+        }
+        HostError::Validation { detail } if detail.starts_with('{') => {
+            let _ = writeln!(stderr, "{detail}");
+            EXIT_BREP_INVALID
+        }
+        HostError::Validation { detail } => {
+            let diagnostic = semantic_reference_diagnostic(detail)
+                .unwrap_or_else(|| Diagnostic::invalid_request(detail));
+            write_diagnostic(stderr, &diagnostic);
+            EXIT_INTEGRITY_FAILURE
+        }
+        error => {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                json!({
+                    "severity": "fatal",
+                    "code": "export_failed",
+                    "affected_feature_id": feature_id,
+                    "recovery": "fix the selected feature or output directory and retry",
+                    "override_eligible": false,
+                    "detail": error.to_string(),
+                    "schema_version": threeterm_protocol::schema_version()
+                })
+            );
+            EXIT_BREP_INVALID
+        }
+    }
 }
 
 fn read_selected_edge_reference(path: &str) -> Result<Value, String> {
@@ -6882,6 +6935,24 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "worker_failure");
         assert_eq!(parsed["arg"], "request_id=req-42; foreign completion");
+    }
+
+    #[test]
+    fn export_stale_geometry_preserves_the_export_failure_contract() {
+        let mut stderr = Vec::new();
+        let exit = emit_export_error(
+            "box",
+            &HostError::StaleLastValidGeometry {
+                feature_id: "box".to_string(),
+                active_revision: "revision-1".to_string(),
+                stale_features: vec![],
+            },
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_BREP_INVALID);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("export diagnostic is JSON");
+        assert_eq!(parsed["code"], "stale_last_valid_geometry");
+        assert_eq!(parsed["feature_id"], "box");
     }
 
     #[test]

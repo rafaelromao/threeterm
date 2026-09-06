@@ -451,6 +451,29 @@ where
 }
 
 #[test]
+fn cli_and_mcp_export_failures_preserve_the_same_semantic_diagnostic() {
+    let bundle = root("export-failure");
+    let output = root("export-failure-output");
+    Bundle::create(&bundle).expect("failure fixture bundle creates");
+    let request = export_request(&bundle, &output, "missing", &["stl"]);
+
+    let cli_error = dispatch_registered_command(&Host::new(), EXPORT_COMMAND_ID, request.clone())
+        .expect_err("CLI export of a missing feature fails")
+        .to_string();
+    let mcp = McpServer::new();
+    let wire_name = find(EXPORT_COMMAND_ID)
+        .expect("MCP export command is registered")
+        .schema_version;
+    let mcp_error =
+        mcp_call(&mcp, wire_name, request).expect_err("MCP export of a missing feature fails");
+    assert!(cli_error.contains("reference is lost"), "{cli_error}");
+    assert!(mcp_error.contains("reference is lost"), "{mcp_error}");
+
+    let _ = fs::remove_dir_all(bundle);
+    let _ = fs::remove_dir_all(output);
+}
+
+#[test]
 #[ignore = "slow: composes real OCCT and libslvs workflows through every adapter"]
 fn box_with_lid_registered_commands_are_equivalent_across_cli_mcp_and_tui() {
     if !require_native_workers(

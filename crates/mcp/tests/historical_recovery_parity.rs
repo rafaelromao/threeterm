@@ -458,6 +458,22 @@ fn semantic_history(value: &Value) -> Value {
     })
 }
 
+fn semantic_stale_features(value: &Value) -> Vec<Value> {
+    value["features"]
+        .as_array()
+        .expect("history response exposes features")
+        .iter()
+        .filter(|feature| feature["stale_last_valid_geometry"] == true)
+        .map(|feature| {
+            json!({
+                "id": feature["id"],
+                "status": feature["status"],
+                "last_valid_geometry_fingerprint": feature["last_valid_geometry_fingerprint"],
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapters() {
     let Some(worker) = require_occt_worker(
@@ -562,6 +578,7 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     let before = [&cli_root, &mcp_root, &tui_root]
         .map(|root| Bundle::at(root).open().expect("fixture reloads").history);
     let before_geometry = [&cli_root, &mcp_root, &tui_root].map(|root| current_brep(root));
+    let before_canonical = [&cli_root, &mcp_root, &tui_root].map(|root| canonical_semantics(root));
 
     let revisions = [
         cli_create_revision(&cli_root, "before-failure"),
@@ -578,6 +595,14 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     ];
     assert_eq!(semantic_history(&results[0]), semantic_history(&results[1]));
     assert_eq!(semantic_history(&results[0]), semantic_history(&results[2]));
+    assert_eq!(
+        semantic_stale_features(&results[0]),
+        semantic_stale_features(&results[1])
+    );
+    assert_eq!(
+        semantic_stale_features(&results[0]),
+        semantic_stale_features(&results[2])
+    );
     assert_eq!(results[0]["status"], "degraded");
     assert_eq!(
         results[0]["dirty_features"],
@@ -661,6 +686,19 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
             .collect::<Vec<_>>(),
         ["l-bracket-base", "l-bracket-bend", "l-bracket-finish"]
     );
+    assert_eq!(
+        tui_stale
+            .iter()
+            .map(|feature| {
+                json!({
+                    "id": feature["feature_id"],
+                    "status": feature["status"],
+                    "last_valid_geometry_fingerprint": feature["last_valid_geometry_fingerprint"],
+                })
+            })
+            .collect::<Vec<_>>(),
+        semantic_stale_features(&results[0])
+    );
     assert!(
         timelines[2]["stale_overlay"]
             .as_str()
@@ -725,9 +763,10 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     assert_eq!(restores[0]["status"], "ok");
     assert_eq!(restores[0]["operation"], "restore-revision");
     assert_eq!(restores[0]["blocked_features"], json!([]));
-    for (root, previous_geometry) in [&cli_root, &mcp_root, &tui_root]
+    for ((root, previous_geometry), expected_canonical) in [&cli_root, &mcp_root, &tui_root]
         .into_iter()
         .zip(before_geometry)
+        .zip(before_canonical)
     {
         let loaded = Bundle::at(root).open().expect("restored bundle reloads");
         assert!(
@@ -738,6 +777,18 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
                 .values()
                 .all(|feature| feature.status == HistoryStatus::CurrentValid)
         );
+        assert!(
+            loaded
+                .history
+                .active_snapshot()
+                .features
+                .values()
+                .all(|feature| {
+                    feature.last_valid_geometry_fingerprint.is_none()
+                        && feature.diagnostic.is_none()
+                })
+        );
+        assert_eq!(canonical_semantics(root), expected_canonical);
         assert_eq!(current_brep(root), previous_geometry);
     }
 

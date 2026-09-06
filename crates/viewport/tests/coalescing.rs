@@ -166,3 +166,37 @@ fn timeout_invalidates_the_attachment_and_cleans_up() {
     assert!(!coordinator.is_valid());
     assert_eq!(coordinator.renderer().cleanup_calls, 1);
 }
+
+#[test]
+fn equal_generations_are_coalesced_by_frame_token() {
+    let mut coordinator = RenderCoordinator::new(RecordingRenderer::default());
+    let first = coordinator.submit(frame(7)).expect("first frame starts");
+    let second = coordinator.submit(frame(7)).expect("second frame queues");
+    let third = coordinator
+        .submit(frame(7))
+        .expect("third frame replaces the pending frame");
+
+    let first = first.started.expect("first identity is active");
+    let second = second.queued.expect("second identity is pending");
+    let third = third.queued.expect("third identity is pending");
+    assert_ne!(first.frame_token, second.frame_token);
+    assert_ne!(second.frame_token, third.frame_token);
+    assert_eq!(coordinator.dropped_frames(), std::slice::from_ref(&second));
+
+    let acknowledged = coordinator
+        .acknowledge(FrameAcknowledgement::from(&first))
+        .expect("first acknowledgement starts the newest equal-generation frame");
+    assert_eq!(
+        acknowledged
+            .started
+            .as_ref()
+            .map(|identity| identity.frame_token),
+        Some(third.frame_token)
+    );
+    assert_eq!(coordinator.renderer().submissions.len(), 2);
+    assert_eq!(coordinator.renderer().submissions[0], first);
+    assert_eq!(
+        coordinator.renderer().submissions[1].frame_token,
+        third.frame_token
+    );
+}

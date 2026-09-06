@@ -9,7 +9,7 @@ use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch,
 };
-use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
+use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment};
 
 #[derive(Debug, Default)]
 struct ScriptedTerminal {
@@ -22,10 +22,20 @@ struct ScriptedTerminal {
     prepare_fails: bool,
     restore_fails: bool,
     ambiguous_probe: bool,
+    cleanup_signal: Option<CleanupSignal>,
+    eof_after_events: bool,
+    read_fails_after_events: bool,
+    panic_after_events: bool,
+    fail_writes_on_read: Option<usize>,
+    write_failures_remaining: usize,
 }
 
 impl Write for ScriptedTerminal {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.write_failures_remaining > 0 {
+            self.write_failures_remaining -= 1;
+            return Err(io::Error::other("scripted terminal write failure"));
+        }
         self.writes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -74,15 +84,37 @@ impl InteractiveTerminal for ScriptedTerminal {
 
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         self.events_read += 1;
-        Ok(self
+        let event = self
             .queued_events
             .pop()
             .or_else(|| self.events.pop())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if self.fail_writes_on_read == Some(self.events_read) {
+            self.write_failures_remaining = 1;
+        }
+        if event.is_empty() {
+            if self.panic_after_events {
+                panic!("scripted terminal panic");
+            }
+            if self.read_fails_after_events {
+                return Err(io::Error::other("scripted terminal read failure"));
+            }
+            if self.eof_after_events {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "scripted terminal input closed",
+                ));
+            }
+        }
+        Ok(event)
     }
 
     fn viewport_size(&self) -> (u32, u32) {
         (64, 48)
+    }
+
+    fn cleanup_signal(&self) -> Option<CleanupSignal> {
+        self.cleanup_signal
     }
 
     fn prepare(&mut self) -> io::Result<()> {
@@ -199,6 +231,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         events: vec![
             b"q".to_vec(),
             b"\x1b[<0;33;25M".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         ],
         ..Default::default()
@@ -231,12 +264,281 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 4);
+    assert_eq!(terminal.events_read, 5);
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
 
     std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_acknowledges_focus_recovery_and_resize() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-transient-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b[8;30;100t".to_vec(),
+            b"\x1b[I".to_vec(),
+            b"\x1b[O".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("transient production events complete the event loop");
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("[focus-recovery-banner]"));
+    assert!(output.contains("[ready-status]"));
+    assert!(output.contains("[resize-recovery-glyph]"));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_acknowledges_pointer_gesture() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-pointer-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b[<0;34;26m".to_vec(),
+            b"\x1b[<32;34;26M".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b[<0;33;25M".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("pointer gesture completes the production event loop");
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("[selection-glyph] Pick: semantic candidate validated"));
+    assert!(output.contains("[motion-trail] drag active"));
+    assert!(output.contains("[ready-status] drag finished"));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_cleans_up_after_terminal_reset() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-reset-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"\x1bc".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("terminal reset completes cleanup");
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("[error-glyph] restoring after runtime failure"));
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=d,d=I".len())
+            .any(|window| window == b"a=d,d=I")
+    );
+    assert!(
+        terminal
+            .writes
+            .windows(b"?1049l".len())
+            .any(|window| window == b"?1049l")
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_distinguishes_sigint_cleanup() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-sigint-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut terminal = ScriptedTerminal {
+        cleanup_signal: Some(CleanupSignal::Sigint),
+        events: vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("SIGINT completes cleanup without keyboard emulation");
+
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=d,d=I".len())
+            .any(|window| window == b"a=d,d=I")
+    );
+    assert!(
+        terminal
+            .writes
+            .windows(b"?1004l".len())
+            .any(|window| window == b"?1004l")
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_distinguishes_sigterm_cleanup() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-sigterm-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut terminal = ScriptedTerminal {
+        cleanup_signal: Some(CleanupSignal::Sigterm),
+        events: vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("SIGTERM completes cleanup without keyboard emulation");
+
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=d,d=I".len())
+            .any(|window| window == b"a=d,d=I")
+    );
+    assert!(
+        terminal
+            .writes
+            .windows(b"?1049l".len())
+            .any(|window| window == b"?1049l")
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_cleans_up_after_terminal_eof() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-eof-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut terminal = ScriptedTerminal {
+        eof_after_events: true,
+        events: vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        ..Default::default()
+    };
+    let error = launch(&host, &root, &mut terminal, official_environment())
+        .expect_err("EOF is reported after the production loop cleans up");
+    assert!(matches!(error, LaunchError::Runtime(_)));
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=d,d=I".len())
+            .any(|window| window == b"a=d,d=I")
+    );
+    assert!(
+        terminal
+            .writes
+            .windows(b"?1049l".len())
+            .any(|window| window == b"?1049l")
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_cleans_up_after_terminal_write_failure() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-write-failure-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let mut terminal = ScriptedTerminal {
+        fail_writes_on_read: Some(2),
+        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        ..Default::default()
+    };
+    let error = launch(&host, &root, &mut terminal, official_environment())
+        .expect_err("terminal write failure is reported after cleanup");
+    assert!(matches!(error, LaunchError::Viewport(_)));
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=d,d=I".len())
+            .any(|window| window == b"a=d,d=I")
+    );
+    assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_cleans_up_after_panic_and_read_failure() {
+    for (suffix, panic_after_events, read_fails_after_events) in
+        [("panic", true, false), ("read-failure", false, true)]
+    {
+        let root = std::env::temp_dir().join(format!(
+            "threeterm-production-launch-{suffix}-{}",
+            std::process::id()
+        ));
+        let host = Host::new();
+        host.save(&root, "feature-a", "box")
+            .expect("project is persisted");
+        let before = host.current().expect("canonical state exists");
+        let mut terminal = ScriptedTerminal {
+            events: vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+            panic_after_events,
+            read_fails_after_events,
+            ..Default::default()
+        };
+        let error = launch(&host, &root, &mut terminal, official_environment())
+            .expect_err("abnormal terminal path is reported");
+        assert!(matches!(error, LaunchError::Runtime(_)));
+        assert!(
+            terminal
+                .writes
+                .windows(b"a=d,d=I".len())
+                .any(|window| window == b"a=d,d=I")
+        );
+        assert_eq!(host.current(), Some(before));
+        std::fs::remove_dir_all(root).expect("project is removed");
+    }
 }
 
 #[test]

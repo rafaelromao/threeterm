@@ -13,7 +13,9 @@ use threeterm_host::Host;
 use threeterm_tui::{
     EXIT_CAPABILITY_FAILURE, EXIT_LAUNCH_FAILURE, InteractiveTerminal, LaunchError, launch,
 };
-use threeterm_viewport::{CapabilityProbeIo, MAX_PROBE_RESPONSE_BYTES, TerminalEnvironment};
+use threeterm_viewport::{
+    CapabilityProbeIo, CleanupSignal, MAX_PROBE_RESPONSE_BYTES, TerminalEnvironment,
+};
 
 #[derive(Debug)]
 struct ProcessTerminal {
@@ -22,15 +24,18 @@ struct ProcessTerminal {
     original_stty: Option<Vec<u8>>,
     cells: (u32, u32),
     event_buffer: Vec<u8>,
-    termination_requested: Arc<AtomicBool>,
+    sigint_requested: Arc<AtomicBool>,
+    sigterm_requested: Arc<AtomicBool>,
 }
 
 impl ProcessTerminal {
     fn new() -> io::Result<Self> {
         let cells = terminal_cells();
-        let termination_requested = Arc::new(AtomicBool::new(false));
-        for signal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
-            flag::register(signal, Arc::clone(&termination_requested)).map_err(io::Error::other)?;
+        let sigint_requested = Arc::new(AtomicBool::new(false));
+        let sigterm_requested = Arc::new(AtomicBool::new(false));
+        flag::register(SIGINT, Arc::clone(&sigint_requested)).map_err(io::Error::other)?;
+        for signal in [SIGHUP, SIGQUIT, SIGTERM] {
+            flag::register(signal, Arc::clone(&sigterm_requested)).map_err(io::Error::other)?;
         }
         Ok(Self {
             input: io::stdin(),
@@ -38,7 +43,8 @@ impl ProcessTerminal {
             original_stty: None,
             cells,
             event_buffer: Vec::new(),
-            termination_requested,
+            sigint_requested,
+            sigterm_requested,
         })
     }
 
@@ -117,8 +123,10 @@ impl InteractiveTerminal for ProcessTerminal {
 
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
         loop {
-            if self.termination_requested.load(Ordering::Relaxed) {
-                return Ok(vec![3]);
+            if self.sigterm_requested.load(Ordering::Relaxed)
+                || self.sigint_requested.load(Ordering::Relaxed)
+            {
+                return Ok(Vec::new());
             }
             if let Some(length) = next_event_length(&self.event_buffer) {
                 return Ok(self.event_buffer.drain(..length).collect());
@@ -139,6 +147,21 @@ impl InteractiveTerminal for ProcessTerminal {
             self.cells.0.saturating_mul(10),
             self.cells.1.saturating_mul(20),
         )
+    }
+
+    fn refresh_viewport_size(&mut self) -> (u32, u32) {
+        self.cells = terminal_cells();
+        self.viewport_size()
+    }
+
+    fn cleanup_signal(&self) -> Option<CleanupSignal> {
+        if self.sigterm_requested.load(Ordering::Relaxed) {
+            Some(CleanupSignal::Sigterm)
+        } else if self.sigint_requested.load(Ordering::Relaxed) {
+            Some(CleanupSignal::Sigint)
+        } else {
+            None
+        }
     }
 
     fn prepare(&mut self) -> io::Result<()> {
@@ -205,6 +228,24 @@ fn next_event_length(bytes: &[u8]) -> Option<usize> {
             .windows(ACK_SUFFIX.len())
             .position(|window| window == ACK_SUFFIX)?;
         return Some(ACK_PREFIX.len() + suffix + ACK_SUFFIX.len());
+    }
+    if bytes.starts_with(b"\x1b[<") {
+        let terminator = bytes[3..]
+            .iter()
+            .position(|byte| *byte == b'M' || *byte == b'm')?;
+        return Some(3 + terminator + 1);
+    }
+    if bytes.starts_with(b"\x1b[8;") {
+        let terminator = bytes[4..].iter().position(|byte| *byte == b't')?;
+        return Some(4 + terminator + 1);
+    }
+    for sequence in [b"\x1b[I".as_slice(), b"\x1b[O", b"\x1bc"] {
+        if bytes.starts_with(sequence) {
+            return Some(sequence.len());
+        }
+        if sequence.starts_with(bytes) {
+            return None;
+        }
     }
     if bytes.starts_with(b"q") || bytes.starts_with(b"\x03") {
         return Some(1);

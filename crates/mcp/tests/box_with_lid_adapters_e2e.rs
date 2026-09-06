@@ -259,6 +259,13 @@ fn assert_viewport_evidence(host: &Host) {
     assert!(scene.features.iter().any(|feature| feature.id == "box"));
     assert!(scene.features.iter().any(|feature| feature.id == "lid"));
     assert_eq!(scene.fit_relationships.len(), 1);
+    assert_eq!(scene.solids.len(), 2);
+    assert!(
+        scene
+            .solids
+            .iter()
+            .all(|solid| solid.feature_id == "box" || solid.feature_id == "lid")
+    );
     let fit = &scene.fit_relationships[0];
     assert_eq!(fit.source_feature_id, "box-sketch");
     assert_eq!(fit.target_feature_id, "lid-sketch");
@@ -315,6 +322,34 @@ fn export_request(root: &Path, output: &Path, feature_id: &str, formats: &[&str]
     })
 }
 
+fn stl_bounds(bytes: &[u8], feature_id: &str) -> ([f64; 3], [f64; 3]) {
+    let text = std::str::from_utf8(bytes).expect("exported STL is ASCII");
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    let mut vertex_count = 0;
+    for line in text.lines() {
+        let Some(vertex) = line.trim().strip_prefix("vertex ") else {
+            continue;
+        };
+        let values = vertex
+            .split_whitespace()
+            .map(|value| value.parse::<f64>().expect("STL vertex is numeric"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values.len(),
+            3,
+            "{feature_id} STL vertex has three coordinates"
+        );
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(values[axis]);
+            maximum[axis] = maximum[axis].max(values[axis]);
+        }
+        vertex_count += 1;
+    }
+    assert!(vertex_count > 0, "{feature_id} STL has vertices");
+    (minimum, maximum)
+}
+
 fn export_and_assert<F>(root: &Path, output: &Path, mut call: F)
 where
     F: FnMut(Value) -> Result<Value, String>,
@@ -332,6 +367,14 @@ where
     assert!(!box_stl.is_empty());
     assert!(!lid_stl.is_empty());
     assert_ne!(box_stl, lid_stl);
+    let (box_min, box_max) = stl_bounds(&box_stl, "box");
+    assert_near(box_max[0] - box_min[0], 10.0);
+    assert_near(box_max[1] - box_min[1], 8.0);
+    assert_near(box_max[2] - box_min[2], 4.0);
+    let (lid_min, lid_max) = stl_bounds(&lid_stl, "lid");
+    assert_near(lid_max[0] - lid_min[0], 9.6);
+    assert_near(lid_max[1] - lid_min[1], 7.6);
+    assert_near(lid_max[2] - lid_min[2], 1.0);
     assert!(
         model
             .windows(b"name=\"box\"".len())
@@ -342,7 +385,14 @@ where
             .windows(b"name=\"lid\"".len())
             .any(|window| { window == b"name=\"lid\"" })
     );
-    assert_eq!(model.windows(b"<item objectid=".len()).count(), 2);
+    let item_marker = b"<item objectid=";
+    assert_eq!(
+        model
+            .windows(item_marker.len())
+            .filter(|window| *window == item_marker)
+            .count(),
+        2
+    );
 }
 
 fn invalid_extrude_request(root: &Path) -> Value {
@@ -366,9 +416,17 @@ where
         .expect("bundle opens before invalid geometry")
         .revision_hash_hex()
         .to_string();
-    let error = call(EXTRUDE_COMMAND_ID, invalid_extrude_request(root))
-        .expect_err("self-intersecting profile must fail");
+    let request = invalid_extrude_request(root);
+    validate(
+        &find(EXTRUDE_COMMAND_ID)
+            .expect("extrude command is registered")
+            .request_schema,
+        &request,
+    )
+    .expect("invalid geometry request remains schema-valid");
+    let error = call(EXTRUDE_COMMAND_ID, request).expect_err("self-intersecting profile must fail");
     assert!(!error.is_empty());
+    assert!(error.to_ascii_lowercase().contains("invalid"), "{error}");
     assert!(
         !Bundle::at(root)
             .open()

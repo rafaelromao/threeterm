@@ -314,7 +314,42 @@ fn current_brep(root: &Path) -> Vec<u8> {
     fs::read(root.join("brep/l-bracket.brep")).expect("current BREP reads")
 }
 
+fn semantic_history_feature(value: &Value) -> Value {
+    json!({
+        "id": value["id"],
+        "status": value["status"],
+        "geometry_fingerprint": value["geometry_fingerprint"],
+        "last_valid_geometry_fingerprint": value["last_valid_geometry_fingerprint"],
+        "stale_last_valid_geometry": value["stale_last_valid_geometry"],
+        "diagnostic": value["diagnostic"],
+    })
+}
+
+fn semantic_named_revision(value: &Value) -> Value {
+    json!({
+        "name": value["name"],
+        "revision_id": value["revision_id"],
+        "provenance": value["provenance"],
+    })
+}
+
+fn semantic_timeline_revision(value: &Value) -> Value {
+    json!({
+        "revision_id": value["revision_id"],
+        "operation": value["operation"],
+        "status": value["status"],
+        "stale_last_valid_geometry_fingerprint": value["stale_last_valid_geometry_fingerprint"],
+        "named_revision_names": value["named_revision_names"],
+    })
+}
+
 fn semantic_timeline(value: &Value) -> Value {
+    let revisions = value["revisions"]
+        .as_array()
+        .expect("timeline revisions are an array")
+        .iter()
+        .map(semantic_timeline_revision)
+        .collect::<Vec<_>>();
     let named_revisions = value["named_revisions"]
         .as_array()
         .expect("timeline named revisions are an array")
@@ -329,7 +364,7 @@ fn semantic_timeline(value: &Value) -> Value {
     json!({
         "feature_id": value["feature_id"],
         "active_revision": value["active_revision"],
-        "revisions": value["revisions"],
+        "revisions": revisions,
         "named_revisions": named_revisions,
     })
 }
@@ -367,7 +402,21 @@ fn semantic_stale_export_error(value: &Value) -> Value {
         "stale_features": value["stale_features"],
         "recovery": value["recovery"],
         "override_eligible": value["override_eligible"],
+        "schema_version": value["schema_version"],
     })
+}
+
+fn expected_stale_export_features(value: &Value) -> Vec<Value> {
+    semantic_stale_features(value)
+        .into_iter()
+        .map(|feature| {
+            json!({
+                "feature_id": feature["id"],
+                "status": feature["status"],
+                "last_valid_geometry_fingerprint": feature["last_valid_geometry_fingerprint"],
+            })
+        })
+        .collect()
 }
 
 fn canonical_semantics(root: &Path) -> Value {
@@ -410,6 +459,17 @@ fn named_revision_semantics(root: &Path, name: &str) -> Value {
         .get(name)
         .unwrap_or_else(|| panic!("named revision {name} exists"));
     serde_json::to_value(revision).expect("named revision metadata serializes")
+}
+
+fn named_revision_name(value: &Value, provenance: &str) -> String {
+    value["named_revisions"]
+        .as_array()
+        .expect("history named revisions are an array")
+        .iter()
+        .find(|revision| revision["provenance"] == provenance)
+        .and_then(|revision| revision["name"].as_str())
+        .expect("history contains a named revision with the expected provenance")
+        .to_string()
 }
 
 fn export_request(root: &Path, output_dir: &Path) -> Value {
@@ -475,6 +535,18 @@ fn tui_create_revision(root: &Path, name: &str) -> Value {
 }
 
 fn semantic_history(value: &Value) -> Value {
+    let named_revisions = value["named_revisions"]
+        .as_array()
+        .expect("history named revisions are an array")
+        .iter()
+        .map(semantic_named_revision)
+        .collect::<Vec<_>>();
+    let features = value["features"]
+        .as_array()
+        .expect("history features are an array")
+        .iter()
+        .map(semantic_history_feature)
+        .collect::<Vec<_>>();
     json!({
         "status": value["status"],
         "operation": value["operation"],
@@ -483,8 +555,8 @@ fn semantic_history(value: &Value) -> Value {
         "evaluated_features": value["evaluated_features"],
         "blocked_features": value["blocked_features"],
         "diagnostics": value["diagnostics"],
-        "named_revisions": value["named_revisions"],
-        "features": value["features"],
+        "named_revisions": named_revisions,
+        "features": features,
     })
 }
 
@@ -768,20 +840,35 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     assert_eq!(stale_errors[0], stale_errors[2]);
     assert_eq!(stale_errors[0]["severity"], "error");
     assert_eq!(stale_errors[0]["code"], "stale_last_valid_geometry");
+    assert_eq!(stale_errors[0]["feature_id"], "l-bracket");
+    assert_eq!(
+        stale_errors[0]["active_revision"],
+        results[0]["active_revision"]
+    );
+    assert_eq!(
+        stale_errors[0]["stale_features"],
+        json!(expected_stale_export_features(&results[0]))
+    );
+    assert_eq!(
+        stale_errors[0]["recovery"],
+        "correct or restore the feature and recompute current geometry"
+    );
     assert_eq!(stale_errors[0]["override_eligible"], false);
+    assert_eq!(
+        stale_errors[0]["schema_version"],
+        threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
+    );
     for output in &output_roots {
         assert_eq!(
             fs::read(output.join("sentinel.txt")).unwrap(),
             b"preserve me"
         );
-        assert!(!output.join("l-bracket.stl").exists());
-        assert!(!fs::read_dir(output).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".threeterm")
-        }));
+        let mut entries = fs::read_dir(output)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, vec!["sentinel.txt"]);
     }
 
     let restores = [
@@ -944,8 +1031,9 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
     assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[1]));
     assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[2]));
     assert_eq!(undone[0]["active_revision"], "history-revision-1");
+    let preserved_name = named_revision_name(&undone[0], "undo");
     let preserved_named_revisions = [&cli_root, &mcp_root, &tui_root]
-        .map(|root| named_revision_semantics(root, "recovered-before-undo-3"));
+        .map(|root| named_revision_semantics(root, &preserved_name));
     assert_eq!(preserved_named_revisions[0], preserved_named_revisions[1]);
     assert_eq!(preserved_named_revisions[0], preserved_named_revisions[2]);
 
@@ -967,23 +1055,23 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
             .as_array()
             .expect("divergent edit exposes named revisions")
             .iter()
-            .any(|revision| revision["name"] == "recovered-before-undo-3")
+            .any(|revision| revision["name"] == preserved_name)
     );
     for (root, expected) in [&cli_root, &mcp_root, &tui_root]
         .into_iter()
         .zip(preserved_named_revisions)
     {
         assert_eq!(
-            named_revision_semantics(root, "recovered-before-undo-3"),
+            named_revision_semantics(root, &preserved_name),
             expected,
             "divergence preserves complete Named Revision metadata"
         );
     }
 
     let restored = [
-        cli_restore(&cli_root, "l-bracket", "recovered-before-undo-3"),
-        mcp_restore(&mcp_root, "l-bracket", "recovered-before-undo-3"),
-        tui_restore(&tui_root, "recovered-before-undo-3"),
+        cli_restore(&cli_root, "l-bracket", &preserved_name),
+        mcp_restore(&mcp_root, "l-bracket", &preserved_name),
+        tui_restore(&tui_root, &preserved_name),
     ];
     assert_eq!(
         semantic_history(&restored[0]),

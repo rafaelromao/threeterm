@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_cli::dispatch::dispatch;
 use threeterm_domain::history::HistoryStatus;
-use threeterm_host::Host;
+use threeterm_host::{Host, HostError};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
@@ -217,6 +217,22 @@ fn tui_call(
 ) -> Result<Value, Value> {
     threeterm_tui::execute_domain_command(&Host::new(), command, request).map_err(|error| {
         match error {
+            threeterm_protocol::command_execution::ExecutionError::Handler(
+                HostError::StaleLastValidGeometry {
+                    feature_id,
+                    active_revision,
+                    stale_features,
+                },
+            ) => json!({
+                "severity": "error",
+                "code": "stale_last_valid_geometry",
+                "feature_id": feature_id,
+                "active_revision": active_revision,
+                "stale_features": stale_features,
+                "recovery": "correct or restore the feature and recompute current geometry",
+                "override_eligible": false,
+                "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
+            }),
             threeterm_protocol::command_execution::ExecutionError::Handler(error) => {
                 serde_json::to_value(threeterm_cli::dispatch::host_error_diagnostic(&error))
                     .expect("TUI diagnostic serializes")
@@ -342,6 +358,18 @@ fn semantic_export(value: &Value) -> Value {
     })
 }
 
+fn semantic_stale_export_error(value: &Value) -> Value {
+    json!({
+        "severity": value["severity"],
+        "code": value["code"],
+        "feature_id": value["feature_id"],
+        "active_revision": value["active_revision"],
+        "stale_features": value["stale_features"],
+        "recovery": value["recovery"],
+        "override_eligible": value["override_eligible"],
+    })
+}
+
 fn canonical_semantics(root: &Path) -> Value {
     let loaded = Bundle::at(root).open().expect("canonical bundle reloads");
     let features = loaded
@@ -370,6 +398,18 @@ fn canonical_semantics(root: &Path) -> Value {
         "feature_graph_hash": loaded.feature_graph_hash_hex(),
         "graph_features": graph_features,
     })
+}
+
+fn named_revision_semantics(root: &Path, name: &str) -> Value {
+    let loaded = Bundle::at(root)
+        .open()
+        .expect("named revision bundle reloads");
+    let revision = loaded
+        .history
+        .named_revisions()
+        .get(name)
+        .unwrap_or_else(|| panic!("named revision {name} exists"));
+    serde_json::to_value(revision).expect("named revision metadata serializes")
 }
 
 fn export_request(root: &Path, output_dir: &Path) -> Value {
@@ -513,7 +553,7 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
             after.history.active_snapshot().features["l-bracket-independent-base"]
                 .geometry_fingerprint,
             prior.active_snapshot().features["l-bracket-independent-base"].geometry_fingerprint,
-            "successful edit preserves the independent branch"
+            "successful edit preserves the independent feature"
         );
     }
 
@@ -714,16 +754,13 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
     )
     .expect_err("MCP stale export fails");
     let tui_error = tui_export(&tui_root, &output_roots[2]).expect_err("TUI stale export fails");
-    assert_eq!(cli_error["code"], "invalid_request");
-    assert!(
-        cli_error["arg"]
-            .as_str()
-            .expect("CLI stale error detail")
-            .contains("stale last-valid geometry")
-    );
-    assert_eq!(mcp_error["code"], "stale_last_valid_geometry");
-    assert_eq!(mcp_error["override_eligible"], false);
-    assert_eq!(tui_error["code"], "invalid_request");
+    let stale_errors =
+        [&cli_error, &mcp_error, &tui_error].map(|error| semantic_stale_export_error(error));
+    assert_eq!(stale_errors[0], stale_errors[1]);
+    assert_eq!(stale_errors[0], stale_errors[2]);
+    assert_eq!(stale_errors[0]["severity"], "error");
+    assert_eq!(stale_errors[0]["code"], "stale_last_valid_geometry");
+    assert_eq!(stale_errors[0]["override_eligible"], false);
     for output in &output_roots {
         assert_eq!(
             fs::read(output.join("sentinel.txt")).unwrap(),
@@ -893,6 +930,10 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
     assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[1]));
     assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[2]));
     assert_eq!(undone[0]["active_revision"], "history-revision-1");
+    let preserved_named_revisions = [&cli_root, &mcp_root, &tui_root]
+        .map(|root| named_revision_semantics(root, "recovered-before-undo-3"));
+    assert_eq!(preserved_named_revisions[0], preserved_named_revisions[1]);
+    assert_eq!(preserved_named_revisions[0], preserved_named_revisions[2]);
 
     let divergent = [
         cli_historical_edit(&cli_root, 62.0),
@@ -914,16 +955,14 @@ fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters()
             .iter()
             .any(|revision| revision["name"] == "recovered-before-undo-3")
     );
-    for root in [&cli_root, &mcp_root, &tui_root] {
-        let loaded = Bundle::at(root).open().expect("divergent bundle reloads");
-        let preserved = loaded
-            .history
-            .named_revisions()
-            .get("recovered-before-undo-3")
-            .expect("undoed future is preserved as a named revision");
+    for (root, expected) in [&cli_root, &mcp_root, &tui_root]
+        .into_iter()
+        .zip(preserved_named_revisions)
+    {
         assert_eq!(
-            preserved.snapshot.features["l-bracket-base"].input_value,
-            61.0
+            named_revision_semantics(root, "recovered-before-undo-3"),
+            expected,
+            "divergence preserves complete Named Revision metadata"
         );
     }
 

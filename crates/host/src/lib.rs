@@ -29,7 +29,7 @@ use threeterm_occt_worker::{
     HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
     MirrorResult, OcctDiagnostic, OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest,
     RevolveResult, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
-    TranslateRequest, WorkerError,
+    TranslateRequest, WorkerError, new_request_id,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
@@ -5699,6 +5699,13 @@ impl Host {
                 && !component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id)
                     .is_file()
         });
+        let bracket_replay_needed = bracket_family_ids(loaded.history.active_snapshot())
+            .into_iter()
+            .any(|family| {
+                loaded.graph.contains_feature(&family)
+                    && bracket_family_params(loaded.history.active_snapshot(), &family).is_some()
+                    && !committed_brep_path(root, &family).is_file()
+            });
         let snapshot = if replay_needed {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             self.reload_and_recompute_canonical_intents(root, &worker)?
@@ -5706,6 +5713,13 @@ impl Host {
         } else {
             view
         };
+        if bracket_replay_needed {
+            let worker = OcctWorker::locate().map_err(HostError::from)?;
+            let loaded = Bundle::at(root).open()?;
+            let artifacts = stage_missing_bracket_family_geometries(root, &loaded, &worker)?;
+            Bundle::at(root)
+                .restore_derived_breps_if_revision(loaded.revision_hash_hex(), &artifacts)?;
+        }
         let mut projected = Bundle::at(root).open()?;
         for feature in projected.graph.features().collect::<Vec<_>>() {
             if projected
@@ -8398,64 +8412,113 @@ impl Host {
     ) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
         let bundle = Bundle::at(root);
-        let mut graph = if !bundle.canonical_root().exists()
+        let loaded = if !bundle.canonical_root().exists()
             && !previous_generation_path(bundle.canonical_root()).exists()
         {
-            ComponentGraph::default()
+            None
         } else {
             match bundle.open() {
-                Ok(loaded) => loaded.components,
-                Err(BundleError::BundlePathMissing { .. }) => ComponentGraph::default(),
+                Ok(loaded) => Some(loaded),
+                Err(BundleError::BundlePathMissing { .. }) => None,
                 Err(error) => return Err(error.into()),
             }
         };
+        let mut graph = loaded
+            .as_ref()
+            .map_or_else(ComponentGraph::default, |loaded| loaded.components.clone());
         graph
             .apply(&command)
             .map_err(|detail| HostError::Validation { detail })?;
-        let expected_revision = if bundle.canonical_root().exists()
-            || previous_generation_path(bundle.canonical_root()).exists()
-        {
-            Some(bundle.open()?.revision_hash_hex().to_string())
-        } else {
-            None
-        };
-        let geometry = match &command {
+        let affected_instance_ids: BTreeSet<String> = match &command {
             ComponentCommand::CreateInstance { instance } => {
-                let loaded = bundle.open()?;
-                materialize_component_instance_geometry(root, &loaded, instance)?
+                [instance.id.clone()].into_iter().collect()
             }
-            ComponentCommand::TransformInstance {
-                instance_id,
-                transform,
-            } => {
-                let loaded = bundle.open()?;
-                let instance =
-                    graph
-                        .instances
-                        .get(instance_id)
-                        .ok_or_else(|| HostError::Validation {
-                            detail: "component instance reference is lost".to_string(),
-                        })?;
-                let mut source = instance.clone();
-                source.transform = *transform;
-                materialize_component_instance_geometry(root, &loaded, &source)?
+            ComponentCommand::TransformInstance { instance_id, .. } => {
+                [instance_id.clone()].into_iter().collect()
             }
-            _ => None,
+            ComponentCommand::MakeIndependent { instance_id, .. } => {
+                [instance_id.clone()].into_iter().collect()
+            }
+            ComponentCommand::EditParameter { definition_id, .. } => graph
+                .instances
+                .values()
+                .filter(|instance| instance.definition_id == *definition_id)
+                .map(|instance| instance.id.clone())
+                .collect(),
+            ComponentCommand::Define { .. } | ComponentCommand::Capture { .. } => BTreeSet::new(),
         };
-        let loaded = match expected_revision.as_deref() {
-            Some(expected_revision) => {
-                bundle.append_component_command_if_revision(&command, expected_revision)?
+        let staged_geometry = if let Some(source) = loaded.as_ref() {
+            let mut geometry = Vec::new();
+            let instances: Vec<_> = graph.instances.values().cloned().collect();
+            let old_revision = source.revision_hash_hex().to_string();
+            let mut geometry_loaded = source.clone();
+            geometry_loaded.components = graph;
+            let needs_worker = instances.iter().any(|instance| {
+                geometry_loaded
+                    .components
+                    .definitions
+                    .get(&instance.definition_id)
+                    .is_some_and(|definition| {
+                        !definition.selected_feature_ids.is_empty()
+                            && (affected_instance_ids.contains(&instance.id)
+                                || !component_instance_geometry_path(
+                                    root,
+                                    &old_revision,
+                                    &instance.id,
+                                )
+                                .is_file())
+                    })
+            });
+            let worker = if needs_worker {
+                Some(
+                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+                        detail: error.to_string(),
+                    })?,
+                )
+            } else {
+                None
+            };
+            for instance in &instances {
+                let Some(definition) = geometry_loaded
+                    .components
+                    .definitions
+                    .get(&instance.definition_id)
+                else {
+                    continue;
+                };
+                if definition.selected_feature_ids.is_empty() {
+                    continue;
+                }
+                let prior_path =
+                    component_instance_geometry_path(root, &old_revision, &instance.id);
+                if affected_instance_ids.contains(&instance.id) || !prior_path.is_file() {
+                    let worker = worker.as_ref().expect("affected component has a worker");
+                    if let Some(materialized) = materialize_component_instance_geometry_with_worker(
+                        root,
+                        &geometry_loaded,
+                        instance,
+                        worker,
+                    )? {
+                        geometry.push(materialized);
+                    }
+                } else {
+                    let bytes = read_brep_verified(&prior_path, None)
+                        .map_err(|detail| HostError::BrepIo { detail })?;
+                    geometry.push((instance.id.clone(), bytes));
+                }
             }
-            None => bundle.append_component_command(&command)?,
+            geometry
+        } else {
+            Vec::new()
         };
-        if let Some((instance_id, bytes)) = geometry {
-            publish_component_instance_geometry(
-                root,
-                loaded.revision_hash_hex(),
-                &instance_id,
-                &bytes,
-            )?;
-        }
+        let expected_revision = loaded
+            .as_ref()
+            .map(|loaded| loaded.revision_hash_hex().to_string());
+        let loaded = bundle.append_component_command_with_geometry(
+            &command,
+            expected_revision.as_deref(),
+            &staged_geometry,
+        )?;
         let view = SnapshotView::from(&loaded);
         self.current.replace(Some(loaded));
         Ok(view)
@@ -8477,6 +8540,11 @@ impl Host {
                 serde_json::to_value(instance).map_err(|error| HostError::Validation {
                     detail: format!("component instance serialization failed: {error}"),
                 })?;
+            let requires_geometry = loaded
+                .components
+                .definitions
+                .get(&instance.definition_id)
+                .is_some_and(|definition| !definition.selected_feature_ids.is_empty());
             let path = component_instance_geometry_path(root, revision, id);
             if path.is_file() {
                 value["geometry_digest"] =
@@ -8487,6 +8555,8 @@ impl Host {
                     })?);
                 value["brep_path"] = serde_json::Value::String(path.to_string_lossy().into_owned());
                 value["geometry_revision"] = serde_json::Value::String(revision.to_string());
+            } else if requires_geometry {
+                return Err(HostError::BrepFileMissing { path });
             }
             instances.insert(id.clone(), value);
         }
@@ -8509,25 +8579,8 @@ impl Host {
     ) -> Result<(), HostError> {
         let root = root.as_ref();
         let loaded = Bundle::at(root).open()?;
-        for instance in loaded.components.instances.values() {
-            let path =
-                component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id);
-            if path.is_file() {
-                continue;
-            }
-            let Some((instance_id, bytes)) = materialize_component_instance_geometry_with_worker(
-                root, &loaded, instance, worker,
-            )?
-            else {
-                continue;
-            };
-            publish_component_instance_geometry(
-                root,
-                loaded.revision_hash_hex(),
-                &instance_id,
-                &bytes,
-            )?;
-        }
+        let geometries = materialize_all_component_instance_geometries(root, &loaded, worker)?;
+        publish_component_instance_geometries(root, loaded.revision_hash_hex(), &geometries)?;
         Ok(())
     }
 
@@ -8537,27 +8590,8 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<(), HostError> {
         let loaded = Bundle::at(root).open()?;
-        for instance in loaded.components.instances.values() {
-            let Some(definition) = loaded.components.definitions.get(&instance.definition_id)
-            else {
-                continue;
-            };
-            if definition.selected_feature_ids.is_empty() {
-                continue;
-            }
-            let Some((instance_id, bytes)) = materialize_component_instance_geometry_with_worker(
-                root, &loaded, instance, worker,
-            )?
-            else {
-                continue;
-            };
-            publish_component_instance_geometry(
-                root,
-                loaded.revision_hash_hex(),
-                &instance_id,
-                &bytes,
-            )?;
-        }
+        let geometries = materialize_all_component_instance_geometries(root, &loaded, worker)?;
+        publish_component_instance_geometries(root, loaded.revision_hash_hex(), &geometries)?;
         Ok(())
     }
 
@@ -12598,27 +12632,6 @@ fn component_source_brep(
     Ok(Some(path))
 }
 
-fn materialize_component_instance_geometry(
-    root: &Path,
-    loaded: &LoadedBundle,
-    instance: &threeterm_domain::ComponentInstance,
-) -> Result<Option<(String, Vec<u8>)>, HostError> {
-    let definition = loaded
-        .components
-        .definitions
-        .get(&instance.definition_id)
-        .ok_or_else(|| HostError::Validation {
-            detail: "component definition reference is lost".to_string(),
-        })?;
-    if definition.selected_feature_ids.is_empty() {
-        return Ok(None);
-    }
-    let worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-        detail: error.to_string(),
-    })?;
-    materialize_component_instance_geometry_with_worker(root, loaded, instance, &worker)
-}
-
 fn materialize_component_instance_geometry_with_worker(
     root: &Path,
     loaded: &LoadedBundle,
@@ -12632,7 +12645,7 @@ fn materialize_component_instance_geometry_with_worker(
         .ok_or_else(|| HostError::Validation {
             detail: "component definition reference is lost".to_string(),
         })?;
-    let Some(source) = component_source_brep(root, loaded, definition)? else {
+    let Some(_source) = component_source_brep(root, loaded, definition)? else {
         return Ok(None);
     };
     if !instance.transform.iter().all(|value| value.is_finite()) {
@@ -12640,20 +12653,57 @@ fn materialize_component_instance_geometry_with_worker(
             detail: "component transform must contain finite numbers".to_string(),
         });
     }
+    let stage = root.join(".derived").join(format!(
+        ".component-instance-{}-{}",
+        std::process::id(),
+        TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+        detail: format!("create component instance stage failed: {error}"),
+    })?;
+    let descriptor = &definition.descriptor;
+    let request = BracketRequest::new(
+        "component-definition",
+        descriptor.length,
+        descriptor.width,
+        descriptor.height,
+        descriptor.thickness,
+    )
+    .with_output_path(&stage, "definition.brep")
+    .with_feature_id(&descriptor.feature_id);
+    let definition_result = worker
+        .clone()
+        .with_revision_id(loaded.revision_hash_hex())
+        .bracket(&request)
+        .map_err(HostError::from);
+    let definition_bytes = match definition_result {
+        Ok(result) if result.is_success() && result.brep_path.is_file() => read_brep_verified(
+            &result.brep_path,
+            Some((result.brep_bytes, &result.brep_sha256)),
+        )
+        .map_err(|detail| HostError::BrepIo { detail })?,
+        Ok(result) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(HostError::BrepInvalid {
+                request_id: Some(result.request_id),
+                detail: format!(
+                    "component definition worker returned status {}",
+                    result.status
+                ),
+            });
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(error);
+        }
+    };
     let bytes = if instance.transform == [0.0, 0.0, 0.0] {
-        read_brep_verified(&source, None).map_err(|detail| HostError::BrepIo { detail })?
+        definition_bytes
     } else {
-        let stage = root.join(".derived").join(format!(
-            ".component-instance-{}-{}",
-            std::process::id(),
-            TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create component instance stage failed: {error}"),
-        })?;
+        let definition_path = stage.join("definition.brep");
         let request = TranslateRequest::new(
             format!("component-instance-{}", instance.id),
-            &source,
+            &definition_path,
             instance.transform,
         )
         .with_output_path(&stage, "instance.brep")
@@ -12663,7 +12713,7 @@ fn materialize_component_instance_geometry_with_worker(
             .with_revision_id(loaded.revision_hash_hex())
             .translate(&request)
             .map_err(HostError::from);
-        let bytes = match result {
+        match result {
             Ok(result) if result.is_success() && result.brep_path.is_file() => read_brep_verified(
                 &result.brep_path,
                 Some((result.brep_bytes, &result.brep_sha256)),
@@ -12683,34 +12733,44 @@ fn materialize_component_instance_geometry_with_worker(
                 let _ = fs::remove_dir_all(&stage);
                 return Err(error);
             }
-        };
-        let _ = fs::remove_dir_all(&stage);
-        bytes
+        }
     };
+    let _ = fs::remove_dir_all(&stage);
     Ok(Some((instance.id.clone(), bytes)))
 }
 
-fn publish_component_instance_geometry(
+fn materialize_all_component_instance_geometries(
+    root: &Path,
+    loaded: &LoadedBundle,
+    worker: &OcctWorker,
+) -> Result<Vec<(String, Vec<u8>)>, HostError> {
+    loaded
+        .components
+        .instances
+        .values()
+        .filter(|instance| {
+            loaded
+                .components
+                .definitions
+                .get(&instance.definition_id)
+                .is_some_and(|definition| !definition.selected_feature_ids.is_empty())
+        })
+        .map(|instance| {
+            materialize_component_instance_geometry_with_worker(root, loaded, instance, worker)
+                .map(|result| result.expect("selected component has materialized geometry"))
+        })
+        .collect()
+}
+
+fn publish_component_instance_geometries(
     root: &Path,
     revision: &str,
-    instance_id: &str,
-    bytes: &[u8],
-) -> Result<PathBuf, HostError> {
-    let path = component_instance_geometry_path(root, revision, instance_id);
-    let parent = path.parent().ok_or_else(|| HostError::BrepIo {
-        detail: "component instance geometry path has no parent".to_string(),
-    })?;
-    fs::create_dir_all(parent).map_err(|error| HostError::BrepIo {
-        detail: format!("create component instance geometry directory failed: {error}"),
-    })?;
-    let temporary = parent.join(format!(".{instance_id}.tmp-{}", std::process::id()));
-    fs::write(&temporary, bytes).map_err(|error| HostError::BrepIo {
-        detail: format!("write component instance geometry failed: {error}"),
-    })?;
-    fs::rename(&temporary, &path).map_err(|error| HostError::BrepIo {
-        detail: format!("publish component instance geometry failed: {error}"),
-    })?;
-    Ok(path)
+    geometries: &[(String, Vec<u8>)],
+) -> Result<(), HostError> {
+    Bundle::at(root)
+        .restore_component_instance_geometries_if_revision(revision, geometries)
+        .map(|_| ())
+        .map_err(HostError::from)
 }
 
 fn descriptor_for_selected_l_bracket(
@@ -12828,6 +12888,67 @@ fn bracket_family_is_current(snapshot: &HistorySnapshot, family: &str) -> bool {
                 .get(&format!("{family}{suffix}"))
                 .is_none_or(|feature| feature.status == HistoryStatus::CurrentValid)
         })
+}
+
+fn stage_missing_bracket_family_geometries(
+    root: &Path,
+    loaded: &LoadedBundle,
+    worker: &OcctWorker,
+) -> Result<Vec<(String, Vec<u8>)>, HostError> {
+    let snapshot = loaded.history.active_snapshot();
+    let mut staged = Vec::new();
+    for family in bracket_family_ids(snapshot) {
+        if !loaded.graph.contains_feature(&family) || committed_brep_path(root, &family).is_file() {
+            continue;
+        }
+        let Some(params) = bracket_family_params(snapshot, &family) else {
+            continue;
+        };
+        if !bracket_family_is_current(snapshot, &family) {
+            continue;
+        }
+        let stage = preview_stage_path(root, &format!("replay-{family}"));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create bracket replay stage failed: {error}"),
+        })?;
+        let request = BracketRequest::new(
+            new_request_id(),
+            params.length,
+            params.width,
+            params.height,
+            params.thickness,
+        )
+        .with_feature_id(&family)
+        .with_output_path(&stage, "replay.brep");
+        let result = match worker
+            .clone()
+            .with_revision_id(loaded.revision_hash_hex())
+            .bracket(&request)
+        {
+            Ok(result) if result.is_success() && result.brep_path.is_file() => result,
+            Ok(result) => {
+                remove_preview_stage(&stage);
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(result.request_id),
+                    detail: format!("bracket replay returned status {}", result.status),
+                });
+            }
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error.into());
+            }
+        };
+        let bytes = match read_verified_worker_brep(&result) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                remove_preview_stage(&stage);
+                return Err(error);
+            }
+        };
+        remove_preview_stage(&stage);
+        staged.push((family, bytes));
+    }
+    Ok(staged)
 }
 
 struct StagedBracketFamily {

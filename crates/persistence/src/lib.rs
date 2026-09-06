@@ -2631,6 +2631,101 @@ impl Bundle {
         })
     }
 
+    /// Restore a complete revision-bound component result set without changing
+    /// canonical state. The revision check and directory replacement share the
+    /// bundle lock so recovery cannot publish results for an obsolete graph.
+    pub fn restore_component_instance_geometries_if_revision(
+        &self,
+        expected_revision: &str,
+        geometries: &[(String, Vec<u8>)],
+    ) -> Result<Vec<PathBuf>, BundleError> {
+        if geometries.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_bundle_write_lock(&self.root, || {
+            let loaded = self.open_locked()?;
+            if loaded.revision_hash_hex() != expected_revision {
+                return Err(BundleError::Invalid(
+                    "component result restore raced with a canonical revision".to_string(),
+                ));
+            }
+
+            let mut instance_ids = std::collections::BTreeSet::new();
+            for (instance_id, bytes) in geometries {
+                if !valid_feature_path_component(instance_id) {
+                    return Err(BundleError::Invalid(
+                        "component instance geometry ID must be a plain path component".to_string(),
+                    ));
+                }
+                if !instance_ids.insert(instance_id) {
+                    return Err(BundleError::Invalid(format!(
+                        "duplicate component instance geometry: {instance_id}"
+                    )));
+                }
+                if bytes.is_empty() {
+                    return Err(BundleError::Invalid(
+                        "component instance geometry must not be empty".to_string(),
+                    ));
+                }
+            }
+
+            let derived_root = self.root.join(".derived");
+            let component_root = derived_root.join("component-instances");
+            fs::create_dir_all(&component_root)?;
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging =
+                component_root.join(format!(".recompute-{}-{sequence}", std::process::id()));
+            let target = component_root.join(expected_revision);
+            let backup = component_root.join(format!(
+                ".{expected_revision}.backup-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&staging)?;
+            for (instance_id, bytes) in geometries {
+                fs::write(staging.join(format!("{instance_id}.brep")), bytes)?;
+            }
+            sync_directory(&staging, PublicationFailurePoint::StagingSync)?;
+
+            let had_target = match fs::rename(&target, &backup) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(error.into());
+                }
+            };
+            let promotion = (|| -> Result<(), BundleError> {
+                fs::rename(&staging, &target)?;
+                sync_directory(&component_root, PublicationFailurePoint::BrepDirectorySync)?;
+                Ok(())
+            })();
+            if let Err(error) = promotion {
+                let mut rollback_errors = Vec::new();
+                if let Err(rollback_error) = fs::remove_dir_all(&target)
+                    && rollback_error.kind() != std::io::ErrorKind::NotFound
+                {
+                    rollback_errors.push(rollback_error.to_string());
+                }
+                if had_target && let Err(rollback_error) = fs::rename(&backup, &target) {
+                    rollback_errors.push(rollback_error.to_string());
+                }
+                let _ = fs::remove_dir_all(&staging);
+                if !rollback_errors.is_empty() {
+                    return Err(BundleError::Io(format!(
+                        "component result restore failed: {error}; rollback failed: {}",
+                        rollback_errors.join("; ")
+                    )));
+                }
+                return Err(error);
+            }
+            let _ = fs::remove_dir_all(&backup);
+            Ok(geometries
+                .iter()
+                .map(|(instance_id, _)| target.join(format!("{instance_id}.brep")))
+                .collect())
+        })
+    }
+
     /// The locked body of `open`. Callers must already hold the per-root
     /// write lock; `append_features_locked`, `load_unlocked`, and the
     /// migration staging validation call it from inside the lock.
@@ -2765,7 +2860,7 @@ impl Bundle {
         &self,
         command: &ComponentCommand,
     ) -> Result<LoadedBundle, BundleError> {
-        self.append_component_command_with_revision(command, None)
+        self.append_component_command_with_geometry(command, None, &[])
     }
 
     /// Append one component command only if the bundle still has the revision
@@ -2775,7 +2870,20 @@ impl Bundle {
         command: &ComponentCommand,
         expected_revision: &str,
     ) -> Result<LoadedBundle, BundleError> {
-        self.append_component_command_with_revision(command, Some(expected_revision))
+        self.append_component_command_with_geometry(command, Some(expected_revision), &[])
+    }
+
+    /// Append one component command and publish its fully staged instance
+    /// geometry in the same sealed generation. Component geometry is derived
+    /// state, but it must not be observable for a revision whose command is
+    /// not also visible.
+    pub fn append_component_command_with_geometry(
+        &self,
+        command: &ComponentCommand,
+        expected_revision: Option<&str>,
+        geometries: &[(String, Vec<u8>)],
+    ) -> Result<LoadedBundle, BundleError> {
+        self.append_component_command_with_revision(command, expected_revision, geometries)
     }
 
     /// Append one relation-only fit transaction if the bundle still has the
@@ -2809,7 +2917,20 @@ impl Bundle {
         &self,
         command: &ComponentCommand,
         expected_revision: Option<&str>,
+        geometries: &[(String, Vec<u8>)],
     ) -> Result<LoadedBundle, BundleError> {
+        for (instance_id, bytes) in geometries {
+            if !valid_feature_path_component(instance_id) {
+                return Err(BundleError::Invalid(
+                    "component instance geometry ID must be a plain path component".to_string(),
+                ));
+            }
+            if bytes.is_empty() {
+                return Err(BundleError::Invalid(
+                    "component instance geometry must not be empty".to_string(),
+                ));
+            }
+        }
         with_bundle_write_lock(&self.root, || {
             let loaded = if self.root.exists() || previous_generation_path(&self.root).exists() {
                 self.open_locked()?
@@ -2823,7 +2944,7 @@ impl Bundle {
                 .map_err(|error| BundleError::Invalid(error.to_string()))?;
             let feature_id = format!("component-transaction-{}", loaded.log.len());
             let kind = format!("{COMPONENT_COMMAND_KIND_PREFIX}{payload}");
-            self.append_features_locked(
+            self.append_features_locked_with_component_geometry(
                 &[(&feature_id, &kind)],
                 expected_revision,
                 &[],
@@ -2831,8 +2952,42 @@ impl Bundle {
                 None,
                 None,
                 None,
+                geometries,
             )
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_features_locked_with_component_geometry(
+        &self,
+        entries: &[(&str, &str)],
+        expected_revision: Option<&str>,
+        breps: &[(&str, &[u8])],
+        source_breps: &[(&str, &str)],
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        history_event: Option<&HistoryEvent>,
+        geometries: &[(String, Vec<u8>)],
+    ) -> Result<LoadedBundle, BundleError> {
+        // Keep the existing feature transaction implementation as the single
+        // validator and add component results only while its generation is
+        // being assembled. The final revision hash is available after the
+        // canonical manifest is sealed below.
+        self.append_features_locked_with_fit_and_component_geometry(
+            entries,
+            expected_revision,
+            breps,
+            source_breps,
+            idempotency_key,
+            idempotency_payload,
+            history_event,
+            None,
+            false,
+            false,
+            false,
+            None,
+            geometries,
+        )
     }
 
     /// Append ordinary feature entries and one accepted history event in the
@@ -3557,6 +3712,40 @@ impl Bundle {
         allow_existing_bracket_edit: bool,
         intent: Option<&CanonicalIntent>,
     ) -> Result<LoadedBundle, BundleError> {
+        self.append_features_locked_with_fit_and_component_geometry(
+            entries,
+            expected_revision,
+            breps,
+            source_breps,
+            idempotency_key,
+            idempotency_payload,
+            history_event,
+            fit_dimension,
+            reject_existing_brep,
+            allow_existing_sketch_update,
+            allow_existing_bracket_edit,
+            intent,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_features_locked_with_fit_and_component_geometry(
+        &self,
+        entries: &[(&str, &str)],
+        expected_revision: Option<&str>,
+        breps: &[(&str, &[u8])],
+        source_breps: &[(&str, &str)],
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        history_event: Option<&HistoryEvent>,
+        fit_dimension: Option<&FitDimension>,
+        reject_existing_brep: bool,
+        allow_existing_sketch_update: bool,
+        allow_existing_bracket_edit: bool,
+        intent: Option<&CanonicalIntent>,
+        component_geometries: &[(String, Vec<u8>)],
+    ) -> Result<LoadedBundle, BundleError> {
         // A save against a brand-new bundle path creates the sealed empty
         // generation first, so concurrent first saves serialize into one
         // bundle instead of racing a create against an append. The baseline
@@ -4203,6 +4392,20 @@ impl Bundle {
                     Some(PublicationFailurePoint::BrepRename),
                     Some(PublicationFailurePoint::BrepDirectorySync),
                 )?;
+            }
+            if !component_geometries.is_empty() {
+                let component_dir = staging
+                    .join(".derived")
+                    .join("component-instances")
+                    .join(&loaded.manifest.revision_hash);
+                fs::create_dir_all(&component_dir)?;
+                for (instance_id, bytes) in component_geometries {
+                    atomic_write(
+                        &component_dir.join(format!("{instance_id}.brep")),
+                        bytes,
+                        None,
+                    )?;
+                }
             }
             terminate_at_requested_publication_point(PublicationKillPoint::ManifestSeal);
             sync_directory(&staging, PublicationFailurePoint::StagingSync)?;

@@ -1056,6 +1056,33 @@ fn component_scene(root: &Path) -> Vec<SceneSolid> {
     solids
 }
 
+fn assert_translated_scene(before: &[SceneSolid], after: &[SceneSolid], offset: [f64; 3]) {
+    let origin = before
+        .iter()
+        .find(|solid| solid.feature_id == "first")
+        .expect("origin instance renders before transform");
+    let translated = after
+        .iter()
+        .find(|solid| solid.feature_id == "second")
+        .expect("transformed instance renders after transform");
+    assert_eq!(translated.triangles.len(), origin.triangles.len());
+    for (translated_triangle, origin_triangle) in translated.triangles.iter().zip(&origin.triangles)
+    {
+        for (translated_vertex, origin_vertex) in translated_triangle
+            .vertices
+            .iter()
+            .zip(origin_triangle.vertices)
+        {
+            for axis in 0..3 {
+                assert!(
+                    (translated_vertex[axis] - (origin_vertex[axis] + offset[axis])).abs() < 1e-9,
+                    "component transform applies the expected translation"
+                );
+            }
+        }
+    }
+}
+
 fn assert_current_component_state(state: &Value, identity: &Value, root: &Path) {
     let revision = identity["revision_hash"]
         .as_str()
@@ -1084,10 +1111,11 @@ fn validate_export(
     response: &Value,
     output_dir: &Path,
     revision: &str,
-) -> BTreeMap<String, Vec<u8>> {
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
     assert_eq!(response["status"], "ok");
     assert_eq!(response["feature_id"], "copy-instance");
     let mut exports = BTreeMap::new();
+    let mut metadata_by_format = BTreeMap::new();
     for format in ["stl", "step"] {
         let path = output_dir.join(format!("copy-instance.{format}"));
         let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
@@ -1110,6 +1138,12 @@ fn validate_export(
         assert_eq!(metadata["source_revision_id"], revision);
         assert_eq!(metadata["byte_count"], bytes.len());
         assert_eq!(metadata["sha256"], sha256_hex(&bytes));
+        let mut portable_metadata = metadata.clone();
+        portable_metadata
+            .as_object_mut()
+            .expect("export metadata is an object")
+            .remove("source_revision_id");
+        metadata_by_format.insert(format.to_string(), portable_metadata);
         exports.insert(format.to_string(), bytes);
     }
     assert!(
@@ -1122,7 +1156,18 @@ fn validate_export(
                 .starts_with(".threeterm-export-")),
         "export staging is removed"
     );
-    exports
+    (exports, metadata_by_format)
+}
+
+fn portable_identity(identity: &Value) -> Value {
+    let mut portable = identity.clone();
+    let object = portable
+        .as_object_mut()
+        .expect("identity response is an object");
+    for field in ["generation_id", "revision_hash", "terminal_log_digest"] {
+        object.remove(field);
+    }
+    portable
 }
 
 struct ComponentSnapshot {
@@ -1130,6 +1175,7 @@ struct ComponentSnapshot {
     identity: Value,
     scene: Vec<SceneSolid>,
     exports: BTreeMap<String, Vec<u8>>,
+    export_metadata: BTreeMap<String, Value>,
     manifest: Vec<u8>,
     log: Vec<u8>,
     source_brep: Vec<u8>,
@@ -1142,7 +1188,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
     let scene = component_scene(&session.root);
     let output_dir = session.root.join(output_name);
     let response = session.export(&output_dir);
-    let exports = validate_export(
+    let (exports, export_metadata) = validate_export(
         &response,
         &output_dir,
         identity["revision_hash"]
@@ -1154,6 +1200,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
         identity,
         scene,
         exports,
+        export_metadata,
         manifest: fs::read(session.root.join("manifest.json")).expect("manifest reads"),
         log: fs::read(session.root.join("transactions.log")).expect("transaction log reads"),
         source_brep: fs::read(session.root.join("brep/bracket.brep")).expect("source BREP reads"),
@@ -1166,8 +1213,10 @@ fn prepare_component_workflow(session: &ComponentSession) {
     session.create_instance("first", [0.0, 0.0, 0.0]);
     session.create_instance("second", [10.0, 0.0, 0.0]);
     let before_transform = session.state();
+    let before_transform_scene = component_scene(&session.root);
     session.transform_instance("second", [0.0, 0.0, 90.0]);
     let after_transform = session.state();
+    let after_transform_scene = component_scene(&session.root);
     assert_eq!(
         after_transform["instances"]["first"]["geometry_digest"],
         before_transform["instances"]["first"]["geometry_digest"]
@@ -1175,6 +1224,11 @@ fn prepare_component_workflow(session: &ComponentSession) {
     assert_ne!(
         after_transform["instances"]["second"]["geometry_digest"],
         before_transform["instances"]["second"]["geometry_digest"]
+    );
+    assert_translated_scene(
+        &before_transform_scene,
+        &after_transform_scene,
+        [0.0, 0.0, 90.0],
     );
     session.make_independent();
     let before_copy_edit = session.state();
@@ -1232,6 +1286,7 @@ fn reload_component_workflow(
     assert_eq!(after.manifest, before.manifest);
     assert_eq!(after.log, before.log);
     assert_eq!(after.source_brep, before.source_brep);
+    assert_eq!(after.export_metadata, before.export_metadata);
     assert_eq!(
         portable_component_state(&after.state),
         portable_component_state(&before.state)
@@ -1242,7 +1297,7 @@ fn reload_component_workflow(
 }
 
 #[test]
-#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+#[ignore = "slow: requires the pinned native OCCT worker"]
 fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
     let Some(_) =
         required_worker("reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui")
@@ -1275,6 +1330,15 @@ fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
             "adapter component outcomes match"
         );
         assert_eq!(
+            portable_identity(&pair[0].identity),
+            portable_identity(&pair[1].identity),
+            "adapter project identities match"
+        );
+        assert_eq!(
+            pair[0].export_metadata, pair[1].export_metadata,
+            "adapter export metadata matches"
+        );
+        assert_eq!(
             pair[0].scene, pair[1].scene,
             "adapter viewport geometry matches"
         );
@@ -1286,7 +1350,7 @@ fn reusable_component_geometry_is_equivalent_through_cli_mcp_and_tui() {
 }
 
 #[test]
-#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+#[ignore = "slow: requires the pinned native OCCT worker"]
 fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
     let Some(_) = required_worker("reusable_component_geometry_survives_a_mixed_adapter_handoff")
     else {
@@ -1334,22 +1398,24 @@ fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
     let scene = component_scene(&root);
     assert_eq!(scene, before.scene);
 
-    let cli_exports = validate_export(
+    let (cli_exports, cli_metadata) = validate_export(
         &cli.export(&root.join("mixed-export-cli")),
         &root.join("mixed-export-cli"),
         identity["revision_hash"].as_str().unwrap(),
     );
-    let mcp_exports = validate_export(
+    let (mcp_exports, mcp_metadata) = validate_export(
         &mcp.export(&root.join("mixed-export-mcp")),
         &root.join("mixed-export-mcp"),
         identity["revision_hash"].as_str().unwrap(),
     );
-    let tui_exports = validate_export(
+    let (tui_exports, tui_metadata) = validate_export(
         &tui.export(&root.join("mixed-export-tui")),
         &root.join("mixed-export-tui"),
         identity["revision_hash"].as_str().unwrap(),
     );
     assert_eq!(cli_exports, mcp_exports);
     assert_eq!(cli_exports, tui_exports);
+    assert_eq!(cli_metadata, mcp_metadata);
+    assert_eq!(cli_metadata, tui_metadata);
     let _ = fs::remove_dir_all(root);
 }

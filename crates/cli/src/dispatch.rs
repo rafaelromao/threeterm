@@ -5032,6 +5032,12 @@ fn emit_export(
             let _ = writeln!(stderr, "{detail}");
             EXIT_BREP_INVALID
         }
+        Err(HostError::Validation { detail }) => {
+            let diagnostic = semantic_reference_diagnostic(&detail)
+                .unwrap_or_else(|| Diagnostic::invalid_request(&detail));
+            write_diagnostic(stderr, &diagnostic);
+            EXIT_INTEGRITY_FAILURE
+        }
         Err(error) => {
             let _ = writeln!(
                 stderr,
@@ -6541,10 +6547,23 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         | HostError::WorkerUnavailable { .. }
         | HostError::WorkerTerminated { .. } => Diagnostic::worker_failure(&detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
-        HostError::Validation { .. } => Diagnostic::invalid_request(&detail),
+        HostError::Validation { detail } => semantic_reference_diagnostic(detail)
+            .unwrap_or_else(|| Diagnostic::invalid_request(&detail)),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
         _ => Diagnostic::integrity_failure(&detail),
+    }
+}
+
+fn semantic_reference_diagnostic(detail: &str) -> Option<Diagnostic> {
+    if detail.contains("reference is ambiguous") {
+        Some(Diagnostic::reference_ambiguous(detail))
+    } else if detail.contains("reference is lost") {
+        Some(Diagnostic::reference_lost(detail))
+    } else if detail.contains("reference is incompatible") {
+        Some(Diagnostic::reference_incompatible(detail))
+    } else {
+        None
     }
 }
 

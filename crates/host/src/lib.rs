@@ -3601,11 +3601,11 @@ impl Host {
                 })
             });
         let component_replay_needed = loaded.components.instances.values().any(|instance| {
-            !loaded
+            loaded
                 .components
                 .definitions
                 .get(&instance.definition_id)
-                .is_some_and(|definition| definition.selected_feature_ids.is_empty())
+                .is_some_and(|definition| !definition.selected_feature_ids.is_empty())
                 && !component_instance_geometry_path(root, loaded.revision_hash_hex(), &instance.id)
                     .is_file()
         });

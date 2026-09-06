@@ -401,6 +401,10 @@ impl McpServer {
             IDENTITY_COMMAND_ID
                 | APPLY_COMMAND_ID
                 | BOOLEAN_PATTERN_COMMAND_ID
+                | threeterm_protocol::schema::REVOLVE_COMMAND_ID
+                | threeterm_protocol::schema::MIRROR_COMMAND_ID
+                | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
+                | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
                 | HOLE_COMMAND_ID
                 | SKETCH_SOLVE_COMMAND_ID
                 | FILLET_COMMAND_ID

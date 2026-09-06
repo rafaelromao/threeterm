@@ -1,4 +1,5 @@
 //! Asserts the registry's published schema hash is stable across builds.
+//! Transform request revision fences are part of this published contract.
 //!
 //! The hash is computed from the canonical JSON encoding of the registry
 //! (sorted object keys via `serde_json::Value::Object`'s default
@@ -36,7 +37,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "132ee0799bfcadc664a3e60150681c71861f1726507c24e4b95e08254c7e6401",
+        "691c7f4fd4e347a8fdc78af38121ff55797567e65e3519d6eb5109a5fde41bd8",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );

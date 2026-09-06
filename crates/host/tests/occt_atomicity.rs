@@ -257,8 +257,8 @@ fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() 
         .last()
         .expect("extrude transaction exists");
     let intent = entry.intent.as_ref().expect("extrude intent persists");
-    let threeterm_persistence::CanonicalIntent::Extrude(intent) = intent else {
-        panic!("extrude transaction carries an extrude intent");
+    let CanonicalIntent::Extrude(intent) = intent else {
+        panic!("expected extrude intent");
     };
     assert_eq!(intent.command, "extrude");
     assert_eq!(intent.operation, "additive");
@@ -560,6 +560,121 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
     );
     assert_eq!(fs::read(root.join(MANIFEST_FILENAME)).unwrap(), manifest);
     assert_eq!(fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).unwrap(), log);
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(worker_root);
+}
+
+#[test]
+fn replay_does_not_promote_earlier_artifacts_when_a_later_intent_fails() {
+    let root = temp_root("replay-batch-atomicity");
+    let worker_root = temp_root("replay-batch-atomicity-bin");
+    fs::create_dir_all(&worker_root).expect("worker directory creates");
+    let script = worker_root.join("occt-worker.sh");
+    let bytes = b"replayable-brep";
+    let digest = sha256_hex(bytes);
+    fs::write(
+        &script,
+        format!(
+            r##"#!/bin/sh
+printf '%s\n' '{{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}}'
+IFS= read -r request
+request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+source_revision_id=$(printf '%s\n' "$request" | sed -n 's/.*"source_revision_id":"\([^"]*\)".*/\1/p')
+output_dir=$(printf '%s\n' "$request" | sed -n 's/.*"output_dir":"\([^"]*\)".*/\1/p')
+output_filename=$(printf '%s\n' "$request" | sed -n 's/.*"output_filename":"\([^"]*\)".*/\1/p')
+feature_id=$(printf '%s\n' "$request" | sed -n 's/.*"feature_id":"\([^"]*\)".*/\1/p')
+count_file="{count_file}"
+count=$(cat "$count_file" 2>/dev/null || printf '0')
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s' 'replayable-brep' > "$output_dir/$output_filename"
+  printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$output_filename" "$feature_id"
+else
+  printf '{{"kind":"failed","schema_version":"threeterm.protocol/1","request_id":"%s","code":"brep_invalid","detail":"later replay intentionally fails"}}\n' "$request_id"
+fi
+"##,
+            count_file = worker_root.join("count").display(),
+            digest = digest,
+            bytes_len = bytes.len(),
+        ),
+    )
+    .expect("worker script writes");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+        .expect("worker script becomes executable");
+
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .append_feature("box-seed", "box")
+        .expect("seed appends")
+        .revision_hash_hex()
+        .to_string();
+    let worker_requirements = threeterm_protocol::artifact::WorkerFingerprint {
+        worker_kind: "occt".to_string(),
+        worker_schema_version: "threeterm.workers.occt/1".to_string(),
+        protocol_schema_version: "threeterm.protocol/1".to_string(),
+    };
+    let first = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
+        request_id: "replay-first-request".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["replay-first".to_string()],
+        source_revision,
+        worker_requirements: worker_requirements.clone(),
+    };
+    let first_commit = bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "replay-first",
+            "brep:replay-first",
+            first.source_revision.as_str(),
+            &first.request_id,
+            "{}",
+            &CanonicalIntent::Extrude(first.clone()),
+            bytes,
+        )
+        .expect("first intent appends");
+    let second = CanonicalExtrudeIntent {
+        request_id: "replay-second-request".to_string(),
+        affected_semantic_ids: vec!["replay-second".to_string()],
+        source_revision: first_commit.revision_hash_hex().to_string(),
+        ..first
+    };
+    let second_source_revision = second.source_revision.clone();
+    let second_request_id = second.request_id.clone();
+    bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "replay-second",
+            "brep:replay-second",
+            second_source_revision.as_str(),
+            &second_request_id,
+            "{}",
+            &CanonicalIntent::Extrude(second),
+            bytes,
+        )
+        .expect("second intent appends");
+    fs::remove_file(root.join("brep/replay-first.brep")).expect("first BREP deletes");
+    fs::remove_file(root.join("brep/replay-second.brep")).expect("second BREP deletes");
+    let before = Host::new().load(&root).expect("snapshot loads");
+
+    let result = Host::new().reload_and_recompute_geometry(
+        &root,
+        &threeterm_occt_worker::OcctWorker::with_binary_path(script.clone()),
+    );
+    assert!(result.is_err(), "later replay failure must be returned");
+    assert!(
+        !root.join("brep/replay-first.brep").exists(),
+        "earlier replay must not be promoted after later failure"
+    );
+    assert!(!root.join("brep/replay-second.brep").exists());
+    assert_eq!(Host::new().load(&root).expect("snapshot reloads"), before);
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(worker_root);

@@ -5747,7 +5747,7 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
                 CanonicalIntent::Revolve(inner) => {
                     let request = RevolveRequest::new(
@@ -5771,7 +5771,7 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
                 CanonicalIntent::Mirror(inner) => {
                     let request = MirrorRequest::new(
@@ -5789,7 +5789,7 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
                 CanonicalIntent::LinearPattern(inner) => {
                     let request = LinearPatternRequest::new(
@@ -5808,7 +5808,7 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
                 CanonicalIntent::CircularPattern(inner) => {
                     let request = CircularPatternRequest::new(
@@ -5828,7 +5828,7 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
                 CanonicalIntent::Boolean(inner) => {
                     let tool_path = if let Some(path) = replayed_paths.get(&inner.tool_feature_id) {
@@ -5853,9 +5853,9 @@ impl Host {
                                     worker,
                                     &inner.source_revision,
                                 )?;
-                            self.restore_replayed_occt_result(
+                            self.stage_replayed_occt_result(
                                 root,
-                                &source_snapshot,
+                                replay_stage_root,
                                 &feature_id,
                                 derived,
                             )?
@@ -5875,9 +5875,9 @@ impl Host {
                                 worker,
                                 &inner.source_revision,
                             )?;
-                            self.restore_replayed_occt_result(
+                            self.stage_replayed_occt_result(
                                 root,
-                                &source_snapshot,
+                                replay_stage_root,
                                 &feature_id,
                                 derived,
                             )?
@@ -5898,9 +5898,9 @@ impl Host {
                                     worker,
                                     &inner.source_revision,
                                 )?;
-                            self.restore_replayed_occt_result(
+                            self.stage_replayed_occt_result(
                                 root,
-                                &source_snapshot,
+                                replay_stage_root,
                                 &feature_id,
                                 derived,
                             )?
@@ -5942,48 +5942,43 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.restore_replayed_occt_result(root, &source_snapshot, &feature_id, derived)?
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
-                CanonicalIntent::Fillet(inner) => restore_replayed_finishing_geometry(
+                CanonicalIntent::Fillet(inner) => stage_replayed_finishing_geometry(
                     root,
                     replay_stage_root,
-                    &source_snapshot,
                     &loaded,
                     &replayed_paths,
                     worker,
                     FinishingReplayIntent::Fillet(inner.clone()),
                 )?,
-                CanonicalIntent::Chamfer(inner) => restore_replayed_finishing_geometry(
+                CanonicalIntent::Chamfer(inner) => stage_replayed_finishing_geometry(
                     root,
                     replay_stage_root,
-                    &source_snapshot,
                     &loaded,
                     &replayed_paths,
                     worker,
                     FinishingReplayIntent::Chamfer(inner.clone()),
                 )?,
-                CanonicalIntent::Shell(inner) => restore_replayed_finishing_geometry(
+                CanonicalIntent::Shell(inner) => stage_replayed_finishing_geometry(
                     root,
                     replay_stage_root,
-                    &source_snapshot,
                     &loaded,
                     &replayed_paths,
                     worker,
                     FinishingReplayIntent::Shell(inner.clone()),
                 )?,
-                CanonicalIntent::Draft(inner) => restore_replayed_finishing_geometry(
+                CanonicalIntent::Draft(inner) => stage_replayed_finishing_geometry(
                     root,
                     replay_stage_root,
-                    &source_snapshot,
                     &loaded,
                     &replayed_paths,
                     worker,
                     FinishingReplayIntent::Draft(inner.clone()),
                 )?,
-                CanonicalIntent::Loft(inner) => restore_replayed_finishing_geometry(
+                CanonicalIntent::Loft(inner) => stage_replayed_finishing_geometry(
                     root,
                     replay_stage_root,
-                    &source_snapshot,
                     &loaded,
                     &replayed_paths,
                     worker,
@@ -6615,6 +6610,23 @@ impl Host {
                                    })?);
                 */
         }
+        let replay_artifacts = feature_ids
+            .iter()
+            .map(|feature_id| {
+                let path = replayed_paths
+                    .get(feature_id)
+                    .ok_or_else(|| HostError::Validation {
+                        detail: format!("replayed artifact path is missing: {feature_id}"),
+                    })?;
+                let bytes = fs::read(path).map_err(|error| HostError::BrepIo {
+                    detail: format!("read staged replayed BREP failed: {error}"),
+                })?;
+                Ok((feature_id.clone(), bytes))
+            })
+            .collect::<Result<Vec<_>, HostError>>()?;
+        Bundle::at(root)
+            .restore_derived_breps_if_revision(&source_snapshot.revision_hash, &replay_artifacts)?;
+        replay_stage.discard();
         let reloaded = Bundle::at(root).open()?;
         let snapshot = SnapshotView::from(&reloaded);
         if snapshot.revision_hash != source_snapshot.revision_hash
@@ -6671,10 +6683,10 @@ impl Host {
         })
     }
 
-    fn restore_replayed_occt_result<R>(
+    fn stage_replayed_occt_result<R>(
         &self,
-        root: &Path,
-        source_snapshot: &SnapshotView,
+        _root: &Path,
+        replay_stage_root: &Path,
         feature_id: &str,
         derived: StagedOcctResult<R>,
     ) -> Result<(PathBuf, String), HostError>
@@ -6709,14 +6721,12 @@ impl Host {
             })?;
         let content = read_brep_verified(Path::new(path), Some((bytes, sha)))
             .map_err(|detail| HostError::BrepIo { detail })?;
-        let restored = Bundle::at(root)
-            .restore_derived_brep_if_revision(feature_id, &source_snapshot.revision_hash, &content)
-            .map_err(HostError::from)?;
-        let fingerprint = sha256_path(&restored).map_err(|error| HostError::BrepIo {
+        let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
+        let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),
         })?;
         cleanup();
-        Ok((restored, fingerprint))
+        Ok((staged, fingerprint))
     }
 
     /* fn load_with_extrude_replay_legacy(
@@ -11850,10 +11860,9 @@ fn rollback_replay_artifacts(
 }
 
 #[allow(dead_code)]
-fn restore_replayed_finishing_geometry(
+fn stage_replayed_finishing_geometry(
     root: &Path,
     replay_stage_root: &Path,
-    source_snapshot: &SnapshotView,
     loaded: &LoadedBundle,
     replayed_paths: &HashMap<String, PathBuf>,
     worker: &OcctWorker,
@@ -11867,14 +11876,7 @@ fn restore_replayed_finishing_geometry(
         worker,
         intent,
     )?;
-    let path = Bundle::at(root)
-        .restore_derived_brep_if_revision(
-            &replayed.feature_id,
-            &source_snapshot.revision_hash,
-            &replayed.bytes,
-        )
-        .map_err(HostError::from)?;
-    Ok((path, replayed.fingerprint))
+    Ok((replayed.path, replayed.fingerprint))
 }
 
 #[allow(dead_code)]

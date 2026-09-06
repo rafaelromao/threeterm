@@ -2854,6 +2854,9 @@ pub struct TuiViewportSession<R: Renderer> {
     height: u32,
     viewport_colors: ViewportColors,
     coordinator: RenderCoordinator<R>,
+    visible_presentation: Option<(u64, CameraState)>,
+    in_flight_presentation: Option<(u64, CameraState)>,
+    pending_presentation: Option<(u64, CameraState)>,
 }
 
 impl<R: Renderer> TuiViewportSession<R> {
@@ -2985,6 +2988,9 @@ impl<R: Renderer> TuiViewportSession<R> {
             height,
             viewport_colors,
             coordinator: RenderCoordinator::new(renderer),
+            visible_presentation: None,
+            in_flight_presentation: None,
+            pending_presentation: None,
         })
     }
 
@@ -3002,7 +3008,15 @@ impl<R: Renderer> TuiViewportSession<R> {
             )
             .with_colors(self.viewport_colors),
         )?;
-        self.coordinator.submit(frame)
+        let camera = self.camera;
+        let submission = self.coordinator.submit(frame)?;
+        if let Some(identity) = submission.started.as_ref() {
+            self.in_flight_presentation = Some((identity.generation, camera));
+        }
+        if let Some(identity) = submission.queued.as_ref() {
+            self.pending_presentation = Some((identity.generation, camera));
+        }
+        Ok(submission)
     }
 
     pub fn pick_at(
@@ -3011,24 +3025,46 @@ impl<R: Renderer> TuiViewportSession<R> {
         x: u32,
         y: u32,
     ) -> Result<PickInputOutcome, TuiViewportError> {
-        let generation = self.tui.state().presentation_generation;
+        let Some((generation, camera)) = self.visible_presentation else {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick cannot target a frame before its first acknowledgement".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        };
+        if self.coordinator.in_flight().is_some() {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick cannot target a presentation while a newer frame is unacknowledged"
+                    .to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        }
         let request = ViewportRequest::new(
             self.scene.revision.clone(),
             generation,
             self.width,
             self.height,
-            self.camera,
+            camera,
         )
         .with_colors(self.viewport_colors);
         let pick = ProtocolNeutralViewport::pick(&self.scene, request, x, y)
             .map_err(TuiViewportError::Viewport)?;
-        self.validate_pick_for_host(pick, host)
+        self.validate_pick_for_host(pick, host, generation, camera)
     }
 
     fn validate_pick_for_host(
         &mut self,
         pick: PickResult,
         host: &Host,
+        expected_generation: u64,
+        expected_camera: CameraState,
     ) -> Result<PickInputOutcome, TuiViewportError> {
         let semantic_ids = pick
             .candidates
@@ -3052,7 +3088,20 @@ impl<R: Renderer> TuiViewportSession<R> {
                     from: Some("host-pick-validation".to_string()),
                 })
             })?;
-        self.validate_pick(pick)
+        if pick.revision != self.scene.revision
+            || pick.generation != expected_generation
+            || pick.camera != expected_camera
+        {
+            return Err(TuiViewportError::Tui(TuiDiagnostic {
+                code: TuiDiagnosticCode::StalePick,
+                detail: "pick result does not match the visible viewport presentation".to_string(),
+                canonical_revision: self.tui.state().canonical_revision,
+                axis: Some(StateAxis::Selection),
+                event: Some(StateEventKind::Selection(SelectionEventKind::Nominate)),
+                from: Some("viewport-pick".to_string()),
+            }));
+        }
+        self.apply_validated_pick(pick)
     }
 
     pub fn validate_pick(
@@ -3073,6 +3122,13 @@ impl<R: Renderer> TuiViewportSession<R> {
                 from: Some("viewport-pick".to_string()),
             }));
         }
+        self.apply_validated_pick(pick)
+    }
+
+    fn apply_validated_pick(
+        &mut self,
+        pick: PickResult,
+    ) -> Result<PickInputOutcome, TuiViewportError> {
         let candidates = pick
             .candidates
             .into_iter()
@@ -3618,7 +3674,28 @@ impl<R: Renderer> TuiViewportSession<R> {
         &mut self,
         acknowledgement: FrameAcknowledgement,
     ) -> Result<threeterm_viewport::AcknowledgeOutcome, ViewportDiagnostic> {
-        self.coordinator.acknowledge(acknowledgement)
+        let active = self.coordinator.in_flight().cloned();
+        let active_presentation = self.in_flight_presentation.take();
+        let outcome = self.coordinator.acknowledge(acknowledgement)?;
+        if outcome.visible.is_some() {
+            if let (Some(identity), Some(presentation)) = (active, active_presentation) {
+                if identity.generation == presentation.0 {
+                    self.visible_presentation = Some(presentation);
+                }
+            }
+        }
+        if let Some(identity) = self.coordinator.in_flight() {
+            if self
+                .in_flight_presentation
+                .as_ref()
+                .is_none_or(|presentation| presentation.0 != identity.generation)
+            {
+                self.in_flight_presentation = self.pending_presentation.take();
+            }
+        } else {
+            self.pending_presentation = None;
+        }
+        Ok(outcome)
     }
 
     pub fn request_cancel(

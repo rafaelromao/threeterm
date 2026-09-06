@@ -24,12 +24,13 @@ use threeterm_protocol::schema::{
     CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
     COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID,
     CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID,
-    MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID,
-    REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID,
-    SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID,
-    TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find, find_by_name, iter,
+    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
+    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find,
+    find_by_name, iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
@@ -3949,6 +3950,49 @@ pub fn dispatch_registered_command(
             let identity = host.identity(string_field("bundle_path")?)?;
             return Ok(identity_value(&identity, schema.response_schema_version));
         }
+        if command == EXPORT_COMMAND_ID {
+            let formats = request["formats"]
+                .as_array()
+                .expect("export schema guarantees formats")
+                .iter()
+                .map(|format| {
+                    format
+                        .as_str()
+                        .expect("export formats are strings")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            let body_ids = request
+                .get("body_ids")
+                .and_then(Value::as_array)
+                .map(|body_ids| {
+                    body_ids
+                        .iter()
+                        .map(|body_id| {
+                            body_id
+                                .as_str()
+                                .expect("export body IDs are strings")
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let view = host.export(
+                string_field("bundle_path")?,
+                string_field("feature_id")?,
+                &formats,
+                Path::new(string_field("output_dir")?),
+                number_field("tessellation_deflection")?,
+                request["override_warnings"]
+                    .as_bool()
+                    .expect("export schema guarantees override_warnings"),
+                request["accept_stale_geometry"]
+                    .as_bool()
+                    .expect("export schema guarantees accept_stale_geometry"),
+                &body_ids,
+            )?;
+            return Ok(export_view_value(&view, schema.response_schema_version));
+        }
         if matches!(
             command,
             DEFINE_COMPONENT_COMMAND_ID
@@ -5095,10 +5139,7 @@ fn emit_export(
                 "artifacts": view.artifacts,
                 "source_revision_id": view.source_snapshot.revision_hash,
                 "derived_artifacts": view.derived_artifacts,
-                "accepted_stale_last_valid_geometry": !view
-                    .stale_last_valid_geometry_acceptance
-                    .stale_features
-                    .is_empty(),
+                "accepted_stale_last_valid_geometry": false,
                 "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
                 "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
             }),
@@ -5118,7 +5159,8 @@ fn emit_export(
                     "feature_id": feature_id,
                     "active_revision": active_revision,
                     "stale_features": stale_features,
-                    "recovery": "correct or restore the feature, or retry with --accept-stale-geometry",
+                    "recovery": "correct or restore the feature and recompute current geometry",
+                    "override_eligible": false,
                     "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
                 })
             );
@@ -5406,6 +5448,19 @@ fn bracket_view_value(view: &threeterm_host::BracketCommitView, schema_version: 
             Some(&view.source_snapshot),
             Some(&view.artifact),
         ),
+        "schema_version": schema_version,
+    })
+}
+
+fn export_view_value(view: &threeterm_host::ExportCommitView, schema_version: &str) -> Value {
+    serde_json::json!({
+        "status": "ok",
+        "feature_id": view.stale_last_valid_geometry_acceptance.feature_id,
+        "artifacts": view.artifacts,
+        "source_revision_id": view.source_snapshot.revision_hash,
+        "derived_artifacts": view.derived_artifacts,
+        "accepted_stale_last_valid_geometry": false,
+        "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
         "schema_version": schema_version,
     })
 }
@@ -7073,7 +7128,8 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             "feature_id": feature_id,
             "active_revision": active_revision,
             "stale_features": stale_features,
-            "recovery": "correct or restore the feature, or retry with --accept-stale-geometry"
+            "recovery": "correct or restore the feature and recompute current geometry",
+            "override_eligible": false
         }))
         .expect("stale geometry diagnostic serializes"),
         HostError::BundlePathMissing { .. } => "bundle_path_missing".to_string(),

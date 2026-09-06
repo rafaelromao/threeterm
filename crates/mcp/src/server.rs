@@ -44,8 +44,9 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::frame::MAX_FRAME_BUFFER;
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID,
-    CHAMFER_COMMAND_ID, CommandSchema, DRAFT_COMMAND_ID, FILLET_COMMAND_ID, HOLE_COMMAND_ID,
-    IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, find, iter,
+    CHAMFER_COMMAND_ID, CommandSchema, DRAFT_COMMAND_ID, EXPORT_COMMAND_ID, FILLET_COMMAND_ID,
+    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOFT_COMMAND_ID, SHELL_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, find, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -466,6 +467,12 @@ impl McpServer {
                 DispatchError::Host(error) if schema_entry.id == BRACKET_EDIT_COMMAND_ID => {
                     let value = bracket_edit_failure_response(&arguments, &error);
                     JsonRpcResponse::success(request.id.clone(), tool_result(value, true))
+                }
+                DispatchError::Host(error) if schema_entry.id == EXPORT_COMMAND_ID => {
+                    JsonRpcResponse::success(
+                        request.id.clone(),
+                        tool_result(export_failure_value(&error), true),
+                    )
                 }
                 DispatchError::Host(_)
                 | DispatchError::Validation(_)
@@ -1502,6 +1509,26 @@ fn tool_result(value: Value, is_error: bool) -> Value {
     result
 }
 
+fn export_failure_value(error: &HostError) -> Value {
+    match error {
+        HostError::StaleLastValidGeometry {
+            feature_id,
+            active_revision,
+            stale_features,
+        } => json!({
+            "severity": "error",
+            "code": "stale_last_valid_geometry",
+            "feature_id": feature_id,
+            "active_revision": active_revision,
+            "stale_features": stale_features,
+            "recovery": "correct or restore the feature and recompute current geometry",
+            "override_eligible": false,
+            "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
+        }),
+        _ => serde_json::to_value(host_error_diagnostic(error)).expect("diagnostic serializes"),
+    }
+}
+
 fn tool_execution_error(message: String) -> Value {
     json!({
         "content": [{"type": "text", "text": message}],
@@ -2204,6 +2231,53 @@ mod tests {
         )
         .expect("text content contains JSON");
         assert_eq!(content, result["structuredContent"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_tool_refuses_stale_geometry_with_structured_recovery() {
+        let root =
+            std::env::temp_dir().join(format!("threeterm-mcp-stale-export-{}", new_request_id()));
+        let output = root.join("output");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("bracket initializes");
+        host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+            .expect("failing historical edit is committed");
+
+        let response = McpServer::new().handle_request(&JsonRpcRequest {
+            id: Value::Number(1.into()),
+            is_notification: false,
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "threeterm.command.export/1",
+                "arguments": {
+                    "bundle_path": root.to_string_lossy(),
+                    "feature_id": "l-bracket",
+                    "formats": ["stl"],
+                    "output_dir": output.to_string_lossy(),
+                    "tessellation_deflection": 1.0,
+                    "override_warnings": true,
+                    "accept_stale_geometry": true
+                }
+            }),
+        });
+
+        let result = response.result.expect("export is a tool result");
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["code"],
+            "stale_last_valid_geometry"
+        );
+        assert_eq!(result["structuredContent"]["override_eligible"], false);
+        assert!(
+            !result["structuredContent"]["recovery"]
+                .as_str()
+                .unwrap()
+                .contains("accept-stale-geometry")
+        );
+        assert!(!output.exists());
+
         let _ = std::fs::remove_dir_all(root);
     }
 

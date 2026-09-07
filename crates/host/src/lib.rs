@@ -7430,38 +7430,25 @@ impl Host {
         replay_stage_root: &Path,
         feature_id: &str,
         derived: StagedOcctResult<R>,
-    ) -> Result<(PathBuf, String), HostError>
-    where
-        R: Serialize,
-    {
+    ) -> Result<(PathBuf, String), HostError> {
         let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
         let cleanup = || {
             if let Some(stage_root) = &stage_root {
                 let _ = fs::remove_dir_all(stage_root);
             }
         };
-        let value =
-            serde_json::to_value(&derived.result).map_err(|error| HostError::Validation {
-                detail: format!("replayed OCCT result serialization failed: {error}"),
-            })?;
-        let path = value["brep_path"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP path".to_string(),
-            })?;
-        let bytes = value["brep_bytes"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| HostError::BrepIo {
+        // Acceptance renames the worker's private staged path to the cache
+        // path, so replay must read the validated artifact rather than the
+        // consumed worker result path.
+        let bytes =
+            usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
                 detail: "replayed OCCT result has an invalid BREP byte count".to_string(),
             })?;
-        let sha = value["brep_sha256"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP digest".to_string(),
-            })?;
-        let content = read_brep_verified(Path::new(path), Some((bytes, sha)))
-            .map_err(|detail| HostError::BrepIo { detail })?;
+        let content = read_brep_verified(
+            &derived.artifact.path,
+            Some((bytes, derived.artifact.sha256.as_str())),
+        )
+        .map_err(|detail| HostError::BrepIo { detail })?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),

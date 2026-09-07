@@ -1344,6 +1344,33 @@ pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
         HostError::UnsupportedGeometry { detail, .. } => Diagnostic::unsupported_geometry(detail),
         HostError::WorkerFailure { detail, .. } => Diagnostic::worker_failure(detail),
         HostError::WorkerUnavailable { detail } => Diagnostic::worker_failure(detail),
+        HostError::WorkerTerminated { record } => {
+            let detail = serde_json::to_string(&serde_json::json!({
+                "kind": "worker_terminated",
+                "request_id": record.request_id,
+                "stage": record.stage,
+                "elapsed_ms": record.elapsed.as_millis(),
+                "last_progress": record.last_progress.as_ref().map(|progress| serde_json::json!({
+                    "stage": progress.stage,
+                    "percent": progress.percent,
+                })),
+                "last_artifact_error": record.last_artifact_error,
+                "exit_signal": record.exit_signal,
+                "exit_code": record.exit_code,
+                "stderr_tail": record.stderr_tail,
+                "failed_code": record.failed_code,
+                "failed_detail": record.failed_detail,
+                "protocol_diagnostic": record.protocol_diagnostic.as_ref().map(|diagnostic| serde_json::json!({
+                    "code": diagnostic.code.as_str(),
+                    "detail": diagnostic.detail,
+                })),
+                "termination_error": record.termination_error,
+                "exit_kind": record.exit_kind.as_str(),
+            }))
+            .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string());
+            Diagnostic::worker_failure(&detail)
+        }
+        HostError::BrepIo { detail } => Diagnostic::brep_invalid(detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&error.to_string()),
         HostError::Persistence(error) => Diagnostic::persistence_failure(&error.to_string()),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),

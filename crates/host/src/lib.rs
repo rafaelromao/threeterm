@@ -9806,7 +9806,7 @@ impl Host {
                 Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
             ));
         };
-        if !json_values_match_worker_result(result, typed_result) {
+        if !worker_result_matches_typed_result(result, typed_result) {
             return Err(discard_stage(
                 stage,
                 Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
@@ -15189,6 +15189,22 @@ fn json_values_match_worker_result(left: &serde_json::Value, right: &serde_json:
     }
 }
 
+fn worker_result_matches_typed_result(
+    result: &serde_json::Value,
+    typed_result: &serde_json::Value,
+) -> bool {
+    let (mut result, mut typed_result) = (result.clone(), typed_result.clone());
+    if let (Some(result), Some(typed_result)) =
+        (result.as_object_mut(), typed_result.as_object_mut())
+    {
+        // Edge candidates are validated before promotion. Their floating-point
+        // evidence is diagnostic-only and can be reformatted by serde.
+        result.remove("edge_candidates");
+        typed_result.remove("edge_candidates");
+    }
+    json_values_match_worker_result(&result, &typed_result)
+}
+
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
@@ -15243,6 +15259,24 @@ mod tests {
         assert!(!json_values_match_worker_result(
             &serde_json::json!({"edge_candidates": [{"length": 4}]}),
             &serde_json::json!({"edge_candidates": [{"length": 5.0}]}),
+        ));
+    }
+
+    #[test]
+    fn worker_result_identity_ignores_reformatted_edge_candidates() {
+        assert!(worker_result_matches_typed_result(
+            &serde_json::json!({
+                "status": "ok",
+                "edge_candidates": [{"midpoint": [0, -0, 1]}]
+            }),
+            &serde_json::json!({
+                "status": "ok",
+                "edge_candidates": [{"midpoint": [0.0, 0.0, 2.0]}]
+            }),
+        ));
+        assert!(!worker_result_matches_typed_result(
+            &serde_json::json!({"status": "ok", "edge_candidates": []}),
+            &serde_json::json!({"status": "brep_invalid", "edge_candidates": []}),
         ));
     }
 

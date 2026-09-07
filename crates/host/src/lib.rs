@@ -14514,10 +14514,14 @@ fn resolve_selected_edge_with_worker(
             selected,
         )
         .map_err(HostError::from)?;
-    let outcome = resolve_edge_reference(
-        &reference,
-        canonical_finishing_edge_candidates(&inspection.edge_candidates),
-    );
+    let candidates = canonical_finishing_edge_candidates(&inspection.edge_candidates)
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.provenance = reference.provenance.clone();
+            candidate
+        })
+        .collect::<Vec<_>>();
+    let outcome = resolve_edge_reference(&reference, candidates);
     let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
         return Err(HostError::Validation {
             detail: edge_selection_failure_detail(&outcome),

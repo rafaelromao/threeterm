@@ -151,7 +151,7 @@ fn linear_pattern(
     let entry = find(LINEAR_PATTERN_COMMAND_ID).expect("linear-pattern is registered");
     validate(&entry.response_schema, &parsed).expect("linear-pattern response validates");
     assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "linear-pattern");
+    assert_eq!(parsed["operation"], "linear_pattern");
     assert_eq!(parsed["feature_id"], feature_id);
     parsed
 }

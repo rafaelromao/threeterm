@@ -139,7 +139,7 @@ fn circular_pattern_cli_drives_host_to_commit_a_patterned_brep() {
     validate(&entry.response_schema, &parsed).expect("response validates against schema");
 
     assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "circular-pattern");
+    assert_eq!(parsed["operation"], "circular_pattern");
     assert_eq!(parsed["feature_id"], "circular-pattern-1");
     assert_eq!(
         parsed["schema_version"],

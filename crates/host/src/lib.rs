@@ -9742,23 +9742,29 @@ impl Host {
                     length: context.length,
                 },
             };
-            let candidates = canonical_finishing_edge_candidates(
-                &typed_value["edge_candidates"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|value| serde_json::from_value(value).ok())
-                    .collect::<Vec<EdgeCandidateEvidence>>(),
-            )
-            .into_iter()
-            .map(|mut candidate| {
-                candidate.provenance = reference.provenance.clone();
-                candidate
-            })
-            .collect::<Vec<_>>();
-            let outcome = resolve_edge_reference(&reference, candidates);
-            if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
+            let returned_candidates = typed_value["edge_candidates"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| serde_json::from_value(value).ok())
+                .collect::<Vec<EdgeCandidateEvidence>>();
+            let candidates = canonical_finishing_edge_candidates(&returned_candidates)
+                .into_iter()
+                .map(|mut candidate| {
+                    candidate.provenance = reference.provenance.clone();
+                    candidate
+                })
+                .collect::<Vec<_>>();
+            // A finishing operation can consume the source edge entirely. The
+            // request was validated against a real inspection before dispatch;
+            // only validate reattachment when the worker reports descendants.
+            let outcome =
+                (!candidates.is_empty()).then(|| resolve_edge_reference(&reference, candidates));
+            if !matches!(
+                outcome,
+                None | Some(EdgeReattachmentOutcome::Resolved { .. })
+            ) {
                 let _ = completion.stage.discard();
                 return Err(HostError::Validation {
                     detail: format!("semantic edge selection failed: {outcome:?}"),

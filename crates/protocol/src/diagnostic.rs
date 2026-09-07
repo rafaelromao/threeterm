@@ -47,6 +47,8 @@ pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub arg: String,
     pub schema_version: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub affected_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,10 +63,26 @@ impl Diagnostic {
             code,
             arg: arg.to_string(),
             schema_version: crate::schema_version(),
+            affected_ids: Vec::new(),
             source: None,
             detail: None,
             recovery: None,
         }
+    }
+
+    pub fn with_context(
+        mut self,
+        affected_ids: impl IntoIterator<Item = impl Into<String>>,
+        recovery: impl Into<String>,
+    ) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.affected_ids = affected_ids
+            .into_iter()
+            .map(Into::into)
+            .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+            .collect();
+        self.recovery = Some(recovery.into());
+        self
     }
 
     pub fn unknown_command(arg: &str) -> Self {

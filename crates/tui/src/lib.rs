@@ -10,7 +10,9 @@ use threeterm_domain::{
     history::{HistoryState as CanonicalHistoryState, HistoryTimelineStatus},
 };
 use threeterm_host::{
-    DomainCommandPreview, HistoryCommitView, Host, HostError, stale_last_valid_geometry_for_export,
+    DomainCommandPreview, HistoryCommitView, Host, HostError,
+    domain_command_failure_value as host_domain_command_failure_value,
+    stale_last_valid_geometry_for_export,
 };
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
@@ -44,6 +46,10 @@ pub fn execute_domain_command(
     request: Value,
 ) -> Result<Value, ExecutionError<HostError>> {
     host.execute_domain_command(command, request)
+}
+
+pub fn domain_command_failure_value(error: &HostError) -> Value {
+    host_domain_command_failure_value(error)
 }
 
 fn execute_history_command(

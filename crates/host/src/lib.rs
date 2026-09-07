@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -15,8 +17,8 @@ use threeterm_domain::{
     SketchDiagnostic as DomainSketchDiagnostic, SketchEntity as DomainSketchEntity, SketchPayload,
     SolvedCoordinate as DomainSolvedCoordinate,
     history::{
-        HistoryEvaluation, HistoryOperation, HistorySnapshot, HistoryState, HistoryStatus,
-        HistoryTimeline,
+        HistoryDiagnostic, HistoryEvaluation, HistoryOperation, HistorySnapshot, HistoryState,
+        HistoryStatus, HistoryTimeline,
     },
     resolve_edge_reference, resolve_planar_face_reference, resolve_split_edge_reference,
 };
@@ -721,6 +723,8 @@ pub struct HistoryCommitView {
     pub evaluation: Option<HistoryEvaluation>,
 }
 
+const HISTORY_FAILURE_RECOVERY: &str = "correct_geometry_or_restore_revision";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTimelineView {
     pub snapshot: SnapshotView,
@@ -742,6 +746,7 @@ pub fn history_commit_value(
         .features
         .values()
         .filter_map(|feature| feature.diagnostic.clone())
+        .map(|diagnostic| history_diagnostic_value(&diagnostic))
         .collect();
     let named_revisions: Vec<_> = view
         .history
@@ -770,7 +775,7 @@ pub fn history_commit_value(
                 "stale_last_valid_geometry": feature.last_valid_geometry_fingerprint.is_some(),
             });
             if let Some(diagnostic) = &feature.diagnostic {
-                value["diagnostic"] = serde_json::json!(diagnostic);
+                value["diagnostic"] = history_diagnostic_value(diagnostic);
             }
             value
         })
@@ -805,6 +810,19 @@ pub fn history_commit_value(
         "feature_graph_hash": view.snapshot.feature_graph_hash,
         "revision_hash": view.snapshot.revision_hash,
         "schema_version": schema_version,
+    })
+}
+
+fn history_diagnostic_value(diagnostic: &HistoryDiagnostic) -> serde_json::Value {
+    serde_json::json!({
+        "code": diagnostic.code,
+        "feature_id": diagnostic.feature_id,
+        "detail": diagnostic.detail,
+        "affected_ids": diagnostic.affected_ids,
+        "recovery": diagnostic
+            .recovery
+            .as_deref()
+            .unwrap_or(HISTORY_FAILURE_RECOVERY),
     })
 }
 
@@ -1120,6 +1138,16 @@ pub enum HostError {
         request_id: Option<String>,
         detail: String,
     },
+    InvalidEdit {
+        detail: String,
+        affected_ids: Vec<String>,
+        recovery: &'static str,
+    },
+    InvalidReference {
+        detail: String,
+        affected_ids: Vec<String>,
+        recovery: &'static str,
+    },
     BrepFileMissing {
         path: PathBuf,
     },
@@ -1224,6 +1252,10 @@ impl std::fmt::Display for HostError {
             Self::BrepInvalid { detail, .. } => {
                 write!(formatter, "occt brep invalid: {detail}")
             }
+            Self::InvalidEdit { detail, .. } => write!(formatter, "invalid edit: {detail}"),
+            Self::InvalidReference { detail, .. } => {
+                write!(formatter, "invalid reference: {detail}")
+            }
             Self::WorkerTerminated { record } => {
                 write!(
                     formatter,
@@ -1324,6 +1356,105 @@ impl std::error::Error for HostError {}
 impl From<BundleError> for HostError {
     fn from(error: BundleError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
+    match error {
+        HostError::InvalidEdit {
+            detail,
+            affected_ids,
+            recovery,
+        } => Diagnostic::brep_invalid(detail).with_context(affected_ids.iter(), *recovery),
+        HostError::InvalidReference {
+            detail,
+            affected_ids,
+            recovery,
+        } => Diagnostic::invalid_request(detail).with_context(affected_ids.iter(), *recovery),
+        HostError::BrepInvalid { detail, .. } => Diagnostic::brep_invalid(detail),
+        HostError::UnsupportedGeometry { detail, .. } => Diagnostic::unsupported_geometry(detail),
+        HostError::WorkerFailure { detail, .. } => Diagnostic::worker_failure(detail),
+        HostError::WorkerUnavailable { detail } => Diagnostic::worker_failure(detail),
+        HostError::WorkerTerminated { record } => {
+            let detail = serde_json::to_string(&serde_json::json!({
+                "kind": "worker_terminated",
+                "request_id": record.request_id,
+                "stage": record.stage,
+                "elapsed_ms": record.elapsed.as_millis(),
+                "last_progress": record.last_progress.as_ref().map(|progress| serde_json::json!({
+                    "stage": progress.stage,
+                    "percent": progress.percent,
+                })),
+                "last_artifact_error": record.last_artifact_error,
+                "exit_signal": record.exit_signal,
+                "exit_code": record.exit_code,
+                "stderr_tail": record.stderr_tail,
+                "failed_code": record.failed_code,
+                "failed_detail": record.failed_detail,
+                "protocol_diagnostic": record.protocol_diagnostic.as_ref().map(|diagnostic| serde_json::json!({
+                    "code": diagnostic.code.as_str(),
+                    "detail": diagnostic.detail,
+                })),
+                "termination_error": record.termination_error,
+                "exit_kind": record.exit_kind.as_str(),
+            }))
+            .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string());
+            Diagnostic::worker_failure(&detail)
+        }
+        HostError::BrepIo { detail } => Diagnostic::brep_invalid(detail),
+        HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&error.to_string()),
+        HostError::Persistence(error) => Diagnostic::persistence_failure(&error.to_string()),
+        HostError::DerivedResult { diagnostic } => diagnostic.clone(),
+        HostError::Validation { detail } => Diagnostic::invalid_request(detail),
+        _ => Diagnostic::integrity_failure(&error.to_string()),
+    }
+}
+
+pub fn domain_command_failure_value(error: &HostError) -> serde_json::Value {
+    if let HostError::StaleLastValidGeometry {
+        feature_id,
+        active_revision,
+        stale_features,
+    } = error
+    {
+        return serde_json::json!({
+            "severity": "error",
+            "code": "stale_last_valid_geometry",
+            "feature_id": feature_id,
+            "active_revision": active_revision,
+            "stale_features": stale_features,
+            "recovery": "correct or restore the feature and recompute current geometry",
+            "override_eligible": false,
+            "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
+        });
+    }
+    serde_json::to_value(domain_command_diagnostic(error)).expect("domain diagnostic serializes")
+}
+
+fn invalid_edit_from_extrude(error: HostError, affected_ids: &[String]) -> HostError {
+    match error {
+        HostError::BrepInvalid { detail, .. } => HostError::InvalidEdit {
+            detail,
+            affected_ids: affected_ids.to_vec(),
+            recovery: "correct_geometry_or_restore_revision",
+        },
+        HostError::WorkerFailure { detail, .. }
+            if [
+                "could not build the 2D polygon",
+                "could not build the planar face from the polygon",
+                "could not prism the face to produce the solid",
+                "subtractive extrusion did not produce a solid",
+            ]
+            .iter()
+            .any(|marker| detail.contains(marker)) =>
+        {
+            HostError::InvalidEdit {
+                detail: format!("brep_invalid: {detail}"),
+                affected_ids: affected_ids.to_vec(),
+                recovery: "correct_geometry_or_restore_revision",
+            }
+        }
+        error => error,
     }
 }
 
@@ -3289,6 +3420,10 @@ impl Host {
                         extrusion,
                         Some(&source_snapshot.revision_hash),
                     )?;
+                    let mut affected_ids = vec![extrusion.feature_id.clone()];
+                    if let Some(target) = target_feature_id.as_ref() {
+                        affected_ids.push(target.clone());
+                    }
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
@@ -3299,9 +3434,11 @@ impl Host {
                             extrusion,
                             &worker,
                             &expected_revision,
-                        )?
+                        )
+                        .map_err(|error| invalid_edit_from_extrude(error, &affected_ids))?
                     } else {
-                        self.extrude(bundle_path, extrusion, &worker)?
+                        self.extrude(bundle_path, extrusion, &worker)
+                            .map_err(|error| invalid_edit_from_extrude(error, &affected_ids))?
                     };
                     Ok(serde_json::json!({
                         "status": view.result.status,
@@ -3618,6 +3755,9 @@ impl Host {
                             &worker,
                         )?
                     };
+                    let recovery = edge_reattachment_recovery(&view.outcome);
+                    let affected_ids =
+                        vec![view.edit_feature_id.clone(), base_feature_id.to_string()];
                     let (outcome, selected_edge_id, candidate_edge_ids) = match view.outcome {
                         EdgeReattachmentOutcome::Resolved { semantic_id } => {
                             ("resolved", Some(semantic_id), Vec::new())
@@ -3634,6 +3774,8 @@ impl Host {
                         "outcome": outcome,
                         "selected_edge_id": selected_edge_id.unwrap_or_default(),
                         "candidate_edge_ids": candidate_edge_ids,
+                        "affected_ids": affected_ids,
+                        "recovery": recovery,
                         "committed": view.committed,
                         "edit_feature_id": view.edit_feature_id,
                         "source_revision": view.source_snapshot.revision_hash,
@@ -11091,10 +11233,12 @@ impl Host {
             });
         }
         if !loaded.graph.contains_feature(&target_feature_id) {
-            return Err(HostError::Validation {
+            return Err(HostError::InvalidReference {
                 detail: format!(
                     "subtractive extrude target feature is missing: {target_feature_id}"
                 ),
+                affected_ids: vec![request.feature_id.clone(), target_feature_id],
+                recovery: "choose_existing_target_or_restore_revision",
             });
         }
         let target_path = root
@@ -14589,6 +14733,17 @@ fn edge_selection_failure_detail(outcome: &EdgeReattachmentOutcome) -> String {
     format!("{prefix}: semantic edge selection failed: {outcome:?}")
 }
 
+fn edge_reattachment_recovery(outcome: &EdgeReattachmentOutcome) -> &'static str {
+    match outcome {
+        EdgeReattachmentOutcome::Resolved { .. } => "continue_with_committed_edit",
+        EdgeReattachmentOutcome::Ambiguous { .. } => "choose_candidate_edge_or_restore_revision",
+        EdgeReattachmentOutcome::Lost => "reattach_edge_or_restore_revision",
+        EdgeReattachmentOutcome::Incompatible { .. } => {
+            "choose_compatible_edge_or_restore_revision"
+        }
+    }
+}
+
 fn validate_finishing_request(
     command: CommandId,
     loaded: &LoadedBundle,
@@ -15811,6 +15966,56 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(output);
+    }
+
+    #[test]
+    fn history_response_normalizes_legacy_diagnostics_to_the_current_schema() {
+        let root = temp_root("legacy-history-diagnostic");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history initializes");
+        let view = host
+            .historical_edit(&root, "l-bracket-base", "length", 0.0)
+            .expect("failing historical edit is committed");
+
+        let mut legacy = serde_json::to_value(&view.history).expect("history serializes");
+        for feature in legacy["active"]["features"]
+            .as_object_mut()
+            .expect("history features serialize")
+            .values_mut()
+        {
+            if let Some(diagnostic) = feature["diagnostic"].as_object_mut() {
+                diagnostic.remove("affected_ids");
+                diagnostic.remove("recovery");
+            }
+        }
+        let legacy_history: HistoryState =
+            serde_json::from_value(legacy).expect("legacy history deserializes");
+        let response = history_commit_value(
+            "historical-edit",
+            threeterm_protocol::schema::HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+            &HistoryCommitView {
+                snapshot: view.snapshot,
+                history: legacy_history,
+                evaluation: view.evaluation,
+            },
+        );
+
+        threeterm_protocol::schema_validator::validate(
+            &threeterm_protocol::schema::HISTORY_COMMIT_RESPONSE_SCHEMA,
+            &response,
+        )
+        .expect("legacy history response matches the current schema");
+        assert_eq!(
+            response["diagnostics"][0]["recovery"],
+            HISTORY_FAILURE_RECOVERY
+        );
+        assert_eq!(
+            response["diagnostics"][0]["affected_ids"],
+            serde_json::json!([])
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

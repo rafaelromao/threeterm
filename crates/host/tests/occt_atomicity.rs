@@ -77,7 +77,14 @@ fn subtractive_extrude_rejects_a_missing_semantic_target_without_mutation() {
             &worker,
         )
         .expect_err("missing semantic target must fail closed");
-    assert!(matches!(error, HostError::Validation { .. }));
+    assert!(matches!(
+        error,
+        HostError::InvalidReference {
+            affected_ids,
+            recovery: "choose_existing_target_or_restore_revision",
+            ..
+        } if affected_ids == ["cut", "does-not-exist"]
+    ));
     assert_eq!(
         fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
         before_manifest

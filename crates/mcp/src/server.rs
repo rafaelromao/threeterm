@@ -33,7 +33,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use threeterm_cli::dispatch::{EXIT_OK, host_error_diagnostic};
-use threeterm_host::{Host, HostError};
+use threeterm_host::{Host, HostError, domain_command_failure_value};
 use threeterm_occt_worker::OcctWorker;
 #[cfg(test)]
 use threeterm_occt_worker::new_request_id;
@@ -458,7 +458,7 @@ impl McpServer {
                 } else if command == EXPORT_COMMAND_ID {
                     tool_result(export_failure_value(&error), true)
                 } else {
-                    tool_execution_error(format!("domain command failed: {error}"))
+                    host_tool_execution_error(&error)
                 },
             ),
             Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(
@@ -975,8 +975,7 @@ fn execute_boolean_pattern(
 }
 
 fn host_tool_execution_error(error: &HostError) -> Value {
-    let diagnostic =
-        serde_json::to_value(host_error_diagnostic(error)).expect("diagnostic serializes");
+    let diagnostic = domain_command_failure_value(error);
     let text = serde_json::to_string(&diagnostic).expect("diagnostic text serializes");
     json!({
         "content": [{"type": "text", "text": text}],
@@ -1154,23 +1153,7 @@ fn tool_result(value: Value, is_error: bool) -> Value {
 }
 
 fn export_failure_value(error: &HostError) -> Value {
-    match error {
-        HostError::StaleLastValidGeometry {
-            feature_id,
-            active_revision,
-            stale_features,
-        } => json!({
-            "severity": "error",
-            "code": "stale_last_valid_geometry",
-            "feature_id": feature_id,
-            "active_revision": active_revision,
-            "stale_features": stale_features,
-            "recovery": "correct or restore the feature and recompute current geometry",
-            "override_eligible": false,
-            "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
-        }),
-        _ => serde_json::to_value(host_error_diagnostic(error)).expect("diagnostic serializes"),
-    }
+    domain_command_failure_value(error)
 }
 
 fn tool_execution_error(message: String) -> Value {

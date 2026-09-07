@@ -51,6 +51,7 @@
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1683,6 +1684,17 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
     out << ']';
 }
 
+std::vector<TopoDS_Edge> unique_edges(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    std::vector<TopoDS_Edge> edges;
+    edges.reserve(edge_map.Extent());
+    for (int index = 1; index <= edge_map.Extent(); ++index) {
+        edges.push_back(TopoDS::Edge(edge_map(index)));
+    }
+    return edges;
+}
+
 bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) {
     const std::string request_id = get_string(request, "request_id");
     const std::string feature_id = get_string(request, "feature_id");
@@ -1698,10 +1710,7 @@ bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) 
             error = "could not read base BREP at " + base_path;
             return false;
         }
-        std::vector<TopoDS_Edge> edges;
-        for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-            edges.push_back(TopoDS::Edge(explorer.Current()));
-        }
+        const std::vector<TopoDS_Edge> edges = unique_edges(shape);
         std::ostringstream out;
         out << "{\"schema_version\":\"" << kSchemaVersion
             << "\",\"request_id\":\"" << json_escape(request_id)
@@ -1730,8 +1739,7 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
 
     TopoDS_Edge match;
-    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+    for (const TopoDS_Edge& edge : unique_edges(shape)) {
         GProp_GProps properties;
         BRepGProp::LinearProperties(edge, properties);
         TopoDS_Vertex first_vertex;

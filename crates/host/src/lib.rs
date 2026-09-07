@@ -6492,12 +6492,11 @@ impl Host {
                         (!base_path.as_os_str().is_empty()).then_some(base_path),
                     )
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<ExtrudeResult>(
+                    let derived = self.stage_occt_result::<ExtrudeResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Extrude,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -6516,12 +6515,11 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<RevolveResult>(
+                    let derived = self.stage_occt_result::<RevolveResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Revolve,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -6534,12 +6532,11 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<MirrorResult>(
+                    let derived = self.stage_occt_result::<MirrorResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Mirror,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -6553,12 +6550,11 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<LinearPatternResult>(
+                    let derived = self.stage_occt_result::<LinearPatternResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::LinearPattern,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -6573,12 +6569,11 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<CircularPatternResult>(
+                    let derived = self.stage_occt_result::<CircularPatternResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::CircularPattern,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -6597,14 +6592,12 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self
-                                .stage_occt_result_for_revision::<BooleanFuseResult>(
-                                    root,
-                                    &request,
-                                    threeterm_occt_worker::Operation::BooleanFuse,
-                                    worker,
-                                    &inner.source_revision,
-                                )?;
+                            let derived = self.stage_occt_result::<BooleanFuseResult>(
+                                root,
+                                &request,
+                                threeterm_occt_worker::Operation::BooleanFuse,
+                                worker,
+                            )?;
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
@@ -6620,12 +6613,11 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self.stage_occt_result_for_revision::<BooleanCutResult>(
+                            let derived = self.stage_occt_result::<BooleanCutResult>(
                                 root,
                                 &request,
                                 threeterm_occt_worker::Operation::BooleanCut,
                                 worker,
-                                &inner.source_revision,
                             )?;
                             self.stage_replayed_occt_result(
                                 root,
@@ -6642,14 +6634,12 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self
-                                .stage_occt_result_for_revision::<BooleanCommonResult>(
-                                    root,
-                                    &request,
-                                    threeterm_occt_worker::Operation::BooleanCommon,
-                                    worker,
-                                    &inner.source_revision,
-                                )?;
+                            let derived = self.stage_occt_result::<BooleanCommonResult>(
+                                root,
+                                &request,
+                                threeterm_occt_worker::Operation::BooleanCommon,
+                                worker,
+                            )?;
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
@@ -6687,12 +6677,11 @@ impl Host {
                             inner.deterministic_inputs.thread_depth.unwrap_or_default(),
                         );
                     }
-                    let derived = self.stage_occt_result_for_revision::<HoleResult>(
+                    let derived = self.stage_occt_result::<HoleResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Hole,
                         worker,
-                        &inner.source_revision,
                     )?;
                     self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
                 }
@@ -9575,28 +9564,6 @@ impl Host {
             input_fingerprint,
             geometry_fingerprint,
         })
-    }
-
-    fn stage_occt_result_for_revision<R>(
-        &self,
-        root: &Path,
-        request: &impl Serialize,
-        operation: threeterm_occt_worker::Operation,
-        worker: &OcctWorker,
-        source_revision: &str,
-    ) -> Result<StagedOcctResult<R>, HostError>
-    where
-        R: DeserializeOwned + Serialize,
-    {
-        self.stage_occt_result_inner(
-            root,
-            request,
-            operation,
-            worker,
-            None,
-            None,
-            Some(source_revision),
-        )
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(

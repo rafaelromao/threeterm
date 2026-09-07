@@ -63,6 +63,16 @@ fn invalid_geometry_request(root: &Path) -> Value {
     })
 }
 
+fn self_intersecting_geometry_request(root: &Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "self-intersecting",
+        "profile": [[0.0, 0.0], [10.0, 10.0], [0.0, 10.0], [10.0, 0.0]],
+        "height": 3.0,
+        "mode": "additive",
+    })
+}
+
 fn cli_failure(root: &Path) -> Value {
     let error = dispatch_registered_command(
         &Host::new(),
@@ -70,6 +80,19 @@ fn cli_failure(root: &Path) -> Value {
         invalid_geometry_request(root),
     )
     .expect_err("CLI adapter rejects invalid geometry");
+    let DispatchError::Host(error) = error else {
+        panic!("CLI returned a non-host failure: {error:?}");
+    };
+    serde_json::to_value(domain_command_diagnostic(&error)).expect("CLI diagnostic serializes")
+}
+
+fn cli_self_intersecting_failure(root: &Path) -> Value {
+    let error = dispatch_registered_command(
+        &Host::new(),
+        EXTRUDE_COMMAND_ID,
+        self_intersecting_geometry_request(root),
+    )
+    .expect_err("CLI adapter rejects a self-intersecting profile");
     let DispatchError::Host(error) = error else {
         panic!("CLI returned a non-host failure: {error:?}");
     };
@@ -89,6 +112,19 @@ fn tui_failure(root: &Path) -> Value {
     serde_json::to_value(domain_command_diagnostic(&error)).expect("TUI diagnostic serializes")
 }
 
+fn tui_self_intersecting_failure(root: &Path) -> Value {
+    let error = threeterm_tui::execute_domain_command(
+        &Host::new(),
+        EXTRUDE_COMMAND_ID,
+        self_intersecting_geometry_request(root),
+    )
+    .expect_err("TUI adapter rejects a self-intersecting profile");
+    let threeterm_protocol::command_execution::ExecutionError::Handler(error) = error else {
+        panic!("TUI returned a non-handler failure: {error:?}");
+    };
+    serde_json::to_value(domain_command_diagnostic(&error)).expect("TUI diagnostic serializes")
+}
+
 fn mcp_failure(root: &Path) -> Value {
     let response = McpServer::new().handle_request(&JsonRpcRequest {
         id: json!(1),
@@ -97,6 +133,22 @@ fn mcp_failure(root: &Path) -> Value {
         params: json!({
             "name": "threeterm.command.extrude/2",
             "arguments": invalid_geometry_request(root),
+        }),
+    });
+    assert!(response.error.is_none(), "MCP should return a tool failure");
+    let result = response.result.expect("MCP has a tool result");
+    assert_eq!(result["isError"], true);
+    result["structuredContent"].clone()
+}
+
+fn mcp_self_intersecting_failure(root: &Path) -> Value {
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.extrude/2",
+            "arguments": self_intersecting_geometry_request(root),
         }),
     });
     assert!(response.error.is_none(), "MCP should return a tool failure");
@@ -286,6 +338,61 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
                 .contains_feature("invalid-cut")
         );
         assert!(!root.join("brep/invalid-cut.brep").exists());
+    }
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn self_intersecting_profile_preserves_canonical_state_and_matches_all_adapter_diagnostics() {
+    let Some(worker) = require_worker(
+        "self_intersecting_profile_preserves_canonical_state_and_matches_all_adapter_diagnostics",
+    ) else {
+        return;
+    };
+    let cli_root = root("self-intersecting-cli");
+    let mcp_root = root("self-intersecting-mcp");
+    let tui_root = root("self-intersecting-tui");
+    for root in [&cli_root, &mcp_root, &tui_root] {
+        seed_base(root, &worker);
+    }
+
+    let before = [&cli_root, &mcp_root, &tui_root].map(|root| {
+        let host = Host::new();
+        (
+            host.load(root).expect("canonical snapshot loads"),
+            canonical_files(root),
+            file_inventory(root),
+        )
+    });
+    let diagnostics = [
+        cli_self_intersecting_failure(&cli_root),
+        mcp_self_intersecting_failure(&mcp_root),
+        tui_self_intersecting_failure(&tui_root),
+    ];
+
+    assert_eq!(diagnostics[0], diagnostics[1]);
+    assert_eq!(diagnostics[0], diagnostics[2]);
+    assert_eq!(diagnostics[0]["code"], "brep_invalid");
+    assert_eq!(diagnostics[0]["affected_ids"], json!(["self-intersecting"]));
+    assert_eq!(
+        diagnostics[0]["recovery"],
+        "correct_geometry_or_restore_revision"
+    );
+
+    for (root, (snapshot, files, inventory)) in [&cli_root, &mcp_root, &tui_root]
+        .into_iter()
+        .zip(before.iter())
+    {
+        assert_eq!(
+            Host::new().load(root).expect("failed edit reloads"),
+            snapshot.clone()
+        );
+        assert_eq!(canonical_files(root), files.clone());
+        assert_eq!(file_inventory(root), inventory.clone());
+        assert!(!root.join("brep/self-intersecting.brep").exists());
     }
 
     for root in [cli_root, mcp_root, tui_root] {

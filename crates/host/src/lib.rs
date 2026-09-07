@@ -1438,6 +1438,22 @@ fn invalid_edit_from_extrude(error: HostError, affected_ids: &[String]) -> HostE
             affected_ids: affected_ids.to_vec(),
             recovery: "correct_geometry_or_restore_revision",
         },
+        HostError::WorkerFailure { detail, .. }
+            if [
+                "could not build the 2D polygon",
+                "could not build the planar face from the polygon",
+                "could not prism the face to produce the solid",
+                "subtractive extrusion did not produce a solid",
+            ]
+            .iter()
+            .any(|marker| detail.contains(marker)) =>
+        {
+            HostError::InvalidEdit {
+                detail: format!("brep_invalid: {detail}"),
+                affected_ids: affected_ids.to_vec(),
+                recovery: "correct_geometry_or_restore_revision",
+            }
+        }
         error => error,
     }
 }

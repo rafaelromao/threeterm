@@ -182,17 +182,30 @@ fn legacy_history_timeline_input_emits_the_canonical_graph_identity() {
                 ("first", "bracket:length=10;width=5;height=3;thickness=1"),
                 ("first-plate-vertical", "plate-vertical"),
                 ("first-plate-horizontal", "plate-horizontal"),
+                ("first-bend", "history-feature"),
+                ("first-finish", "history-feature"),
+                ("first-independent-base", "history-feature"),
+                ("first-independent-finish", "history-feature"),
             ],
             &event,
         )
         .expect("canonical graph publishes");
 
-    let timeline = bundle
-        .open()
-        .expect("bundle opens")
-        .feature_timeline("first-base")
-        .expect("legacy history identity remains readable");
-    assert_eq!(timeline.feature_id, "first");
+    let loaded = bundle.open().expect("bundle opens");
+    for reference in [
+        "first-base",
+        "first-bend",
+        "first-finish",
+        "first-independent-base",
+        "first-independent-finish",
+        "first-plate-vertical",
+        "first-plate-horizontal",
+    ] {
+        let timeline = loaded
+            .feature_timeline(reference)
+            .expect("legacy role identity remains readable");
+        assert_eq!(timeline.feature_id, "first");
+    }
 
     let manifest_before = fs::read(path.join("manifest.json")).expect("manifest");
     let log_before = fs::read(path.join("transactions.log")).expect("transaction log");

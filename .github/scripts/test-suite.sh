@@ -10,7 +10,8 @@ case "${1:-}" in
         cargo test --workspace
         ;;
     slow)
-        cargo test --workspace --jobs 1 -- --ignored --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test --workspace --jobs 1 -- --ignored --test-threads=1
         ;;
     e2e)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \

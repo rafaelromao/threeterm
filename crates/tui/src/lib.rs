@@ -1390,12 +1390,13 @@ impl TuiSession {
     pub fn show_feature_timeline(
         &mut self,
         feature_id: &str,
+        active_revision: impl Into<String>,
         revisions: Vec<FeatureTimelineRevision>,
         named_revisions: Vec<String>,
     ) -> Result<(), TuiDiagnostic> {
         self.show_feature_timeline_with_active_revision(
             feature_id,
-            String::new(),
+            active_revision.into(),
             revisions,
             named_revisions,
             Vec::new(),
@@ -1411,6 +1412,15 @@ impl TuiSession {
         named_revision_provenance: Vec<(String, String)>,
     ) -> Result<(), TuiDiagnostic> {
         let kind = StateEventKind::History(HistoryEventKind::RestoreNamedRevision);
+        if active_revision.is_empty() {
+            return Err(self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                kind,
+                "timeline active revision must not be empty".to_string(),
+                "timeline",
+            ));
+        }
         if self
             .selected_target()
             .is_none_or(|selected| canonical_feature_id(selected) != feature_id)

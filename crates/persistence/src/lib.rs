@@ -2097,13 +2097,10 @@ impl LoadedBundle {
                     .values()
                     .any(|revision| revision.snapshot.features.contains_key(id))
         };
-        let graph_has_family = self.graph.contains_feature(family)
-            || self
-                .graph
-                .contains_feature(&format!("{family}-plate-vertical"))
-            || self
-                .graph
-                .contains_feature(&format!("{family}-plate-horizontal"));
+        let graph_has_family = self
+            .graph
+            .features()
+            .any(|feature| history_family_id(feature.id.as_str()) == family);
         let history_has_family = self.history_events.iter().any(|event| {
             matches!(
                 &event.operation,
@@ -2150,13 +2147,10 @@ fn history_family_id(feature_id: &str) -> &str {
 
 fn canonical_identity_for_history(bundle: &LoadedBundle, history_id: &str) -> String {
     let family = history_family_id(history_id);
-    if bundle.graph.contains_feature(family)
-        || bundle
-            .graph
-            .contains_feature(&format!("{family}-plate-vertical"))
-        || bundle
-            .graph
-            .contains_feature(&format!("{family}-plate-horizontal"))
+    if bundle
+        .graph
+        .features()
+        .any(|feature| history_family_id(feature.id.as_str()) == family)
     {
         family.to_string()
     } else {

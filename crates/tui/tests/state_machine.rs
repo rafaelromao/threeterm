@@ -1041,6 +1041,37 @@ fn selected_canonical_id_ending_in_base_is_not_reinterpreted_as_a_role() {
 }
 
 #[test]
+fn graph_selection_preserves_a_canonical_id_ending_in_base() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "fixture-base", "box")
+        .expect("canonical feature persists");
+    let snapshot = host.current().expect("canonical snapshot exists");
+    let graph = host
+        .current_graph()
+        .expect("host exposes the canonical graph");
+    let mut session = TuiSession::from_feature_graph(&graph, &snapshot.revision_hash);
+
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("canonical feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("canonical feature selects");
+
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn selected_feature_timeline_rejects_a_feature_without_history_without_mutation() {
     let root = temporary_bundle_root();
     let host = Host::new();

@@ -997,7 +997,15 @@ fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
     let mut seen = BTreeSet::new();
     let mut targets = Vec::new();
     for feature in graph.features() {
-        let id = canonical_feature_id(feature.id.as_str()).to_string();
+        // Only history compatibility records use role suffixes without a
+        // canonical graph object. A real graph feature may legitimately end
+        // in `-base`, so preserve that exact semantic identity.
+        let id = if feature.kind == "history-feature" {
+            canonical_feature_id(feature.id.as_str())
+        } else {
+            feature.id.as_str()
+        }
+        .to_string();
         if seen.insert(id.clone()) {
             let label = if id == feature.id.as_str() {
                 feature.kind.to_string()

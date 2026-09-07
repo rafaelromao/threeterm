@@ -4,7 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_cli::dispatch::{DispatchError, dispatch_registered_command};
-use threeterm_host::{Host, domain_command_diagnostic};
+use threeterm_host::{
+    Host, HostError, StaleLastValidGeometryEntry, domain_command_diagnostic,
+    domain_command_failure_value,
+};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::Bundle;
@@ -171,4 +174,38 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
     for root in [cli_root, mcp_root, tui_root] {
         let _ = fs::remove_dir_all(root);
     }
+}
+
+#[test]
+fn stale_export_and_domain_failures_use_the_host_owned_value_projection() {
+    let invalid_edit = HostError::InvalidEdit {
+        detail: "brep_invalid: subtractive extrusion does not intersect the target solid".into(),
+        affected_ids: vec!["invalid-cut".into(), "base".into()],
+        recovery: "correct_geometry_or_restore_revision",
+    };
+    assert_eq!(
+        domain_command_failure_value(&invalid_edit),
+        threeterm_tui::domain_command_failure_value(&invalid_edit)
+    );
+    assert_eq!(
+        domain_command_failure_value(&invalid_edit)["affected_ids"],
+        json!(["invalid-cut", "base"])
+    );
+
+    let stale = HostError::StaleLastValidGeometry {
+        feature_id: "l-bracket".into(),
+        active_revision: "history-revision-2".into(),
+        stale_features: vec![StaleLastValidGeometryEntry {
+            feature_id: "l-bracket-base".into(),
+            status: "broken".into(),
+            last_valid_geometry_fingerprint: "fingerprint".into(),
+        }],
+    };
+    let value = domain_command_failure_value(&stale);
+    assert_eq!(value["code"], "stale_last_valid_geometry");
+    assert_eq!(value["override_eligible"], false);
+    assert_eq!(
+        value["recovery"],
+        "correct or restore the feature and recompute current geometry"
+    );
 }

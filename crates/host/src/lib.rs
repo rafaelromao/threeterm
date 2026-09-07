@@ -1352,6 +1352,27 @@ pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
     }
 }
 
+pub fn domain_command_failure_value(error: &HostError) -> serde_json::Value {
+    if let HostError::StaleLastValidGeometry {
+        feature_id,
+        active_revision,
+        stale_features,
+    } = error
+    {
+        return serde_json::json!({
+            "severity": "error",
+            "code": "stale_last_valid_geometry",
+            "feature_id": feature_id,
+            "active_revision": active_revision,
+            "stale_features": stale_features,
+            "recovery": "correct or restore the feature and recompute current geometry",
+            "override_eligible": false,
+            "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
+        });
+    }
+    serde_json::to_value(domain_command_diagnostic(error)).expect("domain diagnostic serializes")
+}
+
 fn invalid_edit_from_extrude(error: HostError, affected_ids: &[String]) -> HostError {
     match error {
         HostError::BrepInvalid { detail, .. } => HostError::InvalidEdit {

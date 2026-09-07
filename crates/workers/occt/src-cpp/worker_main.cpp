@@ -1638,9 +1638,14 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         out << ",\"edge_candidates\":[]";
         return;
     }
-    const std::string source_feature_id = get_string(*selected, "source_feature_id");
-    const std::string source_revision_id = get_string(*selected, "source_revision_id");
-    const std::string source_edge_id = get_string(*selected, "source_edge_id");
+    const auto* provenance = find_field(*selected, "provenance");
+    const JsonParser::Value* source =
+        provenance != nullptr && provenance->kind == JsonParser::ValueKind::Object
+            ? provenance
+            : selected;
+    const std::string source_feature_id = get_string(*source, "source_feature_id");
+    const std::string source_revision_id = get_string(*source, "source_revision_id");
+    const std::string source_edge_id = get_string(*source, "source_edge_id");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (const TopoDS_Edge& edge : edges) {

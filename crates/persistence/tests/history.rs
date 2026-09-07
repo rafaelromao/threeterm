@@ -108,7 +108,7 @@ fn feature_timeline_reads_the_canonical_stream_without_publishing() {
     let timeline = loaded
         .feature_timeline("first-base")
         .expect("timeline projects");
-    assert_eq!(timeline.feature_id, "first-base");
+    assert_eq!(timeline.feature_id, "first");
     assert_eq!(timeline.named_revisions[0].name, "before-edit");
     assert_eq!(
         fs::read(path.join("manifest.json")).expect("manifest"),

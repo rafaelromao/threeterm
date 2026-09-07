@@ -2075,13 +2075,13 @@ impl LoadedBundle {
     }
 
     /// Resolve a public canonical graph identity to the persisted history
-    /// feature that owns its object timeline. Direct history IDs remain
+    /// feature that owns its feature timeline. Direct history IDs remain
     /// readable for old bundles and headless callers.
     pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
         Ok(self.resolve_history_feature(feature_id)?.history_id)
     }
 
-    /// Resolve a selected graph identity to its persisted history owner while
+    /// Resolve a selected graph identity to its persisted timeline feature while
     /// keeping the public identity stable across legacy history records.
     pub fn resolve_history_feature(
         &self,
@@ -2114,13 +2114,13 @@ impl LoadedBundle {
                 && has_history(&history_id)
         {
             return Ok(ResolvedHistoryFeature {
-                canonical_id: canonical_identity_for_history(self, feature_id),
+                canonical_id: canonical_identity_for_history(feature_id),
                 history_id,
             });
         }
         if has_history(feature_id) {
             return Ok(ResolvedHistoryFeature {
-                canonical_id: canonical_identity_for_history(self, feature_id),
+                canonical_id: canonical_identity_for_history(feature_id),
                 history_id: feature_id.to_string(),
             });
         }
@@ -2145,17 +2145,8 @@ fn history_family_id(feature_id: &str) -> &str {
     .unwrap_or(feature_id)
 }
 
-fn canonical_identity_for_history(bundle: &LoadedBundle, history_id: &str) -> String {
-    let family = history_family_id(history_id);
-    if bundle
-        .graph
-        .features()
-        .any(|feature| history_family_id(feature.id.as_str()) == family)
-    {
-        family.to_string()
-    } else {
-        history_id.to_string()
-    }
+fn canonical_identity_for_history(history_id: &str) -> String {
+    history_family_id(history_id).to_string()
 }
 
 #[derive(Debug)]

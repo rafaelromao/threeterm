@@ -986,29 +986,19 @@ pub struct FeatureTarget {
 }
 
 fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
-    let mut targets = graph
-        .features()
-        .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind))
-        .collect::<Vec<_>>();
-    let existing = targets
-        .iter()
-        .map(|target| target.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let families = graph
-        .features()
-        .filter_map(|feature| {
-            let id = feature.id.as_str();
-            id.strip_suffix("-plate-vertical")
-                .or_else(|| id.strip_suffix("-plate-horizontal"))
-                .map(str::to_string)
-        })
-        .filter(|family| !existing.contains(family.as_str()))
-        .collect::<BTreeSet<_>>();
-    targets.extend(
-        families
-            .into_iter()
-            .map(|family| FeatureTarget::new(family, "bracket")),
-    );
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::new();
+    for feature in graph.features() {
+        let id = canonical_feature_id(feature.id.as_str()).to_string();
+        if seen.insert(id.clone()) {
+            let label = if id == feature.id.as_str() {
+                feature.kind.to_string()
+            } else {
+                "feature".to_string()
+            };
+            targets.push(FeatureTarget::new(id, label));
+        }
+    }
     targets
 }
 
@@ -3208,8 +3198,15 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     pub fn render_current(&mut self) -> Result<SubmitOutcome, ViewportDiagnostic> {
-        self.scene.selected_id = self.tui.state().selected_target;
-        let generation = self.tui.state().presentation_generation;
+        let state = self.tui.state();
+        self.scene.selected_id = state.selected_target.map(|target| {
+            self.scene
+                .features
+                .iter()
+                .find(|feature| feature.id == target || canonical_feature_id(&feature.id) == target)
+                .map_or(target.clone(), |feature| feature.id.clone())
+        });
+        let generation = state.presentation_generation;
         let frame = ProtocolNeutralViewport::project(
             &self.scene,
             ViewportRequest::new(
@@ -3355,24 +3352,30 @@ impl<R: Renderer> TuiViewportSession<R> {
                 diagnostic: None,
             });
         }
+        let canonical_candidates = candidates
+            .iter()
+            .map(|candidate| canonical_feature_id(candidate).to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         self.tui
-            .validate_semantic_candidates(&candidates)
+            .validate_semantic_candidates(&canonical_candidates)
             .map_err(TuiViewportError::Tui)?;
         self.tui
             .transition_selection(SelectionEvent::Nominate {
-                candidates: candidates.clone(),
+                candidates: canonical_candidates.clone(),
             })
             .map_err(TuiViewportError::Tui)?;
-        let transition = if candidates.len() == 1 {
+        let transition = if canonical_candidates.len() == 1 {
             self.tui
                 .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-                    stable_ids: candidates.clone(),
+                    stable_ids: canonical_candidates.clone(),
                 }))
                 .map_err(TuiViewportError::Tui)?
         } else {
             self.tui
                 .transition_selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
-                    stable_ids: candidates.clone(),
+                    stable_ids: canonical_candidates.clone(),
                 }))
                 .map_err(TuiViewportError::Tui)?
         };

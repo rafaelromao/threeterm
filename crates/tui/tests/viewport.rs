@@ -240,13 +240,13 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
         session
             .process_terminal_input(b"\x1b[B")
             .expect("selection enters the production viewport path");
-        if session.state().selected_target.as_deref() == Some("l-bracket-base") {
+        if session.state().selected_target.as_deref() == Some("l-bracket") {
             break;
         }
     }
     assert_eq!(
         session.state().selected_target.as_deref(),
-        Some("l-bracket-base")
+        Some("l-bracket")
     );
     session
         .open_feature_timeline(&host, &root)
@@ -263,7 +263,7 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
             .contains("stale-last-valid-geometry")
     );
     assert!(rendered.rendered.overlay.contains("l-bracket-base"));
-    assert_eq!(session.state().stale_last_valid_geometry.len(), 1);
+    assert_eq!(session.state().stale_last_valid_geometry.len(), 3);
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
@@ -271,7 +271,7 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
 
 #[test]
 #[ignore = "requires the native OCCT worker"]
-fn production_viewport_browses_and_restores_the_selected_object_timeline() {
+fn production_viewport_browses_and_restores_the_selected_feature_timeline() {
     let root = temporary_bundle_root();
     let host = Host::new();
     host.save_bracket(&root, "first", 60.0, 30.0, 40.0, 3.0)

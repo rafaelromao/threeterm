@@ -276,7 +276,7 @@ fn seed_divergent_timeline(root: &Path) {
         .expect("divergent history publishes");
 }
 
-fn timeline_projection(value: &Value) -> Value {
+fn feature_timeline_projection(value: &Value) -> Value {
     serde_json::json!({
         "feature_id": value["feature_id"],
         "active_revision": value["active_revision"],
@@ -286,6 +286,7 @@ fn timeline_projection(value: &Value) -> Value {
                 "revision_id": revision["revision_id"],
                 "operation": revision["operation"],
                 "status": revision["status"],
+                "named_revision_names": revision["named_revision_names"],
             })
         }).collect::<Vec<_>>(),
         "named_revisions": value["named_revisions"].as_array().expect("named revisions").iter().map(|revision| {
@@ -297,7 +298,7 @@ fn timeline_projection(value: &Value) -> Value {
     })
 }
 
-fn tui_timeline_projection(timeline: &threeterm_tui::FeatureTimelineView) -> Value {
+fn tui_feature_timeline_projection(timeline: &threeterm_tui::FeatureTimelineView) -> Value {
     serde_json::json!({
         "feature_id": timeline.feature_id,
         "active_revision": timeline.active_revision,
@@ -307,6 +308,7 @@ fn tui_timeline_projection(timeline: &threeterm_tui::FeatureTimelineView) -> Val
                 "revision_id": revision.revision_id,
                 "operation": revision.operation,
                 "status": revision.status,
+                "named_revision_names": revision.named_revision_names,
             })
         }).collect::<Vec<_>>(),
         "named_revisions": timeline.named_revision_provenance.iter().map(|(name, provenance)| {
@@ -340,7 +342,7 @@ fn cli_timeline(root: &Path, feature_id: &str) -> Value {
 }
 
 #[test]
-fn production_adapters_report_one_canonical_object_timeline() {
+fn production_adapters_report_one_canonical_feature_timeline() {
     let root = fresh_bundle("adapter-conformance");
     seed_divergent_timeline(&root);
 
@@ -380,9 +382,9 @@ fn production_adapters_report_one_canonical_object_timeline() {
         .feature_timeline
         .expect("TUI timeline is visible");
 
-    let cli = timeline_projection(&cli);
-    let mcp = timeline_projection(&mcp);
-    let tui = tui_timeline_projection(&tui);
+    let cli = feature_timeline_projection(&cli);
+    let mcp = feature_timeline_projection(&mcp);
+    let tui = tui_feature_timeline_projection(&tui);
     assert_eq!(cli, mcp);
     assert_eq!(cli, tui);
     assert_eq!(cli["feature_id"], "second");
@@ -1414,7 +1416,7 @@ fn mcp_process_rejects_unknown_and_incompatible_timeline_references_without_muta
 
 #[test]
 #[ignore = "requires the native OCCT worker"]
-fn mcp_process_browses_and_restores_the_divergent_object_timeline() {
+fn mcp_process_browses_and_restores_the_divergent_feature_timeline() {
     let root = fresh_bundle("divergent-timeline");
     mcp_bracket(&root, "first");
     mcp_bracket(&root, "second");

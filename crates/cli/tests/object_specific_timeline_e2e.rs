@@ -103,7 +103,7 @@ fn create_revision(bin: &str, root: &Path, name: &str) -> Value {
 
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
-fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
+fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     bracket(bin, &root, "first");
@@ -408,7 +408,7 @@ fn production_cli_rejects_unknown_and_incompatible_timeline_references_without_m
 
 #[test]
 #[ignore = "requires the native OCCT worker"]
-fn divergent_object_timeline_restore_replays_after_derived_results_are_removed() {
+fn divergent_feature_timeline_restore_replays_after_derived_results_are_removed() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     bracket(bin, &root, "first");

@@ -127,12 +127,12 @@ fn feature_timeline_reload_renders_the_stale_marker_on_live_input() {
     let mut session = TuiSession::from_feature_graph(&graph, &before.revision_hash);
     session
         .transition_selection(SelectionEvent::Nominate {
-            candidates: vec!["l-bracket-base".to_string()],
+            candidates: vec!["l-bracket".to_string()],
         })
         .expect("feature is nominated");
     session
         .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-            stable_ids: vec!["l-bracket-base".to_string()],
+            stable_ids: vec!["l-bracket".to_string()],
         }))
         .expect("feature selection is verified");
     session
@@ -1004,7 +1004,7 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
 }
 
 #[test]
-fn selected_feature_timeline_rejects_an_unknown_history_owner_without_mutation() {
+fn selected_feature_timeline_rejects_a_feature_without_history_without_mutation() {
     let root = temporary_bundle_root();
     let host = Host::new();
     host.save(&root, "plain", "cube")
@@ -1029,7 +1029,7 @@ fn selected_feature_timeline_rejects_an_unknown_history_owner_without_mutation()
 
     let diagnostic = session
         .open_feature_timeline(&host, &root)
-        .expect_err("feature without a history owner is rejected");
+        .expect_err("feature without a timeline is rejected");
     assert_eq!(diagnostic.code, TuiDiagnosticCode::HistoryRejected);
     assert_eq!(
         std::fs::read(root.join("manifest.json")).expect("manifest"),

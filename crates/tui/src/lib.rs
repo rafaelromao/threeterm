@@ -911,6 +911,13 @@ fn feature_timeline_from_response(response: &Value) -> Result<FeatureTimelineVie
                         .ok_or_else(|| "timeline named revision name is not a string".to_string())
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let stale_last_valid_geometry_fingerprint = revision
+                .get("stale_last_valid_geometry_fingerprint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "timeline revision has no stale last valid geometry fingerprint".to_string()
+                })?
+                .to_string();
             Ok(FeatureTimelineRevision {
                 ordinal,
                 revision_id: revision_id.to_string(),
@@ -923,6 +930,7 @@ fn feature_timeline_from_response(response: &Value) -> Result<FeatureTimelineVie
                     HistoryTimelineStatus::Absent => "absent",
                 }
                 .to_string(),
+                stale_last_valid_geometry_fingerprint,
                 named_revision_names,
             })
         })
@@ -1032,6 +1040,7 @@ pub struct FeatureTimelineRevision {
     pub revision_id: String,
     pub operation: String,
     pub status: String,
+    pub stale_last_valid_geometry_fingerprint: String,
     pub named_revision_names: Vec<String>,
 }
 

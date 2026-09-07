@@ -83,7 +83,7 @@ fn subtractive_extrude_rejects_a_missing_semantic_target_without_mutation() {
             affected_ids,
             recovery: "choose_existing_target_or_restore_revision",
             ..
-        } if affected_ids == &["cut", "does-not-exist"]
+        } if affected_ids == ["cut", "does-not-exist"]
     ));
     assert_eq!(
         fs::read(root.join(MANIFEST_FILENAME)).unwrap(),

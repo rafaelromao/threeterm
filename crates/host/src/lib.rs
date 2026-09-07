@@ -3402,10 +3402,10 @@ impl Host {
                         extrusion,
                         Some(&source_snapshot.revision_hash),
                     )?;
-                    let affected_ids = target_feature_id
-                        .as_ref()
-                        .map(|target| vec![extrusion.feature_id.clone(), target.clone()])
-                        .unwrap_or_default();
+                    let mut affected_ids = vec![extrusion.feature_id.clone()];
+                    if let Some(target) = target_feature_id.as_ref() {
+                        affected_ids.push(target.clone());
+                    }
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),

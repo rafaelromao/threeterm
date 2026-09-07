@@ -9742,18 +9742,22 @@ impl Host {
                     length: context.length,
                 },
             };
-            let outcome = resolve_edge_reference(
-                &reference,
-                domain_edge_candidates(
-                    &typed_value["edge_candidates"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|value| serde_json::from_value(value).ok())
-                        .collect::<Vec<EdgeCandidateEvidence>>(),
-                ),
-            );
+            let candidates = canonical_finishing_edge_candidates(
+                &typed_value["edge_candidates"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| serde_json::from_value(value).ok())
+                    .collect::<Vec<EdgeCandidateEvidence>>(),
+            )
+            .into_iter()
+            .map(|mut candidate| {
+                candidate.provenance = reference.provenance.clone();
+                candidate
+            })
+            .collect::<Vec<_>>();
+            let outcome = resolve_edge_reference(&reference, candidates);
             if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
                 let _ = completion.stage.discard();
                 return Err(HostError::Validation {

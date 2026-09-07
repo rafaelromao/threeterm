@@ -20,7 +20,7 @@ use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
     CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
     CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
+    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
     FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
     LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
     MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REHEARSE_COMMAND_ID,
@@ -3706,27 +3706,14 @@ fn execute_handler(
         DispatchPlan::Loft { .. } => {
             emit_registered_domain_handler(LOFT_COMMAND_ID, request, stdout, stderr)
         }
-        DispatchPlan::Export {
-            bundle,
-            feature_id,
-            body_ids,
-            formats,
-            output_dir,
-            tessellation_deflection,
-            override_warnings,
-            accept_stale_geometry,
-        } => emit_export(
-            &bundle,
-            &feature_id,
-            &body_ids,
-            &formats,
-            &output_dir,
-            tessellation_deflection,
-            override_warnings,
-            accept_stale_geometry,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Export { feature_id, .. } => {
+            let host = Host::new();
+            match dispatch_registered_command(&host, EXPORT_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(DispatchError::Host(error)) => emit_export_error(&feature_id, &error, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Unknown { arg } => emit_unknown_command(&arg, stderr),
     }
 }
@@ -4465,48 +4452,13 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
     Ok(request)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_export(
-    bundle: &str,
-    feature_id: &str,
-    body_ids: &[String],
-    formats: &[String],
-    output_dir: &str,
-    deflection: f64,
-    override_warnings: bool,
-    accept_stale_geometry: bool,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    match Host::new().export(
-        bundle,
-        feature_id,
-        formats,
-        Path::new(output_dir),
-        deflection,
-        override_warnings,
-        accept_stale_geometry,
-        body_ids,
-    ) {
-        Ok(view) => write_success(
-            stdout,
-            &json!({
-                "status": "ok",
-                "feature_id": feature_id,
-                "artifacts": view.artifacts,
-                "source_revision_id": view.source_snapshot.revision_hash,
-                "derived_artifacts": view.derived_artifacts,
-                "accepted_stale_last_valid_geometry": false,
-                "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
-                "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION
-            }),
-            stderr,
-        ),
-        Err(HostError::StaleLastValidGeometry {
+fn emit_export_error(feature_id: &str, error: &HostError, stderr: &mut dyn Write) -> i32 {
+    match error {
+        HostError::StaleLastValidGeometry {
             feature_id,
             active_revision,
             stale_features,
-        }) => {
+        } => {
             let _ = writeln!(
                 stderr,
                 "{}",
@@ -4523,21 +4475,29 @@ fn emit_export(
             );
             EXIT_BREP_INVALID
         }
-        Err(HostError::Validation { detail }) if detail.starts_with('{') => {
+        HostError::Validation { detail } if detail.starts_with('{') => {
             let _ = writeln!(stderr, "{detail}");
             EXIT_BREP_INVALID
         }
-        Err(HostError::Validation { detail }) => {
-            let diagnostic = semantic_reference_diagnostic(&detail)
-                .unwrap_or_else(|| Diagnostic::invalid_request(&detail));
+        HostError::Validation { detail } => {
+            let diagnostic = semantic_reference_diagnostic(detail)
+                .unwrap_or_else(|| Diagnostic::invalid_request(detail));
             write_diagnostic(stderr, &diagnostic);
             EXIT_INTEGRITY_FAILURE
         }
-        Err(error) => {
+        error => {
             let _ = writeln!(
                 stderr,
                 "{}",
-                json!({ "severity": "fatal", "code": "export_failed", "affected_feature_id": feature_id, "recovery": "fix the selected feature or output directory and retry", "override_eligible": false, "detail": error.to_string(), "schema_version": threeterm_protocol::schema_version() })
+                json!({
+                    "severity": "fatal",
+                    "code": "export_failed",
+                    "affected_feature_id": feature_id,
+                    "recovery": "fix the selected feature or output directory and retry",
+                    "override_eligible": false,
+                    "detail": error.to_string(),
+                    "schema_version": threeterm_protocol::schema_version()
+                })
             );
             EXIT_BREP_INVALID
         }
@@ -6988,6 +6948,24 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&stderr).expect("diagnostic is JSON");
         assert_eq!(parsed["code"], "worker_failure");
         assert_eq!(parsed["arg"], "request_id=req-42; foreign completion");
+    }
+
+    #[test]
+    fn export_stale_geometry_preserves_the_export_failure_contract() {
+        let mut stderr = Vec::new();
+        let exit = emit_export_error(
+            "box",
+            &HostError::StaleLastValidGeometry {
+                feature_id: "box".to_string(),
+                active_revision: "revision-1".to_string(),
+                stale_features: vec![],
+            },
+            &mut stderr,
+        );
+        assert_eq!(exit, EXIT_BREP_INVALID);
+        let parsed: Value = serde_json::from_slice(&stderr).expect("export diagnostic is JSON");
+        assert_eq!(parsed["code"], "stale_last_valid_geometry");
+        assert_eq!(parsed["feature_id"], "box");
     }
 
     #[test]

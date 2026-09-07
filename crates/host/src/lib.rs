@@ -1120,6 +1120,11 @@ pub enum HostError {
         request_id: Option<String>,
         detail: String,
     },
+    InvalidEdit {
+        detail: String,
+        affected_ids: Vec<String>,
+        recovery: &'static str,
+    },
     BrepFileMissing {
         path: PathBuf,
     },
@@ -1224,6 +1229,7 @@ impl std::fmt::Display for HostError {
             Self::BrepInvalid { detail, .. } => {
                 write!(formatter, "occt brep invalid: {detail}")
             }
+            Self::InvalidEdit { detail, .. } => write!(formatter, "invalid edit: {detail}"),
             Self::WorkerTerminated { record } => {
                 write!(
                     formatter,
@@ -1324,6 +1330,36 @@ impl std::error::Error for HostError {}
 impl From<BundleError> for HostError {
     fn from(error: BundleError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
+    match error {
+        HostError::InvalidEdit {
+            detail,
+            affected_ids,
+            recovery,
+        } => Diagnostic::brep_invalid(detail).with_context(affected_ids.iter(), *recovery),
+        HostError::BrepInvalid { detail, .. } => Diagnostic::brep_invalid(detail),
+        HostError::UnsupportedGeometry { detail, .. } => Diagnostic::unsupported_geometry(detail),
+        HostError::WorkerFailure { detail, .. } => Diagnostic::worker_failure(detail),
+        HostError::WorkerUnavailable { detail } => Diagnostic::worker_failure(detail),
+        HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&error.to_string()),
+        HostError::Persistence(error) => Diagnostic::persistence_failure(&error.to_string()),
+        HostError::DerivedResult { diagnostic } => diagnostic.clone(),
+        HostError::Validation { detail } => Diagnostic::invalid_request(detail),
+        _ => Diagnostic::integrity_failure(&error.to_string()),
+    }
+}
+
+fn invalid_edit_from_extrude(error: HostError, affected_ids: &[String]) -> HostError {
+    match error {
+        HostError::BrepInvalid { detail, .. } => HostError::InvalidEdit {
+            detail,
+            affected_ids: affected_ids.to_vec(),
+            recovery: "correct_geometry_or_restore_revision",
+        },
+        error => error,
     }
 }
 
@@ -3289,6 +3325,10 @@ impl Host {
                         extrusion,
                         Some(&source_snapshot.revision_hash),
                     )?;
+                    let affected_ids = target_feature_id
+                        .as_ref()
+                        .map(|target| vec![extrusion.feature_id.clone(), target.clone()])
+                        .unwrap_or_default();
                     let worker =
                         OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
                             detail: error.to_string(),
@@ -3299,9 +3339,11 @@ impl Host {
                             extrusion,
                             &worker,
                             &expected_revision,
-                        )?
+                        )
+                        .map_err(|error| invalid_edit_from_extrude(error, &affected_ids))?
                     } else {
-                        self.extrude(bundle_path, extrusion, &worker)?
+                        self.extrude(bundle_path, extrusion, &worker)
+                            .map_err(|error| invalid_edit_from_extrude(error, &affected_ids))?
                     };
                     Ok(serde_json::json!({
                         "status": view.result.status,

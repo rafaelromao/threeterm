@@ -458,7 +458,7 @@ impl McpServer {
                 } else if command == EXPORT_COMMAND_ID {
                     tool_result(export_failure_value(&error), true)
                 } else {
-                    tool_execution_error(format!("domain command failed: {error}"))
+                    host_tool_execution_error(&error)
                 },
             ),
             Err(ExecutionError::InvalidResponse(reason)) => JsonRpcResponse::error(

@@ -6506,6 +6506,7 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
             .as_deref()
             .map(|request_id| format!("request_id={request_id}; {detail}"))
             .unwrap_or_else(|| detail.clone()),
+        HostError::InvalidEdit { detail, .. } => detail.clone(),
         HostError::BrepFileMissing { path } => {
             format!("brep file missing: {}", path.display())
         }
@@ -6576,6 +6577,10 @@ fn emit_host_error(error: &HostError, stderr: &mut dyn Write) -> i32 {
         HostError::DerivedResult { diagnostic } => diagnostic.arg.clone(),
     };
     let (mut diagnostic, exit) = match error {
+        HostError::InvalidEdit { .. } => (
+            threeterm_host::domain_command_diagnostic(error),
+            EXIT_BREP_INVALID,
+        ),
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             (Diagnostic::brep_invalid(&detail), EXIT_BREP_INVALID)
         }
@@ -6642,6 +6647,7 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         _ => error.to_string(),
     };
     match error {
+        HostError::InvalidEdit { .. } => threeterm_host::domain_command_diagnostic(error),
         HostError::BrepInvalid { .. } | HostError::BrepIo { .. } => {
             Diagnostic::brep_invalid(&detail)
         }

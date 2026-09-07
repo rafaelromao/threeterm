@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -111,6 +113,77 @@ fn canonical_files(root: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     )
 }
 
+fn file_inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, current: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let mut entries = fs::read_dir(current)
+            .expect("artifact inventory directory reads")
+            .map(|entry| entry.expect("artifact inventory entry reads"))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("artifact inventory path is under bundle")
+                .to_path_buf();
+            if entry
+                .file_type()
+                .expect("artifact inventory type reads")
+                .is_dir()
+            {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    relative,
+                    fs::read(path).expect("artifact inventory file reads"),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+fn cli_load(root: &Path) -> Value {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let path = root.to_string_lossy().into_owned();
+    let status = threeterm_cli::dispatch::dispatch(
+        ["--machine", "load", path.as_str()]
+            .into_iter()
+            .map(OsString::from),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(
+        status,
+        0,
+        "CLI load failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    serde_json::from_slice(&stdout).expect("CLI load returns JSON")
+}
+
+fn mcp_load(root: &Path) -> Value {
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.load/1",
+            "arguments": {"bundle_path": root.to_string_lossy()}
+        }),
+    });
+    assert!(
+        response.error.is_none(),
+        "MCP load failed: {:?}",
+        response.error
+    );
+    response.result.expect("MCP load has result")["structuredContent"].clone()
+}
+
 #[test]
 fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostics() {
     let Some(worker) = require_worker(
@@ -130,6 +203,7 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
         (
             host.load(root).expect("canonical snapshot loads"),
             canonical_files(root),
+            file_inventory(root),
         )
     });
     let diagnostics = [
@@ -156,12 +230,16 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
             .contains("request_id=")
     );
 
-    for (root, (snapshot, files)) in [&cli_root, &mcp_root, &tui_root].into_iter().zip(before) {
+    for (root, (snapshot, files, inventory)) in [&cli_root, &mcp_root, &tui_root]
+        .into_iter()
+        .zip(before.iter())
+    {
         assert_eq!(
             Host::new().load(root).expect("failed edit reloads"),
-            snapshot
+            snapshot.clone()
         );
-        assert_eq!(canonical_files(root), files);
+        assert_eq!(canonical_files(root), files.clone());
+        assert_eq!(file_inventory(root), inventory.clone());
         assert!(!root.join("brep/invalid-cut.brep").exists());
         assert!(
             fs::read_dir(root.join("stage"))
@@ -169,6 +247,45 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
                 .next()
                 .is_none()
         );
+    }
+
+    for root in [&cli_root, &mcp_root, &tui_root] {
+        fs::remove_file(root.join("brep/base.brep")).expect("base BREP removes for reload");
+        for directory in ["cache", ".derived", "stage"] {
+            let _ = fs::remove_dir_all(root.join(directory));
+        }
+    }
+    let loads = [
+        cli_load(&cli_root),
+        mcp_load(&mcp_root),
+        threeterm_tui::execute_domain_command(
+            &Host::new(),
+            threeterm_protocol::schema::LOAD_COMMAND_ID,
+            json!({"bundle_path": tui_root.to_string_lossy()}),
+        )
+        .expect("TUI reloads after the rejected edit"),
+    ];
+    for ((root, (snapshot, files, _)), load_result) in [&cli_root, &mcp_root, &tui_root]
+        .into_iter()
+        .zip(before.iter())
+        .zip(loads)
+    {
+        assert_eq!(
+            load_result["feature_graph_hash"],
+            snapshot.feature_graph_hash
+        );
+        assert_eq!(load_result["revision_hash"], snapshot.revision_hash);
+        assert_eq!(fs::read(root.join("manifest.json")).unwrap(), files.0);
+        assert_eq!(fs::read(root.join("transactions.log")).unwrap(), files.1);
+        assert_eq!(fs::read(root.join("brep/base.brep")).unwrap(), files.2);
+        assert!(
+            !Bundle::at(root)
+                .open()
+                .unwrap()
+                .graph
+                .contains_feature("invalid-cut")
+        );
+        assert!(!root.join("brep/invalid-cut.brep").exists());
     }
 
     for root in [cli_root, mcp_root, tui_root] {

@@ -75,7 +75,7 @@ impl Diagnostic {
         affected_ids: impl IntoIterator<Item = impl Into<String>>,
         recovery: impl Into<String>,
     ) -> Self {
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = std::collections::HashSet::new();
         self.affected_ids = affected_ids
             .into_iter()
             .map(Into::into)

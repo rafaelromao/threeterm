@@ -11,8 +11,8 @@ use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, CommandSchema,
-    EXTRUDE_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, iter,
+    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID,
+    IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
@@ -343,6 +343,18 @@ fn historical_edit_request(root: &std::path::Path) -> Value {
         "feature_id": "l-bracket-base",
         "parameter": "length",
         "value": 0.0
+    })
+}
+
+fn export_request(root: &std::path::Path, override_warnings: bool, accept_stale: bool) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "l-bracket",
+        "formats": ["stl"],
+        "output_dir": root.join("export").to_string_lossy(),
+        "tessellation_deflection": 0.1,
+        "override_warnings": override_warnings,
+        "accept_stale_geometry": accept_stale
     })
 }
 
@@ -1123,6 +1135,92 @@ fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
     assert!(overlay.contains("l-bracket-base"));
     assert!(overlay.contains(active_revision));
 
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
+fn stale_geometry_export_is_fatal_and_equivalent_for_every_override_combination() {
+    let cli_root = root("stale-export-cli");
+    let mcp_root = root("stale-export-mcp");
+    let tui_root = root("stale-export-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        let host = threeterm_host::Host::new();
+        host.save_bracket(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history fixture creates");
+        host.historical_edit(path, "l-bracket-base", "length", 0.0)
+            .expect("historical failure commits stale state");
+    }
+
+    let manifest_before = [
+        fs::read(cli_root.join("manifest.json")).expect("CLI manifest reads"),
+        fs::read(mcp_root.join("manifest.json")).expect("MCP manifest reads"),
+        fs::read(tui_root.join("manifest.json")).expect("TUI manifest reads"),
+    ];
+    let log_before = [
+        fs::read(cli_root.join("transactions.log")).expect("CLI log reads"),
+        fs::read(mcp_root.join("transactions.log")).expect("MCP log reads"),
+        fs::read(tui_root.join("transactions.log")).expect("TUI log reads"),
+    ];
+
+    for override_warnings in [false, true] {
+        for accept_stale in [false, true] {
+            let cli_error = dispatch_registered_command(
+                &threeterm_host::Host::new(),
+                EXPORT_COMMAND_ID,
+                export_request(&cli_root, override_warnings, accept_stale),
+            )
+            .expect_err("CLI refuses stale geometry export");
+            let threeterm_cli::dispatch::DispatchError::Host(cli_error) = cli_error else {
+                panic!("CLI returned a non-host export failure");
+            };
+            let cli = threeterm_host::domain_command_failure_value(&cli_error);
+
+            let tui_error = threeterm_tui::execute_domain_command(
+                &threeterm_host::Host::new(),
+                EXPORT_COMMAND_ID,
+                export_request(&tui_root, override_warnings, accept_stale),
+            )
+            .expect_err("TUI refuses stale geometry export");
+            let threeterm_protocol::command_execution::ExecutionError::Handler(tui_error) =
+                tui_error
+            else {
+                panic!("TUI returned a non-handler export failure");
+            };
+            let tui = threeterm_tui::domain_command_failure_value(&tui_error);
+
+            let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+                id: json!(1),
+                is_notification: false,
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "threeterm.command.export/1",
+                    "arguments": export_request(&mcp_root, override_warnings, accept_stale)
+                }),
+            });
+            let mcp =
+                mcp.result.expect("MCP returns stale export result")["structuredContent"].clone();
+
+            assert_eq!(cli, tui);
+            assert_eq!(cli, mcp);
+            assert_eq!(cli["severity"], "error");
+            assert_eq!(cli["code"], "stale_last_valid_geometry");
+            assert_eq!(cli["override_eligible"], false);
+        }
+    }
+
+    for (index, path) in [&cli_root, &mcp_root, &tui_root].into_iter().enumerate() {
+        assert_eq!(
+            fs::read(path.join("manifest.json")).unwrap(),
+            manifest_before[index]
+        );
+        assert_eq!(
+            fs::read(path.join("transactions.log")).unwrap(),
+            log_before[index]
+        );
+        assert!(!path.join("export").exists());
+    }
     for path in [cli_root, mcp_root, tui_root] {
         let _ = fs::remove_dir_all(path);
     }

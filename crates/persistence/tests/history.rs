@@ -164,6 +164,45 @@ fn feature_timeline_accepts_the_selected_canonical_feature_identity() {
 }
 
 #[test]
+fn exact_initialized_bracket_identity_wins_over_a_legacy_base_role() {
+    let path = root("canonical-base-suffix");
+    let bundle = Bundle::at(&path);
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("history-canonical-base-suffix"),
+    )
+    .expect("fresh bundle");
+    let mut state = HistoryState::default();
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        bundle
+            .append_features_with_history(&[], &event)
+            .expect("history event publishes");
+        state.apply_event(&event).expect("event applies");
+    }
+
+    let loaded = bundle.open().expect("bundle opens");
+    assert_eq!(
+        loaded
+            .feature_timeline("fixture-base")
+            .expect("exact bracket identity resolves")
+            .feature_id,
+        "fixture-base"
+    );
+    assert_eq!(
+        loaded
+            .feature_timeline("fixture-base-base")
+            .expect("legacy role identity resolves")
+            .feature_id,
+        "fixture-base"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn legacy_history_timeline_input_emits_the_canonical_graph_identity() {
     let path = root("legacy-public-identity");
     let bundle = Bundle::at(&path);

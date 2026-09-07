@@ -1420,10 +1420,9 @@ impl TuiSession {
                 "timeline",
             ));
         }
-        if self
-            .selected_target()
-            .is_none_or(|selected| canonical_feature_id(selected) != feature_id)
-        {
+        if self.selected_target().is_none_or(|selected| {
+            selected != feature_id && canonical_feature_id(selected) != feature_id
+        }) {
             return Err(self.operation_diagnostic(
                 TuiDiagnosticCode::HistoryRejected,
                 StateAxis::History,
@@ -1457,7 +1456,7 @@ impl TuiSession {
                 "timeline",
             )
         })?;
-        let feature_id = canonical_feature_id(&selected_feature_id).to_string();
+        let feature_id = selected_feature_id.clone();
         let response = execute_domain_command(
             host,
             TIMELINE_COMMAND_ID,

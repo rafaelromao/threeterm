@@ -2087,8 +2087,16 @@ impl LoadedBundle {
         &self,
         feature_id: &str,
     ) -> Result<ResolvedHistoryFeature, BundleError> {
-        let family = history_family_id(feature_id);
-        let history_id = format!("{family}-base");
+        let initialized_brackets = self
+            .history_events
+            .iter()
+            .filter_map(|event| match &event.operation {
+                HistoryOperation::InitializeLBracket { bracket_id, .. } => {
+                    Some(bracket_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let has_history = |id: &str| {
             project_feature_timeline(&self.history_events, id).is_ok()
                 || self
@@ -2097,6 +2105,35 @@ impl LoadedBundle {
                     .values()
                     .any(|revision| revision.snapshot.features.contains_key(id))
         };
+
+        // Prefer an exact initialized bracket identity before interpreting a
+        // legacy role suffix. This keeps IDs such as `fixture-base` distinct
+        // from the `-base` role of a bracket named `fixture`.
+        for bracket_id in initialized_brackets.iter().copied() {
+            if feature_id == bracket_id {
+                let history_id = format!("{bracket_id}-base");
+                if has_history(&history_id) {
+                    return Ok(ResolvedHistoryFeature {
+                        canonical_id: bracket_id.to_string(),
+                        history_id,
+                    });
+                }
+            }
+        }
+        for bracket_id in initialized_brackets.iter().copied() {
+            if history_role_matches(bracket_id, feature_id) {
+                let history_id = format!("{bracket_id}-base");
+                if has_history(&history_id) {
+                    return Ok(ResolvedHistoryFeature {
+                        canonical_id: bracket_id.to_string(),
+                        history_id,
+                    });
+                }
+            }
+        }
+
+        let family = history_family_id(feature_id);
+        let history_id = format!("{family}-base");
         let graph_has_family = self
             .graph
             .features()
@@ -2128,6 +2165,20 @@ impl LoadedBundle {
             "history feature not found: {feature_id}"
         )))
     }
+}
+
+fn history_role_matches(bracket_id: &str, feature_id: &str) -> bool {
+    [
+        "-independent-finish",
+        "-independent-base",
+        "-finish",
+        "-bend",
+        "-base",
+        "-plate-vertical",
+        "-plate-horizontal",
+    ]
+    .iter()
+    .any(|suffix| feature_id == format!("{bracket_id}{suffix}"))
 }
 
 fn history_family_id(feature_id: &str) -> &str {

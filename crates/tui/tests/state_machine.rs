@@ -1004,6 +1004,43 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
 }
 
 #[test]
+fn selected_canonical_id_ending_in_base_is_not_reinterpreted_as_a_role() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "fixture-base", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+
+    let mut session = TuiSession::new(
+        [FeatureTarget::new("fixture-base", "bracket")],
+        "history-revision-1",
+    );
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("feature selects");
+
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("exact canonical ID opens its own timeline");
+    assert_eq!(
+        session
+            .state()
+            .feature_timeline
+            .as_ref()
+            .map(|timeline| timeline.feature_id.as_str()),
+        Some("fixture-base")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn selected_feature_timeline_rejects_a_feature_without_history_without_mutation() {
     let root = temporary_bundle_root();
     let host = Host::new();

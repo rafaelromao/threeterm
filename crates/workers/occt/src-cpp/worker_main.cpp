@@ -1296,7 +1296,8 @@ bool write_staged_artifact(const JsonParser::Value& request,
         get_string(*binding, "deterministic_settings_sha256");
 
     const bool is_brep_operation = operation == "extrude" || operation == "bracket" ||
-        operation == "boolean_fuse" || operation == "fillet" || operation == "split" || operation == "chamfer" ||
+        operation == "boolean_fuse" || operation == "boolean_cut" ||
+        operation == "boolean_common" || operation == "fillet" || operation == "split" || operation == "chamfer" ||
         operation == "hole" || operation == "revolve" || operation == "mirror" ||
         operation == "translate" ||
         operation == "linear_pattern" || operation == "circular_pattern" ||

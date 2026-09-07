@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,17 +48,17 @@ pub fn selected_edge_file(
             }),
         )
         .expect("edge inspection succeeds");
+    let mut semantic_id_counts = HashMap::new();
+    for candidate in &inspection.edge_candidates {
+        let semantic_id = edge_semantic_id(candidate);
+        *semantic_id_counts.entry(semantic_id).or_insert(0) += 1;
+    }
     let candidate = inspection
         .edge_candidates
-        .first()
-        .expect("edge inspection returns a candidate");
-    let semantic_id = format!(
-        "edge-{}",
-        sha256_hex(
-            &serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
-                .expect("edge evidence serializes")
-        )
-    );
+        .iter()
+        .find(|candidate| semantic_id_counts[&edge_semantic_id(candidate)] == 1)
+        .expect("edge inspection returns an unambiguous candidate");
+    let semantic_id = edge_semantic_id(candidate);
     let selected_edge = serde_json::json!({
         "semantic_id": semantic_id,
         "provenance": {
@@ -79,4 +80,14 @@ pub fn selected_edge_file(
     )
     .expect("selected edge file writes");
     path
+}
+
+fn edge_semantic_id(candidate: &threeterm_occt_worker::EdgeCandidateEvidence) -> String {
+    format!(
+        "edge-{}",
+        sha256_hex(
+            &serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+                .expect("edge evidence serializes")
+        )
+    )
 }

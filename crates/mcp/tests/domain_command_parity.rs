@@ -11,7 +11,8 @@ use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, CommandSchema,
-    EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, iter,
+    EXTRUDE_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
@@ -334,6 +335,15 @@ fn apply_request(root: &std::path::Path, revision: &str) -> Value {
 
 fn identity_request(root: &std::path::Path) -> Value {
     json!({"bundle_path": root.to_string_lossy()})
+}
+
+fn historical_edit_request(root: &std::path::Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "l-bracket-base",
+        "parameter": "length",
+        "value": 0.0
+    })
 }
 
 fn extrude_request(root: &std::path::Path) -> Value {
@@ -1035,6 +1045,87 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
     );
     assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log_before);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
+    let cli_root = root("historical-failure-cli");
+    let mcp_root = root("historical-failure-mcp");
+    let tui_root = root("historical-failure-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        threeterm_host::Host::new()
+            .save_bracket(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history fixture creates");
+    }
+
+    let cli = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        HISTORICAL_EDIT_COMMAND_ID,
+        historical_edit_request(&cli_root),
+    )
+    .expect("CLI historical edit commits degraded snapshot");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        HISTORICAL_EDIT_COMMAND_ID,
+        historical_edit_request(&tui_root),
+    )
+    .expect("TUI historical edit commits degraded snapshot");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.historical-edit/1",
+            "arguments": historical_edit_request(&mcp_root)
+        }),
+    });
+    let mcp =
+        mcp.result.expect("MCP historical edit returns a result")["structuredContent"].clone();
+
+    assert_eq!(cli, mcp);
+    assert_eq!(cli, tui);
+    assert_eq!(cli["status"], "degraded");
+    assert_eq!(
+        cli["dirty_features"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["blocked_features"],
+        json!(["l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["diagnostics"][0]["affected_ids"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["diagnostics"][0]["recovery"],
+        "correct_geometry_or_restore_revision"
+    );
+    assert!(
+        cli["named_revisions"]
+            .as_array()
+            .expect("recovery revision list")
+            .iter()
+            .any(|revision| revision["name"] == "recovered-before-historical-edit-2")
+    );
+
+    let history = threeterm_host::Host::new()
+        .history(&tui_root)
+        .expect("degraded history reloads");
+    let active_revision = cli["active_revision"]
+        .as_str()
+        .expect("active revision is a string");
+    let mut session = threeterm_tui::TuiSession::new([], active_revision);
+    session.refresh_stale_last_valid_geometry(&history, "l-bracket");
+    let overlay = session
+        .stale_last_valid_geometry_overlay()
+        .expect("TUI exposes stale recovery geometry");
+    assert!(overlay.contains("l-bracket-base"));
+    assert!(overlay.contains(active_revision));
+
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 #[test]

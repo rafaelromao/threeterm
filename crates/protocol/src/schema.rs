@@ -1705,11 +1705,13 @@ pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["code", "feature_id", "detail"],
+                    "required": ["code", "feature_id", "detail", "affected_ids", "recovery"],
                     "properties": {
                         "code": { "type": "string", "minLength": 1 },
                         "feature_id": { "type": "string", "minLength": 1 },
-                        "detail": { "type": "string", "minLength": 1 }
+                        "detail": { "type": "string", "minLength": 1 },
+                        "affected_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                        "recovery": { "type": "string", "minLength": 1 }
                     },
                     "additionalProperties": false
                 }

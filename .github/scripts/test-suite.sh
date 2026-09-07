@@ -13,7 +13,8 @@ case "${1:-}" in
         cargo test --workspace --jobs 1 -- --ignored --test-threads=1
         ;;
     e2e)
-        cargo test --workspace --jobs 1 -- --include-ignored --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test --workspace --jobs 1 -- --include-ignored --test-threads=1
         ;;
     *)
         echo "usage: $0 <fast|slow|e2e>" >&2

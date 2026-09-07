@@ -1147,9 +1147,7 @@ fn tool_result(value: Value, is_error: bool) -> Value {
     if value.is_object() {
         result["structuredContent"] = value;
     }
-    if is_error {
-        result["isError"] = Value::Bool(true);
-    }
+    result["isError"] = Value::Bool(is_error);
     result
 }
 

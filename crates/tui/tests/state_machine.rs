@@ -969,9 +969,10 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
             .feature_timeline
             .as_ref()
             .map(|timeline| timeline.feature_id.as_str()),
-        Some("l-plate-vertical")
+        Some("l")
     );
     let timeline = session.state().feature_timeline.expect("timeline state");
+    assert_eq!(timeline.active_revision, "history-revision-1");
     assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
     assert_eq!(timeline.revisions[0].status, "current-valid");
 
@@ -998,6 +999,47 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
     );
     assert!(session.state().feature_timeline.is_none());
     assert_eq!(session.state().canonical_revision, "history-revision-1");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selected_feature_timeline_rejects_an_unknown_history_owner_without_mutation() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "plain", "cube")
+        .expect("plain feature persists");
+    let revision = host
+        .current()
+        .expect("canonical snapshot exists")
+        .revision_hash;
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("transaction log");
+    let mut session = TuiSession::new([FeatureTarget::new("plain", "cube")], revision.clone());
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["plain".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["plain".to_string()],
+        }))
+        .expect("feature selects");
+
+    let diagnostic = session
+        .open_feature_timeline(&host, &root)
+        .expect_err("feature without a history owner is rejected");
+    assert_eq!(diagnostic.code, TuiDiagnosticCode::HistoryRejected);
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transaction log"),
+        log_before
+    );
+    assert_eq!(session.state().canonical_revision, revision);
 
     let _ = std::fs::remove_dir_all(root);
 }

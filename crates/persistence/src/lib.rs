@@ -2031,6 +2031,12 @@ pub struct CanonicalState {
     pub feature_ids: Vec<FeatureId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHistoryFeature {
+    pub canonical_id: String,
+    pub history_id: String,
+}
+
 impl LoadedBundle {
     pub fn feature_graph_hash_hex(&self) -> &str {
         &self.manifest.feature_graph_hash
@@ -2061,12 +2067,10 @@ impl LoadedBundle {
     }
 
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
-        let history_feature_id = self.resolve_history_feature_id(feature_id)?;
-        let mut timeline = project_feature_timeline(&self.history_events, &history_feature_id)
+        let resolved = self.resolve_history_feature(feature_id)?;
+        let mut timeline = project_feature_timeline(&self.history_events, &resolved.history_id)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        // History events retain their role-level IDs for persisted replay, but
-        // callers must see the canonical identity they selected.
-        timeline.feature_id = feature_id.to_string();
+        timeline.feature_id = resolved.canonical_id;
         Ok(timeline)
     }
 
@@ -2074,32 +2078,89 @@ impl LoadedBundle {
     /// feature that owns its object timeline. Direct history IDs remain
     /// readable for old bundles and headless callers.
     pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
-        if project_feature_timeline(&self.history_events, feature_id).is_ok() {
-            return Ok(feature_id.to_string());
-        }
-        if !self.graph.contains_feature(feature_id) {
-            return Err(BundleError::Invalid(format!(
-                "history feature not found: {feature_id}"
-            )));
-        }
-        let family = feature_id
-            .strip_suffix("-plate-vertical")
-            .or_else(|| feature_id.strip_suffix("-plate-horizontal"))
-            .unwrap_or(feature_id);
-        let history_feature_id = format!("{family}-base");
-        if project_feature_timeline(&self.history_events, &history_feature_id).is_ok()
+        Ok(self.resolve_history_feature(feature_id)?.history_id)
+    }
+
+    /// Resolve a selected graph identity to its persisted history owner while
+    /// keeping the public identity stable across legacy history records.
+    pub fn resolve_history_feature(
+        &self,
+        feature_id: &str,
+    ) -> Result<ResolvedHistoryFeature, BundleError> {
+        let family = history_family_id(feature_id);
+        let history_id = format!("{family}-base");
+        let has_history = |id: &str| {
+            project_feature_timeline(&self.history_events, id).is_ok()
+                || self
+                    .history
+                    .named_revisions()
+                    .values()
+                    .any(|revision| revision.snapshot.features.contains_key(id))
+        };
+        let graph_has_family = self.graph.contains_feature(family)
             || self
-                .history
-                .named_revisions()
-                .values()
-                .any(|revision| revision.snapshot.features.contains_key(&history_feature_id))
+                .graph
+                .contains_feature(&format!("{family}-plate-vertical"))
+            || self
+                .graph
+                .contains_feature(&format!("{family}-plate-horizontal"));
+        let history_has_family = self.history_events.iter().any(|event| {
+            matches!(
+                &event.operation,
+                HistoryOperation::InitializeLBracket { bracket_id, .. } if bracket_id == family
+            )
+        });
+
+        if self.graph.contains_feature(feature_id) && has_history(&history_id)
+            || feature_id == family
+                && (graph_has_family || history_has_family)
+                && has_history(&history_id)
         {
-            Ok(history_feature_id)
-        } else {
-            Err(BundleError::Invalid(format!(
-                "history feature not found: {feature_id}"
-            )))
+            return Ok(ResolvedHistoryFeature {
+                canonical_id: canonical_identity_for_history(self, feature_id),
+                history_id,
+            });
         }
+        if has_history(feature_id) {
+            return Ok(ResolvedHistoryFeature {
+                canonical_id: canonical_identity_for_history(self, feature_id),
+                history_id: feature_id.to_string(),
+            });
+        }
+        Err(BundleError::Invalid(format!(
+            "history feature not found: {feature_id}"
+        )))
+    }
+}
+
+fn history_family_id(feature_id: &str) -> &str {
+    [
+        "-independent-finish",
+        "-independent-base",
+        "-finish",
+        "-bend",
+        "-base",
+        "-plate-vertical",
+        "-plate-horizontal",
+    ]
+    .iter()
+    .find_map(|suffix| feature_id.strip_suffix(suffix))
+    .unwrap_or(feature_id)
+}
+
+fn canonical_identity_for_history(bundle: &LoadedBundle, history_id: &str) -> String {
+    let family = history_family_id(history_id);
+    if bundle.graph.contains_feature(family)
+        || bundle
+            .graph
+            .contains_feature(&format!("{family}-plate-vertical"))
+        || bundle
+            .graph
+            .contains_feature(&format!("{family}-plate-horizontal"))
+    {
+        family.to_string()
+    } else {
+        history_id.to_string()
     }
 }
 

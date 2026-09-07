@@ -2,6 +2,7 @@
 
 mod launch;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -15,7 +16,7 @@ use threeterm_host::{
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     CommandId, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    UNDO_COMMAND_ID,
+    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
 };
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
@@ -863,15 +864,109 @@ impl InteractionEvent {
     }
 }
 
-fn history_timeline_status_name(status: &HistoryTimelineStatus) -> String {
-    match status {
-        HistoryTimelineStatus::CurrentValid => "current-valid",
-        HistoryTimelineStatus::Broken => "broken",
-        HistoryTimelineStatus::BlockedByFailure => "blocked-by-failure",
-        HistoryTimelineStatus::Suppressed => "suppressed",
-        HistoryTimelineStatus::Absent => "absent",
-    }
-    .to_string()
+fn feature_timeline_from_response(response: &Value) -> Result<FeatureTimelineView, String> {
+    let feature_id = response
+        .get("feature_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "timeline response has no feature_id".to_string())?
+        .to_string();
+    let active_revision = response
+        .get("active_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "timeline response has no active_revision".to_string())?
+        .to_string();
+    let revisions = response
+        .get("revisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "timeline response has no revisions".to_string())?
+        .iter()
+        .map(|revision| {
+            let ordinal = revision
+                .get("ordinal")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "timeline revision has no ordinal".to_string())?;
+            let revision_id = revision
+                .get("revision_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "timeline revision has no revision_id".to_string())?;
+            let operation = revision
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "timeline revision has no operation".to_string())?;
+            let status = serde_json::from_value::<HistoryTimelineStatus>(
+                revision
+                    .get("status")
+                    .cloned()
+                    .ok_or_else(|| "timeline revision has no status".to_string())?,
+            )
+            .map_err(|error| format!("timeline revision status is invalid: {error}"))?;
+            let named_revision_names = revision
+                .get("named_revision_names")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "timeline revision has no named revision names".to_string())?
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "timeline named revision name is not a string".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(FeatureTimelineRevision {
+                ordinal,
+                revision_id: revision_id.to_string(),
+                operation: operation.to_string(),
+                status: match status {
+                    HistoryTimelineStatus::CurrentValid => "current-valid",
+                    HistoryTimelineStatus::Broken => "broken",
+                    HistoryTimelineStatus::BlockedByFailure => "blocked-by-failure",
+                    HistoryTimelineStatus::Suppressed => "suppressed",
+                    HistoryTimelineStatus::Absent => "absent",
+                }
+                .to_string(),
+                named_revision_names,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let named_revisions = response
+        .get("named_revisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "timeline response has no named revisions".to_string())?
+        .iter()
+        .map(|revision| {
+            revision
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "timeline named revision has no name".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let named_revision_provenance = response
+        .get("named_revisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "timeline response has no named revisions".to_string())?
+        .iter()
+        .map(|revision| {
+            Ok((
+                revision
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "timeline named revision has no name".to_string())?
+                    .to_string(),
+                revision
+                    .get("provenance")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "timeline named revision has no provenance".to_string())?
+                    .to_string(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(FeatureTimelineView {
+        feature_id,
+        active_revision,
+        revisions,
+        named_revisions,
+        named_revision_provenance,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -890,15 +985,60 @@ pub struct FeatureTarget {
     pub label: String,
 }
 
+fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
+    let mut targets = graph
+        .features()
+        .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind))
+        .collect::<Vec<_>>();
+    let existing = targets
+        .iter()
+        .map(|target| target.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let families = graph
+        .features()
+        .filter_map(|feature| {
+            let id = feature.id.as_str();
+            id.strip_suffix("-plate-vertical")
+                .or_else(|| id.strip_suffix("-plate-horizontal"))
+                .map(str::to_string)
+        })
+        .filter(|family| !existing.contains(family.as_str()))
+        .collect::<BTreeSet<_>>();
+    targets.extend(
+        families
+            .into_iter()
+            .map(|family| FeatureTarget::new(family, "bracket")),
+    );
+    targets
+}
+
+fn canonical_feature_id(feature_id: &str) -> &str {
+    [
+        "-independent-finish",
+        "-independent-base",
+        "-finish",
+        "-bend",
+        "-base",
+        "-plate-vertical",
+        "-plate-horizontal",
+    ]
+    .iter()
+    .find_map(|suffix| feature_id.strip_suffix(suffix))
+    .unwrap_or(feature_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureTimelineView {
     pub feature_id: String,
+    pub active_revision: String,
     pub revisions: Vec<FeatureTimelineRevision>,
     pub named_revisions: Vec<String>,
+    pub named_revision_provenance: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureTimelineRevision {
+    pub ordinal: u64,
     pub revision_id: String,
     pub operation: String,
     pub status: String,
@@ -1205,9 +1345,7 @@ impl TuiSession {
     }
 
     pub fn from_feature_graph(graph: &FeatureGraph, canonical_revision: impl AsRef<str>) -> Self {
-        let targets = graph
-            .features()
-            .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
+        let targets = feature_targets(graph);
         Self::new(targets, canonical_revision)
     }
 
@@ -1216,9 +1354,7 @@ impl TuiSession {
         canonical_revision: impl AsRef<str>,
         theme: ThemeContext,
     ) -> Self {
-        let targets = graph
-            .features()
-            .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
+        let targets = feature_targets(graph);
         Self::new_with_theme(targets, canonical_revision, theme)
     }
 
@@ -1226,9 +1362,7 @@ impl TuiSession {
         graph: &FeatureGraph,
         canonical_revision: impl AsRef<str>,
     ) -> Self {
-        let targets = graph
-            .features()
-            .map(|feature| FeatureTarget::new(feature.id.as_str(), feature.kind));
+        let targets = feature_targets(graph);
         Self::new_probing(targets, canonical_revision)
     }
 
@@ -1259,8 +1393,28 @@ impl TuiSession {
         revisions: Vec<FeatureTimelineRevision>,
         named_revisions: Vec<String>,
     ) -> Result<(), TuiDiagnostic> {
+        self.show_feature_timeline_with_active_revision(
+            feature_id,
+            String::new(),
+            revisions,
+            named_revisions,
+            Vec::new(),
+        )
+    }
+
+    fn show_feature_timeline_with_active_revision(
+        &mut self,
+        feature_id: &str,
+        active_revision: String,
+        revisions: Vec<FeatureTimelineRevision>,
+        named_revisions: Vec<String>,
+        named_revision_provenance: Vec<(String, String)>,
+    ) -> Result<(), TuiDiagnostic> {
         let kind = StateEventKind::History(HistoryEventKind::RestoreNamedRevision);
-        if self.selected_target() != Some(feature_id) {
+        if self
+            .selected_target()
+            .is_none_or(|selected| canonical_feature_id(selected) != feature_id)
+        {
             return Err(self.operation_diagnostic(
                 TuiDiagnosticCode::HistoryRejected,
                 StateAxis::History,
@@ -1271,8 +1425,10 @@ impl TuiSession {
         }
         self.feature_timeline = Some(FeatureTimelineView {
             feature_id: feature_id.to_string(),
+            active_revision,
             revisions,
             named_revisions,
+            named_revision_provenance,
         });
         Ok(())
     }
@@ -1283,7 +1439,7 @@ impl TuiSession {
         root: impl AsRef<Path>,
     ) -> Result<(), TuiDiagnostic> {
         let root = root.as_ref();
-        let feature_id = self.selected_target().map(str::to_string).ok_or_else(|| {
+        let selected_feature_id = self.selected_target().map(str::to_string).ok_or_else(|| {
             self.operation_diagnostic(
                 TuiDiagnosticCode::NoFeatureTarget,
                 StateAxis::Selection,
@@ -1292,34 +1448,39 @@ impl TuiSession {
                 "timeline",
             )
         })?;
-        let timeline = host.timeline(root, &feature_id).map_err(|error| {
+        let feature_id = canonical_feature_id(&selected_feature_id).to_string();
+        let response = execute_domain_command(
+            host,
+            TIMELINE_COMMAND_ID,
+            json!({
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": feature_id,
+            }),
+        )
+        .map_err(|error| {
             self.operation_diagnostic(
                 TuiDiagnosticCode::HistoryRejected,
                 StateAxis::History,
                 StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
-                error.to_string(),
+                format!("{error:?}"),
                 "timeline",
             )
         })?;
-        self.show_feature_timeline(
-            &timeline.timeline.feature_id,
-            timeline
-                .timeline
-                .revisions
-                .iter()
-                .map(|revision| FeatureTimelineRevision {
-                    revision_id: revision.revision_id.clone(),
-                    operation: revision.operation.clone(),
-                    status: history_timeline_status_name(&revision.status),
-                    named_revision_names: revision.named_revision_names.clone(),
-                })
-                .collect(),
-            timeline
-                .timeline
-                .named_revisions
-                .iter()
-                .map(|revision| revision.name.clone())
-                .collect(),
+        let timeline = feature_timeline_from_response(&response).map_err(|detail| {
+            self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                StateEventKind::History(HistoryEventKind::RestoreNamedRevision),
+                detail,
+                "timeline",
+            )
+        })?;
+        self.show_feature_timeline_with_active_revision(
+            &timeline.feature_id,
+            timeline.active_revision,
+            timeline.revisions,
+            timeline.named_revisions,
+            timeline.named_revision_provenance,
         )?;
         let history = host.history(root).map_err(|error| {
             self.operation_diagnostic(
@@ -1330,7 +1491,7 @@ impl TuiSession {
                 "stale-last-valid-geometry-refresh",
             )
         })?;
-        self.refresh_stale_last_valid_geometry(&history, &feature_id);
+        self.refresh_stale_last_valid_geometry(&history, &selected_feature_id);
         Ok(())
     }
 
@@ -3965,6 +4126,21 @@ impl<R: Renderer> TuiViewportSession<R> {
         root: impl AsRef<Path>,
     ) -> Result<(), TuiDiagnostic> {
         self.tui.open_feature_timeline(host, root)
+    }
+
+    pub fn restore_feature_timeline(
+        &mut self,
+        host: &Host,
+        root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<HistoryCommitView, TuiViewportError> {
+        let view = self
+            .tui
+            .restore_feature_timeline(host, root, name)
+            .map_err(TuiViewportError::Tui)?;
+        self.refresh_scene_from_host(host)?;
+        self.render_current().map_err(TuiViewportError::Viewport)?;
+        Ok(view)
     }
 
     pub fn refresh_stale_last_valid_geometry(

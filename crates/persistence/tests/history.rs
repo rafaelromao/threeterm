@@ -164,6 +164,61 @@ fn feature_timeline_accepts_the_selected_canonical_feature_identity() {
 }
 
 #[test]
+fn legacy_history_timeline_input_emits_the_canonical_graph_identity() {
+    let path = root("legacy-public-identity");
+    let bundle = Bundle::at(&path);
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("history-legacy-public-identity"),
+    )
+    .expect("fresh bundle");
+    let state = HistoryState::default();
+    let event = state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("history event");
+    bundle
+        .append_features_with_history(
+            &[
+                ("first", "bracket:length=10;width=5;height=3;thickness=1"),
+                ("first-plate-vertical", "plate-vertical"),
+                ("first-plate-horizontal", "plate-horizontal"),
+            ],
+            &event,
+        )
+        .expect("canonical graph publishes");
+
+    let timeline = bundle
+        .open()
+        .expect("bundle opens")
+        .feature_timeline("first-base")
+        .expect("legacy history identity remains readable");
+    assert_eq!(timeline.feature_id, "first");
+
+    let manifest_before = fs::read(path.join("manifest.json")).expect("manifest");
+    let log_before = fs::read(path.join("transactions.log")).expect("transaction log");
+    for reference in ["missing-object", "first-plate-vertical/edge"] {
+        assert!(
+            bundle
+                .open()
+                .expect("bundle reopens")
+                .feature_timeline(reference)
+                .is_err(),
+            "incompatible reference must fail closed: {reference}"
+        );
+    }
+    assert_eq!(
+        fs::read(path.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(path.join("transactions.log")).expect("transaction log"),
+        log_before
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn legacy_named_revision_boundary_is_derived_from_the_sealed_history_log() {
     let path = root("legacy-named-position");
     let bundle = Bundle::at(&path);

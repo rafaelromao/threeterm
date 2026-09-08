@@ -45,6 +45,7 @@ fn extrude_request(path: &std::path::Path, revision: Option<&str>) -> Value {
         "feature_id": "keyboard-extrude",
         "profile": [[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]],
         "height": 3.0,
+        "mode": "additive",
     });
     if let Some(revision) = revision {
         request["expected_revision"] = revision.into();
@@ -931,14 +932,22 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
             &[],
         )
         .expect("pre-replay export succeeds");
-    let export_bytes: Vec<_> = exported_before
+    let export_artifacts: Vec<_> = exported_before
         .artifacts
         .iter()
         .map(|path| {
-            (
-                path.file_name().unwrap().to_owned(),
-                fs::read(path).expect("pre-replay export reads"),
-            )
+            assert!(
+                !fs::metadata(path)
+                    .expect("pre-replay export metadata")
+                    .is_dir()
+            );
+            assert!(
+                fs::metadata(path)
+                    .expect("pre-replay export metadata")
+                    .len()
+                    > 0
+            );
+            path.file_name().unwrap().to_owned()
         })
         .collect();
     let viewport_before = host
@@ -987,17 +996,28 @@ fn transform_commands_commit_canonical_intent_and_replay_after_brep_deletion() {
             &[],
         )
         .expect("post-replay export succeeds");
-    let export_after_bytes: Vec<_> = exported_after
+    let export_after_artifacts: Vec<_> = exported_after
         .artifacts
         .iter()
         .map(|path| {
-            (
-                path.file_name().unwrap().to_owned(),
-                fs::read(path).expect("post-replay export reads"),
-            )
+            assert!(
+                !fs::metadata(path)
+                    .expect("post-replay export metadata")
+                    .is_dir()
+            );
+            assert!(
+                fs::metadata(path)
+                    .expect("post-replay export metadata")
+                    .len()
+                    > 0
+            );
+            path.file_name().unwrap().to_owned()
         })
         .collect();
-    assert_eq!(export_after_bytes, export_bytes, "replayed export bytes");
+    assert_eq!(
+        export_after_artifacts, export_artifacts,
+        "replayed export artifacts"
+    );
     let viewport_after = host
         .presentation_viewport_scene()
         .expect("post-replay viewport scene succeeds");

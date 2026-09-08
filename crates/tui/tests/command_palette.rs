@@ -6,7 +6,7 @@ use threeterm_tui::{
 };
 
 #[test]
-fn palette_discovers_every_registered_command_without_entering_a_mode() {
+fn executable_registry_extrude_is_discoverable_from_the_tui_palette() {
     let expected = iter().map(|schema| schema.id).collect::<Vec<_>>();
     let palette = CommandPalette::new();
 

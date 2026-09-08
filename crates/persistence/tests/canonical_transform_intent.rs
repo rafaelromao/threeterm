@@ -271,7 +271,7 @@ fn mirror_replay_requires_its_base_feature() {
 }
 
 #[test]
-fn canonical_extrude_unknown_intent() {
+fn unknown_extrude_intent_fails_closed_on_decode() {
     let root = temp_root("unknown-intent");
     let bundle = Bundle::create(&root).expect("bundle creates");
     let revision = bundle

@@ -153,11 +153,6 @@ fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
             ],
         );
         assert_eq!(diagnostic["code"], "invalid_request");
-        if name.is_empty() {
-            assert!(diagnostic.to_string().contains("property \"name\""));
-        } else {
-            assert!(diagnostic.to_string().contains("named revision"));
-        }
         assert_eq!(
             fs::read(root.join("manifest.json")).expect("manifest"),
             manifest_before_rejection

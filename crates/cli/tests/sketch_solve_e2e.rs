@@ -81,7 +81,11 @@ fn cli_sketch_solve_commits_and_renders_the_real_worker_result() {
     );
 
     let loaded = Bundle::at(&path).open().expect("bundle reloads");
-    let scene = ViewportScene::from_feature_graph(loaded.revision_hash_hex(), &loaded.graph, None);
+    let scene = ViewportScene::from_feature_graph(
+        loaded.revision_hash_hex(),
+        &loaded.graph,
+        Some("rectangle".to_string()),
+    );
     let frame = ProtocolNeutralViewport::project(
         &scene,
         ViewportRequest::new(

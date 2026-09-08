@@ -224,7 +224,10 @@ fn l_bracket_fillet_then_chamfer_reports_an_atomic_geometry_limitation() {
     );
     let diagnostic: Value =
         serde_json::from_slice(&chamfer_output.stderr).expect("diagnostic is JSON");
-    assert_eq!(diagnostic["code"], "unsupported_geometry");
+    assert_eq!(
+        diagnostic["code"], "unsupported_geometry",
+        "unexpected chamfer diagnostic: {diagnostic}"
+    );
     assert_eq!(diagnostic["schema_version"], "threeterm.protocol/1");
 
     let reloaded = Bundle::at(&root)

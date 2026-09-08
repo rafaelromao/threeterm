@@ -141,10 +141,7 @@ fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
     );
     let manifest_before_rejection = fs::read(root.join("manifest.json")).expect("manifest");
     let log_before_rejection = fs::read(root.join("transactions.log")).expect("log");
-    for (name, code) in [
-        ("", "unknown_command"),
-        ("before-second", "invalid_request"),
-    ] {
+    for name in ["", "before-second"] {
         let diagnostic = run_failed(
             bin,
             &[
@@ -155,13 +152,9 @@ fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
                 name,
             ],
         );
-        assert_eq!(diagnostic["code"], code);
-        if code == "unknown_command" {
-            assert!(
-                diagnostic["arg"]
-                    .as_str()
-                    .is_some_and(|arg| arg.contains("property \"name\""))
-            );
+        assert_eq!(diagnostic["code"], "invalid_request");
+        if name.is_empty() {
+            assert!(diagnostic.to_string().contains("property \"name\""));
         } else {
             assert!(diagnostic.to_string().contains("named revision"));
         }

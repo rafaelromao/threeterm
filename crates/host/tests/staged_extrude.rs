@@ -426,7 +426,7 @@ fn host_promotes_one_validated_extrude_into_the_next_openable_generation() {
 }
 
 #[test]
-fn stale_validated_extrude_is_rejected_without_changing_the_newer_generation() {
+fn generation_concurrent_publish() {
     let project_root = temp_root("stale-promotion-project");
     let host = Host::new();
     let snapshot = host

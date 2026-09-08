@@ -76,7 +76,7 @@ fn extrude_command_is_registered() {
 }
 
 #[test]
-fn canonical_extrude_transaction() {
+fn generation_publication() {
     if OcctWorker::locate().is_err() {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
             panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");

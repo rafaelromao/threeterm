@@ -117,7 +117,7 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 }
 
 #[test]
-fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_generation() {
+fn generation_interruption_recovery() {
     let control_scenario = unique_scenario("control");
     let control_root = control_scenario.join("project");
     let older_control = GenerationHashes::from_response(

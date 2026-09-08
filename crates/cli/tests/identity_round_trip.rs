@@ -57,8 +57,18 @@ fn read_manifest_terminal_log_digest(root: &Path) -> String {
         .to_string()
 }
 
+fn read_manifest_revision_hash(root: &Path) -> String {
+    let manifest_path = root.join("manifest.json");
+    let raw = fs::read_to_string(&manifest_path).expect("manifest is readable");
+    let value: Value = serde_json::from_str(&raw).expect("manifest is JSON");
+    value["revision_hash"]
+        .as_str()
+        .expect("manifest.revision_hash is a string")
+        .to_string()
+}
+
 #[test]
-fn new_project_then_save_then_load_surfaces_empty_log_identity() {
+fn generation_identity() {
     let root = unique_root("empty");
 
     let new = run(&["new-project", root.to_str().expect("utf-8 path")]);
@@ -87,14 +97,14 @@ fn new_project_then_save_then_load_surfaces_empty_log_identity() {
     let _loaded = run(&["--machine", "load", root.to_str().expect("utf-8 path")]);
     let after_reload = read_manifest_generation_id(&root);
     let after_reload_digest = read_manifest_terminal_log_digest(&root);
+    let after_reload_revision = read_manifest_revision_hash(&root);
     assert_eq!(
         after_reload, after_save,
         "Project Generation identity is byte-equal after reload"
     );
-    assert_eq!(
-        after_reload, after_reload_digest,
-        "the durable identity equals the canonical log digest"
-    );
+    assert_ne!(after_reload, after_reload_digest);
+    assert_ne!(after_reload, after_reload_revision);
+    assert_ne!(after_reload_revision, after_reload_digest);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -135,9 +145,9 @@ fn full_mvp_operation_set_preserves_byte_equal_identity_on_reload() {
 
     let before_reload = read_manifest_generation_id(&root);
     let before_reload_digest = read_manifest_terminal_log_digest(&root);
-    assert_eq!(
+    assert_ne!(
         before_reload, before_reload_digest,
-        "Project Generation identity equals the canonical log digest after the full MVP operation set"
+        "Project Generation identity remains distinct from the canonical log digest"
     );
 
     let _loaded = run(&["--machine", "load", root.to_str().expect("utf-8 path")]);

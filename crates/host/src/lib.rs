@@ -9716,63 +9716,10 @@ impl Host {
                 ),
             });
         }
-        if matches!(
-            operation,
-            threeterm_occt_worker::Operation::Fillet | threeterm_occt_worker::Operation::Chamfer
-        ) && canonical_request.get("edit_target").is_none()
-        {
-            let selected = canonical_request
-                .get("selected_edge")
-                .cloned()
-                .ok_or_else(|| HostError::Validation {
-                    detail: "edge finishing operation requires selected_edge".to_string(),
-                })?;
-            let context = selected_edge_context_from_request(selected)?;
-            let reference = SelectedEdgeReference {
-                semantic_id: context.semantic_id,
-                provenance: threeterm_domain::EdgeProvenance {
-                    source_feature_id: context.source_feature_id,
-                    source_revision_id: context.source_revision_id,
-                    source_edge_id: context.source_edge_id,
-                },
-                role: context.role,
-                evidence: threeterm_domain::EdgeGeometricEvidence {
-                    midpoint: context.midpoint,
-                    tangent: context.tangent,
-                    length: context.length,
-                },
-            };
-            let returned_candidates = typed_value["edge_candidates"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|value| serde_json::from_value(value).ok())
-                .collect::<Vec<EdgeCandidateEvidence>>();
-            let candidates = canonical_finishing_edge_candidates(&returned_candidates)
-                .into_iter()
-                .map(|mut candidate| {
-                    candidate.provenance = reference.provenance.clone();
-                    candidate
-                })
-                .collect::<Vec<_>>();
-            // A finishing operation can consume the source edge while still
-            // reporting unrelated output edges. The request was validated
-            // against a real inspection before dispatch, so only reject
-            // ambiguous or incompatible descendant evidence here.
-            let outcome =
-                (!candidates.is_empty()).then(|| resolve_edge_reference(&reference, candidates));
-            if !matches!(
-                outcome,
-                None | Some(EdgeReattachmentOutcome::Resolved { .. })
-                    | Some(EdgeReattachmentOutcome::Lost)
-            ) {
-                let _ = completion.stage.discard();
-                return Err(HostError::Validation {
-                    detail: format!("semantic edge selection failed: {outcome:?}"),
-                });
-            }
-        }
+        // The selected edge is validated against a real inspection before
+        // dispatch. A successful finishing response may consume it and report
+        // only unrelated output edges, so post-dispatch evidence cannot reject
+        // the worker's authoritative geometry outcome.
         let artifact = self
             .accept_staged_occt_result(
                 completion.stage,

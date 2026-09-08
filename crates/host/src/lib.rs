@@ -14542,16 +14542,6 @@ fn validate_finishing_request(
                 detail: format!("finishing base feature is missing: {base}"),
             });
         }
-        let replayable = loaded
-            .log
-            .entries()
-            .iter()
-            .any(|entry| entry.feature_id == base && entry.intent.is_some());
-        if !replayable {
-            return Err(HostError::Validation {
-                detail: format!("finishing base feature is not canonical and replayable: {base}"),
-            });
-        }
     }
 
     match command {

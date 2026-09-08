@@ -9756,14 +9756,16 @@ impl Host {
                     candidate
                 })
                 .collect::<Vec<_>>();
-            // A finishing operation can consume the source edge entirely. The
-            // request was validated against a real inspection before dispatch;
-            // only validate reattachment when the worker reports descendants.
+            // A finishing operation can consume the source edge while still
+            // reporting unrelated output edges. The request was validated
+            // against a real inspection before dispatch, so only reject
+            // ambiguous or incompatible descendant evidence here.
             let outcome =
                 (!candidates.is_empty()).then(|| resolve_edge_reference(&reference, candidates));
             if !matches!(
                 outcome,
                 None | Some(EdgeReattachmentOutcome::Resolved { .. })
+                    | Some(EdgeReattachmentOutcome::Lost)
             ) {
                 let _ = completion.stage.discard();
                 return Err(HostError::Validation {

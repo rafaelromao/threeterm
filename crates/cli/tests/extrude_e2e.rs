@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, CanonicalIntent};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{EXTRUDE_COMMAND_ID, find};
 use threeterm_protocol::schema_validator::validate;
@@ -76,7 +76,7 @@ fn extrude_command_is_registered() {
 }
 
 #[test]
-fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
+fn canonical_extrude_transaction() {
     if OcctWorker::locate().is_err() {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
             panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
@@ -186,6 +186,25 @@ fn extrude_cli_promotes_a_validated_result_into_canonical_generation() {
         .expect("brep_bytes is a number");
 
     let loaded = Bundle::at(&root).open().expect("bundle reopens");
+    let CanonicalIntent::Extrude(intent) = loaded
+        .log
+        .entries()
+        .last()
+        .expect("extrude transaction exists")
+        .intent
+        .as_ref()
+        .expect("accepted extrude seals canonical intent")
+    else {
+        panic!("accepted transaction must contain extrude intent");
+    };
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        serde_json::from_str::<Vec<[f64; 2]>>(&rectangle_profile()).unwrap()
+    );
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.affected_semantic_ids, ["box-rect"]);
+    assert_eq!(intent.source_revision, prior_snapshot.revision_hash);
+    assert_eq!(intent.worker_requirements.worker_kind, "occt");
     assert_eq!(
         loaded.feature_graph_hash_hex(),
         parsed["feature_graph_hash"]

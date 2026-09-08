@@ -7,8 +7,9 @@
 
 use threeterm_persistence::{
     Bundle, CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION, CanonicalCircularPatternIntent,
-    CanonicalIntent, CanonicalLinearPatternIntent, CanonicalMirrorIntent, CanonicalRevolveIntent,
-    CircularPatternDeterministicInputs, LINEAR_PATTERN_INTENT_SCHEMA_VERSION,
+    CanonicalExtrudeIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalMirrorIntent,
+    CanonicalRevolveIntent, CircularPatternDeterministicInputs, EXTRUDE_INTENT_SCHEMA_VERSION,
+    ExtrudeDeterministicInputs, LINEAR_PATTERN_INTENT_SCHEMA_VERSION,
     LinearPatternDeterministicInputs, MIRROR_INTENT_SCHEMA_VERSION, MirrorDeterministicInputs,
     REVOLVE_INTENT_SCHEMA_VERSION, RevolveDeterministicInputs, occt_worker_identity,
     replay_canonical_state,
@@ -27,6 +28,24 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 
 fn triangle_profile() -> Vec<[f64; 2]> {
     vec![[0.0, 0.0], [4.0, 0.0], [2.0, 4.0]]
+}
+
+fn extrude_intent(request_id: &str, source_revision: &str, feature_id: &str) -> CanonicalIntent {
+    CanonicalIntent::Extrude(CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
+        request_id: request_id.to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: triangle_profile(),
+            height: 2.0,
+        },
+        affected_semantic_ids: vec![feature_id.to_string()],
+        source_revision: source_revision.to_string(),
+        worker_requirements: occt_worker_identity(),
+    })
 }
 
 fn revolve_intent(request_id: &str, source_revision: &str, feature_id: &str) -> CanonicalIntent {
@@ -252,7 +271,7 @@ fn mirror_replay_requires_its_base_feature() {
 }
 
 #[test]
-fn unknown_intent_command_fails_closed_on_decode() {
+fn unknown_extrude_intent_fails_closed_on_decode() {
     let root = temp_root("unknown-intent");
     let bundle = Bundle::create(&root).expect("bundle creates");
     let revision = bundle
@@ -260,30 +279,30 @@ fn unknown_intent_command_fails_closed_on_decode() {
         .expect("bundle opens")
         .revision_hash_hex()
         .to_string();
-    let intent = revolve_intent("req-revolve-1", &revision, "rev-1");
+    let intent = extrude_intent("req-extrude-1", &revision, "extrude-1");
     bundle
         .append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
-            "rev-1",
-            "brep:rev-1",
+            "extrude-1",
+            "brep:extrude-1",
             &revision,
-            "req-revolve-1",
+            "req-extrude-1",
             "{}",
             &intent,
-            b"fake-revolve-brep",
+            b"fake-extrude-brep",
         )
-        .expect("revolve transaction appends");
+        .expect("extrude transaction appends");
 
     let mut unknown = serde_json::to_value(&intent).expect("intent serializes");
-    unknown["command"] = serde_json::Value::String("revolve-evil".to_string());
+    unknown["command"] = serde_json::Value::String("extrude-evil".to_string());
     assert!(serde_json::from_value::<CanonicalIntent>(unknown).is_err());
 
     let log_path = root.join("transactions.log");
     let log_bytes = std::fs::read(&log_path).expect("log reads");
     let tampered = String::from_utf8(log_bytes)
         .expect("log is utf-8")
-        .replace("\"command\":\"revolve\"", "\"command\":\"revolve-evil\"");
+        .replace("\"command\":\"extrude\"", "\"command\":\"extrude-evil\"");
     assert_ne!(
-        tampered.matches("\"command\":\"revolve-evil\"").count(),
+        tampered.matches("\"command\":\"extrude-evil\"").count(),
         0,
         "tampered log carries the unknown command"
     );

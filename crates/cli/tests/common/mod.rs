@@ -62,8 +62,8 @@ pub fn selected_edge_file(
     let selected_edge = serde_json::json!({
         "semantic_id": semantic_id,
         "provenance": {
-            "source_feature_id": candidate.source_feature_id,
-            "source_revision_id": candidate.source_revision_id,
+            "source_feature_id": source_feature_id,
+            "source_revision_id": source_revision,
             "source_edge_id": candidate.source_edge_id
         },
         "role": candidate.role,

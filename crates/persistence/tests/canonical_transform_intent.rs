@@ -218,18 +218,18 @@ fn revolve_intent_persists_and_replays_artifact_free() {
         .expect("bundle opens")
         .revision_hash_hex()
         .to_string();
-    let intent = extrude_intent("req-extrude-1", &revision, "extrude-1");
+    let intent = revolve_intent("req-revolve-1", &revision, "rev-1");
     bundle
         .append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
-            "extrude-1",
-            "brep:extrude-1",
+            "rev-1",
+            "brep:rev-1",
             &revision,
-            "req-extrude-1",
+            "req-revolve-1",
             "{}",
             &intent,
-            b"fake-extrude-brep",
+            b"fake-revolve-brep",
         )
-        .expect("extrude transaction appends");
+        .expect("revolve transaction appends");
 
     let loaded = Bundle::at(&root).open().expect("bundle reopens");
     let entry = loaded.log.entries().last().expect("entry exists");

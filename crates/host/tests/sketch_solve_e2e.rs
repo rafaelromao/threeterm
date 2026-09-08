@@ -208,23 +208,17 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
             .iter()
             .any(|feature| feature.kind.starts_with("sketch-segment3:"))
     );
-    let frame = ProtocolNeutralViewport::project(
-        &scene,
-        ViewportRequest::new(
-            loaded.revision_hash_hex(),
-            1,
-            160,
-            120,
-            CameraState::default(),
-        ),
-    )
-    .expect("resolved sketch projects to a viewport frame");
-    assert!(
-        frame
-            .rgb
-            .chunks_exact(3)
-            .any(|pixel| pixel == [105, 220, 190])
+    let request = ViewportRequest::new(
+        loaded.revision_hash_hex(),
+        1,
+        160,
+        120,
+        CameraState::default(),
     );
+    let sketch_edge = request.colors.edge;
+    let frame = ProtocolNeutralViewport::project(&scene, request)
+        .expect("resolved sketch projects to a viewport frame");
+    assert!(frame.rgb.chunks_exact(3).any(|pixel| pixel == sketch_edge));
     assert_eq!(committed.snapshot.revision_hash, loaded.revision_hash_hex());
     assert_ne!(baseline.revision_hash_hex(), loaded.revision_hash_hex());
     let reloaded = host

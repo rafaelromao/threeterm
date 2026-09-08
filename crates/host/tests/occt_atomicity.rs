@@ -237,7 +237,7 @@ fn extrude_commits_brep_into_a_new_revision() {
 }
 
 #[test]
-fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() {
+fn canonical_extrude_replay() {
     let Some(worker) =
         required_fixture_worker("invalid_subtractive_cut_preserves_the_prior_revision_snapshot")
     else {
@@ -573,7 +573,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
 }
 
 #[test]
-fn replay_does_not_promote_earlier_artifacts_when_a_later_intent_fails() {
+fn canonical_extrude_replay_failure() {
     let root = temp_root("replay-batch-atomicity");
     let worker_root = temp_root("replay-batch-atomicity-bin");
     fs::create_dir_all(&worker_root).expect("worker directory creates");
@@ -670,6 +670,7 @@ fi
     fs::remove_file(root.join("brep/replay-first.brep")).expect("first BREP deletes");
     fs::remove_file(root.join("brep/replay-second.brep")).expect("second BREP deletes");
     let before = Host::new().load(&root).expect("snapshot loads");
+    let before_canonical = snapshot_files(&root);
 
     let result = Host::new().reload_and_recompute_geometry(
         &root,
@@ -682,6 +683,7 @@ fi
     );
     assert!(!root.join("brep/replay-second.brep").exists());
     assert_eq!(Host::new().load(&root).expect("snapshot reloads"), before);
+    assert_eq!(snapshot_files(&root), before_canonical);
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(worker_root);

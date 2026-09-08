@@ -4,6 +4,8 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_host::Host;
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::bundle::{PUBLICATION_KILL_POINT_ENV, PublicationKillPoint};
 use threeterm_persistence::previous_generation_path;
 
@@ -58,6 +60,23 @@ fn run_load(root: &Path) -> Output {
         .args(["--machine", "load"])
         .arg(root);
     command.output().expect("load process runs")
+}
+
+fn run_extrude(root: &Path, feature_id: &str, kill_point: Option<&str>) -> Output {
+    let profile = root.join(format!("{feature_id}.json"));
+    fs::write(&profile, "[[0.0,0.0],[4.0,0.0],[2.0,4.0]]").expect("profile writes");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
+    command.env_remove(PUBLICATION_KILL_POINT_ENV);
+    command
+        .args(["--machine", "extrude", "--bundle"])
+        .arg(root)
+        .args(["--feature-id", feature_id, "--profile-file"])
+        .arg(profile)
+        .args(["--height", "2", "--mode", "additive"]);
+    if let Some(kill_point) = kill_point {
+        command.env(PUBLICATION_KILL_POINT_ENV, kill_point);
+    }
+    command.output().expect("extrude process runs")
 }
 
 fn response(output: &Output, operation: &str) -> Value {
@@ -118,26 +137,33 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 
 #[test]
 fn generation_interruption_recovery() {
+    let Ok(worker) = OcctWorker::locate() else {
+        if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
+            panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
+        }
+        return;
+    };
     let control_scenario = unique_scenario("control");
     let control_root = control_scenario.join("project");
+    response(&run_save(&control_root, "seed", None), "control seed save");
     let older_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-1", None),
-            "control initial save",
+            &run_extrude(&control_root, "extrude-1", None),
+            "control initial extrude",
         ),
         "control older generation",
     );
     let before_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-2", None),
-            "control second save",
+            &run_extrude(&control_root, "extrude-2", None),
+            "control second extrude",
         ),
         "control pre-save generation",
     );
     let candidate_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-3", None),
-            "control candidate save",
+            &run_extrude(&control_root, "extrude-3", None),
+            "control candidate extrude",
         ),
         "control candidate generation",
     );
@@ -145,12 +171,19 @@ fn generation_interruption_recovery() {
     for point in PublicationKillPoint::ALL {
         let scenario = unique_scenario(point.as_str());
         let root = scenario.join("project");
+        response(&run_save(&root, "seed", None), "case seed save");
         let older = GenerationHashes::from_response(
-            &response(&run_save(&root, "box-1", None), "case initial save"),
+            &response(
+                &run_extrude(&root, "extrude-1", None),
+                "case initial extrude",
+            ),
             "case older generation",
         );
         let before = GenerationHashes::from_response(
-            &response(&run_save(&root, "box-2", None), "case second save"),
+            &response(
+                &run_extrude(&root, "extrude-2", None),
+                "case second extrude",
+            ),
             "case pre-save generation",
         );
         assert_eq!(
@@ -162,7 +195,7 @@ fn generation_interruption_recovery() {
             "{point:?}: setup pre-save generation differs"
         );
 
-        let interrupted = run_save(&root, "box-3", Some(point.as_str()));
+        let interrupted = run_extrude(&root, "extrude-3", Some(point.as_str()));
         assert!(
             !interrupted.status.success(),
             "{point:?}: interrupted save unexpectedly succeeded"
@@ -207,6 +240,23 @@ fn generation_interruption_recovery() {
             recovered_from_previous,
             point == PublicationKillPoint::ReplaceCurrent,
             "{point:?}: recovery status does not identify the selected slot"
+        );
+
+        let selected_root = if recovered_from_previous {
+            previous_generation_path(&root)
+        } else {
+            root.clone()
+        };
+        for entry in fs::read_dir(selected_root.join("brep")).expect("BREP directory reads") {
+            fs::remove_file(entry.expect("BREP entry reads").path()).expect("BREP removes");
+        }
+        let replay_host = Host::new();
+        let replayed = replay_host
+            .reload_and_recompute_extrudes(&selected_root, &worker)
+            .expect("selected complete generation recomputes");
+        assert!(
+            replayed.recomputed > 0,
+            "{point:?}: extrude geometry recomputes"
         );
 
         let previous = previous_generation_path(&root);

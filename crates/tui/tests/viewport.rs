@@ -664,6 +664,37 @@ fn production_pick_validates_semantic_candidates_before_selection() {
 }
 
 #[test]
+fn production_pick_preserves_a_canonical_id_ending_in_base() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "fixture-base", "box")
+        .expect("canonical feature is persisted");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let initial = session
+        .render_current()
+        .expect("initial frame submits")
+        .started
+        .expect("initial frame is in flight");
+    session
+        .acknowledge(FrameAcknowledgement::from(&initial))
+        .expect("initial frame is acknowledged");
+
+    let picked = session
+        .pick_at(&host, 32, 24)
+        .expect("canonical feature pick succeeds");
+    assert_eq!(picked.candidates, vec!["fixture-base"]);
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn production_pick_rejects_input_while_navigation_frame_is_unacknowledged() {
     let root = temporary_bundle_root();
     let host = Host::new();

@@ -997,15 +997,9 @@ fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
     let mut seen = BTreeSet::new();
     let mut targets = Vec::new();
     for feature in graph.features() {
-        // Only history compatibility records use role suffixes without a
-        // canonical graph object. A real graph feature may legitimately end
-        // in `-base`, so preserve that exact semantic identity.
-        let id = if feature.kind == "history-feature" {
-            canonical_feature_id(feature.id.as_str())
-        } else {
-            feature.id.as_str()
-        }
-        .to_string();
+        // Only known history-role graph records are normalized. A real graph
+        // feature may legitimately end in `-base`, so preserve that identity.
+        let id = canonical_feature_id_for_kind(feature.id.as_str(), &feature.kind).to_string();
         if seen.insert(id.clone()) {
             let label = if id == feature.id.as_str() {
                 feature.kind.to_string()
@@ -1016,6 +1010,17 @@ fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
         }
     }
     targets
+}
+
+fn canonical_feature_id_for_kind<'a>(feature_id: &'a str, kind: &str) -> &'a str {
+    if matches!(
+        kind,
+        "history-feature" | "plate-vertical" | "plate-horizontal"
+    ) {
+        canonical_feature_id(feature_id)
+    } else {
+        feature_id
+    }
 }
 
 fn canonical_feature_id(feature_id: &str) -> &str {
@@ -3219,7 +3224,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             self.scene
                 .features
                 .iter()
-                .find(|feature| feature.id == target || canonical_feature_id(&feature.id) == target)
+                .find(|feature| canonical_feature_id_for_kind(&feature.id, &feature.kind) == target)
                 .map_or(target.clone(), |feature| feature.id.clone())
         });
         let generation = state.presentation_generation;
@@ -3370,7 +3375,18 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
         let canonical_candidates = candidates
             .iter()
-            .map(|candidate| canonical_feature_id(candidate).to_string())
+            .map(|candidate| {
+                self.scene
+                    .features
+                    .iter()
+                    .find(|feature| feature.id == *candidate)
+                    .map_or_else(
+                        || candidate.clone(),
+                        |feature| {
+                            canonical_feature_id_for_kind(&feature.id, &feature.kind).to_string()
+                        },
+                    )
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();

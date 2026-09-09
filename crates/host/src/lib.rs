@@ -1873,7 +1873,13 @@ fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeC
     result
         .iter()
         .map(|candidate| PostEditEdgeCandidate {
-            semantic_id: candidate.semantic_id.clone(),
+            // Native workers return transient geometry without an identity;
+            // retain non-empty fixture/legacy identities for compatibility.
+            semantic_id: if candidate.semantic_id.is_empty() {
+                canonical_edge_semantic_id(candidate)
+            } else {
+                candidate.semantic_id.clone()
+            },
             provenance: threeterm_domain::EdgeProvenance {
                 source_feature_id: candidate.source_feature_id.clone(),
                 source_revision_id: candidate.source_revision_id.clone(),

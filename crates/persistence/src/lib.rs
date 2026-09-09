@@ -2132,32 +2132,9 @@ impl LoadedBundle {
             }
         }
 
-        let family = history_family_id(feature_id);
-        let history_id = format!("{family}-base");
-        let graph_has_family = self
-            .graph
-            .features()
-            .any(|feature| history_family_id(feature.id.as_str()) == family);
-        let history_has_family = self.history_events.iter().any(|event| {
-            matches!(
-                &event.operation,
-                HistoryOperation::InitializeLBracket { bracket_id, .. } if bracket_id == family
-            )
-        });
-
-        if self.graph.contains_feature(feature_id) && has_history(&history_id)
-            || feature_id == family
-                && (graph_has_family || history_has_family)
-                && has_history(&history_id)
-        {
-            return Ok(ResolvedHistoryFeature {
-                canonical_id: canonical_identity_for_history(feature_id),
-                history_id,
-            });
-        }
         if has_history(feature_id) {
             return Ok(ResolvedHistoryFeature {
-                canonical_id: canonical_identity_for_history(feature_id),
+                canonical_id: feature_id.to_string(),
                 history_id: feature_id.to_string(),
             });
         }
@@ -2179,25 +2156,6 @@ fn history_role_matches(bracket_id: &str, feature_id: &str) -> bool {
     ]
     .iter()
     .any(|suffix| feature_id == format!("{bracket_id}{suffix}"))
-}
-
-fn history_family_id(feature_id: &str) -> &str {
-    [
-        "-independent-finish",
-        "-independent-base",
-        "-finish",
-        "-bend",
-        "-base",
-        "-plate-vertical",
-        "-plate-horizontal",
-    ]
-    .iter()
-    .find_map(|suffix| feature_id.strip_suffix(suffix))
-    .unwrap_or(feature_id)
-}
-
-fn canonical_identity_for_history(history_id: &str) -> String {
-    history_family_id(history_id).to_string()
 }
 
 #[derive(Debug)]

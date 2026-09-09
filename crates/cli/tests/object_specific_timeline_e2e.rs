@@ -299,6 +299,40 @@ fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
 }
 
 #[test]
+fn production_cli_preserves_a_canonical_id_ending_in_base() {
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let root = temp_root();
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("cli-canonical-base-suffix"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        bundle
+            .append_features_with_history(
+                &[(bracket_id, "bracket:length=10;width=5;height=3;thickness=1")],
+                &event,
+            )
+            .expect("history event publishes");
+        state.apply_event(&event).expect("history event applies");
+    }
+
+    let timeline = timeline(bin, &root, "fixture-base");
+    assert_eq!(timeline["feature_id"], "fixture-base");
+    assert_eq!(
+        timeline["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn production_cli_rejects_unknown_and_incompatible_timeline_references_without_mutation() {
     let root = temp_root();
     write_fresh(

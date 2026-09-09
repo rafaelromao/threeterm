@@ -393,6 +393,55 @@ fn production_adapters_report_one_canonical_feature_timeline() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn mcp_process_preserves_a_canonical_id_ending_in_base() {
+    let root = fresh_bundle("mcp-canonical-base-suffix");
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("mcp-canonical-base-suffix"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        bundle
+            .append_features_with_history(
+                &[(bracket_id, "bracket:length=10;width=5;height=3;thickness=1")],
+                &event,
+            )
+            .expect("history event publishes");
+        state.apply_event(&event).expect("history event applies");
+    }
+
+    let response = mcp_call(
+        find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "fixture-base",
+        }),
+        "canonical-base-suffix",
+    );
+    validate(
+        &find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .response_schema,
+        &response,
+    )
+    .expect("MCP timeline response validates");
+    assert_eq!(response["feature_id"], "fixture-base");
+    assert_eq!(
+        response["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn create_boolean_pattern_base(root: &std::path::Path) {
     let output = Command::new(threeterm_binary())
         .args(["--machine", "bracket"])

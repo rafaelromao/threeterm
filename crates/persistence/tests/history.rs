@@ -164,6 +164,50 @@ fn feature_timeline_accepts_the_selected_canonical_feature_identity() {
 }
 
 #[test]
+fn exact_initialized_bracket_identity_wins_over_a_legacy_base_role() {
+    let path = root("canonical-base-identity");
+    let bundle = Bundle::at(&path);
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("history-canonical-base-identity"),
+    )
+    .expect("fresh bundle");
+    let mut state = HistoryState::default();
+
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        state.apply_event(&event).expect("event applies");
+        bundle
+            .append_features_with_history(&[], &event)
+            .expect("history event publishes");
+    }
+
+    let exact = bundle
+        .feature_timeline("fixture-base")
+        .expect("exact canonical identity resolves");
+    let legacy = bundle
+        .feature_timeline("fixture-base-base")
+        .expect("legacy base role remains readable");
+    assert_eq!(exact.feature_id, "fixture-base");
+    assert_eq!(legacy.feature_id, "fixture-base-base");
+    assert_eq!(exact.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(legacy.revisions[0].operation, "initialize-l-bracket");
+
+    let reopened = Bundle::at(&path).open().expect("bundle reopens");
+    assert_eq!(
+        reopened
+            .feature_timeline("fixture-base")
+            .expect("exact canonical identity survives reload")
+            .feature_id,
+        "fixture-base"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn legacy_named_revision_boundary_is_derived_from_the_sealed_history_log() {
     let path = root("legacy-named-position");
     let bundle = Bundle::at(&path);

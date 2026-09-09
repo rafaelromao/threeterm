@@ -12709,9 +12709,6 @@ fn replay_finishing_geometry(
                 ),
             });
         }
-        if let Some(path) = replayed_paths.get(dependency) {
-            return Ok(path.clone());
-        }
         let entry = loaded
             .log
             .entries()
@@ -12721,7 +12718,6 @@ fn replay_finishing_geometry(
             .ok_or_else(|| HostError::Validation {
                 detail: format!("finishing replay dependency is not canonical: {dependency}"),
             })?;
-        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
         let expected_bytes = entry
             .brep_byte_count
             .and_then(|value| usize::try_from(value).ok())
@@ -12734,6 +12730,18 @@ fn replay_finishing_geometry(
             .ok_or_else(|| HostError::BrepIo {
                 detail: format!("finishing replay dependency digest is missing: {dependency}"),
             })?;
+        let previous_path = previous_generation_path(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{dependency}.brep"));
+        if previous_path.is_file()
+            && read_brep_verified(&previous_path, Some((expected_bytes, expected_sha))).is_ok()
+        {
+            return Ok(previous_path);
+        }
+        if let Some(path) = replayed_paths.get(dependency) {
+            return Ok(path.clone());
+        }
+        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
         read_brep_verified(&path, Some((expected_bytes, expected_sha)))
             .map_err(|detail| HostError::BrepIo { detail })?;
         Ok(path)
@@ -12830,7 +12838,8 @@ fn replay_finishing_geometry(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
                 )
-                .with_feature_id(&feature_id);
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id);
             read_result!(
                 worker
                     .clone()

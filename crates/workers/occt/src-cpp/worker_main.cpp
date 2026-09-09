@@ -1644,9 +1644,7 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         provenance != nullptr && provenance->kind == JsonParser::ValueKind::Object
             ? provenance
             : selected;
-    const std::string source_feature_id = get_string(request, "feature_id").empty()
-                                              ? get_string(*source, "source_feature_id")
-                                              : get_string(request, "feature_id");
+    const std::string source_feature_id = get_string(*source, "source_feature_id");
     const std::string source_revision_id = get_string(request, "source_revision_id").empty()
                                                ? get_string(*source, "source_revision_id")
                                                : get_string(request, "source_revision_id");

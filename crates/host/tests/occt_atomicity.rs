@@ -101,6 +101,26 @@ fn locate_worker() -> Option<threeterm_occt_worker::OcctWorker> {
     threeterm_occt_worker::OcctWorker::locate().ok()
 }
 
+fn normalize_step_timestamp(bytes: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"FILE_NAME('Open CASCADE Shape Model','";
+    let Some(prefix_start) = bytes
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    else {
+        return bytes.to_vec();
+    };
+    let timestamp_start = prefix_start + PREFIX.len();
+    let Some(timestamp_len) = bytes[timestamp_start..]
+        .windows(2)
+        .position(|window| window == b"',")
+    else {
+        return bytes.to_vec();
+    };
+    let mut normalized = bytes.to_vec();
+    normalized[timestamp_start..timestamp_start + timestamp_len].fill(b'0');
+    normalized
+}
+
 fn required_fixture_worker(test_name: &str) -> Option<threeterm_occt_worker::OcctWorker> {
     let worker = locate_worker();
     if worker.is_none() && std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
@@ -491,14 +511,16 @@ fn subtractive_extrude_replays_and_exports_the_same_cut_after_derived_deletion()
         original_cut
     );
     assert_eq!(
-        fs::read(
-            after_export
-                .artifacts
-                .first()
-                .expect("replayed STEP artifact")
-        )
-        .expect("replayed STEP reads"),
-        before_step
+        normalize_step_timestamp(
+            &fs::read(
+                after_export
+                    .artifacts
+                    .first()
+                    .expect("replayed STEP artifact")
+            )
+            .expect("replayed STEP reads")
+        ),
+        normalize_step_timestamp(&before_step)
     );
     let _ = fs::remove_dir_all(root);
 }

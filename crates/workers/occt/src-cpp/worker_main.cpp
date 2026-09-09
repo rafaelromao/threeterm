@@ -1674,6 +1674,12 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
             (first_point.X() + last_point.X()) / 2.0,
             (first_point.Y() + last_point.Y()) / 2.0,
             (first_point.Z() + last_point.Z()) / 2.0);
+        const auto finite = [](double value) { return std::isfinite(value); };
+        if (!finite(midpoint.X()) || !finite(midpoint.Y()) || !finite(midpoint.Z()) ||
+            !finite(tangent.X()) || !finite(tangent.Y()) || !finite(tangent.Z()) ||
+            !finite(properties.Mass())) {
+            continue;
+        }
         // A candidate role is evidence about the returned edge, not a copy
         // of the caller's claim. Preserve the MVP perimeter role for linear
         // edges and expose a distinct role for curved edit results.

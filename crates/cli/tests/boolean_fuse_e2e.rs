@@ -136,7 +136,7 @@ fn boolean_fuse_cli_drives_host_to_commit_a_fused_brep() {
     validate(&entry.response_schema, &parsed).expect("response validates against schema");
 
     assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "boolean_fuse");
+    assert_eq!(parsed["operation"], "boolean-fuse");
     assert_eq!(parsed["feature_id"], "box-fused");
     assert_eq!(
         parsed["schema_version"],

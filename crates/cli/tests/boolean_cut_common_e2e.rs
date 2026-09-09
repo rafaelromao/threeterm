@@ -146,7 +146,7 @@ fn boolean_cut_and_common_cli_commit_distinct_solids() {
     let cut_entry = find(BOOLEAN_CUT_COMMAND_ID).expect("boolean-cut is registered");
     validate(&cut_entry.response_schema, &cut).expect("cut response validates against schema");
     assert_eq!(cut["status"], "ok");
-    assert_eq!(cut["operation"], "boolean_cut");
+    assert_eq!(cut["operation"], "boolean-cut");
     assert_eq!(cut["feature_id"], "box-cut");
     assert_eq!(
         cut["schema_version"],
@@ -158,7 +158,7 @@ fn boolean_cut_and_common_cli_commit_distinct_solids() {
     validate(&common_entry.response_schema, &common)
         .expect("common response validates against schema");
     assert_eq!(common["status"], "ok");
-    assert_eq!(common["operation"], "boolean_common");
+    assert_eq!(common["operation"], "boolean-common");
     assert_eq!(common["feature_id"], "box-common");
     assert_eq!(
         common["schema_version"],

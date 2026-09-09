@@ -751,6 +751,9 @@ impl WorkerHost for SubprocessWorkerHost {
         // stream could still be delivering over-limit bytes.
         let drain_deadline = Instant::now() + STREAM_DRAIN_WAIT;
         while Instant::now() < drain_deadline {
+            // A worker can fork a detached pipe holder after the initial
+            // snapshot. Keep closing that race until the readers observe EOF.
+            self.kill_inherited_pipe_holders();
             if self.readers_settled() {
                 break;
             }
@@ -966,12 +969,36 @@ fn inherited_pipe_pids(_identity: &str) -> Vec<i32> {
     Vec::new()
 }
 
+#[cfg(target_os = "linux")]
+fn kill_inherited_pipe_processes(identity: &str) {
+    let inherited = inherited_pipe_pids(identity);
+    let mut contained = inherited.clone();
+    for pid in inherited {
+        contained.extend(descendant_pids(pid));
+    }
+    for pid in contained {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_inherited_pipe_processes(_identity: &str) {}
+
 #[cfg(not(target_os = "linux"))]
 fn descendant_pids(_root: i32) -> Vec<i32> {
     Vec::new()
 }
 
 impl SubprocessWorkerHost {
+    fn kill_inherited_pipe_holders(&self) {
+        if let Some(identity) = &self.stdout_pipe_identity {
+            kill_inherited_pipe_processes(identity);
+        }
+    }
+
     fn settle_terminal_streams(&self) {
         let deadline = Instant::now() + STREAM_DRAIN_WAIT;
         while !self.readers_settled()

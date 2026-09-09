@@ -8,6 +8,7 @@ use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::bundle::{PUBLICATION_KILL_POINT_ENV, PublicationKillPoint};
 use threeterm_persistence::previous_generation_path;
+use threeterm_protocol::artifact::sha256_hex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GenerationHashes {
@@ -94,6 +95,18 @@ fn response(output: &Output, operation: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("command response is JSON")
 }
 
+fn brep_fingerprints(root: &Path) -> Vec<String> {
+    let mut fingerprints = fs::read_dir(root.join("brep"))
+        .expect("BREP directory reads")
+        .map(|entry| {
+            let path = entry.expect("BREP entry reads").path();
+            sha256_hex(&fs::read(path).expect("BREP reads"))
+        })
+        .collect::<Vec<_>>();
+    fingerprints.sort();
+    fingerprints
+}
+
 #[test]
 fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
     let scenario = unique_scenario("staged-files");
@@ -137,12 +150,13 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 
 #[test]
 fn generation_interruption_recovery() {
-    let Ok(worker) = OcctWorker::locate() else {
-        if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
-            panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
-        }
-        return;
-    };
+    let worker = OcctWorker::locate().unwrap_or_else(|error| {
+        panic!(
+            "generation_interruption_recovery requires the OCCT worker; set \
+             THREETERM_OCCT_DIR, THREETERM_OCCT_VENDOR=1, or THREETERM_OCCTBUILD_WORKER: \
+             {error:?}"
+        )
+    });
     let control_scenario = unique_scenario("control");
     let control_root = control_scenario.join("project");
     response(&run_save(&control_root, "seed", None), "control seed save");
@@ -160,6 +174,7 @@ fn generation_interruption_recovery() {
         ),
         "control pre-save generation",
     );
+    let before_control_geometry = brep_fingerprints(&control_root);
     let candidate_control = GenerationHashes::from_response(
         &response(
             &run_extrude(&control_root, "extrude-3", None),
@@ -167,6 +182,7 @@ fn generation_interruption_recovery() {
         ),
         "control candidate generation",
     );
+    let candidate_control_geometry = brep_fingerprints(&control_root);
 
     for point in PublicationKillPoint::ALL {
         let scenario = unique_scenario(point.as_str());
@@ -179,6 +195,7 @@ fn generation_interruption_recovery() {
             ),
             "case older generation",
         );
+        let older_geometry = brep_fingerprints(&root);
         let before = GenerationHashes::from_response(
             &response(
                 &run_extrude(&root, "extrude-2", None),
@@ -186,6 +203,7 @@ fn generation_interruption_recovery() {
             ),
             "case pre-save generation",
         );
+        let before_geometry = brep_fingerprints(&root);
         assert_eq!(
             older, older_control,
             "{point:?}: setup older generation differs"
@@ -232,6 +250,12 @@ fn generation_interruption_recovery() {
             observed, *expected,
             "{point:?}: recovered {expected_name} generation does not match the complete generation"
         );
+        let expected_geometry = match point {
+            PublicationKillPoint::PromoteStaging
+            | PublicationKillPoint::ParentSync
+            | PublicationKillPoint::RetiredCleanup => &candidate_control_geometry,
+            _ => &before_control_geometry,
+        };
 
         let recovered_from_previous = loaded["recovered_from_previous"]
             .as_bool()
@@ -258,6 +282,10 @@ fn generation_interruption_recovery() {
             replayed.recomputed > 0,
             "{point:?}: extrude geometry recomputes"
         );
+        assert_eq!(
+            replayed.geometry_fingerprints, *expected_geometry,
+            "{point:?}: replayed geometry differs from the selected complete generation"
+        );
 
         let previous = previous_generation_path(&root);
         assert!(
@@ -282,6 +310,18 @@ fn generation_interruption_recovery() {
             ),
             *expected_previous,
             "{point:?}: previous recovery slot is not the immediately preceding complete generation"
+        );
+        let expected_previous_geometry = match point {
+            PublicationKillPoint::ReplaceCurrent
+            | PublicationKillPoint::PromoteStaging
+            | PublicationKillPoint::ParentSync
+            | PublicationKillPoint::RetiredCleanup => &before_geometry,
+            _ => &older_geometry,
+        };
+        assert_eq!(
+            brep_fingerprints(&previous),
+            *expected_previous_geometry,
+            "{point:?}: previous recovery slot geometry is not complete"
         );
 
         let _ = fs::remove_dir_all(scenario);

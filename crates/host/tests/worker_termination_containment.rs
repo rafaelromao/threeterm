@@ -98,7 +98,7 @@ fn snapshot_manifest_transactions(bundle_root: &str) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn cooperative_cancel_does_not_mutate_canonical_state() {
+fn supervised_occt_failure_containment_cooperative_cancel_preserves_snapshot() {
     // Cooperative cancel via direct worker with HostError projection:
     // the HostError must be WorkerTerminated with last_progress retained.
     let (dir, host, bundle_root) = create_host_with_bundle("coop-canonical");
@@ -169,7 +169,7 @@ fn cooperative_cancel_does_not_mutate_canonical_state() {
 }
 
 #[test]
-fn force_stop_does_not_mutate_canonical_state() {
+fn supervised_occt_failure_containment_deadline_force_stop_preserves_snapshot() {
     let (dir, host, bundle_root) = create_host_with_bundle("force-canonical");
     let (before_manifest, before_log) = snapshot_manifest_transactions(&bundle_root);
     let before_snapshot = host.current().expect("before");

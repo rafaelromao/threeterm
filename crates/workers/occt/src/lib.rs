@@ -291,6 +291,8 @@ pub struct OcctWorker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryFingerprint {
     pub worker_kind: String,
+    pub worker_schema_version: String,
+    pub protocol_schema_version: String,
     pub source_repository: String,
     pub source_commit: String,
     pub binary_sha256: String,
@@ -454,6 +456,8 @@ impl OcctWorker {
         }
         Ok(BinaryFingerprint {
             worker_kind: "occt".to_string(),
+            worker_schema_version: schema_version().to_string(),
+            protocol_schema_version: threeterm_protocol::schema_version().to_string(),
             source_repository: SOURCE_REPOSITORY.to_string(),
             source_commit: SOURCE_COMMIT.to_string(),
             binary_sha256: actual,
@@ -1990,6 +1994,31 @@ mod tests {
             .expect_err("substituted worker must fail closed");
 
         assert!(matches!(error, WorkerError::IdentityMismatch { .. }));
+        let _ = fs::remove_file(worker_path);
+    }
+
+    #[test]
+    fn occt_binary_identity_binds_binary_and_compatibility_versions() {
+        let worker_path =
+            std::env::temp_dir().join(format!("threeterm-occt-fingerprint-{}", new_request_id()));
+        fs::write(&worker_path, b"approved worker bytes").expect("worker fixture writes");
+
+        let fingerprint = OcctWorker::with_binary_path(worker_path.clone())
+            .verify_identity()
+            .expect("regular executable fingerprint verifies");
+
+        assert_eq!(fingerprint.worker_kind, "occt");
+        assert_eq!(fingerprint.worker_schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            fingerprint.protocol_schema_version,
+            threeterm_protocol::schema_version()
+        );
+        assert_eq!(fingerprint.source_repository, SOURCE_REPOSITORY);
+        assert_eq!(fingerprint.source_commit, SOURCE_COMMIT);
+        assert_eq!(
+            fingerprint.binary_sha256,
+            sha256_file(&worker_path).unwrap()
+        );
         let _ = fs::remove_file(worker_path);
     }
 

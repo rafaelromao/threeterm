@@ -23,7 +23,7 @@ run_selector() {
     fi
 }
 
-run_selector fast "test --workspace"
+run_selector fast "test --workspace -- --skip supervised_occt_extrude --skip required_occt_worker"
 run_selector slow "test --workspace --jobs 1 -- --ignored --test-threads=1"
 run_selector e2e "test --workspace --jobs 1 -- --include-ignored --test-threads=1"
 

@@ -23,15 +23,16 @@ use threeterm_domain::{
     resolve_edge_reference, resolve_planar_face_reference, resolve_split_edge_reference,
 };
 use threeterm_occt_worker::{
-    BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
-    BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
-    BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, ExportRequest,
-    ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
-    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
-    MirrorResult, OcctDiagnostic, OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest,
-    RevolveResult, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
-    TranslateRequest, WorkerError, new_request_id,
+    BinaryFingerprint, BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest,
+    BooleanCutResult, BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest,
+    BooleanPatternResult, BracketRequest, BracketResult, ChamferRequest, ChamferResult,
+    CircularPatternRequest, CircularPatternResult, DraftRequest, DraftResult,
+    EdgeCandidateEvidence, ExportRequest, ExtrudeMode, ExtrudeRequest, ExtrudeResult,
+    FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
+    LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
+    OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, WorkerError,
+    new_request_id,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
@@ -505,6 +506,7 @@ pub struct ExtrudeCommitView {
     pub snapshot: SnapshotView,
     pub result: ExtrudeResult,
     pub worker_fingerprint: WorkerFingerprint,
+    pub binary_fingerprint: Option<BinaryFingerprint>,
     pub artifact: Layer1DerivedResult,
 }
 
@@ -6429,129 +6431,7 @@ impl Host {
         root: impl AsRef<Path>,
         worker: &OcctWorker,
     ) -> Result<ExtrudeReplayView, HostError> {
-        match self.reload_and_recompute_canonical_intents(root.as_ref(), worker) {
-            Err(error)
-                if matches!(
-                    &error,
-                    HostError::DerivedResult { diagnostic }
-                        if diagnostic.arg == "expected_exactly_one_artifact"
-                ) =>
-            {
-                self.reload_extrudes_without_artifact_protocol(root.as_ref(), worker)
-            }
-            result => result,
-        }
-    }
-
-    fn reload_extrudes_without_artifact_protocol(
-        &self,
-        root: &Path,
-        worker: &OcctWorker,
-    ) -> Result<ExtrudeReplayView, HostError> {
-        let loaded = Bundle::at(root).open()?;
-        let source_snapshot = SnapshotView::from(&loaded);
-        let model_state = canonical_model_fingerprint(&loaded);
-        let mut feature_ids = Vec::new();
-        let mut geometry_fingerprints = Vec::new();
-        for entry in loaded.log.entries() {
-            let Some(CanonicalIntent::Extrude(intent)) = entry.intent.as_ref() else {
-                continue;
-            };
-            let feature_id = intent
-                .affected_semantic_ids
-                .first()
-                .cloned()
-                .ok_or_else(|| HostError::Validation {
-                    detail: "extrude intent has no affected feature".to_string(),
-                })?;
-            let stage = Stage::create_fresh(root.join(".derived"), "replay").map_err(|error| {
-                HostError::BrepIo {
-                    detail: format!("create extrude replay stage failed: {error}"),
-                }
-            })?;
-            let stage_root = stage.root().to_path_buf();
-            let target_path = if let Some(target_id) = &intent.target_feature_id {
-                Some(authenticated_base_brep(root, target_id)?)
-            } else {
-                None
-            };
-            let request = ExtrudeRequest::new(
-                intent.request_id.clone(),
-                intent
-                    .deterministic_inputs
-                    .profile
-                    .iter()
-                    .map(|[x, y]| (*x, *y))
-                    .collect(),
-                intent.deterministic_inputs.height,
-            )
-            .with_mode(parse_extrude_mode_value(if intent.mode.is_empty() {
-                &intent.operation
-            } else {
-                &intent.mode
-            })?)
-            .with_optional_target_feature_id(intent.target_feature_id.clone())
-            .with_optional_target_path(target_path)
-            .with_output_path(&stage_root, "replay.brep.partial")
-            .with_feature_id(&feature_id);
-            let mut artifact_request = extrude_artifact_request(&request, &source_snapshot)?;
-            artifact_request.source_revision_id = intent.source_revision.clone();
-            artifact_request.staging_name = "replay.brep".to_string();
-            let request = request.with_artifact_request(artifact_request);
-            let result = worker
-                .clone()
-                .with_expected_worker_id("occt")
-                .with_revision_id(intent.source_revision.clone())
-                .extrude(&request)
-                .map_err(HostError::from)?;
-            if result.schema_version != expected_occt_worker_fingerprint().worker_schema_version {
-                let _ = stage.discard();
-                return Err(HostError::WorkerUnavailable {
-                    detail: format!(
-                        "incompatible extrude worker schema: {}",
-                        result.schema_version
-                    ),
-                });
-            }
-            if result.source_revision_id.as_deref() != Some(intent.source_revision.as_str()) {
-                let _ = stage.discard();
-                return Err(HostError::WorkerUnavailable {
-                    detail: "incompatible extrude source revision".to_string(),
-                });
-            }
-            let bytes = read_brep_verified(
-                &result.brep_path,
-                Some((result.brep_bytes, &result.brep_sha256)),
-            )
-            .map_err(|detail| HostError::BrepIo { detail })?;
-            let path = Bundle::at(root).restore_derived_brep_if_revision(
-                &feature_id,
-                &source_snapshot.revision_hash,
-                &bytes,
-            )?;
-            stage.discard().map_err(|error| HostError::BrepIo {
-                detail: format!("discard extrude replay stage failed: {error}"),
-            })?;
-            feature_ids.push(feature_id);
-            geometry_fingerprints.push(sha256_path(&path).map_err(|error| HostError::BrepIo {
-                detail: format!("hash replayed BREP failed: {error}"),
-            })?);
-        }
-        let reloaded = Bundle::at(root).open()?;
-        if canonical_model_fingerprint(&reloaded) != model_state {
-            return Err(HostError::Validation {
-                detail: "extrude replay changed the canonical model state".to_string(),
-            });
-        }
-        let snapshot = SnapshotView::from(&reloaded);
-        self.current.replace(Some(reloaded));
-        Ok(ExtrudeReplayView {
-            snapshot,
-            model_state_fingerprint: model_state,
-            recomputed: feature_ids.len(),
-            feature_ids,
-            geometry_fingerprints,
-        })
+        self.reload_and_recompute_canonical_intents(root, worker)
     }
 
     /// Reload canonical geometry intents and rebuild their disposable BREP
@@ -7605,11 +7485,6 @@ impl Host {
             serde_json::to_value(&derived.result).map_err(|error| HostError::Validation {
                 detail: format!("replayed OCCT result serialization failed: {error}"),
             })?;
-        let path = value["brep_path"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP path".to_string(),
-            })?;
         let bytes = value["brep_bytes"]
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
@@ -7621,7 +7496,7 @@ impl Host {
             .ok_or_else(|| HostError::BrepIo {
                 detail: "replayed OCCT result has no BREP digest".to_string(),
             })?;
-        let content = read_brep_verified(Path::new(path), Some((bytes, sha)))
+        let content = read_brep_verified(&derived.artifact.path, Some((bytes, sha)))
             .map_err(|detail| HostError::BrepIo { detail })?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
@@ -9733,20 +9608,15 @@ impl Host {
         request: &impl Serialize,
         operation: threeterm_occt_worker::Operation,
         worker: &OcctWorker,
-        source_revision: &str,
+        _source_revision: &str,
     ) -> Result<StagedOcctResult<R>, HostError>
     where
         R: DeserializeOwned + Serialize,
     {
-        self.stage_occt_result_inner(
-            root,
-            request,
-            operation,
-            worker,
-            None,
-            None,
-            Some(source_revision),
-        )
+        // Replay executes against the currently loaded Revision Snapshot. The
+        // intent's source revision remains provenance, not the artifact's
+        // promotion revision.
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(
@@ -11558,6 +11428,7 @@ impl Host {
             snapshot,
             result,
             worker_fingerprint,
+            binary_fingerprint: None,
             artifact,
         })
     }
@@ -12176,6 +12047,7 @@ impl Host {
         let source_snapshot = self.load(root)?;
         let request =
             self.resolve_extrude_request(root, request, Some(&source_snapshot.revision_hash))?;
+        let binary_fingerprint = worker.verify_identity().map_err(HostError::from)?;
         let derived = self.stage_occt_result::<ExtrudeResult>(
             root,
             &request,
@@ -12189,6 +12061,7 @@ impl Host {
             snapshot,
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            binary_fingerprint: Some(binary_fingerprint),
             artifact,
         })
     }
@@ -12204,6 +12077,7 @@ impl Host {
         expected_revision: &str,
     ) -> Result<ExtrudeCommitView, HostError> {
         let root = root.as_ref();
+        let binary_fingerprint = worker.verify_identity().map_err(HostError::from)?;
         let derived = self.stage_occt_result::<ExtrudeResult>(
             root,
             &request,
@@ -12226,6 +12100,7 @@ impl Host {
             snapshot,
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            binary_fingerprint: Some(binary_fingerprint),
             artifact,
         })
     }
@@ -12244,6 +12119,7 @@ impl Host {
         let source_snapshot = self.load(root)?;
         let request =
             self.resolve_extrude_request(root, request, Some(&source_snapshot.revision_hash))?;
+        let binary_fingerprint = worker.verify_identity().map_err(HostError::from)?;
         let mut on_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
         let derived = self.stage_occt_result_inner::<ExtrudeResult>(
             root,
@@ -12261,6 +12137,7 @@ impl Host {
             snapshot,
             result,
             worker_fingerprint: expected_occt_worker_fingerprint(),
+            binary_fingerprint: Some(binary_fingerprint),
             artifact,
         })
     }

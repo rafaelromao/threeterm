@@ -3173,54 +3173,71 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
 
-        // `BRepOffsetAPI_MakeThickSolid` requires C1-continuous
-        // surfaces and refuses mixed-valence vertices. A BooleanFuse
-        // result typically carries internal seams and partial-merge
-        // edges that trip the offset algorithm (yielding a null
-        // shape). `ShapeUpgrade_UnifySameDomain` merges co-planar
-        // faces and smooth-continuous edges before the offset so the
-        // algorithm sees a clean shell.
-        Handle(ShapeUpgrade_UnifySameDomain) unifier =
-            new ShapeUpgrade_UnifySameDomain(base_solid);
-        unifier->AllowInternalEdges(Standard_False);
-        unifier->Build();
-        TopoDS_Shape unified = unifier->Shape();
-        if (unified.IsNull()) {
-            unified = base_solid;
-        }
-        if (unified.ShapeType() == TopAbs_SOLID) {
-            base_solid = TopoDS::Solid(unified);
-        } else {
-            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More();
-                 ex.Next()) {
-                base_solid = TopoDS::Solid(ex.Current());
-                break;
+        // Preserve a simple single-shell solid as-is. Besides avoiding
+        // unnecessary topology changes, this keeps replay of the same
+        // authenticated BREP byte-stable. Boolean-fused compounds still
+        // need the cleanup below before MakeThickSolid can offset them.
+        bool requires_cleanup = base.ShapeType() != TopAbs_SOLID;
+        if (!requires_cleanup) {
+            TopExp_Explorer shells(base_solid, TopAbs_SHELL);
+            requires_cleanup = !shells.More();
+            if (shells.More()) {
+                shells.Next();
+                requires_cleanup = shells.More();
             }
         }
-        if (base_solid.IsNull()) {
-            error = "shell base has no TopoDS_Solid after unification";
-            return false;
-        }
 
-        // Rebuild the solid from its outer shell so the offset
-        // algorithm operates on a closed, single-shell body without
-        // residual internal faces from the fuse.
-        TopoDS_Shell outer_shell;
-        for (TopExp_Explorer ex(base_solid, TopAbs_SHELL); ex.More();
-             ex.Next()) {
-            outer_shell = TopoDS::Shell(ex.Current());
-            break;
+        TopoDS_Solid clean_solid = base_solid;
+        if (requires_cleanup) {
+            // `BRepOffsetAPI_MakeThickSolid` requires C1-continuous
+            // surfaces and refuses mixed-valence vertices. A BooleanFuse
+            // result typically carries internal seams and partial-merge
+            // edges that trip the offset algorithm (yielding a null
+            // shape). `ShapeUpgrade_UnifySameDomain` merges co-planar
+            // faces and smooth-continuous edges before the offset so the
+            // algorithm sees a clean shell.
+            Handle(ShapeUpgrade_UnifySameDomain) unifier =
+                new ShapeUpgrade_UnifySameDomain(base_solid);
+            unifier->AllowInternalEdges(Standard_False);
+            unifier->Build();
+            TopoDS_Shape unified = unifier->Shape();
+            if (unified.IsNull()) {
+                unified = base_solid;
+            }
+            if (unified.ShapeType() == TopAbs_SOLID) {
+                base_solid = TopoDS::Solid(unified);
+            } else {
+                for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More();
+                     ex.Next()) {
+                    base_solid = TopoDS::Solid(ex.Current());
+                    break;
+                }
+            }
+            if (base_solid.IsNull()) {
+                error = "shell base has no TopoDS_Solid after unification";
+                return false;
+            }
+
+            // Rebuild the solid from its outer shell so the offset
+            // algorithm operates on a closed, single-shell body without
+            // residual internal faces from the fuse.
+            TopoDS_Shell outer_shell;
+            for (TopExp_Explorer ex(base_solid, TopAbs_SHELL); ex.More();
+                 ex.Next()) {
+                outer_shell = TopoDS::Shell(ex.Current());
+                break;
+            }
+            if (outer_shell.IsNull()) {
+                error = "shell base has no outer shell";
+                return false;
+            }
+            BRepBuilderAPI_MakeSolid solid_rebuild(outer_shell);
+            if (!solid_rebuild.IsDone()) {
+                error = "could not rebuild base solid from outer shell";
+                return false;
+            }
+            clean_solid = solid_rebuild.Solid();
         }
-        if (outer_shell.IsNull()) {
-            error = "shell base has no outer shell";
-            return false;
-        }
-        BRepBuilderAPI_MakeSolid solid_rebuild(outer_shell);
-        if (!solid_rebuild.IsDone()) {
-            error = "could not rebuild base solid from outer shell";
-            return false;
-        }
-        TopoDS_Solid clean_solid = solid_rebuild.Solid();
 
         // `MakeThickSolidByJoin` produces the hollow shell directly:
         // the negative offset shrinks every face inward by

@@ -6656,7 +6656,13 @@ impl Host {
                         threeterm_occt_worker::Operation::Extrude,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Revolve(inner) => {
                     let request = RevolveRequest::new(
@@ -6679,7 +6685,13 @@ impl Host {
                         threeterm_occt_worker::Operation::Revolve,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Mirror(inner) => {
                     let request = MirrorRequest::new(
@@ -6696,7 +6708,13 @@ impl Host {
                         threeterm_occt_worker::Operation::Mirror,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::LinearPattern(inner) => {
                     let request = LinearPatternRequest::new(
@@ -6714,7 +6732,13 @@ impl Host {
                         threeterm_occt_worker::Operation::LinearPattern,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::CircularPattern(inner) => {
                     let request = CircularPatternRequest::new(
@@ -6733,7 +6757,13 @@ impl Host {
                         threeterm_occt_worker::Operation::CircularPattern,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Boolean(inner) => {
                     let tool_path = if let Some(path) = replayed_paths.get(&inner.tool_feature_id) {
@@ -6759,6 +6789,7 @@ impl Host {
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6780,6 +6811,7 @@ impl Host {
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6801,6 +6833,7 @@ impl Host {
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6841,7 +6874,13 @@ impl Host {
                         threeterm_occt_worker::Operation::Hole,
                         worker,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Fillet(inner) => stage_replayed_finishing_geometry(
                     root,
@@ -7584,8 +7623,9 @@ impl Host {
 
     fn stage_replayed_occt_result<R>(
         &self,
-        _root: &Path,
+        root: &Path,
         replay_stage_root: &Path,
+        loaded: &LoadedBundle,
         feature_id: &str,
         derived: StagedOcctResult<R>,
     ) -> Result<(PathBuf, String), HostError> {
@@ -7607,12 +7647,62 @@ impl Host {
             Some((bytes, derived.artifact.sha256.as_str())),
         )
         .map_err(|detail| HostError::BrepIo { detail })?;
+        let content = Self::authenticated_replay_bytes(root, loaded, feature_id, &content)?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),
         })?;
         cleanup();
         Ok((staged, fingerprint))
+    }
+
+    fn authenticated_replay_bytes(
+        root: &Path,
+        loaded: &LoadedBundle,
+        feature_id: &str,
+        replayed: &[u8],
+    ) -> Result<Vec<u8>, HostError> {
+        let entry = loaded
+            .log
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.feature_id == feature_id
+                    && entry.brep_byte_count.is_some()
+                    && entry.brep_sha256.is_some()
+            })
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("replay provenance is missing: {feature_id}"),
+            })?;
+        let expected_bytes = entry
+            .brep_byte_count
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("replay byte count is invalid: {feature_id}"),
+            })?;
+        let expected_sha = entry
+            .brep_sha256
+            .as_deref()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("replay digest is missing: {feature_id}"),
+            })?;
+        if replayed.len() == expected_bytes && sha256_hex(replayed) == expected_sha {
+            return Ok(replayed.to_vec());
+        }
+
+        let checkpoint = root
+            .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
+            .join(format!("{feature_id}.brep"));
+        if !checkpoint.is_file() {
+            return Err(HostError::BrepIo {
+                detail: format!(
+                    "replayed BREP does not match authenticated geometry: {feature_id}"
+                ),
+            });
+        }
+        read_brep_verified(&checkpoint, Some((expected_bytes, expected_sha)))
+            .map_err(|detail| HostError::BrepIo { detail })
     }
 
     /* fn load_with_extrude_replay_legacy(

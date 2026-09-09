@@ -12830,8 +12830,7 @@ fn replay_finishing_geometry(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
                 )
-                .with_feature_id(&feature_id)
-                .with_base_feature_id(&value.base_feature_id);
+                .with_feature_id(&feature_id);
             read_result!(
                 worker
                     .clone()

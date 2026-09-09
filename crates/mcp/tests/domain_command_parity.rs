@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -11,7 +12,9 @@ use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
     APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, CommandSchema,
-    EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, iter,
+    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID,
+    IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    iter,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
@@ -291,7 +294,7 @@ fn assert_mcp_registry_result(
 }
 
 #[test]
-fn every_registered_command_reaches_cli_and_mcp_executor_and_validates_response() {
+fn executable_registry_extrude_reaches_cli_and_mcp_executor_and_validates_response() {
     let root = root("registry-adapter-parity");
 
     for schema in iter() {
@@ -336,6 +339,36 @@ fn identity_request(root: &std::path::Path) -> Value {
     json!({"bundle_path": root.to_string_lossy()})
 }
 
+fn historical_edit_request(root: &std::path::Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "l-bracket-base",
+        "parameter": "length",
+        "value": 0.0
+    })
+}
+
+fn export_request(root: &std::path::Path, override_warnings: bool, accept_stale: bool) -> Value {
+    export_request_for_feature(root, "l-bracket", override_warnings, accept_stale)
+}
+
+fn export_request_for_feature(
+    root: &std::path::Path,
+    feature_id: &str,
+    override_warnings: bool,
+    accept_stale: bool,
+) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": feature_id,
+        "formats": ["stl"],
+        "output_dir": root.join("export").to_string_lossy(),
+        "tessellation_deflection": 0.1,
+        "override_warnings": override_warnings,
+        "accept_stale_geometry": accept_stale
+    })
+}
+
 fn extrude_request(root: &std::path::Path) -> Value {
     json!({
         "bundle_path": root.to_string_lossy(),
@@ -372,6 +405,13 @@ fn edge_reference(revision: &str) -> Value {
             "length": 4.0
         }
     })
+}
+
+fn lost_edge_reference(revision: &str) -> Value {
+    let mut reference = edge_reference(revision);
+    reference["semantic_id"] = json!("missing-edge");
+    reference["provenance"]["source_edge_id"] = json!("missing-edge");
+    reference
 }
 
 fn edge_edit_target(revision: &str) -> Value {
@@ -530,6 +570,103 @@ fn cli_identity(root: &std::path::Path) -> Value {
         String::from_utf8_lossy(&stderr)
     );
     serde_json::from_slice(&stdout).expect("CLI identity returns JSON")
+}
+
+fn cli_load(root: &Path) -> Value {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let path = root.to_string_lossy().into_owned();
+    let status = threeterm_cli::dispatch::dispatch(
+        ["--machine", "load", path.as_str()]
+            .into_iter()
+            .map(OsString::from),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(
+        status,
+        0,
+        "CLI load failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    serde_json::from_slice(&stdout).expect("CLI load returns JSON")
+}
+
+fn mcp_load(root: &Path) -> Value {
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.load/1",
+            "arguments": {"bundle_path": root.to_string_lossy()}
+        }),
+    });
+    assert!(
+        response.error.is_none(),
+        "MCP load failed: {:?}",
+        response.error
+    );
+    response.result.expect("MCP load has result")["structuredContent"].clone()
+}
+
+fn restore_request(root: &Path) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": "l-bracket-base",
+        "name": "recovered-before-historical-edit-2"
+    })
+}
+
+fn mcp_restore(root: &Path) -> Value {
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.restore-revision/1",
+            "arguments": restore_request(root)
+        }),
+    });
+    assert!(
+        response.error.is_none(),
+        "MCP restore failed: {:?}",
+        response.error
+    );
+    response.result.expect("MCP restore has result")["structuredContent"].clone()
+}
+
+fn file_inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, current: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let mut entries = fs::read_dir(current)
+            .expect("artifact inventory directory reads")
+            .map(|entry| entry.expect("artifact inventory entry reads"))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("artifact inventory path is under bundle")
+                .to_path_buf();
+            if entry
+                .file_type()
+                .expect("artifact inventory type reads")
+                .is_dir()
+            {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    relative,
+                    fs::read(path).expect("artifact inventory file reads"),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
 }
 
 fn cli_apply(root: &std::path::Path, revision: &str) -> Value {
@@ -716,6 +853,92 @@ fn mcp_cursor_move(root: &std::path::Path, tool: &str) -> Value {
         response.error
     );
     response.result.expect("MCP has result")["structuredContent"].clone()
+}
+
+#[test]
+fn cli_mcp_and_tui_load_rebuild_disposable_geometry_without_canonical_mutation() {
+    let cli_root = root("reload-cli");
+    let mcp_root = root("reload-mcp");
+    let tui_root = root("reload-tui");
+    let Some(worker) = required_worker(
+        "cli_mcp_and_tui_load_rebuild_disposable_geometry_without_canonical_mutation",
+    ) else {
+        return;
+    };
+    for (path, label) in [(&cli_root, "cli"), (&mcp_root, "mcp"), (&tui_root, "tui")] {
+        Bundle::create(path).expect("reload bundle creates");
+        threeterm_host::Host::new()
+            .extrude(
+                path,
+                ExtrudeRequest::new(
+                    format!("reload-{label}"),
+                    vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+                    3.0,
+                )
+                .with_feature_id("base"),
+                &worker,
+            )
+            .expect("reload seed commits");
+    }
+    let before = [&cli_root, &mcp_root, &tui_root].map(|path| {
+        let bundle = Bundle::at(path).open().expect("reload bundle opens");
+        (
+            threeterm_host::Host::new()
+                .identity(path)
+                .expect("reload identity reads"),
+            bundle.history,
+            bundle.graph,
+            fs::read(path.join("manifest.json")).expect("reload manifest reads"),
+            fs::read(path.join("transactions.log")).expect("reload log reads"),
+            fs::read(path.join("brep/base.brep")).expect("reload BREP reads"),
+            file_inventory(path),
+        )
+    });
+
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        fs::remove_file(path.join("brep/base.brep")).expect("reload BREP removes");
+        for directory in ["cache", ".derived", "stage"] {
+            let _ = fs::remove_dir_all(path.join(directory));
+        }
+    }
+    let loads = [
+        cli_load(&cli_root),
+        mcp_load(&mcp_root),
+        threeterm_tui::execute_domain_command(
+            &threeterm_host::Host::new(),
+            LOAD_COMMAND_ID,
+            json!({"bundle_path": tui_root.to_string_lossy()}),
+        )
+        .expect("TUI load rebuilds disposable geometry"),
+    ];
+    for ((path, state), load_result) in [&cli_root, &mcp_root, &tui_root]
+        .into_iter()
+        .zip(before.iter())
+        .zip(loads)
+    {
+        let (identity, history, graph, manifest, log, brep, inventory) = state;
+        assert_eq!(
+            load_result["feature_graph_hash"],
+            identity.feature_graph_hash
+        );
+        assert_eq!(load_result["revision_hash"], identity.revision_hash);
+        assert_eq!(
+            threeterm_host::Host::new().identity(path).unwrap(),
+            *identity
+        );
+        let reloaded = Bundle::at(path).open().expect("reloaded bundle opens");
+        assert_eq!(reloaded.history, *history);
+        assert_eq!(reloaded.graph, *graph);
+        assert_eq!(fs::read(path.join("manifest.json")).unwrap(), *manifest);
+        assert_eq!(fs::read(path.join("transactions.log")).unwrap(), *log);
+        assert_eq!(fs::read(path.join("brep/base.brep")).unwrap(), *brep);
+        assert_eq!(file_inventory(path), *inventory);
+        assert!(!reloaded.graph.contains_feature("invalid-cut"));
+    }
+
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 #[test]
@@ -1038,7 +1261,238 @@ fn migrated_adapters_preserve_shared_schema_and_validation_errors() {
 }
 
 #[test]
-fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
+fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
+    let Some(_worker) =
+        required_worker("cli_mcp_and_tui_preserve_historical_failure_recovery_context")
+    else {
+        return;
+    };
+    let cli_root = root("historical-failure-cli");
+    let mcp_root = root("historical-failure-mcp");
+    let tui_root = root("historical-failure-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        threeterm_host::Host::new()
+            .save_bracket(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history fixture creates");
+        fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
+            ),
+            path.join("brep/l-bracket.brep"),
+        )
+        .expect("history fixture BREP copies");
+    }
+
+    let cli = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        HISTORICAL_EDIT_COMMAND_ID,
+        historical_edit_request(&cli_root),
+    )
+    .expect("CLI historical edit commits degraded snapshot");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        HISTORICAL_EDIT_COMMAND_ID,
+        historical_edit_request(&tui_root),
+    )
+    .expect("TUI historical edit commits degraded snapshot");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.historical-edit/1",
+            "arguments": historical_edit_request(&mcp_root)
+        }),
+    });
+    let mcp =
+        mcp.result.expect("MCP historical edit returns a result")["structuredContent"].clone();
+
+    assert_eq!(cli, mcp);
+    assert_eq!(cli, tui);
+    assert_eq!(cli["status"], "degraded");
+    assert_eq!(
+        cli["dirty_features"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["blocked_features"],
+        json!(["l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["diagnostics"][0]["affected_ids"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        cli["diagnostics"][0]["recovery"],
+        "correct_geometry_or_restore_revision"
+    );
+    assert!(
+        cli["named_revisions"]
+            .as_array()
+            .expect("recovery revision list")
+            .iter()
+            .any(|revision| revision["name"] == "recovered-before-historical-edit-2")
+    );
+
+    let history = threeterm_host::Host::new()
+        .history(&tui_root)
+        .expect("degraded history reloads");
+    let active_revision = cli["active_revision"]
+        .as_str()
+        .expect("active revision is a string");
+    let mut session = threeterm_tui::TuiSession::new([], active_revision);
+    session.refresh_stale_last_valid_geometry(&history, "l-bracket");
+    let overlay = session
+        .stale_last_valid_geometry_overlay()
+        .expect("TUI exposes stale recovery geometry");
+    assert!(overlay.contains("l-bracket-base"));
+    assert!(overlay.contains(active_revision));
+
+    let cli_restore = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        RESTORE_REVISION_COMMAND_ID,
+        restore_request(&cli_root),
+    )
+    .expect("CLI restores the pre-failure named revision");
+    let tui_restore = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        RESTORE_REVISION_COMMAND_ID,
+        restore_request(&tui_root),
+    )
+    .expect("TUI restores the pre-failure named revision");
+    let mcp_restore = mcp_restore(&mcp_root);
+    assert_eq!(cli_restore, tui_restore);
+    assert_eq!(cli_restore, mcp_restore);
+    assert_eq!(cli_restore["status"], "ok");
+    assert_eq!(
+        cli_restore["features"][0]["stale_last_valid_geometry"],
+        false
+    );
+
+    let cli_export = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXPORT_COMMAND_ID,
+        export_request_for_feature(&cli_root, "l-bracket-base", false, false),
+    )
+    .expect("CLI exports restored current geometry");
+    let tui_export = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        EXPORT_COMMAND_ID,
+        export_request_for_feature(&tui_root, "l-bracket-base", false, false),
+    )
+    .expect("TUI exports restored current geometry");
+    let mcp_export_response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.export/1",
+            "arguments": export_request_for_feature(&mcp_root, "l-bracket-base", false, false)
+        }),
+    });
+    let mcp_export = mcp_export_response
+        .result
+        .expect("MCP exports restored current geometry")["structuredContent"]
+        .clone();
+    for export in [&cli_export, &tui_export, &mcp_export] {
+        assert_eq!(export["status"], "ok");
+        assert_eq!(export["accepted_stale_last_valid_geometry"], false);
+    }
+
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
+fn stale_geometry_export_is_fatal_and_equivalent_for_every_override_combination() {
+    let cli_root = root("stale-export-cli");
+    let mcp_root = root("stale-export-mcp");
+    let tui_root = root("stale-export-tui");
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        let host = threeterm_host::Host::new();
+        host.save_bracket(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history fixture creates");
+        host.historical_edit(path, "l-bracket-base", "length", 0.0)
+            .expect("historical failure commits stale state");
+    }
+
+    let manifest_before = [
+        fs::read(cli_root.join("manifest.json")).expect("CLI manifest reads"),
+        fs::read(mcp_root.join("manifest.json")).expect("MCP manifest reads"),
+        fs::read(tui_root.join("manifest.json")).expect("TUI manifest reads"),
+    ];
+    let log_before = [
+        fs::read(cli_root.join("transactions.log")).expect("CLI log reads"),
+        fs::read(mcp_root.join("transactions.log")).expect("MCP log reads"),
+        fs::read(tui_root.join("transactions.log")).expect("TUI log reads"),
+    ];
+
+    for override_warnings in [false, true] {
+        for accept_stale in [false, true] {
+            let cli_error = dispatch_registered_command(
+                &threeterm_host::Host::new(),
+                EXPORT_COMMAND_ID,
+                export_request(&cli_root, override_warnings, accept_stale),
+            )
+            .expect_err("CLI refuses stale geometry export");
+            let threeterm_cli::dispatch::DispatchError::Host(cli_error) = cli_error else {
+                panic!("CLI returned a non-host export failure");
+            };
+            let cli = threeterm_host::domain_command_failure_value(&cli_error);
+
+            let tui_error = threeterm_tui::execute_domain_command(
+                &threeterm_host::Host::new(),
+                EXPORT_COMMAND_ID,
+                export_request(&tui_root, override_warnings, accept_stale),
+            )
+            .expect_err("TUI refuses stale geometry export");
+            let threeterm_protocol::command_execution::ExecutionError::Handler(tui_error) =
+                tui_error
+            else {
+                panic!("TUI returned a non-handler export failure");
+            };
+            let tui = threeterm_tui::domain_command_failure_value(&tui_error);
+
+            let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+                id: json!(1),
+                is_notification: false,
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "threeterm.command.export/1",
+                    "arguments": export_request(&mcp_root, override_warnings, accept_stale)
+                }),
+            });
+            let mcp =
+                mcp.result.expect("MCP returns stale export result")["structuredContent"].clone();
+
+            assert_eq!(cli, tui);
+            assert_eq!(cli, mcp);
+            assert_eq!(cli["severity"], "error");
+            assert_eq!(cli["code"], "stale_last_valid_geometry");
+            assert_eq!(cli["override_eligible"], false);
+        }
+    }
+
+    for (index, path) in [&cli_root, &mcp_root, &tui_root].into_iter().enumerate() {
+        assert_eq!(
+            fs::read(path.join("manifest.json")).unwrap(),
+            manifest_before[index]
+        );
+        assert_eq!(
+            fs::read(path.join("transactions.log")).unwrap(),
+            log_before[index]
+        );
+        assert!(!path.join("export").exists());
+    }
+    for path in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+#[test]
+fn shared_extrude_execution_routes_cli_mcp_and_tui_through_the_shared_executor() {
     let cli_root = root("extrude-cli");
     let mcp_root = root("extrude-mcp");
     let tui_root = root("extrude-tui");
@@ -1096,7 +1550,7 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
 }
 
 #[test]
-fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
+fn extrude_adapter_parity_commits_equivalent_subtractive_extrusions() {
     let cli_root = root("subtractive-cli");
     let mcp_root = root("subtractive-mcp");
     let tui_root = root("subtractive-tui");
@@ -1113,7 +1567,7 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
             .extrude(
                 path,
                 ExtrudeRequest::new(
-                    format!("base-{}", path.file_name().unwrap().to_string_lossy()),
+                    "base",
                     vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
                     2.0,
                 )
@@ -1154,6 +1608,16 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
     }
     assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
     assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+    for field in [
+        "request_id",
+        "feature_graph_hash",
+        "revision_hash",
+        "transaction_count",
+        "terminal_log_digest",
+    ] {
+        assert_eq!(cli[field], tui[field], "TUI {field} matches CLI");
+        assert_eq!(cli[field], mcp[field], "MCP {field} matches CLI");
+    }
 
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
@@ -1177,13 +1641,22 @@ fn required_worker(test_name: &str) -> Option<OcctWorker> {
 }
 
 #[test]
-fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
+fn extrude_adapter_failure_parity_reports_the_same_invalid_subtractive_target_diagnostic() {
     let cli_root = root("invalid-subtractive-cli");
     let mcp_root = root("invalid-subtractive-mcp");
     let tui_root = root("invalid-subtractive-tui");
     for path in [&cli_root, &mcp_root, &tui_root] {
         Bundle::create(path).expect("bundle creates");
     }
+    let before = [&cli_root, &mcp_root, &tui_root].map(|path| {
+        (
+            fs::read(path.join("manifest.json")).expect("manifest reads"),
+            fs::read(path.join("transactions.log")).expect("transaction log reads"),
+            threeterm_host::Host::new()
+                .identity(path)
+                .expect("Revision Snapshot identity reads"),
+        )
+    });
     let cli = threeterm_cli::dispatch::dispatch_registered_command(
         &threeterm_host::Host::new(),
         EXTRUDE_COMMAND_ID,
@@ -1206,24 +1679,50 @@ fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
         }),
     });
     let mcp = mcp.result.expect("MCP returns a tool error result");
-    let normalize = |diagnostic: &str| {
-        diagnostic
-            .contains("subtractive extrude target feature is missing: base")
-            .then_some("subtractive extrude target feature is missing: base")
+    let DispatchError::Host(cli_error) = cli else {
+        panic!("CLI returned a non-host failure");
     };
-    let cli_diagnostic = normalize(&format!("{cli:?}"));
-    let tui_diagnostic = normalize(&format!("{tui:?}"));
-    assert_eq!(
-        cli_diagnostic,
-        Some("subtractive extrude target feature is missing: base")
-    );
+    let threeterm_protocol::command_execution::ExecutionError::Handler(tui_error) = tui else {
+        panic!("TUI returned a non-handler failure");
+    };
+    let cli_diagnostic =
+        serde_json::to_value(threeterm_host::domain_command_diagnostic(&cli_error))
+            .expect("CLI diagnostic serializes");
+    let tui_diagnostic =
+        serde_json::to_value(threeterm_host::domain_command_diagnostic(&tui_error))
+            .expect("TUI diagnostic serializes");
+    let mcp_diagnostic = mcp["structuredContent"].clone();
     assert_eq!(cli_diagnostic, tui_diagnostic);
-    assert_eq!(mcp["isError"], true);
+    assert_eq!(cli_diagnostic, mcp_diagnostic);
+    assert_eq!(cli_diagnostic["code"], "invalid_request");
+    assert_eq!(cli_diagnostic["affected_ids"], json!(["cut", "base"]));
     assert_eq!(
-        normalize(mcp["content"][0]["text"].as_str().unwrap_or_default()),
-        Some("subtractive extrude target feature is missing: base")
+        cli_diagnostic["recovery"],
+        "choose_existing_target_or_restore_revision"
     );
-    for path in [cli_root, mcp_root, tui_root] {
+    assert!(
+        cli_diagnostic["arg"]
+            .as_str()
+            .expect("diagnostic detail is text")
+            .contains("subtractive extrude target feature is missing: base")
+    );
+    assert_eq!(mcp["isError"], true);
+    for (index, path) in [cli_root, mcp_root, tui_root].into_iter().enumerate() {
+        assert_eq!(
+            fs::read(path.join("manifest.json")).unwrap(),
+            before[index].0
+        );
+        assert_eq!(
+            fs::read(path.join("transactions.log")).unwrap(),
+            before[index].1
+        );
+        assert_eq!(Bundle::at(&path).open().unwrap().log.len(), 0);
+        assert_eq!(
+            threeterm_host::Host::new()
+                .identity(&path)
+                .expect("Revision Snapshot identity remains unchanged"),
+            before[index].2
+        );
         let _ = fs::remove_dir_all(path);
     }
 }
@@ -1343,6 +1842,11 @@ fn cli_mcp_and_tui_report_real_worker_role_incompatibility_without_commit() {
     for result in [&cli, &tui, &mcp] {
         assert_eq!(result["outcome"], "incompatible");
         assert_eq!(result["committed"], false);
+        assert_eq!(result["affected_ids"][1], "base");
+        assert_eq!(
+            result["recovery"],
+            "choose_compatible_edge_or_restore_revision"
+        );
     }
     for path in [&cli_root, &mcp_root, &tui_root] {
         assert_eq!(Bundle::at(path).open().unwrap().log.len(), 1);
@@ -1351,6 +1855,72 @@ fn cli_mcp_and_tui_report_real_worker_role_incompatibility_without_commit() {
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_report_a_lost_edge_reference_without_commit() {
+    let cli_root = root("edge-lost-cli");
+    let mcp_root = root("edge-lost-mcp");
+    let tui_root = root("edge-lost-tui");
+    let Some(cli_revision) = setup_edge_root(&cli_root, "lost-cli") else {
+        return;
+    };
+    let Some(tui_revision) = setup_edge_root(&tui_root, "lost-tui") else {
+        return;
+    };
+    let Some(mcp_revision) = setup_edge_root(&mcp_root, "lost-mcp") else {
+        return;
+    };
+
+    let cli = cli_reattach_edge(
+        &cli_root,
+        &cli_revision,
+        lost_edge_reference(&cli_revision),
+        edge_edit_target(&cli_revision),
+    );
+    let tui = threeterm_tui::execute_selected_edge_reattachment(
+        &threeterm_host::Host::new(),
+        &tui_root,
+        &tui_revision,
+        "fillet-after-edge",
+        "fillet",
+        "base",
+        0.25,
+        lost_edge_reference(&tui_revision),
+        edge_edit_target(&tui_revision),
+    )
+    .expect("TUI edge command reports a lost reference");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.reattach-edge/2",
+            "arguments": edge_request_with_target(
+                &mcp_root,
+                &mcp_revision,
+                lost_edge_reference(&mcp_revision),
+                edge_edit_target(&mcp_revision),
+            )
+        }),
+    });
+    let mcp = mcp
+        .result
+        .expect("MCP edge command reports a lost reference")["structuredContent"]
+        .clone();
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["outcome"], "lost");
+        assert!(result["candidate_edge_ids"].as_array().unwrap().is_empty());
+        assert_eq!(result["affected_ids"][1], "base");
+        assert_eq!(result["recovery"], "reattach_edge_or_restore_revision");
+        assert_eq!(result["committed"], false);
+    }
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        assert_eq!(Bundle::at(path).open().unwrap().log.len(), 1);
+        assert!(!path.join("brep/fillet-after-edge.brep").exists());
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 #[test]
@@ -1419,6 +1989,11 @@ fn cli_mcp_and_tui_report_real_worker_ambiguity_without_commit() {
         let candidates = result["candidate_edge_ids"].as_array().unwrap();
         assert!(candidates.len() >= 2);
         assert_ne!(candidates[0], candidates[1]);
+        assert_eq!(result["affected_ids"][1], "base");
+        assert_eq!(
+            result["recovery"],
+            "choose_candidate_edge_or_restore_revision"
+        );
         assert_eq!(result["committed"], false);
     }
     for (index, path) in [&cli_root, &mcp_root, &tui_root].into_iter().enumerate() {

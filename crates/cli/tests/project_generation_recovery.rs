@@ -4,8 +4,11 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_host::Host;
+use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::bundle::{PUBLICATION_KILL_POINT_ENV, PublicationKillPoint};
 use threeterm_persistence::previous_generation_path;
+use threeterm_protocol::artifact::sha256_hex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GenerationHashes {
@@ -60,6 +63,23 @@ fn run_load(root: &Path) -> Output {
     command.output().expect("load process runs")
 }
 
+fn run_extrude(root: &Path, feature_id: &str, kill_point: Option<&str>) -> Output {
+    let profile = root.join(format!("{feature_id}.json"));
+    fs::write(&profile, "[[0.0,0.0],[4.0,0.0],[2.0,4.0]]").expect("profile writes");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_threeterm"));
+    command.env_remove(PUBLICATION_KILL_POINT_ENV);
+    command
+        .args(["--machine", "extrude", "--bundle"])
+        .arg(root)
+        .args(["--feature-id", feature_id, "--profile-file"])
+        .arg(profile)
+        .args(["--height", "2", "--mode", "additive"]);
+    if let Some(kill_point) = kill_point {
+        command.env(PUBLICATION_KILL_POINT_ENV, kill_point);
+    }
+    command.output().expect("extrude process runs")
+}
+
 fn response(output: &Output, operation: &str) -> Value {
     assert!(
         output.status.success(),
@@ -73,6 +93,18 @@ fn response(output: &Output, operation: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("command response is JSON")
+}
+
+fn brep_fingerprints(root: &Path) -> Vec<String> {
+    let mut fingerprints = fs::read_dir(root.join("brep"))
+        .expect("BREP directory reads")
+        .map(|entry| {
+            let path = entry.expect("BREP entry reads").path();
+            sha256_hex(&fs::read(path).expect("BREP reads"))
+        })
+        .collect::<Vec<_>>();
+    fingerprints.sort();
+    fingerprints
 }
 
 #[test]
@@ -117,42 +149,61 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 }
 
 #[test]
-fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_generation() {
+fn generation_interruption_recovery() {
+    let worker = OcctWorker::locate().unwrap_or_else(|error| {
+        panic!(
+            "generation_interruption_recovery requires the OCCT worker; set \
+             THREETERM_OCCT_DIR, THREETERM_OCCT_VENDOR=1, or THREETERM_OCCTBUILD_WORKER: \
+             {error:?}"
+        )
+    });
     let control_scenario = unique_scenario("control");
     let control_root = control_scenario.join("project");
+    response(&run_save(&control_root, "seed", None), "control seed save");
     let older_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-1", None),
-            "control initial save",
+            &run_extrude(&control_root, "extrude-1", None),
+            "control initial extrude",
         ),
         "control older generation",
     );
     let before_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-2", None),
-            "control second save",
+            &run_extrude(&control_root, "extrude-2", None),
+            "control second extrude",
         ),
         "control pre-save generation",
     );
+    let before_control_geometry = brep_fingerprints(&control_root);
     let candidate_control = GenerationHashes::from_response(
         &response(
-            &run_save(&control_root, "box-3", None),
-            "control candidate save",
+            &run_extrude(&control_root, "extrude-3", None),
+            "control candidate extrude",
         ),
         "control candidate generation",
     );
+    let candidate_control_geometry = brep_fingerprints(&control_root);
 
     for point in PublicationKillPoint::ALL {
         let scenario = unique_scenario(point.as_str());
         let root = scenario.join("project");
+        response(&run_save(&root, "seed", None), "case seed save");
         let older = GenerationHashes::from_response(
-            &response(&run_save(&root, "box-1", None), "case initial save"),
+            &response(
+                &run_extrude(&root, "extrude-1", None),
+                "case initial extrude",
+            ),
             "case older generation",
         );
+        let older_geometry = brep_fingerprints(&root);
         let before = GenerationHashes::from_response(
-            &response(&run_save(&root, "box-2", None), "case second save"),
+            &response(
+                &run_extrude(&root, "extrude-2", None),
+                "case second extrude",
+            ),
             "case pre-save generation",
         );
+        let before_geometry = brep_fingerprints(&root);
         assert_eq!(
             older, older_control,
             "{point:?}: setup older generation differs"
@@ -162,7 +213,7 @@ fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_genera
             "{point:?}: setup pre-save generation differs"
         );
 
-        let interrupted = run_save(&root, "box-3", Some(point.as_str()));
+        let interrupted = run_extrude(&root, "extrude-3", Some(point.as_str()));
         assert!(
             !interrupted.status.success(),
             "{point:?}: interrupted save unexpectedly succeeded"
@@ -199,6 +250,12 @@ fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_genera
             observed, *expected,
             "{point:?}: recovered {expected_name} generation does not match the complete generation"
         );
+        let expected_geometry = match point {
+            PublicationKillPoint::PromoteStaging
+            | PublicationKillPoint::ParentSync
+            | PublicationKillPoint::RetiredCleanup => &candidate_control_geometry,
+            _ => &before_control_geometry,
+        };
 
         let recovered_from_previous = loaded["recovered_from_previous"]
             .as_bool()
@@ -207,6 +264,27 @@ fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_genera
             recovered_from_previous,
             point == PublicationKillPoint::ReplaceCurrent,
             "{point:?}: recovery status does not identify the selected slot"
+        );
+
+        let selected_root = if recovered_from_previous {
+            previous_generation_path(&root)
+        } else {
+            root.clone()
+        };
+        for entry in fs::read_dir(selected_root.join("brep")).expect("BREP directory reads") {
+            fs::remove_file(entry.expect("BREP entry reads").path()).expect("BREP removes");
+        }
+        let replay_host = Host::new();
+        let replayed = replay_host
+            .reload_and_recompute_extrudes(&selected_root, &worker)
+            .expect("selected complete generation recomputes");
+        assert!(
+            replayed.recomputed > 0,
+            "{point:?}: extrude geometry recomputes"
+        );
+        assert_eq!(
+            replayed.geometry_fingerprints, *expected_geometry,
+            "{point:?}: replayed geometry differs from the selected complete generation"
         );
 
         let previous = previous_generation_path(&root);
@@ -232,6 +310,18 @@ fn interrupted_save_at_every_publication_boundary_reopens_only_a_complete_genera
             ),
             *expected_previous,
             "{point:?}: previous recovery slot is not the immediately preceding complete generation"
+        );
+        let expected_previous_geometry = match point {
+            PublicationKillPoint::ReplaceCurrent
+            | PublicationKillPoint::PromoteStaging
+            | PublicationKillPoint::ParentSync
+            | PublicationKillPoint::RetiredCleanup => &before_geometry,
+            _ => &older_geometry,
+        };
+        assert_eq!(
+            brep_fingerprints(&previous),
+            *expected_previous_geometry,
+            "{point:?}: previous recovery slot geometry is not complete"
         );
 
         let _ = fs::remove_dir_all(scenario);

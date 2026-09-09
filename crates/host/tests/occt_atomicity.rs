@@ -77,7 +77,14 @@ fn subtractive_extrude_rejects_a_missing_semantic_target_without_mutation() {
             &worker,
         )
         .expect_err("missing semantic target must fail closed");
-    assert!(matches!(error, HostError::Validation { .. }));
+    assert!(matches!(
+        error,
+        HostError::InvalidReference {
+            affected_ids,
+            recovery: "choose_existing_target_or_restore_revision",
+            ..
+        } if affected_ids == ["cut", "does-not-exist"]
+    ));
     assert_eq!(
         fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
         before_manifest
@@ -230,7 +237,7 @@ fn extrude_commits_brep_into_a_new_revision() {
 }
 
 #[test]
-fn canonical_extrude_reloads_and_recomputes_after_derived_results_are_removed() {
+fn canonical_extrude_replay() {
     let Some(worker) =
         required_fixture_worker("invalid_subtractive_cut_preserves_the_prior_revision_snapshot")
     else {
@@ -566,7 +573,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
 }
 
 #[test]
-fn replay_does_not_promote_earlier_artifacts_when_a_later_intent_fails() {
+fn canonical_extrude_replay_failure() {
     let root = temp_root("replay-batch-atomicity");
     let worker_root = temp_root("replay-batch-atomicity-bin");
     fs::create_dir_all(&worker_root).expect("worker directory creates");
@@ -663,6 +670,7 @@ fi
     fs::remove_file(root.join("brep/replay-first.brep")).expect("first BREP deletes");
     fs::remove_file(root.join("brep/replay-second.brep")).expect("second BREP deletes");
     let before = Host::new().load(&root).expect("snapshot loads");
+    let before_canonical = snapshot_files(&root);
 
     let result = Host::new().reload_and_recompute_geometry(
         &root,
@@ -675,6 +683,78 @@ fi
     );
     assert!(!root.join("brep/replay-second.brep").exists());
     assert_eq!(Host::new().load(&root).expect("snapshot reloads"), before);
+    assert_eq!(snapshot_files(&root), before_canonical);
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(worker_root);
+}
+
+#[test]
+fn canonical_extrude_unknown_intent() {
+    let root = temp_root("unknown-intent-before-worker");
+    let worker_root = temp_root("unknown-intent-before-worker-bin");
+    fs::create_dir_all(&worker_root).expect("worker directory creates");
+    let marker = worker_root.join("invoked");
+    let script = worker_root.join("occt-worker.sh");
+    fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display()))
+        .expect("worker script writes");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+        .expect("worker script becomes executable");
+
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let source_revision = bundle
+        .append_feature("seed", "box")
+        .expect("seed feature appends")
+        .revision_hash_hex()
+        .to_string();
+    let intent = CanonicalExtrudeIntent {
+        schema_version: EXTRUDE_INTENT_SCHEMA_VERSION.to_string(),
+        command: "extrude".to_string(),
+        operation: "additive".to_string(),
+        mode: "additive".to_string(),
+        target_feature_id: None,
+        request_id: "unknown-intent-request".to_string(),
+        deterministic_inputs: ExtrudeDeterministicInputs {
+            profile: vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            height: 2.0,
+        },
+        affected_semantic_ids: vec!["extrude-1".to_string()],
+        source_revision,
+        worker_requirements: threeterm_persistence::occt_worker_identity(),
+    };
+    bundle
+        .append_new_feature_with_brep_if_revision_and_provenance_and_intent(
+            "extrude-1",
+            "brep:extrude-1",
+            &intent.source_revision,
+            &intent.request_id,
+            "{}",
+            &CanonicalIntent::Extrude(intent.clone()),
+            b"derived-result",
+        )
+        .expect("accepted extrude persists");
+    let canonical_before = snapshot_files(&root);
+    let log_path = root.join(TRANSACTIONS_LOG_FILENAME);
+    let log = fs::read_to_string(&log_path).expect("log reads");
+    fs::write(
+        &log_path,
+        log.replace("\"command\":\"extrude\"", "\"command\":\"extrude-evil\""),
+    )
+    .expect("unknown intent writes");
+
+    let result = Host::new().reload_and_recompute_extrudes(
+        &root,
+        &threeterm_occt_worker::OcctWorker::with_binary_path(script),
+    );
+    assert!(result.is_err(), "unknown canonical intent must fail closed");
+    assert!(
+        !marker.exists(),
+        "canonical validation must precede worker invocation"
+    );
+    assert_eq!(
+        fs::read(root.join(MANIFEST_FILENAME)).unwrap(),
+        canonical_before.0
+    );
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(worker_root);

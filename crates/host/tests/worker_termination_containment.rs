@@ -6,6 +6,8 @@
 //! no staged geometry was promoted, and the structured `HostError` retains
 //! diagnostic context.
 
+#![allow(clippy::result_large_err)]
+
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

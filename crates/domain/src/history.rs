@@ -20,6 +20,10 @@ pub struct HistoryDiagnostic {
     pub code: String,
     pub feature_id: String,
     pub detail: String,
+    #[serde(default)]
+    pub affected_ids: Vec<String>,
+    #[serde(default)]
+    pub recovery: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +317,8 @@ impl HistoryState {
                     code: "historical_geometry_invalid".to_string(),
                     feature_id: id.clone(),
                     detail: format!("{parameter} must produce positive material"),
+                    affected_ids: dirty_features.clone(),
+                    recovery: Some("correct_geometry_or_restore_revision".to_string()),
                 };
                 let feature = active
                     .features
@@ -1267,6 +1273,14 @@ mod tests {
         assert_eq!(evaluation.dirty_features, ["l-base", "l-bend", "l-finish"]);
         assert_eq!(evaluation.evaluated_features, Vec::<String>::new());
         assert_eq!(evaluation.blocked_features, ["l-bend", "l-finish"]);
+        assert_eq!(
+            evaluation.diagnostics[0].affected_ids,
+            ["l-base", "l-bend", "l-finish"]
+        );
+        assert_eq!(
+            evaluation.diagnostics[0].recovery.as_deref(),
+            Some("correct_geometry_or_restore_revision")
+        );
         assert_eq!(
             event.active.features["l-base"].status,
             HistoryStatus::Broken

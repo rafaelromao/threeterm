@@ -633,7 +633,7 @@ fn production_launch_restores_after_terminal_setup_failure() {
 }
 
 #[test]
-fn production_launch_drives_one_extrude_draft_through_preview_and_commit() {
+fn shared_extrude_execution_accepts_deterministic_tui_input() {
     if OcctWorker::locate().is_err() {
         eprintln!("interactive command slice: OCCT worker unavailable");
         return;

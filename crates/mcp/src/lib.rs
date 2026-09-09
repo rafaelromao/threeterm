@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 pub mod server;
 
 pub fn schema_version() -> &'static str {

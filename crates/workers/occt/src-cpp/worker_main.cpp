@@ -1148,7 +1148,7 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
         const double result_volume = result_properties.Mass();
         if (!std::isfinite(target_volume) || !std::isfinite(result_volume) ||
             result_volume >= target_volume - 1e-9 * std::max(1.0, target_volume)) {
-            error = "subtractive extrusion does not intersect the target solid";
+            error = "brep_invalid: subtractive extrusion does not intersect the target solid";
             return false;
         }
         solid = cut.Shape();

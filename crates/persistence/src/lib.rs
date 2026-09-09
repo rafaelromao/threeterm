@@ -327,7 +327,7 @@ pub struct Manifest {
 impl Manifest {
     #[allow(clippy::too_many_arguments)]
     fn seal(
-        _generation_id: &str,
+        generation_id: &str,
         revision_id: &str,
         log: &TransactionLog,
         graph: &FeatureGraph,
@@ -339,14 +339,12 @@ impl Manifest {
         let mut manifest = Self {
             schema_version: schema_epoch().to_string(),
             schema_generation: MANIFEST_SCHEMA_GENERATION,
-            // The Project Generation identity is the canonical log
-            // digest: for new bundles and append operations the
-            // chain head is the identity. The v0 → v1 migration
-            // path constructs the manifest directly (without going
-            // through this seal) so the prior identity is preserved.
-            // The `generation_id` parameter is retained for API
-            // shape but is not consulted here.
-            generation_id: terminal_log_digest.clone(),
+            // A generation identity names this complete sealed save, rather
+            // than aliasing either its canonical state or its log-chain head.
+            generation_id: hash(
+                format!("generation/{generation_id}/{revision_id}/{terminal_log_digest}")
+                    .as_bytes(),
+            ),
             revision_id: revision_id.to_string(),
             revision_count: 1,
             transaction_count: log.len(),

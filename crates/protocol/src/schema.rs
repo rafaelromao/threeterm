@@ -640,16 +640,18 @@ pub static REATTACH_EDGE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static REATTACH_EDGE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["outcome", "selected_edge_id", "candidate_edge_ids", "committed", "edit_feature_id", "source_revision", "revision_hash", "schema_version"],
+        "required": ["outcome", "selected_edge_id", "candidate_edge_ids", "affected_ids", "recovery", "committed", "edit_feature_id", "source_revision", "revision_hash", "schema_version"],
         "properties": {
             "outcome": { "enum": ["resolved", "ambiguous", "lost", "incompatible"] },
             "selected_edge_id": { "type": "string" },
             "candidate_edge_ids": { "type": "array", "items": { "type": "string" } },
+            "affected_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "recovery": { "type": "string", "minLength": 1 },
             "committed": { "type": "boolean" },
             "edit_feature_id": { "type": "string", "minLength": 1 },
             "source_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "schema_version": { "type": "string", "const": "threeterm.command.reattach-edge.response/1" }
+            "schema_version": { "type": "string", "const": "threeterm.command.reattach-edge.response/2" }
         },
         "additionalProperties": false
     })
@@ -1705,11 +1707,13 @@ pub static HISTORY_COMMIT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["code", "feature_id", "detail"],
+                    "required": ["code", "feature_id", "detail", "affected_ids", "recovery"],
                     "properties": {
                         "code": { "type": "string", "minLength": 1 },
                         "feature_id": { "type": "string", "minLength": 1 },
-                        "detail": { "type": "string", "minLength": 1 }
+                        "detail": { "type": "string", "minLength": 1 },
+                        "affected_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                        "recovery": { "type": "string", "minLength": 1 }
                     },
                     "additionalProperties": false
                 }
@@ -2766,7 +2770,7 @@ pub const BOOLEAN_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
 pub const FILLET_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.fillet.response/1";
 pub const CHAMFER_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.chamfer.response/1";
 pub const REATTACH_EDGE_RESPONSE_SCHEMA_VERSION: &str =
-    "threeterm.command.reattach-edge.response/1";
+    "threeterm.command.reattach-edge.response/2";
 pub const HOLE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.hole.response/1";
 pub const REVOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.revolve.response/1";
 pub const MIRROR_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.mirror.response/1";
@@ -2779,7 +2783,7 @@ pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.respons
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
 pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/2";
 pub const SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.sketch-solve.response/1";
-pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/2";
+pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/3";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =
     "threeterm.command.replay-verify.response/1";
 pub const UNDO_REQUEST_SCHEMA_VERSION: &str = "threeterm.command.undo.request/1";

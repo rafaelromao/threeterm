@@ -87,6 +87,7 @@ pub mod bundle {
 
 pub const PRE_MIGRATION_BACKUP_SUFFIX: &str = ".pre-migration-backup";
 pub const PREVIOUS_GENERATION_SUFFIX: &str = ".previous-generation";
+pub const CANONICAL_BREP_CHECKPOINT_SUBDIR: &str = ".canonical-brep";
 
 pub fn schema_epoch() -> &'static str {
     "threeterm.persistence/1"
@@ -4446,6 +4447,17 @@ impl Bundle {
                     Some(PublicationFailurePoint::BrepDirectorySync),
                 )?;
             }
+            if !breps.is_empty() {
+                let checkpoint_dir = staging.join(CANONICAL_BREP_CHECKPOINT_SUBDIR);
+                fs::create_dir_all(&checkpoint_dir)?;
+                for (feature_id, brep_bytes) in breps {
+                    atomic_write(
+                        &checkpoint_dir.join(format!("{feature_id}.brep")),
+                        brep_bytes,
+                        None,
+                    )?;
+                }
+            }
             if !component_geometries.is_empty() {
                 let component_dir = staging
                     .join(".derived")
@@ -6573,6 +6585,30 @@ mod tests {
         assert_eq!(loaded.revision_hash_hex(), saved.revision_hash_hex());
         assert!(root.join(MANIFEST_FILENAME).is_file());
         assert!(root.join(TRANSACTIONS_LOG_FILENAME).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn brep_publication_keeps_an_authenticated_geometry_checkpoint() {
+        let root = temp_root("brep-checkpoint");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        let revision = bundle
+            .open()
+            .expect("opens")
+            .revision_hash_hex()
+            .to_string();
+        let bytes = b"authenticated-brep";
+        bundle
+            .append_feature_with_brep_if_revision("solid-1", "brep:solid-1", &revision, bytes)
+            .expect("BREP publishes");
+
+        let checkpoint = root
+            .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
+            .join("solid-1.brep");
+        assert_eq!(fs::read(&checkpoint).expect("checkpoint reads"), bytes);
+        fs::remove_file(root.join("brep/solid-1.brep")).expect("derived BREP deletes");
+        bundle.open().expect("bundle reopens without derived BREP");
+        assert_eq!(fs::read(&checkpoint).expect("checkpoint remains"), bytes);
         let _ = fs::remove_dir_all(root);
     }
 

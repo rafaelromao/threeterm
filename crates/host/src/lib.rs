@@ -34,17 +34,18 @@ use threeterm_occt_worker::{
     TranslateRequest, WorkerError, new_request_id,
 };
 use threeterm_persistence::{
-    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
-    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
-    CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
-    CanonicalHoleIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalLoftIntent,
-    CanonicalMirrorIntent, CanonicalRevolveIntent, CanonicalShellIntent,
-    CircularPatternDeterministicInputs, DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION,
-    EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION,
-    HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement, HoleDeterministicInputs,
-    LOFT_INTENT_SCHEMA_VERSION, LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle,
-    MirrorDeterministicInputs, RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load,
-    load_with_policy, previous_generation_path, replay_canonical_state,
+    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CANONICAL_BREP_CHECKPOINT_SUBDIR,
+    CHAMFER_INTENT_SCHEMA_VERSION, CanonicalBooleanIntent, CanonicalChamferIntent,
+    CanonicalCircularPatternIntent, CanonicalDraftIntent, CanonicalEdgeReference,
+    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
+    CanonicalLinearPatternIntent, CanonicalLoftIntent, CanonicalMirrorIntent,
+    CanonicalRevolveIntent, CanonicalShellIntent, CircularPatternDeterministicInputs,
+    DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance,
+    ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION, HOLE_INTENT_SCHEMA_VERSION,
+    HistoryBrepReplacement, HoleDeterministicInputs, LOFT_INTENT_SCHEMA_VERSION,
+    LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle, MirrorDeterministicInputs,
+    RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load, load_with_policy,
+    previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -12871,6 +12872,27 @@ fn replay_finishing_geometry(
             ),
         });
     }
+    let expected_entry = loaded
+        .log
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| entry.feature_id == feature_id && entry.brep_sha256.is_some())
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("finishing replay provenance is missing: {feature_id}"),
+        })?;
+    let expected_bytes = expected_entry
+        .brep_byte_count
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("finishing replay byte count is invalid: {feature_id}"),
+        })?;
+    let expected_sha = expected_entry
+        .brep_sha256
+        .as_deref()
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("finishing replay digest is missing: {feature_id}"),
+        })?;
 
     let dependency_path = |dependency: &str| -> Result<PathBuf, HostError> {
         if !valid_feature_path_component(dependency) {
@@ -12933,6 +12955,19 @@ fn replay_finishing_geometry(
                 Some((result.brep_bytes, result.brep_sha256.as_str())),
             )
             .map_err(|detail| HostError::BrepIo { detail })?;
+            let bytes = if bytes.len() != expected_bytes || sha256_hex(&bytes) != expected_sha {
+                let checkpoint = root
+                    .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
+                    .join(format!("{feature_id}.brep"));
+                if checkpoint.is_file() {
+                    read_brep_verified(&checkpoint, Some((expected_bytes, expected_sha)))
+                        .map_err(|detail| HostError::BrepIo { detail })?
+                } else {
+                    bytes
+                }
+            } else {
+                bytes
+            };
             bytes
         }};
     }

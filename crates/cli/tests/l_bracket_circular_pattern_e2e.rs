@@ -155,7 +155,7 @@ fn circular_pattern(
     let entry = find(CIRCULAR_PATTERN_COMMAND_ID).expect("circular-pattern is registered");
     validate(&entry.response_schema, &parsed).expect("circular-pattern response validates");
     assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["operation"], "circular_pattern");
+    assert_eq!(parsed["operation"], "circular-pattern");
     assert_eq!(parsed["feature_id"], feature_id);
     parsed
 }

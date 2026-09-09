@@ -80,3 +80,132 @@ fn boolean_fuse_cli_preserves_the_worker_operation_and_artifact_binding() {
 
     let _ = fs::remove_dir_all(project);
 }
+
+#[test]
+fn boolean_fuse_cli_reports_a_fixture_worker_failure_without_mutating_history() {
+    let fixture = common::install_occt_fixture();
+    let project = root("boolean-fuse-failure");
+    Bundle::create(&project).expect("bundle creates");
+    common::extrude_canonical_with_worker(
+        &project,
+        "base",
+        serde_json::json!([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]),
+        1.0,
+        &fixture.worker(),
+    );
+    common::extrude_canonical_with_worker(
+        &project,
+        "tool",
+        serde_json::json!([[1.0, 0.0], [3.0, 0.0], [1.0, 2.0]]),
+        1.0,
+        &fixture.worker(),
+    );
+    let manifest = fs::read(project.join("manifest.json")).expect("manifest reads");
+    let log = fs::read(project.join("transactions.log")).expect("log reads");
+    let failure = common::install_occt_failure_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+        .env("THREETERM_OCCTBUILD_WORKER", failure.path())
+        .args([
+            "--machine",
+            "boolean-fuse",
+            "--bundle",
+            project.to_str().expect("project path is utf-8"),
+            "--feature-id",
+            "failed-fuse",
+            "--base",
+            "base",
+            "--tool",
+            "tool",
+        ])
+        .output()
+        .expect("CLI runs");
+    assert!(
+        !output.status.success(),
+        "fixture failure must reach the CLI"
+    );
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).expect("diagnostic is JSON");
+    assert_eq!(diagnostic["code"], "brep_invalid");
+    assert!(
+        diagnostic["arg"]
+            .as_str()
+            .expect("diagnostic detail is text")
+            .contains("fixture rejects this request")
+    );
+    assert_eq!(failure.last_request()["command_id"], "boolean_fuse");
+    assert_eq!(fs::read(project.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(project.join("transactions.log")).unwrap(), log);
+    assert!(!project.join("brep/failed-fuse.brep").exists());
+
+    let _ = fs::remove_dir_all(project);
+}
+
+#[test]
+fn boolean_cli_commands_preserve_their_distinct_worker_operation_names() {
+    let fixture = common::install_occt_fixture();
+    let project = root("boolean-operation-names");
+    Bundle::create(&project).expect("bundle creates");
+    for (feature_id, profile) in [
+        (
+            "base",
+            serde_json::json!([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]),
+        ),
+        (
+            "tool",
+            serde_json::json!([[1.0, 0.0], [3.0, 0.0], [1.0, 2.0]]),
+        ),
+    ] {
+        common::extrude_canonical_with_worker(
+            &project,
+            feature_id,
+            profile,
+            1.0,
+            &fixture.worker(),
+        );
+    }
+
+    for (command, worker_operation) in [
+        ("boolean-fuse", "boolean_fuse"),
+        ("boolean-cut", "boolean_cut"),
+        ("boolean-common", "boolean_common"),
+    ] {
+        let feature_id = format!("{worker_operation}-result");
+        let output = Command::new(env!("CARGO_BIN_EXE_threeterm"))
+            .env("THREETERM_OCCTBUILD_WORKER", fixture.path())
+            .args([
+                "--machine",
+                command,
+                "--bundle",
+                project.to_str().expect("project path is utf-8"),
+                "--feature-id",
+                &feature_id,
+                "--base",
+                "base",
+                "--tool",
+                "tool",
+            ])
+            .output()
+            .expect("CLI runs");
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).expect("response is JSON");
+        assert_eq!(response["operation"], command);
+        assert_eq!(response["feature_id"], feature_id);
+    }
+
+    let operations: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .map(|request| request["command_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(operations.ends_with(&[
+        "boolean_fuse".to_string(),
+        "boolean_cut".to_string(),
+        "boolean_common".to_string(),
+    ]));
+
+    let _ = fs::remove_dir_all(project);
+}

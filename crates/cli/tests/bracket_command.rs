@@ -246,8 +246,8 @@ fn machine_bracket_on_tampered_bundle_returns_integrity_diagnostic_and_preserves
         "stdout must be empty on integrity failure"
     );
     let diagnostic: Value = serde_json::from_slice(&failed.stderr).expect("diagnostic is JSON");
-    assert_eq!(diagnostic["code"], "persistence_failure");
-    assert_eq!(diagnostic["arg"], "log digest mismatch");
+    assert_eq!(diagnostic["code"], "integrity_failure");
+    assert_eq!(diagnostic["arg"], "log_digest_mismatch");
     assert_eq!(diagnostic["schema_version"], "threeterm.protocol/1");
 
     assert_eq!(

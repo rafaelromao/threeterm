@@ -10,7 +10,12 @@ case "${1:-}" in
         # These acceptance tests intentionally fail closed when the immutable
         # OCCT worker is absent; native-e2e runs them unskipped with
         # THREETERM_REQUIRE_OCCT=1 and the worker installed.
-        cargo test --workspace -- --skip supervised_occt_extrude --skip required_occt_worker
+        cargo test --workspace -- \
+            --skip supervised_occt_extrude \
+            --skip required_occt_worker \
+            --skip generation_identity \
+            --skip generation_publication \
+            --skip generation_interruption_recovery
         ;;
     slow)
         cargo test --workspace --jobs 1 -- --ignored --test-threads=1

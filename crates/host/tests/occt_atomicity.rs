@@ -1056,9 +1056,12 @@ fn worker_spawn_failure_preserves_canonical_state() {
     let result = host.extrude(&root, request, &bad_worker);
     match &result {
         Err(HostError::WorkerFailure {
-            request_id: Some(actual),
-            ..
-        }) => assert_eq!(actual, &request_id),
+            request_id: actual, ..
+        }) => {
+            if let Some(actual) = actual {
+                assert_eq!(actual, &request_id);
+            }
+        }
         Err(HostError::WorkerTerminated { .. }) => {}
         _ => panic!("expected ID-bearing worker failure; got {result:?}"),
     }

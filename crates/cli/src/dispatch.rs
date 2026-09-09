@@ -6625,17 +6625,12 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&detail),
         HostError::Validation { detail } => semantic_reference_diagnostic(detail)
             .unwrap_or_else(|| Diagnostic::invalid_request(detail)),
-        HostError::Persistence(error)
-            if matches!(
-                error,
-                threeterm_persistence::BundleError::LogDigestMismatch
-                    | threeterm_persistence::BundleError::LogBrokenLink { .. }
-                    | threeterm_persistence::BundleError::CompatibilityIdentityMismatch { .. }
-                    | threeterm_persistence::BundleError::CompatibilityIdentityMissing { .. }
-            ) =>
-        {
-            Diagnostic::integrity_failure(&detail)
-        }
+        HostError::Persistence(
+            threeterm_persistence::BundleError::LogDigestMismatch
+            | threeterm_persistence::BundleError::LogBrokenLink { .. }
+            | threeterm_persistence::BundleError::CompatibilityIdentityMismatch { .. }
+            | threeterm_persistence::BundleError::CompatibilityIdentityMissing { .. },
+        ) => Diagnostic::integrity_failure(&detail),
         HostError::Persistence(_) => Diagnostic::persistence_failure(&detail),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
         _ => Diagnostic::integrity_failure(&detail),

@@ -6,9 +6,8 @@
 //! schema and that the bundle's `transactions.log` grew by exactly one
 //! entry.
 //!
-//! When the OCCT worker binary is unavailable the test soft-skip with
-//! an eprintln so the local dev path is green; the CI archlinux
-//! container installs `opencascade` so the production path runs.
+//! The test requires the OCCT worker so that it always exercises the
+//! production geometry path.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,17 +75,13 @@ fn extrude_command_is_registered() {
 }
 
 #[test]
-fn canonical_extrude_transaction() {
-    if OcctWorker::locate().is_err() {
-        if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
-            panic!("THREETERM_REQUIRE_OCCT is set but the OCCT worker is unavailable");
-        }
-        eprintln!(
-            "extrude_e2e: no OCCT worker binary found; set THREETERM_OCCTBUILD_WORKER \
-             or build the crate against a system OCCT install"
-        );
-        return;
-    }
+fn generation_publication() {
+    let _worker = OcctWorker::locate().unwrap_or_else(|error| {
+        panic!(
+            "generation_publication requires the OCCT worker; set THREETERM_OCCT_DIR, \
+             THREETERM_OCCT_VENDOR=1, or THREETERM_OCCTBUILD_WORKER: {error:?}"
+        )
+    });
 
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root("commit");

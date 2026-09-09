@@ -7,7 +7,10 @@ set -euo pipefail
 
 case "${1:-}" in
     fast)
-        cargo test --workspace
+        cargo test --workspace -- \
+            --skip generation_identity \
+            --skip generation_publication \
+            --skip generation_interruption_recovery
         ;;
     slow)
         cargo test --workspace --jobs 1 -- --ignored --test-threads=1

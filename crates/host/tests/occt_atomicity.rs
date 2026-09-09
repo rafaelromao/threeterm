@@ -209,6 +209,83 @@ fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn supervised_occt_extrude_promotes_a_real_worker_result() {
+    let worker = threeterm_occt_worker::OcctWorker::locate()
+        .expect("supervised_occt_extrude requires the real OCCT worker");
+    let root = fresh_bundle_with_feature("supervised-extrude", "seed", "box");
+    let host = Host::new();
+    let prior = host.load(&root).expect("prior snapshot loads");
+
+    let committed = host
+        .extrude(
+            &root,
+            rectangle_extrude_request("supervised-extrude"),
+            &worker,
+        )
+        .expect("real OCCT extrude completes through supervision");
+
+    assert_ne!(committed.snapshot, prior);
+    assert_eq!(committed.result.status, "ok");
+    assert!(committed.result.brep_path.is_file());
+    let brep = fs::read(&committed.result.brep_path).expect("real BREP reads");
+    assert!(
+        String::from_utf8_lossy(&brep[..brep.len().min(64)]).contains("DBRep_DrawableShape"),
+        "supervised extrude must promote an OCCT BREP"
+    );
+    let binary_fingerprint = committed
+        .binary_fingerprint
+        .as_ref()
+        .expect("production extrude records the executed binary identity");
+    assert_eq!(binary_fingerprint.worker_kind, "occt");
+    assert_eq!(
+        binary_fingerprint.worker_schema_version,
+        threeterm_occt_worker::schema_version()
+    );
+    assert_eq!(
+        binary_fingerprint.protocol_schema_version,
+        threeterm_protocol::schema_version()
+    );
+    assert_eq!(
+        binary_fingerprint.source_repository,
+        threeterm_occt_worker::SOURCE_REPOSITORY
+    );
+    assert_eq!(
+        binary_fingerprint.source_commit,
+        threeterm_occt_worker::SOURCE_COMMIT
+    );
+    assert_eq!(
+        binary_fingerprint.binary_sha256,
+        threeterm_occt_worker::sha256_file(worker.binary_path()).expect("worker hash reads")
+    );
+    assert_eq!(
+        host.load(&root).expect("committed snapshot reloads"),
+        committed.snapshot
+    );
+
+    let canonical_before_replay = snapshot_files(&root);
+    fs::remove_file(&committed.result.brep_path).expect("committed BREP removes");
+    let _ = fs::remove_dir_all(root.join(".derived"));
+    let _ = fs::remove_dir_all(root.join("cache"));
+    let replayed = Host::new()
+        .load_with_extrude_replay(&root)
+        .expect("production reload replays through supervised OCCT");
+    assert_eq!(replayed, committed.snapshot);
+    assert_eq!(
+        fs::read(&committed.result.brep_path).expect("replayed BREP reads"),
+        brep
+    );
+    assert_eq!(snapshot_files(&root), canonical_before_replay);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_occt_worker_is_not_soft_skipped_in_native_e2e() {
+    threeterm_occt_worker::OcctWorker::locate()
+        .expect("required_occt_worker requires a real OCCT worker");
+}
+
+#[test]
 fn extrude_commits_brep_into_a_new_revision() {
     let Some(worker) = required_fixture_worker(
         "subtractive_extrude_replays_and_exports_the_same_cut_after_derived_deletion",
@@ -498,8 +575,12 @@ source_revision_id=$(printf '%s\n' "$request" | sed -n 's/.*"source_revision_id"
 output_dir=$(printf '%s\n' "$request" | sed -n 's/.*"output_dir":"\([^"]*\)".*/\1/p')
 output_filename=$(printf '%s\n' "$request" | sed -n 's/.*"output_filename":"\([^"]*\)".*/\1/p')
 feature_id=$(printf '%s\n' "$request" | sed -n 's/.*"feature_id":"\([^"]*\)".*/\1/p')
-printf '%s' 'replayable-brep' > "$output_dir/$output_filename"
-printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$output_filename" "$feature_id"
+staging_name="extrude-replay-request.brep"
+semantic_input_sha256=$(printf '%s\n' "$request" | sed -n 's/.*"semantic_input_sha256":"\([^" ]*\)".*/\1/p')
+deterministic_settings_sha256=$(printf '%s\n' "$request" | sed -n 's/.*"deterministic_settings_sha256":"\([^" ]*\)".*/\1/p')
+printf '%s' 'replayable-brep' > "$output_dir/$staging_name.partial"
+printf '{{"kind":"artifact","schema_version":"threeterm.protocol/1","header":{{"request_id":"%s","source_revision_id":"%s","operation":"extrude","feature_id":"%s","cache_key":{{"source_revision_id":"%s","worker_fingerprint":{{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"}},"operation":"extrude","feature_id":"%s","artifact_kind":"brep","semantic_input_sha256":"%s","deterministic_settings_sha256":"%s"}},"worker_fingerprint":{{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"}},"artifact_kind":"brep","staging_name":"%s","byte_count":{bytes_len},"sha256":"{digest}"}}}}\n' "$request_id" "$source_revision_id" "$feature_id" "$source_revision_id" "$feature_id" "$semantic_input_sha256" "$deterministic_settings_sha256" "$staging_name"
+printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s.partial","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$staging_name" "$feature_id"
 "##,
             digest = digest,
             bytes_len = bytes.len(),
@@ -1026,8 +1107,7 @@ fn extrude_request_malformed_preserves_canonical_state() {
 }
 
 #[test]
-fn extrude_malformed_response_preserves_canonical_state() {
-    let Some(_) = locate_worker() else { return };
+fn supervised_occt_failure_containment_malformed_output_preserves_snapshot() {
     let root = fresh_bundle_with_feature("malformed", "box-seed", "box");
     let (prior_manifest, prior_log) = snapshot_files(&root);
     let host = Host::new();

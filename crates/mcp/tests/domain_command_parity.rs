@@ -294,7 +294,7 @@ fn assert_mcp_registry_result(
 }
 
 #[test]
-fn every_registered_command_reaches_cli_and_mcp_executor_and_validates_response() {
+fn executable_registry_extrude_reaches_cli_and_mcp_executor_and_validates_response() {
     let root = root("registry-adapter-parity");
 
     for schema in iter() {
@@ -1492,7 +1492,7 @@ fn stale_geometry_export_is_fatal_and_equivalent_for_every_override_combination(
 }
 
 #[test]
-fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
+fn shared_extrude_execution_routes_cli_mcp_and_tui_through_the_shared_executor() {
     let cli_root = root("extrude-cli");
     let mcp_root = root("extrude-mcp");
     let tui_root = root("extrude-tui");
@@ -1550,7 +1550,7 @@ fn cli_mcp_and_tui_route_extrude_through_the_shared_executor() {
 }
 
 #[test]
-fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
+fn extrude_adapter_parity_commits_equivalent_subtractive_extrusions() {
     let cli_root = root("subtractive-cli");
     let mcp_root = root("subtractive-mcp");
     let tui_root = root("subtractive-tui");
@@ -1567,7 +1567,7 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
             .extrude(
                 path,
                 ExtrudeRequest::new(
-                    format!("base-{}", path.file_name().unwrap().to_string_lossy()),
+                    "base",
                     vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
                     2.0,
                 )
@@ -1608,6 +1608,16 @@ fn cli_mcp_and_tui_commit_equivalent_subtractive_extrusions() {
     }
     assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
     assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+    for field in [
+        "request_id",
+        "feature_graph_hash",
+        "revision_hash",
+        "transaction_count",
+        "terminal_log_digest",
+    ] {
+        assert_eq!(cli[field], tui[field], "TUI {field} matches CLI");
+        assert_eq!(cli[field], mcp[field], "MCP {field} matches CLI");
+    }
 
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
@@ -1631,7 +1641,7 @@ fn required_worker(test_name: &str) -> Option<OcctWorker> {
 }
 
 #[test]
-fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
+fn extrude_adapter_failure_parity_reports_the_same_invalid_subtractive_target_diagnostic() {
     let cli_root = root("invalid-subtractive-cli");
     let mcp_root = root("invalid-subtractive-mcp");
     let tui_root = root("invalid-subtractive-tui");
@@ -1642,6 +1652,9 @@ fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
         (
             fs::read(path.join("manifest.json")).expect("manifest reads"),
             fs::read(path.join("transactions.log")).expect("transaction log reads"),
+            threeterm_host::Host::new()
+                .identity(path)
+                .expect("Revision Snapshot identity reads"),
         )
     });
     let cli = threeterm_cli::dispatch::dispatch_registered_command(
@@ -1704,6 +1717,12 @@ fn cli_mcp_and_tui_report_the_same_invalid_subtractive_target_diagnostic() {
             before[index].1
         );
         assert_eq!(Bundle::at(&path).open().unwrap().log.len(), 0);
+        assert_eq!(
+            threeterm_host::Host::new()
+                .identity(&path)
+                .expect("Revision Snapshot identity remains unchanged"),
+            before[index].2
+        );
         let _ = fs::remove_dir_all(path);
     }
 }

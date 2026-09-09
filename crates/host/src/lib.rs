@@ -3406,15 +3406,23 @@ impl Host {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
                     let bundle_path = string_field("bundle_path")?.to_string();
+                    let source_snapshot = self.load(&bundle_path)?;
+                    let feature_id = string_field("feature_id")?;
                     let extrusion = ExtrudeRequest::new(
-                        threeterm_occt_worker::new_request_id(),
+                        deterministic_extrude_request_id(
+                            &source_snapshot.revision_hash,
+                            feature_id,
+                            &profile,
+                            height,
+                            mode,
+                            target_feature_id.as_deref(),
+                        ),
                         profile.into_iter().map(|[x, y]| (x, y)).collect(),
                         height,
                     )
                     .with_mode(mode)
                     .with_optional_target_feature_id(target_feature_id.clone())
-                    .with_feature_id(string_field("feature_id")?);
-                    let source_snapshot = self.load(&bundle_path)?;
+                    .with_feature_id(feature_id);
                     let extrusion = self.resolve_extrude_request(
                         Path::new(&bundle_path),
                         extrusion,
@@ -12697,6 +12705,25 @@ impl Host {
             artifact,
         })
     }
+}
+
+fn deterministic_extrude_request_id(
+    source_revision: &str,
+    feature_id: &str,
+    profile: &[[f64; 2]],
+    height: f64,
+    mode: ExtrudeMode,
+    target_feature_id: Option<&str>,
+) -> String {
+    let intent = serde_json::json!({
+        "source_revision": source_revision,
+        "feature_id": feature_id,
+        "profile": profile,
+        "height": height,
+        "mode": mode.as_str(),
+        "target_feature_id": target_feature_id,
+    });
+    format!("extrude-{}", sha256_hex(intent.to_string().as_bytes()))
 }
 
 #[allow(dead_code)]

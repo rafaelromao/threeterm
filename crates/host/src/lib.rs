@@ -14406,6 +14406,15 @@ fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, Host
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .filter(|id| !id.is_empty())
+        .or_else(|| {
+            request
+                .get("base_path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|path| Path::new(path).file_stem())
+                .and_then(|stem| stem.to_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| HostError::Validation {
             detail: "canonical operation requires base_feature_id".to_string(),
         })

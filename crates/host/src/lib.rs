@@ -2785,7 +2785,7 @@ impl Host {
                     &worker,
                 )?;
                 let (snapshot, result, artifact) = self.promote_occt_result(&root, derived)?;
-                canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                canonical_occt_response(&result, &snapshot, &artifact, command, schema_version)
             }
             MIRROR_COMMAND_ID | LINEAR_PATTERN_COMMAND_ID | CIRCULAR_PATTERN_COMMAND_ID => {
                 let base_feature_id = string_field("base_feature_id")?;
@@ -2828,7 +2828,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     LINEAR_PATTERN_COMMAND_ID => {
                         let direction =
@@ -2874,7 +2880,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     CIRCULAR_PATTERN_COMMAND_ID => {
                         let axis_point = serde_json::from_value(array_field("axis_point")?)
@@ -2923,7 +2935,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     _ => unreachable!(),
                 }
@@ -14484,6 +14502,7 @@ fn canonical_occt_response(
     result: &impl Serialize,
     snapshot: &SnapshotView,
     artifact: &Layer1DerivedResult,
+    command: CommandId,
     schema_version: &str,
 ) -> Result<serde_json::Value, HostError> {
     let value = serde_json::to_value(result).map_err(|error| HostError::Validation {
@@ -14491,7 +14510,11 @@ fn canonical_occt_response(
     })?;
     Ok(serde_json::json!({
         "status": value["status"],
-        "operation": value["operation"],
+        // Worker operations use snake_case; public command responses use the
+        // registered command name, which is the adapter-shared contract.
+        "operation": find(command)
+            .expect("canonical OCCT command is registered")
+            .name,
         "feature_id": value["feature_id"],
         "feature_graph_hash": snapshot.feature_graph_hash,
         "revision_hash": snapshot.revision_hash,

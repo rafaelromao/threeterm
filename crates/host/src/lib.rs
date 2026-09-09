@@ -4426,6 +4426,7 @@ impl Host {
             )
             .with_hole_kind(hole_kind.clone())
             .with_base_feature_id(base_feature_id)
+            .with_output_path(loaded.canonical_root.join("stage"), "preview.brep")
             .with_feature_id(feature_id);
             if hole_kind == "tapped" {
                 hole_request = hole_request.with_thread(
@@ -9859,6 +9860,46 @@ impl Host {
                             .map_err(|error| BundleError::Invalid(error.to_string()))?,
                         )
                     }
+                    "fillet" if derived.request.get("selected_edge").is_some() => {
+                        CanonicalIntent::Fillet(
+                            canonical_fillet_intent(
+                                &derived.request,
+                                &derived.source_snapshot,
+                                artifact,
+                            )
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                        )
+                    }
+                    "chamfer" if derived.request.get("selected_edge").is_some() => {
+                        CanonicalIntent::Chamfer(
+                            canonical_chamfer_intent(
+                                &derived.request,
+                                &derived.source_snapshot,
+                                artifact,
+                            )
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                        )
+                    }
+                    "shell" => CanonicalIntent::Shell(
+                        canonical_shell_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "draft" => CanonicalIntent::Draft(
+                        canonical_draft_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "loft" => CanonicalIntent::Loft(
+                        canonical_loft_intent(&derived.request, &derived.source_snapshot, artifact)
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
                     _ => {
                         return bundle.append_new_feature_with_brep_if_revision_and_provenance(
                             feature_id,

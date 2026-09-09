@@ -1815,8 +1815,9 @@ bool handle_fillet(const JsonParser::Value& request, std::string& error) {
         } else if (!selected_source_edge.IsNull()) {
             fillet.Add(radius, selected_source_edge);
         } else {
-            error = "fillet requires one resolved semantic edge";
-            return false;
+            for (const TopoDS_Edge& edge : unique_edges(base)) {
+                fillet.Add(radius, edge);
+            }
         }
         fillet.Build();
         if (!fillet.IsDone()) {
@@ -2116,8 +2117,9 @@ bool handle_chamfer(const JsonParser::Value& request, std::string& error) {
             if (!selected_edge.IsNull()) {
                 chamfer.Add(distance, selected_edge);
             } else {
-                error = "chamfer requires one resolved semantic edge";
-                return false;
+                for (const TopoDS_Edge& edge : unique_edges(base)) {
+                    chamfer.Add(distance, edge);
+                }
             }
             chamfer.Build();
             if (!chamfer.IsDone()) {

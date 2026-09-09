@@ -1023,6 +1023,13 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
         GProp_GProps properties;
         BRepGProp::SurfaceProperties(face, properties);
         const gp_Pnt origin = properties.CentreOfMass();
+        const auto finite = [](double value) { return std::isfinite(value); };
+        if (!finite(origin.X()) || !finite(origin.Y()) || !finite(origin.Z()) ||
+            !finite(normal.X()) || !finite(normal.Y()) || !finite(normal.Z()) ||
+            !finite(x_axis.X()) || !finite(x_axis.Y()) || !finite(x_axis.Z()) ||
+            !finite(y_axis.X()) || !finite(y_axis.Y()) || !finite(y_axis.Z())) {
+            continue;
+        }
         candidates.push_back({origin, normal, x_axis, y_axis});
     }
     std::sort(candidates.begin(), candidates.end(),

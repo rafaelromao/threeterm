@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,12 +31,13 @@ use threeterm_occt_worker::{
     FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
     OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult, SelectedEdgeContext,
-    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, WorkerError,
-    new_request_id,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, TranslateResult,
+    WorkerError, new_request_id,
 };
 use threeterm_persistence::{
-    BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION,
-    CanonicalBooleanIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
+    BOOLEAN_INTENT_SCHEMA_VERSION, BRACKET_INTENT_SCHEMA_VERSION, BracketDeterministicInputs,
+    Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalBooleanIntent,
+    CanonicalBracketIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
     CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
     CanonicalHoleIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalLoftIntent,
     CanonicalMirrorIntent, CanonicalRevolveIntent, CanonicalShellIntent,
@@ -691,6 +692,7 @@ pub struct BracketParameterDraft {
     pub request: BracketRequest,
     pub sequence: u64,
     preview_path: Option<PathBuf>,
+    preview_output_path: Option<PathBuf>,
     created_at: Instant,
 }
 
@@ -3241,28 +3243,33 @@ impl Host {
             if command == BRACKET_COMMAND_ID {
                 let bundle_path = string_field("bundle_path")?;
                 let bracket_id = string_field("bracket_id")?;
-                let request = BracketRequest::new(
-                    new_request_id(),
-                    request["length"]
-                        .as_f64()
-                        .ok_or_else(|| HostError::Validation {
-                            detail: "bracket length must be a number".to_string(),
-                        })?,
-                    request["width"]
-                        .as_f64()
-                        .ok_or_else(|| HostError::Validation {
-                            detail: "bracket width must be a number".to_string(),
-                        })?,
-                    request["height"]
-                        .as_f64()
-                        .ok_or_else(|| HostError::Validation {
-                            detail: "bracket height must be a number".to_string(),
-                        })?,
+                let length = request["length"]
+                    .as_f64()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "bracket length must be a number".to_string(),
+                    })?;
+                let width = request["width"]
+                    .as_f64()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "bracket width must be a number".to_string(),
+                    })?;
+                let height = request["height"]
+                    .as_f64()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "bracket height must be a number".to_string(),
+                    })?;
+                let thickness =
                     request["thickness"]
                         .as_f64()
                         .ok_or_else(|| HostError::Validation {
                             detail: "bracket thickness must be a number".to_string(),
-                        })?,
+                        })?;
+                let request = BracketRequest::new(
+                    canonical_bracket_request_id(bracket_id, length, width, height, thickness),
+                    length,
+                    width,
+                    height,
+                    thickness,
                 )
                 .with_feature_id(bracket_id);
                 let worker =
@@ -5801,23 +5808,93 @@ impl Host {
             .as_ref()
             .map(|target| canonical_graph_compensation(&loaded.graph, target))
             .unwrap_or_default();
+        let staged_root = self.stage_changed_bracket_root(
+            root,
+            loaded.history.active_snapshot(),
+            &event.active,
+            &expected_revision,
+            operation,
+            ordinal,
+        )?;
+        let root_graph_compensation = staged_root.as_ref().is_some_and(|staged_root| {
+            graph_entries.iter().all(|(feature_id, kind)| {
+                feature_id == &staged_root.feature_id && kind.starts_with("apply-set/1:bracket:")
+            })
+        });
+        let staged_root =
+            staged_root.filter(|_| graph_entries.is_empty() || root_graph_compensation);
         let staged = if let Some(target_graph) = restore_graph.as_ref() {
-            self.stage_target_bracket_families_for_restore(
-                root,
-                loaded.history.active_snapshot(),
-                &event.active,
-                target_graph,
-                &expected_revision,
-            )?
+            if staged_root.is_some() {
+                Vec::new()
+            } else {
+                self.stage_target_bracket_families_for_restore(
+                    root,
+                    loaded.history.active_snapshot(),
+                    &event.active,
+                    target_graph,
+                    &expected_revision,
+                )?
+            }
         } else {
-            self.stage_changed_bracket_families(
-                root,
-                loaded.history.active_snapshot(),
-                &event.active,
-                &expected_revision,
-            )?
+            if staged_root.is_some() {
+                Vec::new()
+            } else {
+                self.stage_changed_bracket_families(
+                    root,
+                    loaded.history.active_snapshot(),
+                    &event.active,
+                    &expected_revision,
+                )?
+            }
         };
-        let updated = if restore_graph.is_some() {
+        let updated = if let Some(staged_root) = staged_root {
+            let source_brep_sha256 =
+                sha256_path(&committed_brep_path(root, &staged_root.feature_id)).map_err(
+                    |error| HostError::BrepIo {
+                        detail: format!("read bracket source BREP failed: {error}"),
+                    },
+                )?;
+            let key = canonical_bracket_request_id(
+                &staged_root.feature_id,
+                staged_root.request.length,
+                staged_root.request.width,
+                staged_root.request.height,
+                staged_root.request.thickness,
+            );
+            let payload = history_recompute_idempotency_payload(
+                &staged_root.feature_id,
+                &staged_root.request,
+                &source_brep_sha256,
+                &expected_revision,
+                &staged_root.result_sha256,
+            );
+            let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
+                schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
+                command: "bracket".to_string(),
+                operation: "bracket".to_string(),
+                request_id: key.clone(),
+                deterministic_inputs: BracketDeterministicInputs {
+                    length: staged_root.request.length,
+                    width: staged_root.request.width,
+                    height: staged_root.request.height,
+                    thickness: staged_root.request.thickness,
+                },
+                affected_semantic_ids: bracket_affected_semantic_ids(&staged_root.feature_id),
+                source_revision: expected_revision.clone(),
+                worker_requirements: expected_occt_worker_fingerprint(),
+            });
+            bundle.replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload_and_intent(
+                &staged_root.feature_id,
+                &bracket_kind(&staged_root.request),
+                &expected_revision,
+                &source_brep_sha256,
+                Some(&key),
+                Some(&payload),
+                &staged_root.bytes,
+                &intent,
+                Some(&event),
+            )?
+        } else if restore_graph.is_some() {
             let mut entries = graph_entries;
             for staged_family in &staged {
                 let kind = bracket_kind(&staged_family.request);
@@ -5838,7 +5915,11 @@ impl Host {
                 .collect::<Vec<_>>();
             if staged.is_empty() {
                 if entry_refs.is_empty() {
-                    bundle.append_features_with_history(&[], &event)?
+                    bundle.append_features_with_history_if_revision(
+                        &[],
+                        &expected_revision,
+                        &event,
+                    )?
                 } else {
                     bundle.append_features_with_history_if_revision(
                         &entry_refs,
@@ -5856,7 +5937,7 @@ impl Host {
             }
         } else if staged.is_empty() {
             if graph_entries.is_empty() {
-                bundle.append_features_with_history(&[], &event)?
+                bundle.append_features_with_history_if_revision(&[], &expected_revision, &event)?
             } else {
                 let entries = graph_entries
                     .iter()
@@ -5921,6 +6002,68 @@ impl Host {
         })
     }
 
+    fn stage_changed_bracket_root(
+        &self,
+        root: &Path,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+        source_revision: &str,
+        operation: &str,
+        ordinal: u64,
+    ) -> Result<Option<StagedBracketRoot>, HostError> {
+        let Some((feature_id, after_params)) = after
+            .features
+            .keys()
+            .filter_map(|id| id.strip_suffix("-base"))
+            .filter_map(|id| {
+                let before_params = bracket_family_params(before, id)?;
+                let after_params = bracket_family_params(after, id)?;
+                (before_params != after_params
+                    && valid_bracket_family_params(&after_params)
+                    && committed_brep_path(root, id).is_file())
+                .then_some((id.to_string(), after_params))
+            })
+            .next()
+        else {
+            return Ok(None);
+        };
+        let request = BracketRequest::new(
+            format!("history-bracket-{operation}-{ordinal}"),
+            after_params.length,
+            after_params.width,
+            after_params.height,
+            after_params.thickness,
+        )
+        .with_feature_id(&feature_id)
+        .with_output_path(root, "history-root.brep");
+        request
+            .validate()
+            .map_err(|detail| HostError::Validation { detail })?;
+        let worker = OcctWorker::locate().map_err(HostError::from)?;
+        let derived = self.stage_occt_result_for_revision::<BracketResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            &worker,
+            source_revision,
+        )?;
+        let result = derived.result.clone();
+        let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.discard_staged_occt_result(&derived);
+                return Err(error);
+            }
+        };
+        self.discard_staged_occt_result(&derived);
+        Ok(Some(StagedBracketRoot {
+            feature_id,
+            request,
+            bytes,
+            result_sha256: result.brep_sha256,
+        }))
+    }
+
     /// Rebuild every target bracket family whose parameters changed or whose
     /// disposable BREP is missing. Restore cannot rely on the displaced
     /// generation's Derived Results being present.
@@ -5944,10 +6087,6 @@ impl Host {
             if !bracket_family_is_current(after, &family) {
                 continue;
             }
-            let stage = preview_stage_path(root, &format!("history-restore-{family}"));
-            fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-                detail: format!("create restore recompute stage failed: {error}"),
-            })?;
             let request = BracketRequest::new(
                 threeterm_occt_worker::new_request_id(),
                 params.length,
@@ -5956,38 +6095,28 @@ impl Host {
                 params.thickness,
             )
             .with_feature_id(&family)
-            .with_output_path(&stage, "restore.brep");
+            .with_output_path(root, "restore.brep");
             request
                 .validate()
                 .map_err(|detail| HostError::Validation { detail })?;
             let worker = worker.get_or_insert(OcctWorker::locate().map_err(HostError::from)?);
-            let result = match worker
-                .clone()
-                .with_revision_id(source_revision.to_string())
-                .bracket(&request)
-            {
-                Ok(result) if result.is_success() => result,
-                Ok(result) => {
-                    remove_preview_stage(&stage);
-                    return Err(HostError::BrepInvalid {
-                        request_id: Some(request.request_id.clone()),
-                        detail: format!("restore recompute returned status {}", result.status),
-                    });
-                }
-                Err(error) => {
-                    remove_preview_stage(&stage);
-                    return Err(error.into());
-                }
-            };
-            let bytes = match read_verified_worker_brep(&result) {
+            let derived = self.stage_occt_result_for_revision::<BracketResult>(
+                root,
+                &request,
+                threeterm_occt_worker::Operation::Bracket,
+                worker,
+                source_revision,
+            )?;
+            let result = derived.result.clone();
+            let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    remove_preview_stage(&stage);
+                    self.discard_staged_occt_result(&derived);
                     return Err(error);
                 }
             };
+            self.discard_staged_occt_result(&derived);
             let result_sha256 = result.brep_sha256.clone();
-            remove_preview_stage(&stage);
             staged.push(StagedBracketFamily {
                 family,
                 request,
@@ -6032,10 +6161,6 @@ impl Host {
         let worker = OcctWorker::locate().map_err(HostError::from)?;
         let mut staged = Vec::with_capacity(changed.len());
         for (family, params, source_brep_sha256) in changed {
-            let stage = preview_stage_path(root, &format!("history-recompute-{family}"));
-            fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-                detail: format!("create history recompute stage failed: {error}"),
-            })?;
             let request = BracketRequest::new(
                 threeterm_occt_worker::new_request_id(),
                 params.length,
@@ -6044,37 +6169,27 @@ impl Host {
                 params.thickness,
             )
             .with_feature_id(&family)
-            .with_output_path(&stage, "recompute.brep");
+            .with_output_path(root, "recompute.brep");
             request
                 .validate()
                 .map_err(|detail| HostError::Validation { detail })?;
-            let result = match worker
-                .clone()
-                .with_revision_id(source_revision.to_string())
-                .bracket(&request)
-            {
-                Ok(result) if result.is_success() => result,
-                Ok(result) => {
-                    remove_preview_stage(&stage);
-                    return Err(HostError::BrepInvalid {
-                        request_id: Some(request.request_id.clone()),
-                        detail: format!("history recompute returned status {}", result.status),
-                    });
-                }
-                Err(error) => {
-                    remove_preview_stage(&stage);
-                    return Err(error.into());
-                }
-            };
-            let bytes = match read_verified_worker_brep(&result) {
+            let derived = self.stage_occt_result_for_revision::<BracketResult>(
+                root,
+                &request,
+                threeterm_occt_worker::Operation::Bracket,
+                &worker,
+                source_revision,
+            )?;
+            let result = derived.result.clone();
+            let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    remove_preview_stage(&stage);
+                    self.discard_staged_occt_result(&derived);
                     return Err(error);
                 }
             };
+            self.discard_staged_occt_result(&derived);
             let result_sha256 = result.brep_sha256.clone();
-            remove_preview_stage(&stage);
             staged.push(StagedBracketFamily {
                 family,
                 request,
@@ -6343,12 +6458,18 @@ impl Host {
             .iter()
             .filter_map(|entry| entry.intent.as_ref())
             .any(|intent| {
-                intent.affected_semantic_ids().iter().any(|feature_id| {
-                    !bundle_root(root)
-                        .join(BREP_SUBDIR)
-                        .join(format!("{feature_id}.brep"))
-                        .is_file()
-                })
+                canonical_geometry_feature_ids(intent)
+                    .iter()
+                    .any(|feature_id| {
+                        let has_provenance = loaded.log.entries().iter().any(|entry| {
+                            entry.feature_id == *feature_id && entry.brep_sha256.is_some()
+                        });
+                        has_provenance
+                            && !bundle_root(root)
+                                .join(BREP_SUBDIR)
+                                .join(format!("{feature_id}.brep"))
+                                .is_file()
+                    })
             });
         let component_replay_needed = loaded.components.instances.values().any(|instance| {
             loaded
@@ -6362,14 +6483,18 @@ impl Host {
         let bracket_replay_needed = bracket_family_ids(loaded.history.active_snapshot())
             .into_iter()
             .any(|family| {
-                loaded.graph.contains_feature(&family)
-                    && bracket_family_params(loaded.history.active_snapshot(), &family).is_some()
+                bracket_family_params(loaded.history.active_snapshot(), &family).is_some()
+                    && loaded
+                        .log
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.feature_id == family && entry.brep_sha256.is_some())
                     && !committed_brep_path(root, &family).is_file()
             });
         if bracket_replay_needed {
             let worker = OcctWorker::locate().map_err(HostError::from)?;
             let loaded = Bundle::at(root).open()?;
-            let artifacts = stage_missing_bracket_family_geometries(root, &loaded, &worker)?;
+            let artifacts = stage_missing_bracket_family_geometries(self, root, &loaded, &worker)?;
             Bundle::at(root)
                 .restore_derived_breps_if_revision(loaded.revision_hash_hex(), &artifacts)?;
         }
@@ -6607,6 +6732,25 @@ impl Host {
                         root,
                         &request,
                         threeterm_occt_worker::Operation::CircularPattern,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                }
+                CanonicalIntent::Bracket(inner) => {
+                    let request = BracketRequest::new(
+                        inner.request_id.clone(),
+                        inner.deterministic_inputs.length,
+                        inner.deterministic_inputs.width,
+                        inner.deterministic_inputs.height,
+                        inner.deterministic_inputs.thickness,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result_for_revision::<BracketResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Bracket,
                         worker,
                         &inner.source_revision,
                     )?;
@@ -7392,18 +7536,27 @@ impl Host {
                                    })?);
                 */
         }
-        let replay_artifacts = feature_ids
+        let mut restore_feature_ids = BTreeSet::new();
+        let mut replay_feature_ids = feature_ids
             .iter()
+            .rev()
+            .filter(|feature_id| restore_feature_ids.insert((*feature_id).clone()))
+            .map(|feature_id| (*feature_id).clone())
+            .collect::<Vec<_>>();
+        replay_feature_ids.reverse();
+        let replay_artifacts = replay_feature_ids
+            .into_iter()
             .map(|feature_id| {
-                let path = replayed_paths
-                    .get(feature_id)
-                    .ok_or_else(|| HostError::Validation {
-                        detail: format!("replayed artifact path is missing: {feature_id}"),
-                    })?;
+                let path =
+                    replayed_paths
+                        .get(&feature_id)
+                        .ok_or_else(|| HostError::Validation {
+                            detail: format!("replayed artifact path is missing: {feature_id}"),
+                        })?;
                 let bytes = fs::read(path).map_err(|error| HostError::BrepIo {
                     detail: format!("read staged replayed BREP failed: {error}"),
                 })?;
-                Ok((feature_id.clone(), bytes))
+                Ok((feature_id, bytes))
             })
             .collect::<Result<Vec<_>, HostError>>()?;
         Bundle::at(root)
@@ -8721,35 +8874,50 @@ impl Host {
     ) -> Result<Layer1CacheRebuild, HostError> {
         let root = root.as_ref();
         let loaded = Bundle::at(root).open()?;
-        let cache = root.join(LAYER1_CACHE_DIR);
-        fs::create_dir_all(&cache).map_err(|error| HostError::BrepIo {
-            detail: format!("create Layer 1 cache failed: {error}"),
-        })?;
         let artifact_name = "l-bracket.brep";
+        let params = bracket_family_params(loaded.history.active_snapshot(), "l-bracket")
+            .ok_or_else(|| HostError::Validation {
+                detail: "L-bracket history parameters are unavailable".to_string(),
+            })?;
         let request = BracketRequest::new(
-            format!("layer1-cache-{}", std::process::id()),
-            60.0,
-            30.0,
-            40.0,
-            3.0,
+            canonical_bracket_request_id(
+                "l-bracket",
+                params.length,
+                params.width,
+                params.height,
+                params.thickness,
+            ),
+            params.length,
+            params.width,
+            params.height,
+            params.thickness,
         )
-        .with_output_path(&cache, artifact_name)
+        .with_output_path(root, artifact_name)
         .with_feature_id("l-bracket");
         let worker = OcctWorker::locate()
             .map_err(|error| HostError::WorkerUnavailable {
                 detail: error.to_string(),
             })?
             .with_revision_id(loaded.revision_hash_hex());
-        let result = worker.bracket(&request).map_err(HostError::from)?;
-        if !result.is_success() || !result.brep_path.is_file() {
-            return Err(HostError::BrepInvalid {
-                request_id: Some(result.request_id),
-                detail: "Layer 1 cache worker did not produce a BREP".to_string(),
-            });
-        }
-        let sha256 = sha256_path(&result.brep_path).map_err(|error| HostError::BrepIo {
-            detail: error.to_string(),
-        })?;
+        let derived = self.stage_occt_result::<BracketResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            &worker,
+        )?;
+        let result = derived.result.clone();
+        let bytes = match read_brep_verified(
+            &result.brep_path,
+            Some((result.brep_bytes, &result.brep_sha256)),
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.discard_staged_occt_result(&derived);
+                return Err(HostError::BrepIo { detail: error });
+            }
+        };
+        self.discard_staged_occt_result(&derived);
+        let sha256 = sha256_hex(&bytes);
         let record = Layer1CacheRecord {
             schema_version: LAYER1_CACHE_SCHEMA.to_string(),
             source_revision: loaded.revision_hash_hex().to_string(),
@@ -8757,22 +8925,14 @@ impl Host {
             feature_id: "l-bracket".to_string(),
             worker_fingerprint: expected_occt_worker_fingerprint(),
             artifact_name: artifact_name.to_string(),
-            byte_count: result.brep_bytes as u64,
+            byte_count: bytes.len() as u64,
             sha256,
         };
         let record_bytes =
             serde_json::to_vec_pretty(&record).map_err(|error| HostError::BrepIo {
                 detail: format!("serialize Layer 1 cache record failed: {error}"),
             })?;
-        let temporary = cache.join(format!(".{LAYER1_CACHE_RECORD}.tmp-{}", std::process::id()));
-        fs::write(&temporary, record_bytes).map_err(|error| HostError::BrepIo {
-            detail: format!("write Layer 1 cache record failed: {error}"),
-        })?;
-        fs::rename(temporary, cache.join(LAYER1_CACHE_RECORD)).map_err(|error| {
-            HostError::BrepIo {
-                detail: format!("publish Layer 1 cache record failed: {error}"),
-            }
-        })?;
+        publish_layer1_cache_pair(root, &bytes, &record_bytes)?;
         Ok(Layer1CacheRebuild {
             record,
             recomputations: 1,
@@ -9030,6 +9190,7 @@ impl Host {
                 if affected_instance_ids.contains(&instance.id) || !prior_path.is_file() {
                     let worker = worker.as_ref().expect("affected component has a worker");
                     if let Some(materialized) = materialize_component_instance_geometry_with_worker(
+                        self,
                         root,
                         &geometry_loaded,
                         instance,
@@ -9115,7 +9276,8 @@ impl Host {
     ) -> Result<(), HostError> {
         let root = root.as_ref();
         let loaded = Bundle::at(root).open()?;
-        let geometries = materialize_all_component_instance_geometries(root, &loaded, worker)?;
+        let geometries =
+            materialize_all_component_instance_geometries(self, root, &loaded, worker)?;
         publish_component_instance_geometries(root, loaded.revision_hash_hex(), &geometries)?;
         Ok(())
     }
@@ -9126,7 +9288,8 @@ impl Host {
         worker: &OcctWorker,
     ) -> Result<(), HostError> {
         let loaded = Bundle::at(root).open()?;
-        let geometries = materialize_all_component_instance_geometries(root, &loaded, worker)?;
+        let geometries =
+            materialize_all_component_instance_geometries(self, root, &loaded, worker)?;
         publish_component_instance_geometries(root, loaded.revision_hash_hex(), &geometries)?;
         Ok(())
     }
@@ -9535,11 +9698,23 @@ impl Host {
     }
 
     fn clear_bracket_draft_preview(&self, draft_key: &(PathBuf, String)) {
-        if let Some(draft) = self.bracket_drafts.borrow_mut().get_mut(draft_key)
-            && let Some(path) = draft.preview_path.take()
-        {
-            remove_preview_stage(&path);
+        if let Some(draft) = self.bracket_drafts.borrow_mut().get_mut(draft_key) {
+            if let Some(path) = draft.preview_path.take() {
+                self.remove_bracket_preview_cache(&path);
+            }
+            if let Some(path) = draft.preview_output_path.take()
+                && let Some(parent) = path.parent()
+            {
+                remove_preview_stage(parent);
+            }
         }
+    }
+
+    fn remove_bracket_preview_cache(&self, path: &Path) {
+        remove_preview_stage(path);
+        self.layer1_results
+            .borrow_mut()
+            .retain(|_, result| result.path.parent() != Some(path));
     }
 
     fn stage_occt_result<R>(
@@ -9712,7 +9887,7 @@ impl Host {
         request_value["output_dir"] =
             serde_json::Value::String(stage.root().to_string_lossy().into_owned());
         request_value["output_filename"] =
-            serde_json::Value::String("pending.brep.partial".to_string());
+            serde_json::Value::String(format!("{}.partial", binding.staging_name));
         request_value["artifact_request"] = match serde_json::to_value(&binding) {
             Ok(value) => value,
             Err(error) => {
@@ -10323,13 +10498,34 @@ impl Host {
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let request_id = request.request_id.clone();
+        let request_id = canonical_bracket_request_id(
+            &request.feature_id,
+            request.length,
+            request.width,
+            request.height,
+            request.thickness,
+        );
         let feature_id = request.feature_id.clone();
+        let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
+            schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
+            command: "bracket".to_string(),
+            operation: "bracket".to_string(),
+            request_id: request_id.clone(),
+            deterministic_inputs: BracketDeterministicInputs {
+                length: request.length,
+                width: request.width,
+                height: request.height,
+                thickness: request.thickness,
+            },
+            affected_semantic_ids: bracket_affected_semantic_ids(&feature_id),
+            source_revision: source_snapshot.revision_hash.clone(),
+            worker_requirements: expected_occt_worker_fingerprint(),
+        });
         let (snapshot, result, artifact) = self.promote_occt_result_with_append(
             &root,
             derived,
             move |bundle, current, _derived, _artifact, bytes, shared_provenance| {
-                bundle.append_features_with_brep_if_revision_and_history_and_provenance(
+                bundle.append_features_with_brep_if_revision_and_history_and_provenance_and_intent(
                     &entries,
                     &feature_id,
                     current.revision_hash_hex(),
@@ -10337,6 +10533,7 @@ impl Host {
                     &history_event,
                     &request_id,
                     shared_provenance,
+                    &intent,
                 )
             },
         )?;
@@ -10410,6 +10607,7 @@ impl Host {
             request,
             sequence: 0,
             preview_path: None,
+            preview_output_path: None,
             created_at: Instant::now(),
         };
         self.bracket_drafts
@@ -10456,55 +10654,74 @@ impl Host {
         self.clear_bracket_draft_preview(&draft_key);
         self.validate_bracket_source(&draft, &loaded)?;
         if let Some(path) = &draft.preview_path {
-            remove_preview_stage(path);
+            self.remove_bracket_preview_cache(path);
         }
-        let stage = preview_stage_path(&root, draft_id);
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create bracket preview stage failed: {error}"),
-        })?;
         let request = draft
             .request
             .clone()
-            .with_output_path(&stage, "preview.brep");
-        let result = match worker
-            .clone()
-            .with_revision_id(draft.source_revision.clone())
-            .bracket_with_cancel(&request, cancel)
-        {
-            Ok(result) if result.is_success() => result,
-            Ok(result) => {
-                remove_preview_stage(&stage);
-                return Err(HostError::BrepInvalid {
-                    request_id: Some(request.request_id),
-                    detail: format!("bracket preview returned status {}", result.status),
+            .with_output_path(&root, "preview.brep");
+        let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
+        let derived = self.stage_occt_result_with_cancel_and_progress::<BracketResult>(
+            &root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            worker,
+            cancel,
+            &mut ignore_progress,
+        )?;
+        let result = derived.result.clone();
+        let preview_stage_root = match derived.artifact.path.parent().map(Path::to_path_buf) {
+            Some(path) => path,
+            None => {
+                self.discard_staged_occt_result(&derived);
+                return Err(HostError::BrepIo {
+                    detail: "bracket preview stage path is missing".to_string(),
                 });
             }
+        };
+        let preview_output_stage = preview_stage_path(&root, &format!("bracket-{draft_id}"));
+        let preview_output_path = match (|| -> Result<PathBuf, HostError> {
+            fs::create_dir_all(&preview_output_stage).map_err(|error| HostError::BrepIo {
+                detail: format!("create bracket preview output stage failed: {error}"),
+            })?;
+            let preview_output_path = preview_output_stage.join("preview.brep");
+            let preview_bytes = read_verified_worker_brep(&result, &derived.artifact.path)?;
+            fs::write(&preview_output_path, preview_bytes).map_err(|error| HostError::BrepIo {
+                detail: format!("write bracket preview output failed: {error}"),
+            })?;
+            Ok(preview_output_path)
+        })() {
+            Ok(path) => path,
             Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
+                self.discard_staged_occt_result(&derived);
+                let _ = fs::remove_dir_all(&preview_output_stage);
+                return Err(error);
             }
         };
-        if let Err(error) = read_verified_worker_brep(&result) {
-            remove_preview_stage(&stage);
-            return Err(error);
-        }
+        self.discard_staged_occt_result(&derived);
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
         let preview_revision = draft_preview_revision(&draft.source_revision, &input_fingerprint);
-        let preview_path = result.brep_path.clone();
         self.bracket_drafts
             .borrow_mut()
             .get_mut(&draft_key)
             .ok_or_else(|| HostError::DraftNotFound {
                 draft_id: draft_id.to_string(),
             })?
-            .preview_path = Some(stage);
+            .preview_path = Some(preview_stage_root);
+        self.bracket_drafts
+            .borrow_mut()
+            .get_mut(&draft_key)
+            .ok_or_else(|| HostError::DraftNotFound {
+                draft_id: draft_id.to_string(),
+            })?
+            .preview_output_path = Some(preview_output_path.clone());
         Ok(BracketPreviewView {
             draft_id: draft_id.to_string(),
             source_revision: draft.source_revision,
             preview_revision,
             input_fingerprint,
             result,
-            brep_path: preview_path,
+            brep_path: preview_output_path,
         })
     }
 
@@ -10549,7 +10766,12 @@ impl Host {
                 detail,
             })?;
         if let Some(path) = &draft.preview_path {
-            remove_preview_stage(path);
+            self.remove_bracket_preview_cache(path);
+        }
+        if let Some(path) = draft.preview_output_path.take()
+            && let Some(parent) = path.parent()
+        {
+            remove_preview_stage(parent);
         }
         draft.request = request;
         draft.preview_path = None;
@@ -10593,47 +10815,61 @@ impl Host {
         }
         let loaded = Bundle::at(&root).open()?;
         self.current.replace(Some(loaded.clone()));
-        self.clear_bracket_draft_preview(&draft_key);
         self.validate_bracket_source(&draft, &loaded)?;
-        if let Some(path) = &draft.preview_path {
-            remove_preview_stage(path);
-        }
-        let stage = preview_stage_path(&root, &format!("{draft_id}-commit"));
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create bracket commit stage failed: {error}"),
-        })?;
-        let request = draft
-            .request
-            .clone()
-            .with_output_path(&stage, "commit.brep");
-        let result = match worker
-            .clone()
-            .with_revision_id(draft.source_revision.clone())
-            .bracket(&request)
-        {
-            Ok(result) if result.is_success() => result,
-            Ok(result) => {
-                remove_preview_stage(&stage);
-                return Err(HostError::BrepInvalid {
-                    request_id: Some(request.request_id),
-                    detail: format!("bracket commit returned status {}", result.status),
-                });
-            }
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
-            }
-        };
-        let bytes = match read_verified_worker_brep(&result) {
+        let history_event = loaded
+            .history
+            .edit_l_bracket(
+                &draft.bracket_id,
+                draft.request.length,
+                draft.request.width,
+                draft.request.height,
+                draft.request.thickness,
+            )
+            .map_err(|error| HostError::Validation {
+                detail: error.to_string(),
+            })?
+            .0;
+        let request = draft.request.clone().with_output_path(&root, "commit.brep");
+        let derived = self.stage_occt_result::<BracketResult>(
+            &root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            worker,
+        )?;
+        let result = derived.result.clone();
+        let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                remove_preview_stage(&stage);
+                self.discard_staged_occt_result(&derived);
                 return Err(error);
             }
         };
+        self.discard_staged_occt_result(&derived);
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let idempotency_payload =
-            bracket_idempotency_payload(&draft, &result.brep_sha256, &input_fingerprint);
+            bracket_idempotency_payload(&draft, draft_id, &result.brep_sha256, &input_fingerprint);
+        let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
+            schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
+            command: "bracket".to_string(),
+            operation: "bracket".to_string(),
+            request_id: request_id.clone(),
+            deterministic_inputs: BracketDeterministicInputs {
+                length: draft.request.length,
+                width: draft.request.width,
+                height: draft.request.height,
+                thickness: draft.request.thickness,
+            },
+            affected_semantic_ids: bracket_affected_semantic_ids(&draft.bracket_id),
+            source_revision: draft.source_revision.clone(),
+            worker_requirements: expected_occt_worker_fingerprint(),
+        });
         let snapshot = match self.promote_brep_bytes(
             &root,
             &draft.bracket_id,
@@ -10641,8 +10877,10 @@ impl Host {
             &draft.source_revision,
             &bytes,
             Some(&draft.source_brep_sha256),
-            Some(draft_id),
+            Some(&request_id),
             Some(&idempotency_payload),
+            &intent,
+            Some(&history_event),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -10655,12 +10893,15 @@ impl Host {
                 ) {
                     return Ok(committed);
                 }
-                remove_preview_stage(&stage);
                 return Err(self.classify_bracket_promotion_error(&root, draft_id, &draft, error));
             }
         };
-        remove_preview_stage(&stage);
         self.bracket_drafts.borrow_mut().remove(&draft_key);
+        if let Some(path) = draft.preview_output_path
+            && let Some(parent) = path.parent()
+        {
+            remove_preview_stage(parent);
+        }
         Ok(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
@@ -10676,9 +10917,26 @@ impl Host {
         kind: &str,
         semantic_fingerprint: &str,
     ) -> Result<Option<BracketDraftCommitView>, HostError> {
-        let Some(committed) = Bundle::at(root).find_idempotency_key(draft_id)? else {
+        let committed = Bundle::at(root).open()?;
+        let has_draft_id = committed.log.entries().iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(
+                entry.idempotency_payload.as_deref().unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|payload| payload["draft_id"].as_str().map(str::to_owned))
+            .as_deref()
+                == Some(draft_id)
+        });
+        if !has_draft_id {
             return Ok(None);
-        };
+        }
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let matching_entry = committed.log.entries().iter().find(|entry| {
             let payload = serde_json::from_str::<serde_json::Value>(
                 entry.idempotency_payload.as_deref().unwrap_or_default(),
@@ -10695,7 +10953,7 @@ impl Host {
             let source_matches = payload_source_revision == Some(draft.source_revision.as_str())
                 || (draft.source_revision == committed.revision_hash_hex()
                     && entry.log_index + 1 == committed.log.entries().len());
-            entry.idempotency_key.as_deref() == Some(draft_id)
+            entry.idempotency_key.as_deref() == Some(request_id.as_str())
                 && entry.feature_id == draft.bracket_id
                 && entry.kind == kind
                 && entry.log_index + 1 == committed.log.entries().len()
@@ -10747,12 +11005,18 @@ impl Host {
         let draft_key = draft_map_key(root, draft_id);
         let kind = bracket_kind(&draft.request);
         let input_fingerprint = bracket_input_fingerprint(draft, result_sha256);
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let idempotency_payload =
-            bracket_idempotency_payload(draft, result_sha256, &input_fingerprint);
-        let stage = preview_stage_path(root, &format!("{draft_id}-commit"));
+            bracket_idempotency_payload(draft, draft_id, result_sha256, &input_fingerprint);
         let committed = Bundle::at(root).open().ok()?;
         let published = committed.log.entries().iter().any(|entry| {
-            entry.idempotency_key.as_deref() == Some(draft_id)
+            entry.idempotency_key.as_deref() == Some(request_id.as_str())
                 && entry.feature_id == draft.bracket_id
                 && entry.kind == kind
                 && entry.idempotency_payload.as_deref() == Some(idempotency_payload.as_str())
@@ -10766,7 +11030,6 @@ impl Host {
         let snapshot = SnapshotView::from(&committed);
         self.current.replace(Some(committed));
         self.bracket_drafts.borrow_mut().remove(&draft_key);
-        remove_preview_stage(&stage);
         Some(BracketDraftCommitView {
             snapshot,
             input_fingerprint,
@@ -10845,7 +11108,12 @@ impl Host {
                 draft_id: draft_id.to_string(),
             })?;
         if let Some(path) = draft.preview_path {
-            remove_preview_stage(&path);
+            self.remove_bracket_preview_cache(&path);
+        }
+        if let Some(path) = draft.preview_output_path
+            && let Some(parent) = path.parent()
+        {
+            remove_preview_stage(parent);
         }
         Ok(draft.source_revision)
     }
@@ -11015,11 +11283,13 @@ impl Host {
         source_brep_sha256: Option<&str>,
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
+        intent: &CanonicalIntent,
+        history_event: Option<&threeterm_domain::history::HistoryEvent>,
     ) -> Result<SnapshotView, HostError> {
         let bundle = Bundle::at(root);
         let updated = match source_brep_sha256 {
             Some(source_brep_sha256) => bundle
-                .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload(
+                .replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload_and_intent(
                     feature_id,
                     kind,
                     expected_revision,
@@ -11027,6 +11297,8 @@ impl Host {
                     idempotency_key,
                     idempotency_payload,
                     bytes,
+                    intent,
+                    history_event,
                 )?,
             None => bundle.append_feature_with_brep_if_revision(
                 feature_id,
@@ -13139,17 +13411,6 @@ fn component_source_brep(
             detail: "component feature references are incompatible".to_string(),
         });
     }
-    let path = bundle_root(root)
-        .join(BREP_SUBDIR)
-        .join(format!("{family}.brep"));
-    if !path.is_file() {
-        return Err(HostError::BrepFileMissing { path });
-    }
-    if !loaded.graph.contains_feature(family) {
-        return Err(HostError::Validation {
-            detail: format!("component source feature reference is lost: {family}"),
-        });
-    }
     for feature_id in &definition.selected_feature_ids {
         let feature = loaded
             .history
@@ -13164,6 +13425,15 @@ fn component_source_brep(
                 detail: format!("component source geometry is stale: {feature_id}"),
             });
         }
+    }
+    let path = bundle_root(root)
+        .join(BREP_SUBDIR)
+        .join(format!("{family}.brep"));
+    if !path.is_file() {
+        // History features are canonical inputs; their disposable family BREP
+        // may not have been materialized yet. The component worker rebuilds it
+        // from the durable descriptor below.
+        return Ok(None);
     }
     let entry = loaded
         .log
@@ -13192,6 +13462,7 @@ fn component_source_brep(
 }
 
 fn materialize_component_instance_geometry_with_worker(
+    host: &Host,
     root: &Path,
     loaded: &LoadedBundle,
     instance: &threeterm_domain::ComponentInstance,
@@ -13204,9 +13475,9 @@ fn materialize_component_instance_geometry_with_worker(
         .ok_or_else(|| HostError::Validation {
             detail: "component definition reference is lost".to_string(),
         })?;
-    let Some(_source) = component_source_brep(root, loaded, definition)? else {
-        return Ok(None);
-    };
+    // A missing family BREP is a disposable-result miss, not a lost
+    // reference. Rebuild the definition from its canonical history below.
+    let _source = component_source_brep(root, loaded, definition)?;
     if !instance.transform.iter().all(|value| value.is_finite()) {
         return Err(HostError::Validation {
             detail: "component transform must contain finite numbers".to_string(),
@@ -13220,85 +13491,77 @@ fn materialize_component_instance_geometry_with_worker(
     fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
         detail: format!("create component instance stage failed: {error}"),
     })?;
-    let descriptor = &definition.descriptor;
-    let request = BracketRequest::new(
-        "component-definition",
-        descriptor.length,
-        descriptor.width,
-        descriptor.height,
-        descriptor.thickness,
-    )
-    .with_output_path(&stage, "definition.brep")
-    .with_feature_id(&descriptor.feature_id);
-    let definition_result = worker
-        .clone()
-        .with_revision_id(loaded.revision_hash_hex())
-        .bracket(&request)
-        .map_err(HostError::from);
-    let definition_bytes = match definition_result {
-        Ok(result) if result.is_success() && result.brep_path.is_file() => read_brep_verified(
-            &result.brep_path,
-            Some((result.brep_bytes, &result.brep_sha256)),
+    let result = (|| {
+        let descriptor = &definition.descriptor;
+        let request = BracketRequest::new(
+            "component-definition",
+            descriptor.length,
+            descriptor.width,
+            descriptor.height,
+            descriptor.thickness,
         )
-        .map_err(|detail| HostError::BrepIo { detail })?,
-        Ok(result) => {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(HostError::BrepInvalid {
-                request_id: Some(result.request_id),
-                detail: format!(
-                    "component definition worker returned status {}",
-                    result.status
-                ),
-            });
-        }
-        Err(error) => {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(error);
-        }
-    };
-    let bytes = if instance.transform == [0.0, 0.0, 0.0] {
-        definition_bytes
-    } else {
-        let definition_path = stage.join("definition.brep");
-        let request = TranslateRequest::new(
-            format!("component-instance-{}", instance.id),
-            &definition_path,
-            instance.transform,
-        )
-        .with_output_path(&stage, "instance.brep")
-        .with_feature_id(&instance.id);
-        let result = worker
-            .clone()
-            .with_revision_id(loaded.revision_hash_hex())
-            .translate(&request)
-            .map_err(HostError::from);
-        match result {
-            Ok(result) if result.is_success() && result.brep_path.is_file() => read_brep_verified(
-                &result.brep_path,
-                Some((result.brep_bytes, &result.brep_sha256)),
-            )
-            .map_err(|detail| HostError::BrepIo { detail })?,
-            Ok(result) => {
-                let _ = fs::remove_dir_all(&stage);
-                return Err(HostError::BrepInvalid {
-                    request_id: Some(result.request_id),
-                    detail: format!(
-                        "component instance worker returned status {}",
-                        result.status
-                    ),
-                });
-            }
+        .with_output_path(&stage, "definition.brep")
+        .with_feature_id(&descriptor.feature_id);
+        let definition_derived = host.stage_occt_result::<BracketResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            worker,
+        )?;
+        let definition_result = definition_derived.result.clone();
+        let definition_bytes = match read_verified_worker_brep(
+            &definition_result,
+            &definition_derived.artifact.path,
+        ) {
+            Ok(bytes) => bytes,
             Err(error) => {
-                let _ = fs::remove_dir_all(&stage);
+                host.discard_staged_occt_result(&definition_derived);
                 return Err(error);
             }
-        }
-    };
+        };
+        host.discard_staged_occt_result(&definition_derived);
+        let definition_path = stage.join("definition.brep");
+        fs::write(&definition_path, &definition_bytes).map_err(|error| HostError::BrepIo {
+            detail: format!("write component definition stage failed: {error}"),
+        })?;
+        let bytes = if instance.transform == [0.0, 0.0, 0.0] {
+            definition_bytes
+        } else {
+            let request = TranslateRequest::new(
+                format!("component-instance-{}", instance.id),
+                &definition_path,
+                instance.transform,
+            )
+            .with_output_path(&stage, "instance.brep")
+            .with_feature_id(&instance.id);
+            let derived = host.stage_occt_result::<TranslateResult>(
+                root,
+                &request,
+                threeterm_occt_worker::Operation::Translate,
+                worker,
+            )?;
+            let result = derived.result.clone();
+            let bytes = match read_brep_verified(
+                &result.brep_path,
+                Some((result.brep_bytes, &result.brep_sha256)),
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    host.discard_staged_occt_result(&derived);
+                    return Err(HostError::BrepIo { detail: error });
+                }
+            };
+            host.discard_staged_occt_result(&derived);
+            bytes
+        };
+        Ok(Some((instance.id.clone(), bytes)))
+    })();
     let _ = fs::remove_dir_all(&stage);
-    Ok(Some((instance.id.clone(), bytes)))
+    result
 }
 
 fn materialize_all_component_instance_geometries(
+    host: &Host,
     root: &Path,
     loaded: &LoadedBundle,
     worker: &OcctWorker,
@@ -13315,8 +13578,10 @@ fn materialize_all_component_instance_geometries(
                 .is_some_and(|definition| !definition.selected_feature_ids.is_empty())
         })
         .map(|instance| {
-            materialize_component_instance_geometry_with_worker(root, loaded, instance, worker)
-                .map(|result| result.expect("selected component has materialized geometry"))
+            materialize_component_instance_geometry_with_worker(
+                host, root, loaded, instance, worker,
+            )
+            .map(|result| result.expect("selected component has materialized geometry"))
         })
         .collect()
 }
@@ -13403,6 +13668,21 @@ fn is_geometric_feature_kind(kind: &str) -> bool {
     kind.starts_with("brep:") || kind.starts_with("bracket:")
 }
 
+fn canonical_geometry_feature_ids(intent: &CanonicalIntent) -> Vec<&str> {
+    match intent {
+        CanonicalIntent::Bracket(bracket) => bracket
+            .affected_semantic_ids
+            .iter()
+            .map(String::as_str)
+            .collect(),
+        _ => intent
+            .affected_semantic_ids()
+            .iter()
+            .map(String::as_str)
+            .collect(),
+    }
+}
+
 /// L-bracket family parameters read from one history snapshot. The role
 /// mapping mirrors the canonical descriptor derivation: base carries length,
 /// bend carries width, finish carries height, and independent-base carries
@@ -13415,6 +13695,14 @@ struct BracketFamilyParams {
     thickness: f64,
 }
 
+fn valid_bracket_family_params(params: &BracketFamilyParams) -> bool {
+    [params.length, params.width, params.height, params.thickness]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+        && params.thickness < params.length
+        && params.thickness < params.width
+}
+
 fn bracket_family_params(snapshot: &HistorySnapshot, family: &str) -> Option<BracketFamilyParams> {
     let value = |suffix: &str| {
         snapshot
@@ -13422,11 +13710,37 @@ fn bracket_family_params(snapshot: &HistorySnapshot, family: &str) -> Option<Bra
             .get(&format!("{family}{suffix}"))
             .map(|feature| feature.input_value)
     };
+    value("-independent-finish")?;
     Some(BracketFamilyParams {
         length: value("-base")?,
         width: value("-bend")?,
         height: value("-finish")?,
         thickness: value("-independent-base")?,
+    })
+}
+
+fn latest_bracket_intent_params(
+    log: &threeterm_persistence::TransactionLog,
+    feature_id: &str,
+) -> Option<BracketFamilyParams> {
+    log.entries().iter().rev().find_map(|entry| {
+        let CanonicalIntent::Bracket(intent) = entry.intent.as_ref()? else {
+            return None;
+        };
+        if entry.feature_id != feature_id
+            && !intent
+                .affected_semantic_ids
+                .iter()
+                .any(|semantic_id| semantic_id == feature_id)
+        {
+            return None;
+        }
+        Some(BracketFamilyParams {
+            length: intent.deterministic_inputs.length,
+            width: intent.deterministic_inputs.width,
+            height: intent.deterministic_inputs.height,
+            thickness: intent.deterministic_inputs.thickness,
+        })
     })
 }
 
@@ -13439,17 +13753,24 @@ fn bracket_family_ids(snapshot: &HistorySnapshot) -> BTreeSet<String> {
 }
 
 fn bracket_family_is_current(snapshot: &HistorySnapshot, family: &str) -> bool {
-    ["-base", "-bend", "-finish", "-independent-base"]
-        .into_iter()
-        .all(|suffix| {
-            snapshot
-                .features
-                .get(&format!("{family}{suffix}"))
-                .is_none_or(|feature| feature.status == HistoryStatus::CurrentValid)
-        })
+    [
+        "-base",
+        "-bend",
+        "-finish",
+        "-independent-base",
+        "-independent-finish",
+    ]
+    .into_iter()
+    .all(|suffix| {
+        snapshot
+            .features
+            .get(&format!("{family}{suffix}"))
+            .is_none_or(|feature| feature.status == HistoryStatus::CurrentValid)
+    })
 }
 
 fn stage_missing_bracket_family_geometries(
+    host: &Host,
     root: &Path,
     loaded: &LoadedBundle,
     worker: &OcctWorker,
@@ -13457,19 +13778,23 @@ fn stage_missing_bracket_family_geometries(
     let snapshot = loaded.history.active_snapshot();
     let mut staged = Vec::new();
     for family in bracket_family_ids(snapshot) {
-        if !loaded.graph.contains_feature(&family) || committed_brep_path(root, &family).is_file() {
+        if committed_brep_path(root, &family).is_file()
+            || !loaded
+                .log
+                .entries()
+                .iter()
+                .any(|entry| entry.feature_id == family && entry.brep_sha256.is_some())
+        {
             continue;
         }
-        let Some(params) = bracket_family_params(snapshot, &family) else {
+        let Some(params) = bracket_family_params(snapshot, &family)
+            .or_else(|| latest_bracket_intent_params(&loaded.log, &family))
+        else {
             continue;
         };
         if !bracket_family_is_current(snapshot, &family) {
             continue;
         }
-        let stage = preview_stage_path(root, &format!("replay-{family}"));
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create bracket replay stage failed: {error}"),
-        })?;
         let request = BracketRequest::new(
             new_request_id(),
             params.length,
@@ -13478,33 +13803,23 @@ fn stage_missing_bracket_family_geometries(
             params.thickness,
         )
         .with_feature_id(&family)
-        .with_output_path(&stage, "replay.brep");
-        let result = match worker
-            .clone()
-            .with_revision_id(loaded.revision_hash_hex())
-            .bracket(&request)
-        {
-            Ok(result) if result.is_success() && result.brep_path.is_file() => result,
-            Ok(result) => {
-                remove_preview_stage(&stage);
-                return Err(HostError::BrepInvalid {
-                    request_id: Some(result.request_id),
-                    detail: format!("bracket replay returned status {}", result.status),
-                });
-            }
-            Err(error) => {
-                remove_preview_stage(&stage);
-                return Err(error.into());
-            }
-        };
-        let bytes = match read_verified_worker_brep(&result) {
+        .with_output_path(root, "replay.brep");
+        let derived = host.stage_occt_result_for_revision::<BracketResult>(
+            root,
+            &request,
+            threeterm_occt_worker::Operation::Bracket,
+            worker,
+            loaded.revision_hash_hex(),
+        )?;
+        let result = derived.result.clone();
+        let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                remove_preview_stage(&stage);
+                host.discard_staged_occt_result(&derived);
                 return Err(error);
             }
         };
-        remove_preview_stage(&stage);
+        host.discard_staged_occt_result(&derived);
         staged.push((family, bytes));
     }
     Ok(staged)
@@ -13517,6 +13832,13 @@ struct StagedBracketFamily {
     result_sha256: String,
     source_brep_sha256: String,
     source_revision: String,
+}
+
+struct StagedBracketRoot {
+    feature_id: String,
+    request: BracketRequest,
+    bytes: Vec<u8>,
+    result_sha256: String,
 }
 
 fn history_recompute_idempotency_payload(
@@ -13782,8 +14104,11 @@ fn sha256_path(path: &Path) -> Result<String, std::io::Error> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn read_verified_worker_brep(result: &BracketResult) -> Result<Vec<u8>, HostError> {
-    let bytes = fs::read(&result.brep_path).map_err(|error| HostError::BrepIo {
+fn read_verified_worker_brep(
+    result: &BracketResult,
+    accepted_path: &Path,
+) -> Result<Vec<u8>, HostError> {
+    let bytes = fs::read(accepted_path).map_err(|error| HostError::BrepIo {
         detail: format!("read bracket BREP failed: {error}"),
     })?;
     if bytes.len() != result.brep_bytes
@@ -13796,11 +14121,38 @@ fn read_verified_worker_brep(result: &BracketResult) -> Result<Vec<u8>, HostErro
     Ok(bytes)
 }
 
+/// Derive the stable request identity used by adapter-created brackets.
+/// Direct Host callers may still supply a request identity explicitly.
+pub fn canonical_bracket_request_id(
+    bracket_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+) -> String {
+    threeterm_persistence::canonical_bracket_request_id(
+        bracket_id, length, width, height, thickness,
+    )
+}
+
 fn bracket_kind(request: &BracketRequest) -> String {
     format!(
         "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
         request.length, request.width, request.height, request.thickness,
     )
+}
+
+fn bracket_affected_semantic_ids(feature_id: &str) -> Vec<String> {
+    [
+        feature_id.to_string(),
+        format!("{feature_id}-base"),
+        format!("{feature_id}-bend"),
+        format!("{feature_id}-finish"),
+        format!("{feature_id}-independent-base"),
+        format!("{feature_id}-independent-finish"),
+    ]
+    .into_iter()
+    .collect()
 }
 
 fn bracket_draft_fingerprint(draft: &BracketParameterDraft) -> String {
@@ -13831,10 +14183,12 @@ fn bracket_semantic_fingerprint(draft: &BracketParameterDraft) -> String {
 
 fn bracket_idempotency_payload(
     draft: &BracketParameterDraft,
+    draft_id: &str,
     result_sha256: &str,
     input_fingerprint: &str,
 ) -> String {
     serde_json::json!({
+        "draft_id": draft_id,
         "input_fingerprint": input_fingerprint,
         "result_sha256": result_sha256,
         "semantic_fingerprint": bracket_semantic_fingerprint(draft),
@@ -13975,6 +14329,97 @@ fn validate_layer1_cache(root: &Path, loaded: &LoadedBundle) -> Result<(), HostE
         });
     }
     Ok(())
+}
+
+fn publish_layer1_cache_pair(
+    root: &Path,
+    brep_bytes: &[u8],
+    record_bytes: &[u8],
+) -> Result<(), HostError> {
+    let sequence = TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = root.join(format!(
+        ".layer1-cache-stage-{}-{sequence}",
+        std::process::id()
+    ));
+    let cache = root.join(LAYER1_CACHE_DIR);
+    let previous = root.join(format!(
+        ".layer1-cache-previous-{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        fs::create_dir(&staging).map_err(|error| HostError::BrepIo {
+            detail: format!("create Layer 1 cache stage failed: {error}"),
+        })?;
+        write_synced_file(
+            &staging.join("l-bracket.brep"),
+            brep_bytes,
+            "Layer 1 cache BREP",
+        )?;
+        write_synced_file(
+            &staging.join(LAYER1_CACHE_RECORD),
+            record_bytes,
+            "Layer 1 cache record",
+        )?;
+        fs::File::open(&staging)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| HostError::BrepIo {
+                detail: format!("sync Layer 1 cache stage failed: {error}"),
+            })?;
+        if cache.exists() {
+            fs::rename(&cache, &previous).map_err(|error| HostError::BrepIo {
+                detail: format!("retire previous Layer 1 cache failed: {error}"),
+            })?;
+        }
+        if let Err(error) = fs::rename(&staging, &cache) {
+            if previous.exists() {
+                let _ = fs::rename(&previous, &cache);
+            }
+            return Err(HostError::BrepIo {
+                detail: format!("publish Layer 1 cache pair failed: {error}"),
+            });
+        }
+        let sync_result = fs::File::open(root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| HostError::BrepIo {
+                detail: format!("sync Layer 1 cache publication failed: {error}"),
+            });
+        if let Err(error) = sync_result {
+            let _ = fs::remove_dir_all(&cache);
+            if let Err(restore_error) = fs::rename(&previous, &cache) {
+                return Err(HostError::BrepIo {
+                    detail: format!(
+                        "sync Layer 1 cache publication failed: {error}; restoring previous cache failed: {restore_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
+        if previous.exists() {
+            fs::remove_dir_all(&previous).map_err(|error| HostError::BrepIo {
+                detail: format!("remove previous Layer 1 cache failed: {error}"),
+            })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+        if cache.exists() {
+            let _ = fs::remove_dir_all(&previous);
+        }
+    }
+    result
+}
+
+fn write_synced_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), HostError> {
+    let mut file = fs::File::create(path).map_err(|error| HostError::BrepIo {
+        detail: format!("write {label} failed: {error}"),
+    })?;
+    file.write_all(bytes).map_err(|error| HostError::BrepIo {
+        detail: format!("write {label} failed: {error}"),
+    })?;
+    file.sync_all().map_err(|error| HostError::BrepIo {
+        detail: format!("sync {label} failed: {error}"),
+    })
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -15570,6 +16015,47 @@ mod tests {
     #[test]
     fn schema_version_matches_pinned_string() {
         assert_eq!(schema_version(), "threeterm.host/1");
+    }
+
+    #[test]
+    fn adapter_bracket_request_identity_is_canonical() {
+        let first = canonical_bracket_request_id("l-bracket", 60.0, 30.0, 40.0, 3.0);
+        let second = canonical_bracket_request_id("l-bracket", 60.0, 30.0, 40.0, 3.0);
+        let changed = canonical_bracket_request_id("l-bracket", 61.0, 30.0, 40.0, 3.0);
+        assert_eq!(first, second);
+        assert_ne!(first, changed);
+        assert!(first.starts_with("bracket-"));
+    }
+
+    #[test]
+    fn component_source_can_rebuild_from_history_without_a_family_brep() {
+        let root = temp_root("component-history-source");
+        let host = Host::new();
+        host.save_bracket(&root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("history-backed bracket creates");
+        let loaded = Bundle::at(&root).open().expect("bracket reloads");
+        let definition = threeterm_domain::ComponentDefinition {
+            id: "component".to_string(),
+            selected_feature_ids: vec![
+                "l-bracket-base".to_string(),
+                "l-bracket-bend".to_string(),
+                "l-bracket-finish".to_string(),
+                "l-bracket-independent-base".to_string(),
+            ],
+            descriptor: threeterm_domain::LBracketDescriptor {
+                feature_id: "l-bracket".to_string(),
+                length: 60.0,
+                width: 30.0,
+                height: 40.0,
+                thickness: 3.0,
+            },
+        };
+        assert!(
+            component_source_brep(&root, &loaded, &definition)
+                .expect("history references validate")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

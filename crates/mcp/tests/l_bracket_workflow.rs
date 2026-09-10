@@ -7,7 +7,9 @@ use threeterm_cli::dispatch::{DispatchError, dispatch_registered_command};
 use threeterm_host::{Host, HostError};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::{BRACKET_INTENT_SCHEMA_VERSION, Bundle, CanonicalIntent};
+use threeterm_persistence::{
+    BRACKET_INTENT_SCHEMA_VERSION, Bundle, CanonicalIntent, canonical_bracket_request_id,
+};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
@@ -414,6 +416,19 @@ fn assert_bracket_intent(root: &Path, expected_length: f64) {
     assert_eq!(intent.deterministic_inputs.width, 30.0);
     assert_eq!(intent.deterministic_inputs.height, 40.0);
     assert_eq!(intent.deterministic_inputs.thickness, 3.0);
+    assert_eq!(
+        intent.request_id,
+        canonical_bracket_request_id("l-bracket", expected_length, 30.0, 40.0, 3.0)
+    );
+    assert_eq!(intent.source_revision, bundle.revision_hash_hex());
+    assert_eq!(intent.worker_requirements.worker_kind, "occt");
+    assert!(!intent.worker_requirements.worker_schema_version.is_empty());
+    assert!(
+        !intent
+            .worker_requirements
+            .protocol_schema_version
+            .is_empty()
+    );
 }
 
 #[test]
@@ -479,9 +494,53 @@ fn l_bracket_supervision() {
         dispatch_registered_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&root))
             .expect("supervised bracket command commits");
     assert_eq!(response["status"], "ok");
+    assert_eq!(response["operation"], "bracket");
+    assert_eq!(response["feature_id"], "l-bracket");
     assert_eq!(response["artifact_kind"], "brep");
+    assert_eq!(
+        response["request_id"],
+        response["derived_result"]["request_id"]
+    );
+    assert_eq!(response["derived_result"]["operation"], "bracket");
+    assert_eq!(response["derived_result"]["feature_id"], "l-bracket");
     assert_eq!(response["worker_fingerprint"]["worker_kind"], "occt");
+    assert_eq!(
+        response["derived_result"]["worker_fingerprint"],
+        response["worker_fingerprint"]
+    );
+    assert_eq!(
+        response["derived_result"]["byte_count"],
+        response["brep_bytes"]
+    );
+    assert_eq!(
+        response["derived_result"]["sha256"],
+        response["brep_sha256"]
+    );
+    assert_eq!(
+        response["derived_result"]["source_revision_id"],
+        response["source_snapshot"]["revision_hash"]
+    );
     assert_bracket_intent(&root, 60.0);
+    let bundle = Bundle::at(&root)
+        .open()
+        .expect("supervision bundle reloads");
+    for (feature_id, kind) in [
+        (
+            "l-bracket",
+            "bracket:length=60.00000000000000000;width=30.00000000000000000;height=40.00000000000000000;thickness=3.00000000000000000",
+        ),
+        ("l-bracket-plate-vertical", "plate-vertical"),
+        ("l-bracket-plate-horizontal", "plate-horizontal"),
+    ] {
+        assert!(bundle.graph.contains_feature(feature_id));
+        assert!(
+            bundle
+                .log
+                .entries()
+                .iter()
+                .any(|entry| entry.feature_id == feature_id && entry.kind == kind)
+        );
+    }
     assert!(!root.join(".derived").exists());
     let _ = fs::remove_dir_all(root);
 }

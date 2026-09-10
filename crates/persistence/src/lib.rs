@@ -1261,6 +1261,20 @@ impl CanonicalBracketIntent {
                 "canonical bracket semantic impact is invalid".to_string(),
             ));
         }
+        if !valid_feature_path_component(feature_id)
+            || self.request_id
+                != canonical_bracket_request_id(
+                    feature_id,
+                    inputs.length,
+                    inputs.width,
+                    inputs.height,
+                    inputs.thickness,
+                )
+        {
+            return Err(BundleError::Invalid(
+                "canonical bracket request identity is invalid".to_string(),
+            ));
+        }
         validate_intent_impact(
             &[feature_id.to_string()],
             feature_id,
@@ -1272,10 +1286,26 @@ impl CanonicalBracketIntent {
     }
 }
 
+/// Derive the stable request identity for a bracket's canonical dimensions.
+pub fn canonical_bracket_request_id(
+    feature_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+) -> String {
+    let canonical = format!(
+        "bracket:{feature_id};length={length:.17};width={width:.17};height={height:.17};thickness={thickness:.17}"
+    );
+    format!("bracket-{}", sha256_hex(canonical.as_bytes()))
+}
+
 fn bracket_transaction_entries_match(
     entries: &[(&str, &str)],
     feature_id: &str,
     inputs: &BracketDeterministicInputs,
+    loaded: &LoadedBundle,
+    allow_existing_bracket_edit: bool,
 ) -> bool {
     let expected_kind = format!(
         "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
@@ -1285,7 +1315,12 @@ fn bracket_transaction_entries_match(
         .iter()
         .any(|(id, kind)| *id == feature_id && *kind == expected_kind);
     if entries.len() == 1 {
-        return has_root;
+        let vertical_id = format!("{feature_id}-plate-vertical");
+        let horizontal_id = format!("{feature_id}-plate-horizontal");
+        return allow_existing_bracket_edit
+            && has_root
+            && loaded.graph.contains_feature(&vertical_id)
+            && loaded.graph.contains_feature(&horizontal_id);
     }
     let vertical_id = format!("{feature_id}-plate-vertical");
     let horizontal_id = format!("{feature_id}-plate-horizontal");
@@ -4245,6 +4280,8 @@ impl Bundle {
                         entries,
                         intent_feature_id,
                         &bracket.deterministic_inputs,
+                        &loaded,
+                        allow_existing_bracket_edit,
                     ) || bracket.validate(intent_feature_id).is_err()
                         || idempotency_key != Some(bracket.request_id.as_str())
                         || bracket.worker_requirements != occt_worker_identity()
@@ -5348,11 +5385,20 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                 if bracket.schema_version != BRACKET_INTENT_SCHEMA_VERSION
                     || bracket.command != "bracket"
                     || bracket.operation != "bracket"
-                    || bracket.worker_requirements != occt_worker_identity()
                 {
                     return Err(BundleError::CanonicalOperationUnknown {
                         log_index: Some(entry.log_index),
                         operation: format!("{}:{}", bracket.command, bracket.operation),
+                    });
+                }
+                bracket.validate(&entry.feature_id)?;
+                if bracket.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_bracket_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&bracket.worker_requirements)
+                            .expect("worker identity serializes"),
                     });
                 }
             }

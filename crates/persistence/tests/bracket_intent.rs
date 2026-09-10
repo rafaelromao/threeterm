@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_persistence::{
     BRACKET_INTENT_SCHEMA_VERSION, BracketDeterministicInputs, Bundle, CanonicalBracketIntent,
-    CanonicalIntent, occt_worker_identity, replay_canonical_state,
+    CanonicalIntent, canonical_bracket_request_id, occt_worker_identity, replay_canonical_state,
 };
 use threeterm_protocol::artifact::sha256_hex;
 
@@ -30,7 +30,7 @@ fn bracket_intent_persists_with_atomic_family_entries_and_replays() {
         schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
         command: "bracket".to_string(),
         operation: "bracket".to_string(),
-        request_id: "bracket-request-1".to_string(),
+        request_id: canonical_bracket_request_id("l-bracket", 60.0, 30.0, 40.0, 3.0),
         deterministic_inputs: BracketDeterministicInputs {
             length: 60.0,
             width: 30.0,
@@ -65,7 +65,7 @@ fn bracket_intent_persists_with_atomic_family_entries_and_replays() {
             &threeterm_domain::history::HistoryState::default()
                 .initialize_l_bracket("l-bracket", 60.0, 30.0, 40.0, 3.0)
                 .expect("history event creates"),
-            "bracket-request-1",
+            &canonical_bracket_request_id("l-bracket", 60.0, 30.0, 40.0, 3.0),
             "{}",
             &CanonicalIntent::Bracket(intent.clone()),
         )
@@ -96,7 +96,7 @@ fn bracket_intent_persists_with_atomic_family_entries_and_replays() {
         schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
         command: "bracket".to_string(),
         operation: "bracket".to_string(),
-        request_id: "bracket-edit-1".to_string(),
+        request_id: canonical_bracket_request_id("l-bracket", 65.0, 30.0, 40.0, 3.0),
         deterministic_inputs: BracketDeterministicInputs {
             length: 65.0,
             width: 30.0,
@@ -120,7 +120,7 @@ fn bracket_intent_persists_with_atomic_family_entries_and_replays() {
             "bracket:length=65.00000000000000000;width=30.00000000000000000;height=40.00000000000000000;thickness=3.00000000000000000",
             &source_revision,
             &source_sha256,
-            Some("bracket-edit-1"),
+            Some(&canonical_bracket_request_id("l-bracket", 65.0, 30.0, 40.0, 3.0)),
             Some("{}"),
             b"edited-bracket-brep",
             &edited_intent,

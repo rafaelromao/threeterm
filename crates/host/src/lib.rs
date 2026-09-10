@@ -5854,7 +5854,13 @@ impl Host {
                         detail: format!("read bracket source BREP failed: {error}"),
                     },
                 )?;
-            let key = format!("history-bracket-{operation}-{ordinal}");
+            let key = canonical_bracket_request_id(
+                &staged_root.feature_id,
+                staged_root.request.length,
+                staged_root.request.width,
+                staged_root.request.height,
+                staged_root.request.thickness,
+            );
             let payload = history_recompute_idempotency_payload(
                 &staged_root.feature_id,
                 &staged_root.request,
@@ -6455,10 +6461,14 @@ impl Host {
                 canonical_geometry_feature_ids(intent)
                     .iter()
                     .any(|feature_id| {
-                        !bundle_root(root)
-                            .join(BREP_SUBDIR)
-                            .join(format!("{feature_id}.brep"))
-                            .is_file()
+                        let has_provenance = loaded.log.entries().iter().any(|entry| {
+                            entry.feature_id == *feature_id && entry.brep_sha256.is_some()
+                        });
+                        has_provenance
+                            && !bundle_root(root)
+                                .join(BREP_SUBDIR)
+                                .join(format!("{feature_id}.brep"))
+                                .is_file()
                     })
             });
         let component_replay_needed = loaded.components.instances.values().any(|instance| {
@@ -10488,7 +10498,13 @@ impl Host {
             (vertical_id.as_str(), "plate-vertical"),
             (horizontal_id.as_str(), "plate-horizontal"),
         ];
-        let request_id = request.request_id.clone();
+        let request_id = canonical_bracket_request_id(
+            &request.feature_id,
+            request.length,
+            request.width,
+            request.height,
+            request.thickness,
+        );
         let feature_id = request.feature_id.clone();
         let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
             schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
@@ -10656,27 +10672,36 @@ impl Host {
             Ok(derived) => derived,
             Err(error) => return Err(error),
         };
-        let preview_stage_root = derived
-            .artifact
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "bracket preview stage path is missing".to_string(),
-            })?;
+        let result = derived.result.clone();
+        let preview_stage_root = match derived.artifact.path.parent().map(Path::to_path_buf) {
+            Some(path) => path,
+            None => {
+                self.discard_staged_occt_result(&derived);
+                return Err(HostError::BrepIo {
+                    detail: "bracket preview stage path is missing".to_string(),
+                });
+            }
+        };
         let preview_output_stage = preview_stage_path(&root, &format!("bracket-{draft_id}"));
-        fs::create_dir_all(&preview_output_stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create bracket preview output stage failed: {error}"),
-        })?;
-        let preview_output_path = preview_output_stage.join("preview.brep");
-        let preview_bytes =
-            fs::read(&derived.artifact.path).map_err(|error| HostError::BrepIo {
-                detail: format!("read bracket preview artifact failed: {error}"),
+        let preview_output_path = match (|| -> Result<PathBuf, HostError> {
+            fs::create_dir_all(&preview_output_stage).map_err(|error| HostError::BrepIo {
+                detail: format!("create bracket preview output stage failed: {error}"),
             })?;
-        fs::write(&preview_output_path, preview_bytes).map_err(|error| HostError::BrepIo {
-            detail: format!("write bracket preview output failed: {error}"),
-        })?;
-        let result = derived.result;
+            let preview_output_path = preview_output_stage.join("preview.brep");
+            let preview_bytes = read_verified_worker_brep(&result, &derived.artifact.path)?;
+            fs::write(&preview_output_path, preview_bytes).map_err(|error| HostError::BrepIo {
+                detail: format!("write bracket preview output failed: {error}"),
+            })?;
+            Ok(preview_output_path)
+        })() {
+            Ok(path) => path,
+            Err(error) => {
+                self.discard_staged_occt_result(&derived);
+                let _ = fs::remove_dir_all(&preview_output_stage);
+                return Err(error);
+            }
+        };
+        self.discard_staged_occt_result(&derived);
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
         let preview_revision = draft_preview_revision(&draft.source_revision, &input_fingerprint);
         self.bracket_drafts
@@ -10827,13 +10852,20 @@ impl Host {
         };
         self.discard_staged_occt_result(&derived);
         let input_fingerprint = bracket_input_fingerprint(&draft, &result.brep_sha256);
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let idempotency_payload =
-            bracket_idempotency_payload(&draft, &result.brep_sha256, &input_fingerprint);
+            bracket_idempotency_payload(&draft, draft_id, &result.brep_sha256, &input_fingerprint);
         let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
             schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
             command: "bracket".to_string(),
             operation: "bracket".to_string(),
-            request_id: draft_id.to_string(),
+            request_id: request_id.clone(),
             deterministic_inputs: BracketDeterministicInputs {
                 length: draft.request.length,
                 width: draft.request.width,
@@ -10851,7 +10883,7 @@ impl Host {
             &draft.source_revision,
             &bytes,
             Some(&draft.source_brep_sha256),
-            Some(draft_id),
+            Some(&request_id),
             Some(&idempotency_payload),
             &intent,
             Some(&history_event),
@@ -10891,9 +10923,26 @@ impl Host {
         kind: &str,
         semantic_fingerprint: &str,
     ) -> Result<Option<BracketDraftCommitView>, HostError> {
-        let Some(committed) = Bundle::at(root).find_idempotency_key(draft_id)? else {
+        let committed = Bundle::at(root).open()?;
+        let has_draft_id = committed.log.entries().iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(
+                entry.idempotency_payload.as_deref().unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|payload| payload["draft_id"].as_str().map(str::to_owned))
+            .as_deref()
+                == Some(draft_id)
+        });
+        if !has_draft_id {
             return Ok(None);
-        };
+        }
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let matching_entry = committed.log.entries().iter().find(|entry| {
             let payload = serde_json::from_str::<serde_json::Value>(
                 entry.idempotency_payload.as_deref().unwrap_or_default(),
@@ -10910,7 +10959,7 @@ impl Host {
             let source_matches = payload_source_revision == Some(draft.source_revision.as_str())
                 || (draft.source_revision == committed.revision_hash_hex()
                     && entry.log_index + 1 == committed.log.entries().len());
-            entry.idempotency_key.as_deref() == Some(draft_id)
+            entry.idempotency_key.as_deref() == Some(request_id.as_str())
                 && entry.feature_id == draft.bracket_id
                 && entry.kind == kind
                 && entry.log_index + 1 == committed.log.entries().len()
@@ -10962,11 +11011,18 @@ impl Host {
         let draft_key = draft_map_key(root, draft_id);
         let kind = bracket_kind(&draft.request);
         let input_fingerprint = bracket_input_fingerprint(draft, result_sha256);
+        let request_id = canonical_bracket_request_id(
+            &draft.bracket_id,
+            draft.request.length,
+            draft.request.width,
+            draft.request.height,
+            draft.request.thickness,
+        );
         let idempotency_payload =
-            bracket_idempotency_payload(draft, result_sha256, &input_fingerprint);
+            bracket_idempotency_payload(draft, draft_id, result_sha256, &input_fingerprint);
         let committed = Bundle::at(root).open().ok()?;
         let published = committed.log.entries().iter().any(|entry| {
-            entry.idempotency_key.as_deref() == Some(draft_id)
+            entry.idempotency_key.as_deref() == Some(request_id.as_str())
                 && entry.feature_id == draft.bracket_id
                 && entry.kind == kind
                 && entry.idempotency_payload.as_deref() == Some(idempotency_payload.as_str())
@@ -13622,9 +13678,8 @@ fn canonical_geometry_feature_ids(intent: &CanonicalIntent) -> Vec<&str> {
     match intent {
         CanonicalIntent::Bracket(bracket) => bracket
             .affected_semantic_ids
-            .first()
+            .iter()
             .map(String::as_str)
-            .into_iter()
             .collect(),
         _ => intent
             .affected_semantic_ids()
@@ -14081,10 +14136,9 @@ pub fn canonical_bracket_request_id(
     height: f64,
     thickness: f64,
 ) -> String {
-    let canonical = format!(
-        "bracket:{bracket_id};length={length:.17};width={width:.17};height={height:.17};thickness={thickness:.17}"
-    );
-    format!("bracket-{}", sha256_hex(canonical.as_bytes()))
+    threeterm_persistence::canonical_bracket_request_id(
+        bracket_id, length, width, height, thickness,
+    )
 }
 
 fn bracket_kind(request: &BracketRequest) -> String {
@@ -14135,10 +14189,12 @@ fn bracket_semantic_fingerprint(draft: &BracketParameterDraft) -> String {
 
 fn bracket_idempotency_payload(
     draft: &BracketParameterDraft,
+    draft_id: &str,
     result_sha256: &str,
     input_fingerprint: &str,
 ) -> String {
     serde_json::json!({
+        "draft_id": draft_id,
         "input_fingerprint": input_fingerprint,
         "result_sha256": result_sha256,
         "semantic_fingerprint": bracket_semantic_fingerprint(draft),
@@ -14333,12 +14389,29 @@ fn publish_layer1_cache_pair(
             .map_err(|error| HostError::BrepIo {
                 detail: format!("sync Layer 1 cache publication failed: {error}"),
             });
-        let _ = fs::remove_dir_all(&previous);
-        sync_result
+        if let Err(error) = sync_result {
+            let _ = fs::remove_dir_all(&cache);
+            if let Err(restore_error) = fs::rename(&previous, &cache) {
+                return Err(HostError::BrepIo {
+                    detail: format!(
+                        "sync Layer 1 cache publication failed: {error}; restoring previous cache failed: {restore_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
+        if previous.exists() {
+            fs::remove_dir_all(&previous).map_err(|error| HostError::BrepIo {
+                detail: format!("remove previous Layer 1 cache failed: {error}"),
+            })?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&previous);
+        if cache.exists() {
+            let _ = fs::remove_dir_all(&previous);
+        }
     }
     result
 }

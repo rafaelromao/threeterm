@@ -3265,7 +3265,7 @@ impl Host {
                             detail: "bracket thickness must be a number".to_string(),
                         })?;
                 let request = BracketRequest::new(
-                    canonical_bracket_request_id(&bracket_id, length, width, height, thickness),
+                    canonical_bracket_request_id(bracket_id, length, width, height, thickness),
                     length,
                     width,
                     height,
@@ -10661,17 +10661,14 @@ impl Host {
             .clone()
             .with_output_path(&root, "preview.brep");
         let mut ignore_progress = |_progress: &threeterm_protocol::supervisor::Progress| {};
-        let derived = match self.stage_occt_result_with_cancel_and_progress::<BracketResult>(
+        let derived = self.stage_occt_result_with_cancel_and_progress::<BracketResult>(
             &root,
             &request,
             threeterm_occt_worker::Operation::Bracket,
             worker,
             cancel,
             &mut ignore_progress,
-        ) {
-            Ok(derived) => derived,
-            Err(error) => return Err(error),
-        };
+        )?;
         let result = derived.result.clone();
         let preview_stage_root = match derived.artifact.path.parent().map(Path::to_path_buf) {
             Some(path) => path,
@@ -10833,15 +10830,12 @@ impl Host {
             })?
             .0;
         let request = draft.request.clone().with_output_path(&root, "commit.brep");
-        let derived = match self.stage_occt_result::<BracketResult>(
+        let derived = self.stage_occt_result::<BracketResult>(
             &root,
             &request,
             threeterm_occt_worker::Operation::Bracket,
             worker,
-        ) {
-            Ok(derived) => derived,
-            Err(error) => return Err(error),
-        };
+        )?;
         let result = derived.result.clone();
         let bytes = match read_verified_worker_brep(&result, &derived.artifact.path) {
             Ok(bytes) => bytes,

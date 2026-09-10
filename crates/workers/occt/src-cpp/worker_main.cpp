@@ -2348,6 +2348,10 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             BRepGProp::VolumeProperties(base, base_properties);
             BRepGProp::VolumeProperties(serialized_result, result_properties);
             removed_volume = base_properties.Mass() - result_properties.Mass();
+            if (!std::isfinite(removed_volume)) {
+                error = "hole removed volume is non-finite";
+                return false;
+            }
         }
         std::ifstream stream(output_path, std::ios::binary);
         std::ostringstream bytes;

@@ -501,6 +501,10 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
                 if (parameter.h == point.x) x = parameter.val;
                 if (parameter.h == point.y) y = parameter.val;
             }
+            if (!std::isfinite(x) || !std::isfinite(y)) {
+                error = "solver produced a non-finite coordinate";
+                return false;
+            }
             output << "{\"entity_id\":\"" << escape(point.id) << "\",\"x\":" << x << ",\"y\":" << y << '}';
         }
         output << ']';

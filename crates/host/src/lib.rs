@@ -6805,7 +6805,13 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Boolean(inner) => {
                     let tool_path = if let Some(path) = replayed_paths.get(&inner.tool_feature_id) {
@@ -9824,6 +9830,23 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
+    }
+
+    fn stage_occt_result_for_revision<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        _source_revision: &str,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        // Replay executes against the currently loaded Revision Snapshot. The
+        // intent's source revision remains provenance, not the artifact's
+        // promotion revision.
         self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 

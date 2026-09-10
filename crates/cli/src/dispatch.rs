@@ -7,26 +7,27 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use threeterm_domain::ProjectGeneration;
-use threeterm_host::{Host, HostError, SnapshotView};
+use threeterm_host::{Host, HostError, SnapshotView, canonical_bracket_request_id};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
 use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BracketRequest, ChamferRequest,
     CircularPatternRequest, FilletRequest, HoleRequest, LinearPatternRequest, MirrorRequest,
-    OcctWorker, Operation, RevolveRequest, new_request_id,
+    OcctWorker, Operation, RevolveRequest,
 };
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::Diagnostic;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, CHAMFER_COMMAND_ID,
-    CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID, CREATE_COMPONENT_INSTANCE_COMMAND_ID,
-    CREATE_REVISION_COMMAND_ID, CommandId, DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID,
-    EDIT_COMPONENT_PARAMETER_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID,
-    FIT_DIMENSION_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID, LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
-    MIRROR_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REHEARSE_COMMAND_ID,
-    REPLAY_VERIFY_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
-    UNDO_COMMAND_ID, find_by_name, iter,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID,
+    CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
+    CREATE_COMPONENT_INSTANCE_COMMAND_ID, CREATE_REVISION_COMMAND_ID, CommandId,
+    DEFINE_COMPONENT_COMMAND_ID, DRAFT_COMMAND_ID, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
+    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FILLET_COMMAND_ID, FIT_DIMENSION_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LOFT_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID, MIRROR_COMMAND_ID,
+    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, REHEARSE_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SHELL_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
+    TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID, UNDO_COMMAND_ID, find_by_name,
+    iter,
 };
 pub use threeterm_protocol::schema::{
     BOOLEAN_COMMON_RESPONSE_SCHEMA_VERSION, BOOLEAN_CUT_RESPONSE_SCHEMA_VERSION,
@@ -3516,23 +3517,12 @@ fn execute_handler(
                 Err(error) => emit_dispatch_error(&error, stderr),
             }
         }
-        DispatchPlan::Bracket {
-            bundle,
-            bracket_id,
-            length,
-            width,
-            height,
-            thickness,
-        } => emit_bracket(
-            &bundle,
-            &bracket_id,
-            length,
-            width,
-            height,
-            thickness,
-            stdout,
-            stderr,
-        ),
+        DispatchPlan::Bracket { .. } => {
+            match dispatch_registered_command(&Host::new(), BRACKET_COMMAND_ID, request.clone()) {
+                Ok(response) => write_success(stdout, &response, stderr),
+                Err(error) => emit_dispatch_error(&error, stderr),
+            }
+        }
         DispatchPlan::Component { command, request } => {
             let host = Host::new();
             match dispatch_registered_command(&host, command, request) {
@@ -3910,8 +3900,14 @@ fn dispatch_bracket_with_host(
             detail: error.to_string(),
         })
     })?;
-    let request = BracketRequest::new(new_request_id(), length, width, height, thickness)
-        .with_feature_id(bracket_id);
+    let request = BracketRequest::new(
+        canonical_bracket_request_id(bracket_id, length, width, height, thickness),
+        length,
+        width,
+        height,
+        thickness,
+    )
+    .with_feature_id(bracket_id);
     host.create_bracket(bundle, request, &worker)
         .map_err(DispatchError::from)
 }

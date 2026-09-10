@@ -71,17 +71,17 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        BOOLEAN_INTENT_SCHEMA_VERSION, Bundle, BundleError, CanonicalBooleanIntent,
-        CanonicalChamferIntent, CanonicalDraftIntent, CanonicalEdgeReference,
-        CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
-        CanonicalLoftIntent, CanonicalShellIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX,
-        EdgeEvidence, EdgeProvenance, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
-        HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
-        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
-        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
-        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
-        fail_next_publication_at, load, load_with_policy, migrate_v0_to_v1, prior_schema_epoch,
-        read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        BOOLEAN_INTENT_SCHEMA_VERSION, BracketDeterministicInputs, Bundle, BundleError,
+        CanonicalBooleanIntent, CanonicalBracketIntent, CanonicalChamferIntent,
+        CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent,
+        CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalLoftIntent,
+        CanonicalShellIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX, EdgeEvidence, EdgeProvenance,
+        HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
+        LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
+        PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
+        PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
+        V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
+        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -110,6 +110,7 @@ pub const LINEAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.linear-
 pub const CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.circular-pattern/1";
 pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
+pub const BRACKET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.bracket/1";
 pub const FILLET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.fillet/1";
 pub const CHAMFER_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.chamfer/1";
 pub const SHELL_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.shell/1";
@@ -1199,6 +1200,141 @@ impl CanonicalCircularPatternIntent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BracketDeterministicInputs {
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+    pub thickness: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalBracketIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub request_id: String,
+    pub deterministic_inputs: BracketDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalBracketIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        if self.schema_version != BRACKET_INTENT_SCHEMA_VERSION
+            || self.command != "bracket"
+            || self.operation != "bracket"
+            || self.request_id.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical bracket intent identity is invalid".to_string(),
+            ));
+        }
+        let inputs = &self.deterministic_inputs;
+        if !inputs.length.is_finite()
+            || inputs.length <= 0.0
+            || !inputs.width.is_finite()
+            || inputs.width <= 0.0
+            || !inputs.height.is_finite()
+            || inputs.height <= 0.0
+            || !inputs.thickness.is_finite()
+            || inputs.thickness <= 0.0
+            || inputs.thickness >= inputs.length
+            || inputs.thickness >= inputs.width
+        {
+            return Err(BundleError::Invalid(
+                "canonical bracket deterministic inputs are invalid".to_string(),
+            ));
+        }
+        let expected_ids = [
+            feature_id.to_string(),
+            format!("{feature_id}-base"),
+            format!("{feature_id}-bend"),
+            format!("{feature_id}-finish"),
+            format!("{feature_id}-independent-base"),
+            format!("{feature_id}-independent-finish"),
+        ];
+        if self.affected_semantic_ids != expected_ids {
+            return Err(BundleError::Invalid(
+                "canonical bracket semantic impact is invalid".to_string(),
+            ));
+        }
+        if !valid_feature_path_component(feature_id)
+            || self.request_id
+                != canonical_bracket_request_id(
+                    feature_id,
+                    inputs.length,
+                    inputs.width,
+                    inputs.height,
+                    inputs.thickness,
+                )
+        {
+            return Err(BundleError::Invalid(
+                "canonical bracket request identity is invalid".to_string(),
+            ));
+        }
+        validate_intent_impact(
+            &[feature_id.to_string()],
+            feature_id,
+            None,
+            &self.source_revision,
+            &self.worker_requirements,
+            "bracket",
+        )
+    }
+}
+
+/// Derive the stable request identity for a bracket's canonical dimensions.
+pub fn canonical_bracket_request_id(
+    feature_id: &str,
+    length: f64,
+    width: f64,
+    height: f64,
+    thickness: f64,
+) -> String {
+    let canonical = format!(
+        "bracket:{feature_id};length={length:.17};width={width:.17};height={height:.17};thickness={thickness:.17}"
+    );
+    format!("bracket-{}", sha256_hex(canonical.as_bytes()))
+}
+
+fn bracket_transaction_entries_match(
+    entries: &[(&str, &str)],
+    feature_id: &str,
+    inputs: &BracketDeterministicInputs,
+    loaded: &LoadedBundle,
+    allow_existing_bracket_edit: bool,
+) -> bool {
+    let expected_kind = format!(
+        "bracket:length={:.17};width={:.17};height={:.17};thickness={:.17}",
+        inputs.length, inputs.width, inputs.height, inputs.thickness
+    );
+    let has_root = entries
+        .iter()
+        .any(|(id, kind)| *id == feature_id && *kind == expected_kind);
+    if entries.len() == 1 {
+        let vertical_id = format!("{feature_id}-plate-vertical");
+        let horizontal_id = format!("{feature_id}-plate-horizontal");
+        return allow_existing_bracket_edit
+            && has_root
+            && loaded.graph.contains_feature(&vertical_id)
+            && loaded.graph.contains_feature(&horizontal_id);
+    }
+    let vertical_id = format!("{feature_id}-plate-vertical");
+    let horizontal_id = format!("{feature_id}-plate-horizontal");
+    entries.len() == 3
+        && has_root
+        && entries
+            .iter()
+            .any(|(id, kind)| *id == vertical_id && *kind == "plate-vertical")
+        && entries
+            .iter()
+            .any(|(id, kind)| *id == horizontal_id && *kind == "plate-horizontal")
+}
+
 /// Versioned canonical command intent recorded in the Canonical Transaction
 /// Log. The untagged representation keeps every variant's JSON shape exactly
 /// the shape its single-command struct would serialize to, so entries sealed
@@ -1214,6 +1350,7 @@ pub enum CanonicalIntent {
     Mirror(CanonicalMirrorIntent),
     LinearPattern(CanonicalLinearPatternIntent),
     CircularPattern(CanonicalCircularPatternIntent),
+    Bracket(CanonicalBracketIntent),
     Boolean(CanonicalBooleanIntent),
     Hole(CanonicalHoleIntent),
     Fillet(CanonicalFilletIntent),
@@ -1251,6 +1388,9 @@ impl<'de> Deserialize<'de> for CanonicalIntent {
             "circular-pattern" => serde_json::from_value(value)
                 .map(Self::CircularPattern)
                 .map_err(D::Error::custom),
+            "bracket" => serde_json::from_value(value)
+                .map(Self::Bracket)
+                .map_err(D::Error::custom),
             "boolean" => serde_json::from_value(value)
                 .map(Self::Boolean)
                 .map_err(D::Error::custom),
@@ -1287,6 +1427,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.command,
             Self::LinearPattern(intent) => &intent.command,
             Self::CircularPattern(intent) => &intent.command,
+            Self::Bracket(intent) => &intent.command,
             Self::Boolean(intent) => &intent.command,
             Self::Hole(intent) => &intent.command,
             Self::Fillet(intent) => &intent.command,
@@ -1304,6 +1445,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.operation,
             Self::LinearPattern(intent) => &intent.operation,
             Self::CircularPattern(intent) => &intent.operation,
+            Self::Bracket(intent) => &intent.operation,
             Self::Boolean(intent) => &intent.operation,
             Self::Hole(intent) => &intent.hole_kind,
             Self::Fillet(intent) => &intent.operation,
@@ -1321,6 +1463,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.schema_version,
             Self::LinearPattern(intent) => &intent.schema_version,
             Self::CircularPattern(intent) => &intent.schema_version,
+            Self::Bracket(intent) => &intent.schema_version,
             Self::Boolean(intent) => &intent.schema_version,
             Self::Hole(intent) => &intent.schema_version,
             Self::Fillet(intent) => &intent.schema_version,
@@ -1338,6 +1481,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.request_id,
             Self::LinearPattern(intent) => &intent.request_id,
             Self::CircularPattern(intent) => &intent.request_id,
+            Self::Bracket(intent) => &intent.request_id,
             Self::Boolean(intent) => &intent.request_id,
             Self::Hole(intent) => &intent.request_id,
             Self::Fillet(intent) => &intent.request_id,
@@ -1355,6 +1499,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.affected_semantic_ids,
             Self::LinearPattern(intent) => &intent.affected_semantic_ids,
             Self::CircularPattern(intent) => &intent.affected_semantic_ids,
+            Self::Bracket(intent) => &intent.affected_semantic_ids,
             Self::Boolean(intent) => &intent.affected_semantic_ids,
             Self::Hole(intent) => &intent.affected_semantic_ids,
             Self::Fillet(intent) => &intent.affected_semantic_ids,
@@ -1372,6 +1517,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.source_revision,
             Self::LinearPattern(intent) => &intent.source_revision,
             Self::CircularPattern(intent) => &intent.source_revision,
+            Self::Bracket(intent) => &intent.source_revision,
             Self::Boolean(intent) => &intent.source_revision,
             Self::Hole(intent) => &intent.source_revision,
             Self::Fillet(intent) => &intent.source_revision,
@@ -1389,6 +1535,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => &intent.worker_requirements,
             Self::LinearPattern(intent) => &intent.worker_requirements,
             Self::CircularPattern(intent) => &intent.worker_requirements,
+            Self::Bracket(intent) => &intent.worker_requirements,
             Self::Boolean(intent) => &intent.worker_requirements,
             Self::Hole(intent) => &intent.worker_requirements,
             Self::Fillet(intent) => &intent.worker_requirements,
@@ -1414,6 +1561,7 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 Some(intent.deterministic_inputs.base_feature_id.as_str())
             }
+            Self::Bracket(_) => None,
             Self::Boolean(intent) => Some(intent.base_feature_id.as_str()),
             Self::Hole(intent) => Some(intent.base_feature_id.as_str()),
             Self::Fillet(intent) => Some(intent.base_feature_id.as_str()),
@@ -1438,6 +1586,7 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
             }
+            Self::Bracket(intent) => intent.schema_version == BRACKET_INTENT_SCHEMA_VERSION,
             Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
             Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
             Self::Fillet(intent) => intent.schema_version == FILLET_INTENT_SCHEMA_VERSION,
@@ -1464,6 +1613,7 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => {
                 intent.schema_version == CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION
             }
+            Self::Bracket(intent) => intent.schema_version == BRACKET_INTENT_SCHEMA_VERSION,
             Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
             Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
             Self::Fillet(intent) => intent.schema_version == FILLET_INTENT_SCHEMA_VERSION,
@@ -1481,6 +1631,7 @@ impl CanonicalIntent {
             Self::Mirror(intent) => intent.validate(feature_id),
             Self::LinearPattern(intent) => intent.validate(feature_id),
             Self::CircularPattern(intent) => intent.validate(feature_id),
+            Self::Bracket(intent) => intent.validate(feature_id),
             Self::Boolean(intent) => intent.validate(feature_id),
             Self::Hole(intent) => intent.validate(feature_id),
             Self::Fillet(intent) => intent.validate(feature_id),
@@ -3502,6 +3653,36 @@ impl Bundle {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_features_with_brep_if_revision_and_history_and_provenance_and_intent(
+        &self,
+        entries: &[(&str, &str)],
+        brep_feature_id: &str,
+        expected_revision: &str,
+        brep_bytes: &[u8],
+        history_event: &HistoryEvent,
+        request_id: &str,
+        provenance: &str,
+        intent: &CanonicalIntent,
+    ) -> Result<LoadedBundle, BundleError> {
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                entries,
+                Some(expected_revision),
+                &[(brep_feature_id, brep_bytes)],
+                &[],
+                Some(request_id),
+                Some(provenance),
+                Some(history_event),
+                None,
+                false,
+                false,
+                false,
+                Some(intent),
+            )
+        })
+    }
+
     /// Variant of BREP promotion that also authenticates the source BREP while
     /// holding the bundle write lock, immediately before staging the new
     /// generation.
@@ -3604,6 +3785,47 @@ impl Bundle {
                 false,
                 true,
                 None,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload_and_intent(
+        &self,
+        feature_id: &str,
+        kind: &str,
+        expected_revision: &str,
+        expected_source_sha256: &str,
+        idempotency_key: Option<&str>,
+        idempotency_payload: Option<&str>,
+        brep_bytes: &[u8],
+        intent: &CanonicalIntent,
+        history_event: Option<&HistoryEvent>,
+    ) -> Result<LoadedBundle, BundleError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency key".to_string(),
+            ));
+        };
+        let Some(idempotency_payload) = idempotency_payload else {
+            return Err(BundleError::Invalid(
+                "parameterized bracket replacement requires an idempotency payload".to_string(),
+            ));
+        };
+        with_bundle_write_lock(&self.root, || {
+            self.append_features_locked_with_fit(
+                &[(feature_id, kind)],
+                Some(expected_revision),
+                &[(feature_id, brep_bytes)],
+                &[(feature_id, expected_source_sha256)],
+                Some(idempotency_key),
+                Some(idempotency_payload),
+                history_event,
+                None,
+                false,
+                false,
+                true,
+                Some(intent),
             )
         })
     }
@@ -3856,6 +4078,7 @@ impl Bundle {
                 CanonicalIntent::Mirror(_) => intent.operation() == "mirror",
                 CanonicalIntent::LinearPattern(_) => intent.operation() == "linear-pattern",
                 CanonicalIntent::CircularPattern(_) => intent.operation() == "circular-pattern",
+                CanonicalIntent::Bracket(_) => intent.operation() == "bracket",
                 CanonicalIntent::Boolean(_) => {
                     matches!(intent.operation(), "fuse" | "cut" | "common")
                 }
@@ -3899,7 +4122,23 @@ impl Bundle {
                 }
                 verify_brep_provenance(&self.root, &loaded.log, &loaded.graph)?;
             }
-            if entries.len() != 1 || intent.validate(entries[0].0).is_err() {
+            let intent_feature_id = intent
+                .affected_semantic_ids()
+                .first()
+                .map(String::as_str)
+                .ok_or_else(|| {
+                    BundleError::Invalid(format!(
+                        "canonical {} intent has no affected feature",
+                        intent.command()
+                    ))
+                })?;
+            let bracket_family = matches!(intent, CanonicalIntent::Bracket(_));
+            if (!bracket_family && entries.len() != 1)
+                || !entries
+                    .iter()
+                    .any(|(feature_id, _)| *feature_id == intent_feature_id)
+                || intent.validate(intent_feature_id).is_err()
+            {
                 return Err(BundleError::Invalid(format!(
                     "canonical {} intent does not match its transaction",
                     intent.command(),
@@ -3919,6 +4158,7 @@ impl Bundle {
                         CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
                         CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
                         CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                        CanonicalIntent::Bracket(_) => "canonical_bracket_worker",
                         CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
                         CanonicalIntent::Hole(_) => "canonical_hole_worker",
                         CanonicalIntent::Fillet(_) => "canonical_fillet_worker",
@@ -4088,6 +4328,23 @@ impl Bundle {
                         return Err(BundleError::Invalid(
                             "canonical hole intent source revision does not match the transaction source"
                                 .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Bracket(bracket) => {
+                    if !bracket_transaction_entries_match(
+                        entries,
+                        intent_feature_id,
+                        &bracket.deterministic_inputs,
+                        &loaded,
+                        allow_existing_bracket_edit,
+                    ) || bracket.validate(intent_feature_id).is_err()
+                        || idempotency_key != Some(bracket.request_id.as_str())
+                        || bracket.worker_requirements != occt_worker_identity()
+                        || bracket.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical bracket intent does not match its transaction".to_string(),
                         ));
                     }
                 }
@@ -4696,7 +4953,19 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                     ),
                 });
             }
-            if intent.source_revision() != graph.revision_hash_hex(&entry.previous_digest) {
+            let source_revision_digest = if matches!(intent, CanonicalIntent::Bracket(_)) {
+                log.entries()
+                    .get(entry.log_index.saturating_sub(1))
+                    .filter(|history_entry| {
+                        history_entry.kind.starts_with(HISTORY_EVENT_KIND_PREFIX)
+                    })
+                    .map_or(entry.previous_digest.as_str(), |history_entry| {
+                        history_entry.previous_digest.as_str()
+                    })
+            } else {
+                entry.previous_digest.as_str()
+            };
+            if intent.source_revision() != graph.revision_hash_hex(source_revision_digest) {
                 return Err(BundleError::LogBrokenLink {
                     log_index: entry.log_index,
                     detail: format!(
@@ -4760,6 +5029,7 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                         });
                     }
                 }
+                CanonicalIntent::Bracket(_) => {}
                 CanonicalIntent::Revolve(_)
                 | CanonicalIntent::Mirror(_)
                 | CanonicalIntent::LinearPattern(_)
@@ -5084,6 +5354,7 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                     CanonicalIntent::Mirror(_) => "canonical_mirror_worker",
                     CanonicalIntent::LinearPattern(_) => "canonical_linear_pattern_worker",
                     CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
+                    CanonicalIntent::Bracket(_) => "canonical_bracket_worker",
                     CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
                     CanonicalIntent::Hole(_) => "canonical_hole_worker",
                     CanonicalIntent::Fillet(_) => "canonical_fillet_worker",
@@ -5173,6 +5444,27 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                         expected: serde_json::to_string(&occt_worker_identity())
                             .expect("worker identity serializes"),
                         found: serde_json::to_string(&hole.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Bracket(bracket) => {
+                if bracket.schema_version != BRACKET_INTENT_SCHEMA_VERSION
+                    || bracket.command != "bracket"
+                    || bracket.operation != "bracket"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", bracket.command, bracket.operation),
+                    });
+                }
+                bracket.validate(&entry.feature_id)?;
+                if bracket.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_bracket_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&bracket.worker_requirements)
                             .expect("worker identity serializes"),
                     });
                 }

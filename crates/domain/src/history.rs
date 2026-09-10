@@ -235,6 +235,102 @@ impl HistoryState {
         ))
     }
 
+    /// Build one history event for a parameterized bracket edit. The bracket
+    /// dimensions are one semantic input even though the history graph stores
+    /// them across five dependency features.
+    pub fn edit_l_bracket(
+        &self,
+        bracket_id: &str,
+        length: f64,
+        width: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Result<(HistoryEvent, HistoryEvaluation), HistoryError> {
+        if bracket_id.is_empty()
+            || ![length, width, height, thickness]
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            || thickness >= length
+            || thickness >= width
+        {
+            return Err(HistoryError::InvalidValue);
+        }
+        let feature_ids = [
+            format!("{bracket_id}-base"),
+            format!("{bracket_id}-bend"),
+            format!("{bracket_id}-finish"),
+            format!("{bracket_id}-independent-base"),
+            format!("{bracket_id}-independent-finish"),
+        ];
+        if feature_ids
+            .iter()
+            .any(|id| !self.active.features.contains_key(id))
+        {
+            return Err(HistoryError::FeatureNotFound(bracket_id.to_string()));
+        }
+        let ordinal = self.event_ordinal + 1;
+        let preserved_name = format!("recovered-before-historical-edit-{ordinal}");
+        if self.named_revisions.contains_key(&preserved_name) {
+            return Err(HistoryError::DuplicateName(preserved_name));
+        }
+        let mut named_revisions = self.named_revisions.clone();
+        named_revisions.insert(
+            preserved_name.clone(),
+            NamedRevision {
+                name: preserved_name.clone(),
+                snapshot: self.active.clone(),
+                provenance: format!("historical-edit:{bracket_id}"),
+                canonical_log_position: None,
+            },
+        );
+
+        let mut active = self.active.clone();
+        active.revision_id = format!("history-revision-{ordinal}");
+        for (id, value) in feature_ids
+            .iter()
+            .zip([length, width, height, thickness, height])
+        {
+            active
+                .features
+                .get_mut(id)
+                .expect("bracket feature existence was checked")
+                .input_value = value;
+        }
+        for id in &feature_ids {
+            let feature = active
+                .features
+                .get(id)
+                .expect("bracket feature existence was checked")
+                .clone();
+            let fingerprint = geometry_fingerprint(&feature, &active.features);
+            let feature = active
+                .features
+                .get_mut(id)
+                .expect("bracket feature existence was checked");
+            feature.geometry_fingerprint = Some(fingerprint);
+            feature.last_valid_geometry_fingerprint = None;
+            feature.status = HistoryStatus::CurrentValid;
+            feature.diagnostic = None;
+        }
+        let evaluation = HistoryEvaluation {
+            dirty_features: feature_ids.to_vec(),
+            evaluated_features: feature_ids.to_vec(),
+            blocked_features: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let operation = HistoryOperation::HistoricalEdit {
+            feature_id: feature_ids[0].clone(),
+            parameter: "dimensions".to_string(),
+            value: length,
+            dirty_features: evaluation.dirty_features.clone(),
+            evaluated_features: evaluation.evaluated_features.clone(),
+            blocked_features: Vec::new(),
+            diagnostics: Vec::new(),
+            preserved_name: Some(preserved_name),
+        };
+        Ok((self.event(operation, active, named_revisions), evaluation))
+    }
+
     pub fn historical_edit(
         &self,
         feature_id: &str,
@@ -1333,6 +1429,33 @@ mod tests {
                 .values()
                 .all(|feature| feature.status == HistoryStatus::CurrentValid)
         );
+    }
+
+    #[test]
+    fn l_bracket_edit_updates_all_dimension_dependencies_in_one_event() {
+        let mut state = HistoryState::default();
+        let event = state
+            .initialize_l_bracket("l", 60.0, 30.0, 40.0, 3.0)
+            .expect("initial bracket event");
+        state.apply_event(&event).expect("initial event applies");
+
+        let (event, evaluation) = state
+            .edit_l_bracket("l", 65.0, 31.0, 41.0, 3.5)
+            .expect("bracket edit event");
+
+        assert_eq!(evaluation.dirty_features.len(), 5);
+        assert_eq!(evaluation.evaluated_features, evaluation.dirty_features);
+        assert!(evaluation.blocked_features.is_empty());
+        assert_eq!(event.active.features["l-base"].input_value, 65.0);
+        assert_eq!(event.active.features["l-bend"].input_value, 31.0);
+        assert_eq!(event.active.features["l-finish"].input_value, 41.0);
+        assert_eq!(event.active.features["l-independent-base"].input_value, 3.5);
+        assert_eq!(
+            event.active.features["l-independent-finish"].input_value,
+            41.0
+        );
+        state.apply_event(&event).expect("edit event applies");
+        assert_eq!(state.event_ordinal(), 2);
     }
 
     #[test]

@@ -3,12 +3,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_cli::dispatch::dispatch_registered_command;
-use threeterm_host::Host;
+use threeterm_cli::dispatch::{DispatchError, dispatch_registered_command};
+use threeterm_host::{Host, HostError};
 use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{
+    BRACKET_INTENT_SCHEMA_VERSION, Bundle, CanonicalIntent, canonical_bracket_request_id,
+};
 use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID,
 };
@@ -163,11 +166,39 @@ impl AdapterSession {
         request: Value,
     ) -> Value {
         match self {
-            Self::Cli { host, .. } => dispatch_registered_command(host, command, request)
-                .unwrap_or_else(|error| panic!("CLI {wire_name} command fails: {error:?}")),
+            Self::Cli { host, .. } => match dispatch_registered_command(host, command, request) {
+                Ok(response) => response,
+                Err(DispatchError::Host(HostError::DraftInputConflict {
+                    draft_id,
+                    source_revision,
+                    current_revision,
+                    recovery,
+                })) => draft_input_conflict_response(
+                    "open",
+                    draft_id,
+                    source_revision,
+                    current_revision,
+                    recovery,
+                ),
+                Err(error) => panic!("CLI {wire_name} command fails: {error:?}"),
+            },
             Self::Mcp { server, .. } => mcp_call(server, wire_name, request),
-            Self::Tui { host, .. } => execute_domain_command(host, command, request)
-                .unwrap_or_else(|error| panic!("TUI {wire_name} command fails: {error:?}")),
+            Self::Tui { host, .. } => match execute_domain_command(host, command, request) {
+                Ok(response) => response,
+                Err(ExecutionError::Handler(HostError::DraftInputConflict {
+                    draft_id,
+                    source_revision,
+                    current_revision,
+                    recovery,
+                })) => draft_input_conflict_response(
+                    "open",
+                    draft_id,
+                    source_revision,
+                    current_revision,
+                    recovery,
+                ),
+                Err(error) => panic!("TUI {wire_name} command fails: {error:?}"),
+            },
         }
     }
 
@@ -231,6 +262,27 @@ impl AdapterSession {
             request,
         )
     }
+}
+
+fn draft_input_conflict_response(
+    phase: &str,
+    draft_id: String,
+    source_revision: String,
+    current_revision: String,
+    recovery: &str,
+) -> Value {
+    json!({
+        "status": "rejected",
+        "phase": phase,
+        "draft_id": draft_id,
+        "diagnostic": {
+            "kind": "draft_input_conflict",
+            "draft_id": draft_id,
+            "source_revision": source_revision,
+            "current_revision": current_revision,
+            "recovery": recovery,
+        },
+    })
 }
 
 struct EditedObservation {
@@ -328,9 +380,60 @@ fn normalized_edit_diagnostic(value: &Value) -> Value {
     })
 }
 
+fn assert_bracket_intent(root: &Path, expected_length: f64) {
+    let bundle = Bundle::at(root).open().expect("bracket bundle opens");
+    let entry = bundle
+        .log
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry.feature_id == "l-bracket"
+                && matches!(
+                    entry.intent.as_ref(),
+                    Some(CanonicalIntent::Bracket(intent))
+                        if intent.deterministic_inputs.length == expected_length
+                )
+        })
+        .expect("canonical bracket entry exists");
+    let Some(CanonicalIntent::Bracket(intent)) = entry.intent.as_ref() else {
+        panic!("canonical bracket entry carries a bracket intent");
+    };
+    assert_eq!(intent.schema_version, BRACKET_INTENT_SCHEMA_VERSION);
+    assert_eq!(intent.command, "bracket");
+    assert_eq!(intent.operation, "bracket");
+    assert_eq!(
+        intent.affected_semantic_ids,
+        vec![
+            "l-bracket".to_string(),
+            "l-bracket-base".to_string(),
+            "l-bracket-bend".to_string(),
+            "l-bracket-finish".to_string(),
+            "l-bracket-independent-base".to_string(),
+            "l-bracket-independent-finish".to_string(),
+        ]
+    );
+    assert_eq!(intent.deterministic_inputs.length, expected_length);
+    assert_eq!(intent.deterministic_inputs.width, 30.0);
+    assert_eq!(intent.deterministic_inputs.height, 40.0);
+    assert_eq!(intent.deterministic_inputs.thickness, 3.0);
+    assert_eq!(
+        intent.request_id,
+        canonical_bracket_request_id("l-bracket", expected_length, 30.0, 40.0, 3.0)
+    );
+    assert_eq!(intent.source_revision, bundle.revision_hash_hex());
+    assert_eq!(intent.worker_requirements.worker_kind, "occt");
+    assert!(!intent.worker_requirements.worker_schema_version.is_empty());
+    assert!(
+        !intent
+            .worker_requirements
+            .protocol_schema_version
+            .is_empty()
+    );
+}
+
 #[test]
-fn l_bracket_create_is_equivalent_through_cli_mcp_and_tui() {
-    if !required_worker("l_bracket_create_is_equivalent_through_cli_mcp_and_tui") {
+fn l_bracket_adapter_parity() {
+    if !required_worker("l_bracket_adapter_parity") {
         return;
     }
     let cli_root = root("create-cli");
@@ -358,6 +461,7 @@ fn l_bracket_create_is_equivalent_through_cli_mcp_and_tui() {
         assert_eq!(response["artifact_kind"], "brep");
         assert_eq!(response["worker_fingerprint"]["worker_kind"], "occt");
         assert!(path.join("brep/l-bracket.brep").is_file());
+        assert_bracket_intent(path, 60.0);
     }
     assert_eq!(cli["feature_graph_hash"], mcp["feature_graph_hash"]);
     assert_eq!(cli["feature_graph_hash"], tui["feature_graph_hash"]);
@@ -380,8 +484,70 @@ fn l_bracket_create_is_equivalent_through_cli_mcp_and_tui() {
 }
 
 #[test]
-fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
-    if !required_worker("l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity") {
+fn l_bracket_supervision() {
+    if !required_worker("l_bracket_supervision") {
+        return;
+    }
+    let root = root("supervision");
+    Bundle::create(&root).expect("supervision bundle creates");
+    let response =
+        dispatch_registered_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&root))
+            .expect("supervised bracket command commits");
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["operation"], "bracket");
+    assert_eq!(response["feature_id"], "l-bracket");
+    assert_eq!(response["artifact_kind"], "brep");
+    assert_eq!(
+        response["request_id"],
+        response["derived_result"]["request_id"]
+    );
+    assert_eq!(response["derived_result"]["operation"], "bracket");
+    assert_eq!(response["derived_result"]["feature_id"], "l-bracket");
+    assert_eq!(response["worker_fingerprint"]["worker_kind"], "occt");
+    assert_eq!(
+        response["derived_result"]["worker_fingerprint"],
+        response["worker_fingerprint"]
+    );
+    assert_eq!(
+        response["derived_result"]["byte_count"],
+        response["brep_bytes"]
+    );
+    assert_eq!(
+        response["derived_result"]["sha256"],
+        response["brep_sha256"]
+    );
+    assert_eq!(
+        response["derived_result"]["source_revision_id"],
+        response["source_snapshot"]["revision_hash"]
+    );
+    assert_bracket_intent(&root, 60.0);
+    let bundle = Bundle::at(&root)
+        .open()
+        .expect("supervision bundle reloads");
+    for (feature_id, kind) in [
+        (
+            "l-bracket",
+            "bracket:length=60.00000000000000000;width=30.00000000000000000;height=40.00000000000000000;thickness=3.00000000000000000",
+        ),
+        ("l-bracket-plate-vertical", "plate-vertical"),
+        ("l-bracket-plate-horizontal", "plate-horizontal"),
+    ] {
+        assert!(bundle.graph.contains_feature(feature_id));
+        assert!(
+            bundle
+                .log
+                .entries()
+                .iter()
+                .any(|entry| entry.feature_id == feature_id && entry.kind == kind)
+        );
+    }
+    assert!(!root.join(".derived").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn l_bracket_canonical_intent() {
+    if !required_worker("l_bracket_canonical_intent") {
         return;
     }
     let mut sessions = vec![
@@ -464,16 +630,26 @@ fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
         let loaded = Bundle::at(session.root())
             .open()
             .expect("edited bundle reloads");
-        assert_eq!(loaded.log.len(), 2);
-        assert!(
-            loaded.log.entries()[0]
-                .kind
-                .starts_with("bracket:length=60")
-        );
-        assert!(
-            loaded.log.entries()[1]
-                .kind
-                .starts_with("bracket:length=65")
+        assert_bracket_intent(session.root(), 60.0);
+        assert_bracket_intent(session.root(), 65.0);
+        assert_eq!(loaded.log.len(), 6);
+        let history = loaded.history.active_snapshot();
+        assert_eq!(history.features["l-bracket-base"].input_value, 65.0);
+        assert_eq!(history.features["l-bracket-bend"].input_value, 30.0);
+        assert_eq!(history.features["l-bracket-finish"].input_value, 40.0);
+        let bracket_kinds = loaded
+            .log
+            .entries()
+            .iter()
+            .filter(|entry| entry.feature_id == "l-bracket")
+            .map(|entry| entry.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bracket_kinds,
+            [
+                "bracket:length=60.00000000000000000;width=30.00000000000000000;height=40.00000000000000000;thickness=3.00000000000000000",
+                "bracket:length=65.00000000000000000;width=30.00000000000000000;height=40.00000000000000000;thickness=3.00000000000000000",
+            ]
         );
         let lifecycle = json!({
             "discard_open": portable_edit_response(&opened_discard),
@@ -521,8 +697,8 @@ fn l_bracket_edit_preview_commit_and_discard_preserve_adapter_parity() {
 }
 
 #[test]
-fn l_bracket_reload_viewport_and_export_preserve_adapter_parity() {
-    if !required_worker("l_bracket_reload_viewport_and_export_preserve_adapter_parity") {
+fn l_bracket_artifact_discard_replay() {
+    if !required_worker("l_bracket_artifact_discard_replay") {
         return;
     }
     let mut sessions = vec![
@@ -746,8 +922,8 @@ fn l_bracket_reload_viewport_and_export_preserve_adapter_parity() {
 }
 
 #[test]
-fn l_bracket_edit_conflicts_preserve_diagnostic_identity_through_adapters() {
-    if !required_worker("l_bracket_edit_conflicts_preserve_diagnostic_identity_through_adapters") {
+fn l_bracket_failure_atomicity() {
+    if !required_worker("l_bracket_failure_atomicity") {
         return;
     }
     let mut sessions = vec![

@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_host::Host;
 use threeterm_persistence::Bundle;
 
 mod common;
@@ -73,9 +74,32 @@ fn boolean_fuse_cli_preserves_the_worker_operation_and_artifact_binding() {
     let request = fixture.last_request();
     assert_eq!(request["command_id"], "boolean_fuse");
     assert_eq!(request["args"]["feature_id"], "fused");
+    assert!(
+        request["args"]["base_path"]
+            .as_str()
+            .expect("base path is present")
+            .ends_with("/brep/base.brep")
+    );
+    assert!(
+        request["args"]["tool_path"]
+            .as_str()
+            .expect("tool path is present")
+            .ends_with("/brep/tool.brep")
+    );
     assert_eq!(
         request["args"]["artifact_request"]["source_revision_id"],
         source_revision
+    );
+
+    let original = fs::read(project.join("brep/fused.brep")).expect("fused BREP reads");
+    fs::remove_file(project.join("brep/fused.brep")).expect("derived BREP removes");
+    let replayed = Host::new()
+        .reload_and_recompute_geometry(&project, &fixture.worker())
+        .expect("fused BREP replays");
+    assert!(replayed.feature_ids.contains(&"fused".to_string()));
+    assert_eq!(
+        fs::read(project.join("brep/fused.brep")).expect("replayed BREP reads"),
+        original
     );
 
     let _ = fs::remove_dir_all(project);

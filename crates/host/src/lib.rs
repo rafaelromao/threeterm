@@ -9008,10 +9008,18 @@ impl Host {
             threeterm_occt_worker::Operation::Bracket,
             &worker,
         )?;
-        let result = derived.result.clone();
+        // Acceptance verifies then promotes (renames) the worker's `.partial`
+        // file, so the worker-reported `brep_path` no longer exists here. Read
+        // the promoted artifact path whose bytes acceptance already verified.
+        let artifact_path = derived.artifact.path.clone();
+        let artifact_sha256 = derived.artifact.sha256.clone();
+        let artifact_bytes =
+            usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
+                detail: "rebuilt Layer 1 BREP has an invalid byte count".to_string(),
+            })?;
         let bytes = match read_brep_verified(
-            &result.brep_path,
-            Some((result.brep_bytes, &result.brep_sha256)),
+            &artifact_path,
+            Some((artifact_bytes, artifact_sha256.as_str())),
         ) {
             Ok(bytes) => bytes,
             Err(error) => {

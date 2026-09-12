@@ -700,20 +700,25 @@ IFS= read -r request
 request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
 source_revision_id=$(printf '%s\n' "$request" | sed -n 's/.*"source_revision_id":"\([^"]*\)".*/\1/p')
 output_dir=$(printf '%s\n' "$request" | sed -n 's/.*"output_dir":"\([^"]*\)".*/\1/p')
-output_filename=$(printf '%s\n' "$request" | sed -n 's/.*"output_filename":"\([^"]*\)".*/\1/p')
 feature_id=$(printf '%s\n' "$request" | sed -n 's/.*"feature_id":"\([^"]*\)".*/\1/p')
+staging_name=$(printf '%s\n' "$request" | sed -n 's/.*"staging_name":"\([^"]*\)".*/\1/p')
+semantic_input_sha256=$(printf '%s\n' "$request" | sed -n 's/.*"semantic_input_sha256":"\([^"]*\)".*/\1/p')
+deterministic_settings_sha256=$(printf '%s\n' "$request" | sed -n 's/.*"deterministic_settings_sha256":"\([^"]*\)".*/\1/p')
 count_file="{count_file}"
+fail_file="{fail_file}"
 count=$(cat "$count_file" 2>/dev/null || printf '0')
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
-if [ "$count" -eq 1 ]; then
-  printf '%s' 'replayable-brep' > "$output_dir/$output_filename"
-  printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$output_filename" "$feature_id"
-else
+if [ -f "$fail_file" ] && [ "$count" -eq 2 ]; then
   printf '{{"kind":"failed","schema_version":"threeterm.protocol/1","request_id":"%s","code":"brep_invalid","detail":"later replay intentionally fails"}}\n' "$request_id"
+else
+  printf '%s' 'replayable-brep' > "$output_dir/$staging_name.partial"
+  printf '{{"kind":"artifact","schema_version":"threeterm.protocol/1","header":{{"request_id":"%s","source_revision_id":"%s","operation":"extrude","feature_id":"%s","cache_key":{{"source_revision_id":"%s","worker_fingerprint":{{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"}},"operation":"extrude","feature_id":"%s","artifact_kind":"brep","semantic_input_sha256":"%s","deterministic_settings_sha256":"%s"}},"worker_fingerprint":{{"worker_kind":"occt","worker_schema_version":"threeterm.workers.occt/1","protocol_schema_version":"threeterm.protocol/1"}},"artifact_kind":"brep","staging_name":"%s","byte_count":{bytes_len},"sha256":"{digest}"}}}}\n' "$request_id" "$source_revision_id" "$feature_id" "$source_revision_id" "$feature_id" "$semantic_input_sha256" "$deterministic_settings_sha256" "$staging_name"
+  printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id":"%s","result":{{"schema_version":"threeterm.workers.occt/1","request_id":"%s","source_revision_id":"%s","operation":"extrude","status":"ok","brep_path":"%s/%s.partial","brep_sha256":"{digest}","brep_bytes":{bytes_len},"feature_id":"%s"}}}}\n' "$request_id" "$request_id" "$source_revision_id" "$output_dir" "$staging_name" "$feature_id"
 fi
 "##,
             count_file = worker_root.join("count").display(),
+            fail_file = worker_root.join("fail").display(),
             digest = digest,
             bytes_len = bytes.len(),
         ),
@@ -721,6 +726,7 @@ fi
     .expect("worker script writes");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
         .expect("worker script becomes executable");
+    fs::write(worker_root.join("fail"), "fail").expect("failure marker writes");
 
     let bundle = Bundle::create(&root).expect("bundle creates");
     let source_revision = bundle
@@ -794,6 +800,29 @@ fi
     );
     assert!(!root.join("brep/replay-second.brep").exists());
     assert_eq!(Host::new().load(&root).expect("snapshot reloads"), before);
+    assert_eq!(snapshot_files(&root), before_canonical);
+
+    fs::remove_file(worker_root.join("fail")).expect("failure marker removes");
+    fs::remove_file(worker_root.join("count")).expect("failed replay counter removes");
+    let retried = Host::new()
+        .reload_and_recompute_geometry(
+            &root,
+            &threeterm_occt_worker::OcctWorker::with_binary_path(script),
+        )
+        .expect("clean replay retry succeeds");
+    assert_eq!(retried.recomputed, 2);
+    assert_eq!(
+        fs::read(root.join("brep/replay-first.brep")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::read(root.join("brep/replay-second.brep")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        Host::new().load(&root).expect("retry snapshot reloads"),
+        before
+    );
     assert_eq!(snapshot_files(&root), before_canonical);
 
     let _ = fs::remove_dir_all(root);

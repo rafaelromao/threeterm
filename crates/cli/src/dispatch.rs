@@ -4032,6 +4032,10 @@ fn execute_registered_with_observer(
     {
         return emit_internal_error("finishing command requires --expected-revision", stderr);
     }
+    let export_feature_id = request
+        .get("feature_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let result = dispatch_registered_command(&Host::new(), command, request);
     match result {
         Ok(response) => write_success(stdout, &response, stderr),
@@ -4050,6 +4054,11 @@ fn execute_registered_with_observer(
                 serde_json::from_str(&detail).unwrap_or_else(|_| json!({"message": detail}));
             write_rehearsal_diagnostic(&diagnostic, stderr)
         }
+        Err(DispatchError::Host(error)) if command == EXPORT_COMMAND_ID => emit_export_error(
+            export_feature_id.as_deref().unwrap_or_default(),
+            &error,
+            stderr,
+        ),
         Err(error) => {
             if command == threeterm_protocol::schema::LOAD_COMMAND_ID
                 && let DispatchError::Host(host_error) = &error

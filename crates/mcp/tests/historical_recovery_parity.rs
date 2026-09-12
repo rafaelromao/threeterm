@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,9 @@ use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
-    CREATE_REVISION_COMMAND_ID, EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, UNDO_COMMAND_ID,
+    BRACKET_COMMAND_ID, CREATE_REVISION_COMMAND_ID, EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
+    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, LOAD_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
+    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
 };
 use threeterm_tui::{FeatureTarget, SelectionEvent, SelectionVerification, TuiSession};
 
@@ -27,7 +29,10 @@ fn temp_root(label: &str) -> PathBuf {
 fn require_occt_worker(test_name: &str) -> Option<OcctWorker> {
     match OcctWorker::locate() {
         Ok(worker) => Some(worker),
-        Err(error) if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() => {
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
+        {
             panic!("{test_name}: OCCT worker unavailable: {error}");
         }
         Err(_) => {
@@ -35,6 +40,18 @@ fn require_occt_worker(test_name: &str) -> Option<OcctWorker> {
             None
         }
     }
+}
+
+fn require_native_occt_worker(test_name: &str) -> OcctWorker {
+    if std::env::var_os("THREETERM_REQUIRE_OCCT").is_none()
+        || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_none()
+    {
+        panic!(
+            "{test_name}: native proof requires THREETERM_REQUIRE_OCCT=1 and THREETERM_REQUIRE_REAL_WORKER=1"
+        );
+    }
+    OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("{test_name}: OCCT worker unavailable: {error}"))
 }
 
 fn seed_bundle(root: &Path, worker: &OcctWorker) {
@@ -131,27 +148,43 @@ fn create_revision_request(root: &Path, name: &str) -> Value {
     json!({"bundle_path": root.to_string_lossy(), "name": name})
 }
 
-fn timeline_request(root: &Path) -> Value {
-    json!({"bundle_path": root.to_string_lossy(), "feature_id": "l-bracket"})
+fn timeline_request(root: &Path, feature_id: &str) -> Value {
+    json!({"bundle_path": root.to_string_lossy(), "feature_id": feature_id})
 }
 
 fn cli_timeline(root: &Path) -> Value {
+    cli_timeline_for(root, "l-bracket")
+}
+
+fn cli_timeline_for(root: &Path, feature_id: &str) -> Value {
     let root = root.to_string_lossy().into_owned();
     cli_call([
         OsString::from("--machine"),
         OsString::from("timeline"),
         OsString::from(root),
         OsString::from("--feature-id"),
-        OsString::from("l-bracket"),
+        OsString::from(feature_id),
     ])
     .expect("CLI timeline succeeds")
 }
 
 fn mcp_timeline(root: &Path) -> Value {
-    mcp_call("threeterm.command.timeline/1", timeline_request(root)).expect("MCP timeline succeeds")
+    mcp_timeline_for(root, "l-bracket")
+}
+
+fn mcp_timeline_for(root: &Path, feature_id: &str) -> Value {
+    mcp_call(
+        "threeterm.command.timeline/1",
+        timeline_request(root, feature_id),
+    )
+    .expect("MCP timeline succeeds")
 }
 
 fn tui_timeline(root: &Path) -> (TuiSession, Value) {
+    tui_timeline_for(root, "l-bracket")
+}
+
+fn tui_timeline_for(root: &Path, feature_id: &str) -> (TuiSession, Value) {
     let host = Host::new();
     let active_revision = host
         .history(root)
@@ -159,18 +192,34 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
         .active_snapshot()
         .revision_id
         .clone();
-    let mut session = TuiSession::new(
-        [FeatureTarget::new("l-bracket", "L-bracket")],
-        active_revision,
-    );
+    let graph = Bundle::at(root)
+        .open()
+        .expect("TUI timeline graph reloads")
+        .graph;
+    let graph_has_target = graph.contains_feature(feature_id)
+        || graph.features().any(|feature| {
+            feature.id.as_str() == format!("{feature_id}-plate-vertical")
+                || feature.id.as_str() == format!("{feature_id}-plate-horizontal")
+        });
+    let mut session = if feature_id.ends_with("-plate-vertical")
+        || feature_id.ends_with("-plate-horizontal")
+        || !graph_has_target
+    {
+        TuiSession::new(
+            [FeatureTarget::new(feature_id, "L-bracket")],
+            active_revision,
+        )
+    } else {
+        TuiSession::from_feature_graph(&graph, active_revision)
+    };
     session
         .transition_selection(SelectionEvent::Nominate {
-            candidates: vec!["l-bracket".to_string()],
+            candidates: vec![feature_id.to_string()],
         })
         .expect("TUI nominates the selected feature");
     session
         .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-            stable_ids: vec!["l-bracket".to_string()],
+            stable_ids: vec![feature_id.to_string()],
         }))
         .expect("TUI verifies the selected feature");
     session
@@ -184,6 +233,7 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
         .iter()
         .map(|revision| {
             json!({
+                "ordinal": revision.ordinal,
                 "revision_id": revision.revision_id,
                 "operation": revision.operation,
                 "status": revision.status,
@@ -193,13 +243,22 @@ fn tui_timeline(root: &Path) -> (TuiSession, Value) {
             })
         })
         .collect::<Vec<_>>();
+    let named_revisions = timeline
+        .named_revisions
+        .iter()
+        .zip(timeline.named_revision_provenance.iter())
+        .map(|(name, (provenance_name, provenance))| {
+            debug_assert_eq!(name, provenance_name);
+            json!({"name": name, "provenance": provenance})
+        })
+        .collect::<Vec<_>>();
     (
         session,
         json!({
             "feature_id": timeline.feature_id,
-            "active_revision": state.canonical_revision,
+            "active_revision": timeline.active_revision,
             "revisions": revisions,
-            "named_revisions": timeline.named_revisions,
+            "named_revisions": named_revisions,
             "stale_last_valid_geometry": state.stale_last_valid_geometry.iter().map(|feature| json!({
                 "feature_id": feature.feature_id,
                 "status": feature.status,
@@ -242,6 +301,32 @@ fn tui_call(
     })
 }
 
+fn cli_load(root: &Path) -> Value {
+    let root = root.to_string_lossy().into_owned();
+    cli_call([
+        OsString::from("--machine"),
+        OsString::from("load"),
+        OsString::from(root),
+    ])
+    .expect("CLI load succeeds")
+}
+
+fn mcp_load(root: &Path) -> Value {
+    mcp_call(
+        "threeterm.command.load/1",
+        json!({"bundle_path": root.to_string_lossy()}),
+    )
+    .expect("MCP load succeeds")
+}
+
+fn tui_load(root: &Path) -> Value {
+    tui_call(
+        LOAD_COMMAND_ID,
+        json!({"bundle_path": root.to_string_lossy()}),
+    )
+    .expect("TUI load succeeds")
+}
+
 fn cli_undo(root: &Path) -> Value {
     let root = root.to_string_lossy().into_owned();
     cli_call([
@@ -269,6 +354,10 @@ fn tui_undo(root: &Path) -> Value {
 }
 
 fn cli_restore(root: &Path, feature_id: &str, name: &str) -> Value {
+    cli_restore_result(root, feature_id, name).expect("CLI named revision restore succeeds")
+}
+
+fn cli_restore_result(root: &Path, feature_id: &str, name: &str) -> Result<Value, Value> {
     let root = root.to_string_lossy().into_owned();
     cli_call([
         OsString::from("--machine"),
@@ -279,10 +368,9 @@ fn cli_restore(root: &Path, feature_id: &str, name: &str) -> Value {
         OsString::from("--name"),
         OsString::from(name),
     ])
-    .expect("CLI named revision restore succeeds")
 }
 
-fn mcp_restore(root: &Path, feature_id: &str, name: &str) -> Value {
+fn mcp_restore_result(root: &Path, feature_id: &str, name: &str) -> Result<Value, Value> {
     mcp_call(
         "threeterm.command.restore-revision/1",
         json!({
@@ -291,19 +379,34 @@ fn mcp_restore(root: &Path, feature_id: &str, name: &str) -> Value {
             "name": name,
         }),
     )
-    .expect("MCP named revision restore succeeds")
+}
+
+fn mcp_restore(root: &Path, feature_id: &str, name: &str) -> Value {
+    mcp_restore_result(root, feature_id, name).expect("MCP named revision restore succeeds")
 }
 
 fn tui_restore(root: &Path, name: &str) -> Value {
-    let (mut session, _) = tui_timeline(root);
+    tui_restore_for(root, "l-bracket", name)
+}
+
+fn tui_restore_for(root: &Path, feature_id: &str, name: &str) -> Value {
+    tui_restore_result_for(root, feature_id, name).expect("TUI named revision restore succeeds")
+}
+
+fn tui_restore_result(root: &Path, name: &str) -> Result<Value, Value> {
+    tui_restore_result_for(root, "l-bracket", name)
+}
+
+fn tui_restore_result_for(root: &Path, feature_id: &str, name: &str) -> Result<Value, Value> {
+    let (mut session, _) = tui_timeline_for(root, feature_id);
     let view = session
         .restore_feature_timeline(&Host::new(), root, name)
-        .expect("TUI named revision restore succeeds");
-    threeterm_host::history_commit_value(
+        .map_err(|error| json!({"code": error.code.as_str(), "detail": error.detail}))?;
+    Ok(threeterm_host::history_commit_value(
         "restore-revision",
         HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
         &view,
-    )
+    ))
 }
 
 fn tui_export(root: &Path, output_dir: &Path) -> Result<Value, Value> {
@@ -335,6 +438,7 @@ fn semantic_named_revision(value: &Value) -> Value {
 
 fn semantic_timeline_revision(value: &Value) -> Value {
     json!({
+        "ordinal": value["ordinal"],
         "revision_id": value["revision_id"],
         "operation": value["operation"],
         "status": value["status"],
@@ -361,11 +465,18 @@ fn semantic_timeline(value: &Value) -> Value {
                 .unwrap_or_else(|| revision.clone())
         })
         .collect::<Vec<_>>();
+    let named_revision_provenance = value["named_revisions"]
+        .as_array()
+        .expect("timeline named revisions are an array")
+        .iter()
+        .map(|revision| revision.get("provenance").cloned().unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
     json!({
         "feature_id": value["feature_id"],
         "active_revision": value["active_revision"],
         "revisions": revisions,
         "named_revisions": named_revisions,
+        "named_revision_provenance": named_revision_provenance,
     })
 }
 
@@ -532,6 +643,660 @@ fn tui_create_revision(root: &Path, name: &str) -> Value {
         create_revision_request(root, name),
     )
     .expect("TUI named revision creation succeeds")
+}
+
+fn bracket_request(root: &Path, bracket_id: &str) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "bracket_id": bracket_id,
+        "length": 60.0,
+        "width": 30.0,
+        "height": 40.0,
+        "thickness": 3.0,
+    })
+}
+
+fn cli_create_bracket(root: &Path, bracket_id: &str) -> Value {
+    let root = root.to_string_lossy().into_owned();
+    cli_call([
+        OsString::from("--machine"),
+        OsString::from("bracket"),
+        OsString::from(root),
+        OsString::from("--bracket-id"),
+        OsString::from(bracket_id),
+        OsString::from("--length"),
+        OsString::from("60"),
+        OsString::from("--width"),
+        OsString::from("30"),
+        OsString::from("--height"),
+        OsString::from("40"),
+        OsString::from("--thickness"),
+        OsString::from("3"),
+    ])
+    .expect("CLI bracket creation succeeds")
+}
+
+fn mcp_create_bracket(root: &Path, bracket_id: &str) -> Value {
+    mcp_call(
+        "threeterm.command.bracket/1",
+        bracket_request(root, bracket_id),
+    )
+    .expect("MCP bracket creation succeeds")
+}
+
+fn tui_create_bracket(root: &Path, bracket_id: &str) -> Value {
+    tui_call(BRACKET_COMMAND_ID, bracket_request(root, bracket_id))
+        .expect("TUI bracket creation succeeds")
+}
+
+fn seed_standard_brackets_through_adapters(roots: [&Path; 3], test_name: &str) -> bool {
+    if require_occt_worker(test_name).is_none() {
+        return false;
+    }
+    let results = [
+        cli_create_bracket(roots[0], "l-bracket"),
+        mcp_create_bracket(roots[1], "l-bracket"),
+        tui_create_bracket(roots[2], "l-bracket"),
+    ];
+    assert!(results.iter().all(|value| value["status"] == "ok"));
+    true
+}
+
+fn current_brep_for(root: &Path, feature_id: &str) -> Vec<u8> {
+    fs::read(root.join(format!("brep/{feature_id}.brep"))).expect("current feature BREP reads")
+}
+
+fn bundle_inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, current: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let mut entries = fs::read_dir(current)
+            .expect("bundle inventory directory reads")
+            .map(|entry| entry.expect("bundle inventory entry reads"))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("bundle inventory path is under root")
+                .to_path_buf();
+            if entry
+                .file_type()
+                .expect("bundle inventory type reads")
+                .is_dir()
+            {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    relative,
+                    fs::read(path).expect("bundle inventory file reads"),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[test]
+fn object_timeline_semantic_identity_is_canonical_across_all_adapters() {
+    let cli_root = temp_root("object-identity-cli");
+    let mcp_root = temp_root("object-identity-mcp");
+    let tui_root = temp_root("object-identity-tui");
+    if !seed_standard_brackets_through_adapters(
+        [&cli_root, &mcp_root, &tui_root],
+        "object_timeline_semantic_identity_is_canonical_across_all_adapters",
+    ) {
+        for root in [cli_root, mcp_root, tui_root] {
+            let _ = fs::remove_dir_all(root);
+        }
+        return;
+    }
+
+    let canonical = [
+        cli_timeline_for(&cli_root, "l-bracket"),
+        mcp_timeline_for(&mcp_root, "l-bracket"),
+        tui_timeline_for(&tui_root, "l-bracket").1,
+    ];
+    let legacy_aliases = [
+        cli_timeline_for(&cli_root, "l-bracket-plate-vertical"),
+        mcp_timeline_for(&mcp_root, "l-bracket-plate-vertical"),
+        tui_timeline_for(&tui_root, "l-bracket-plate-vertical").1,
+    ];
+    for timeline in canonical.iter().chain(legacy_aliases.iter()) {
+        assert_eq!(timeline["feature_id"], "l-bracket");
+        assert_eq!(timeline["active_revision"], "history-revision-1");
+        assert_eq!(timeline["revisions"][0]["ordinal"], 1);
+    }
+    assert_eq!(
+        semantic_timeline(&canonical[0]),
+        semantic_timeline(&canonical[1])
+    );
+    assert_eq!(
+        semantic_timeline(&canonical[0]),
+        semantic_timeline(&canonical[2])
+    );
+    for timeline in &legacy_aliases {
+        assert_eq!(
+            semantic_timeline(&canonical[0]),
+            semantic_timeline(timeline)
+        );
+    }
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads() {
+    let cli_root = temp_root("object-parity-cli");
+    let mcp_root = temp_root("object-parity-mcp");
+    let tui_root = temp_root("object-parity-tui");
+    if !seed_standard_brackets_through_adapters(
+        [&cli_root, &mcp_root, &tui_root],
+        "object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads",
+    ) {
+        for root in [cli_root, mcp_root, tui_root] {
+            let _ = fs::remove_dir_all(root);
+        }
+        return;
+    }
+    let revisions = [
+        cli_create_revision(&cli_root, "before-edit"),
+        mcp_create_revision(&mcp_root, "before-edit"),
+        tui_create_revision(&tui_root, "before-edit"),
+    ];
+    assert!(revisions.iter().all(|value| value["status"] == "ok"));
+
+    let timelines = [
+        cli_timeline(&cli_root),
+        mcp_timeline(&mcp_root),
+        tui_timeline(&tui_root).1,
+    ];
+    assert_eq!(
+        semantic_timeline(&timelines[0]),
+        semantic_timeline(&timelines[1])
+    );
+    assert_eq!(
+        semantic_timeline(&timelines[0]),
+        semantic_timeline(&timelines[2])
+    );
+    assert_eq!(timelines[0]["feature_id"], "l-bracket");
+    assert_eq!(timelines[0]["active_revision"], "history-revision-1");
+    assert_eq!(
+        timelines[0]["revisions"]
+            .as_array()
+            .expect("timeline revisions are ordered")
+            .iter()
+            .map(|revision| revision["ordinal"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        timelines[0]["named_revisions"][0]["provenance"],
+        "explicit-create"
+    );
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn object_timeline_restore_preserves_canonical_identity_through_all_adapters() {
+    let cli_root = temp_root("object-restore-cli");
+    let mcp_root = temp_root("object-restore-mcp");
+    let tui_root = temp_root("object-restore-tui");
+    if !seed_standard_brackets_through_adapters(
+        [&cli_root, &mcp_root, &tui_root],
+        "object_timeline_restore_preserves_canonical_identity_through_all_adapters",
+    ) {
+        for root in [cli_root, mcp_root, tui_root] {
+            let _ = fs::remove_dir_all(root);
+        }
+        return;
+    }
+
+    let revisions = [
+        cli_create_revision(&cli_root, "before-failure"),
+        mcp_create_revision(&mcp_root, "before-failure"),
+        tui_create_revision(&tui_root, "before-failure"),
+    ];
+    assert!(revisions.iter().all(|value| value["status"] == "ok"));
+
+    let edits = [
+        cli_historical_edit(&cli_root, 0.0),
+        mcp_historical_edit(&mcp_root, 0.0),
+        tui_historical_edit(&tui_root, 0.0),
+    ];
+    assert_eq!(semantic_history(&edits[0]), semantic_history(&edits[1]));
+    assert_eq!(semantic_history(&edits[0]), semantic_history(&edits[2]));
+
+    let restores = [
+        cli_restore(&cli_root, "l-bracket", "before-failure"),
+        mcp_restore(&mcp_root, "l-bracket", "before-failure"),
+        tui_restore(&tui_root, "before-failure"),
+    ];
+    assert_eq!(
+        semantic_history(&restores[0]),
+        semantic_history(&restores[1])
+    );
+    assert_eq!(
+        semantic_history(&restores[0]),
+        semantic_history(&restores[2])
+    );
+    assert_eq!(restores[0]["status"], "ok");
+    assert_eq!(restores[0]["operation"], "restore-revision");
+    assert_eq!(restores[0]["active_revision"], "history-revision-1");
+    let restored_timelines = [
+        cli_timeline(&cli_root),
+        mcp_timeline(&mcp_root),
+        tui_timeline(&tui_root).1,
+    ];
+    assert_eq!(
+        semantic_timeline(&restored_timelines[0]),
+        semantic_timeline(&restored_timelines[1])
+    );
+    assert_eq!(
+        semantic_timeline(&restored_timelines[0]),
+        semantic_timeline(&restored_timelines[2])
+    );
+    assert_eq!(
+        restored_timelines[0]["revisions"]
+            .as_array()
+            .expect("restored timeline revisions are ordered")
+            .last()
+            .expect("restored timeline has a compensating event")["operation"],
+        "restore-named-revision"
+    );
+
+    for root in [&cli_root, &mcp_root, &tui_root] {
+        let loaded = Bundle::at(root).open().expect("restored bundle opens");
+        assert_eq!(
+            loaded.feature_timeline("l-bracket").unwrap().feature_id,
+            "l-bracket"
+        );
+        assert!(
+            loaded
+                .history
+                .active_snapshot()
+                .features
+                .values()
+                .all(|feature| feature.status == HistoryStatus::CurrentValid)
+        );
+    }
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn object_timeline_adapter_parity_object_timeline_restore_replays_divergence_through_all_adapters()
+{
+    let cli_root = temp_root("object-divergence-cli");
+    let mcp_root = temp_root("object-divergence-mcp");
+    let tui_root = temp_root("object-divergence-tui");
+    let roots = [&cli_root, &mcp_root, &tui_root];
+    if require_occt_worker(
+        "object_timeline_adapter_parity_object_timeline_restore_replays_divergence_through_all_adapters",
+    )
+    .is_none()
+    {
+        for root in [cli_root, mcp_root, tui_root] {
+            let _ = fs::remove_dir_all(root);
+        }
+        return;
+    }
+
+    let first = [
+        cli_create_bracket(&cli_root, "first"),
+        mcp_create_bracket(&mcp_root, "first"),
+        tui_create_bracket(&tui_root, "first"),
+    ];
+    assert!(first.iter().all(|value| value["status"] == "ok"));
+    let second = [
+        cli_create_bracket(&cli_root, "second"),
+        mcp_create_bracket(&mcp_root, "second"),
+        tui_create_bracket(&tui_root, "second"),
+    ];
+    assert!(second.iter().all(|value| value["status"] == "ok"));
+    let second_geometry = Some(roots.map(|root| current_brep_for(root, "second")));
+
+    let undone = [
+        cli_undo(&cli_root),
+        mcp_undo(&mcp_root),
+        tui_undo(&tui_root),
+    ];
+    assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[1]));
+    assert_eq!(semantic_history(&undone[0]), semantic_history(&undone[2]));
+    assert_eq!(undone[0]["active_revision"], "history-revision-1");
+    let preserved_name = named_revision_name(&undone[0], "undo");
+
+    let third = [
+        cli_create_bracket(&cli_root, "third"),
+        mcp_create_bracket(&mcp_root, "third"),
+        tui_create_bracket(&tui_root, "third"),
+    ];
+    assert!(third.iter().all(|value| value["status"] == "ok"));
+
+    let divergent_timelines = [
+        cli_timeline_for(&cli_root, "second"),
+        mcp_timeline_for(&mcp_root, "second"),
+        tui_timeline_for(&tui_root, "second").1,
+    ];
+    assert_eq!(
+        semantic_timeline(&divergent_timelines[0]),
+        semantic_timeline(&divergent_timelines[1])
+    );
+    assert_eq!(
+        semantic_timeline(&divergent_timelines[0]),
+        semantic_timeline(&divergent_timelines[2])
+    );
+    assert_eq!(divergent_timelines[0]["feature_id"], "second");
+    assert_eq!(
+        divergent_timelines[0]["active_revision"],
+        "history-revision-4"
+    );
+    assert_eq!(
+        divergent_timelines[0]["revisions"]
+            .as_array()
+            .expect("divergent timeline revisions are ordered")
+            .iter()
+            .map(|revision| revision["ordinal"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(
+        divergent_timelines[0]["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+    assert_eq!(
+        divergent_timelines[0]["revisions"][0]["status"],
+        "current-valid"
+    );
+    assert_eq!(divergent_timelines[0]["revisions"][1]["operation"], "undo");
+    assert_eq!(divergent_timelines[0]["revisions"][1]["status"], "absent");
+
+    let restored = [
+        cli_restore(&cli_root, "second", &preserved_name),
+        mcp_restore(&mcp_root, "second", &preserved_name),
+        tui_restore_for(&tui_root, "second", &preserved_name),
+    ];
+    assert_eq!(
+        semantic_history(&restored[0]),
+        semantic_history(&restored[1])
+    );
+    assert_eq!(
+        semantic_history(&restored[0]),
+        semantic_history(&restored[2])
+    );
+    assert_eq!(restored[0]["active_revision"], "history-revision-2");
+    assert_eq!(restored[0]["operation"], "restore-revision");
+
+    let restored_timelines = [
+        cli_timeline_for(&cli_root, "second"),
+        mcp_timeline_for(&mcp_root, "second"),
+        tui_timeline_for(&tui_root, "second").1,
+    ];
+    assert_eq!(
+        semantic_timeline(&restored_timelines[0]),
+        semantic_timeline(&restored_timelines[1])
+    );
+    assert_eq!(
+        semantic_timeline(&restored_timelines[0]),
+        semantic_timeline(&restored_timelines[2])
+    );
+    assert_eq!(
+        restored_timelines[0]["active_revision"],
+        "history-revision-2"
+    );
+    assert_eq!(
+        restored_timelines[0]["revisions"]
+            .as_array()
+            .expect("restored timeline revisions are ordered")
+            .iter()
+            .map(|revision| revision["ordinal"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, 3, 5]
+    );
+    assert_eq!(
+        restored_timelines[0]["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+    assert_eq!(
+        restored_timelines[0]["revisions"][0]["status"],
+        "current-valid"
+    );
+    assert_eq!(restored_timelines[0]["revisions"][1]["operation"], "undo");
+    assert_eq!(restored_timelines[0]["revisions"][1]["status"], "absent");
+    assert_eq!(
+        restored_timelines[0]["revisions"][2]["operation"],
+        "restore-named-revision"
+    );
+    assert_eq!(
+        restored_timelines[0]["revisions"][2]["status"],
+        "current-valid"
+    );
+
+    let restored_revisions = roots.map(|root| {
+        let loaded = Bundle::at(root).open().expect("restored bundle reloads");
+        (
+            loaded.feature_graph_hash_hex().to_string(),
+            loaded.revision_hash_hex().to_string(),
+        )
+    });
+    for root in roots {
+        for directory in ["brep", "cache", ".derived", "stage"] {
+            let path = root.join(directory);
+            if path.exists() {
+                fs::remove_dir_all(path).expect("derived directory removes before reload");
+            }
+        }
+    }
+    let reloaded = [
+        cli_load(&cli_root),
+        mcp_load(&mcp_root),
+        tui_load(&tui_root),
+    ];
+    for (index, root) in roots.into_iter().enumerate() {
+        assert_eq!(
+            reloaded[index]["feature_graph_hash"],
+            restored_revisions[index].0
+        );
+        assert_eq!(
+            reloaded[index]["revision_hash"],
+            restored_revisions[index].1
+        );
+        if let Some(expected_geometry) = &second_geometry {
+            assert_eq!(current_brep_for(root, "second"), expected_geometry[index]);
+        }
+    }
+    let reloaded_timelines = [
+        cli_timeline_for(&cli_root, "second"),
+        mcp_timeline_for(&mcp_root, "second"),
+        tui_timeline_for(&tui_root, "second").1,
+    ];
+    assert_eq!(
+        semantic_timeline(&reloaded_timelines[0]),
+        semantic_timeline(&restored_timelines[0])
+    );
+    assert_eq!(
+        semantic_timeline(&reloaded_timelines[0]),
+        semantic_timeline(&reloaded_timelines[1])
+    );
+    assert_eq!(
+        semantic_timeline(&reloaded_timelines[0]),
+        semantic_timeline(&reloaded_timelines[2])
+    );
+
+    for (index, root) in roots.into_iter().enumerate() {
+        let loaded = Bundle::at(root).open().expect("restored bundle opens");
+        let active = loaded.history.active_snapshot();
+        assert!(active.features.contains_key("first-base"));
+        assert!(active.features.contains_key("second-base"));
+        assert!(!active.features.contains_key("third-base"));
+        assert!(loaded.graph.contains_feature("first-plate-vertical"));
+        assert!(loaded.graph.contains_feature("second-plate-vertical"));
+        assert!(!loaded.graph.contains_feature("third-plate-vertical"));
+        if let Some(expected_geometry) = &second_geometry {
+            assert_eq!(current_brep_for(root, "second"), expected_geometry[index]);
+        }
+    }
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn object_timeline_invalid_reference_is_atomic_across_all_adapters() {
+    let cli_root = temp_root("object-invalid-cli");
+    let mcp_root = temp_root("object-invalid-mcp");
+    let tui_root = temp_root("object-invalid-tui");
+    for root in [&cli_root, &mcp_root, &tui_root] {
+        let host = Host::new();
+        host.save(root, "seed", "box")
+            .expect("seed feature initializes");
+        host.create_named_revision(root, "before-bracket")
+            .expect("predating named revision initializes");
+        host.save_bracket(root, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .expect("L-bracket history initializes");
+        fs::create_dir_all(root.join(".derived")).expect("derived results directory creates");
+        fs::write(root.join(".derived/timeline-sentinel"), b"preserve me")
+            .expect("derived result sentinel writes");
+    }
+    let before = [&cli_root, &mcp_root, &tui_root].map(|root| canonical_semantics(root));
+    let before_manifest = [&cli_root, &mcp_root, &tui_root]
+        .map(|root| fs::read(root.join("manifest.json")).expect("manifest reads"));
+    let before_log = [&cli_root, &mcp_root, &tui_root]
+        .map(|root| fs::read(root.join("transactions.log")).expect("log reads"));
+    let before_inventory = [&cli_root, &mcp_root, &tui_root].map(|root| bundle_inventory(root));
+
+    let cli_error = cli_call([
+        OsString::from("--machine"),
+        OsString::from("timeline"),
+        OsString::from(cli_root.to_string_lossy().into_owned()),
+        OsString::from("--feature-id"),
+        OsString::from("missing-feature"),
+    ])
+    .expect_err("CLI rejects an unknown timeline feature");
+    let mcp_error = mcp_call(
+        "threeterm.command.timeline/1",
+        json!({
+            "bundle_path": mcp_root.to_string_lossy(),
+            "feature_id": "missing-feature",
+        }),
+    )
+    .expect_err("MCP rejects an unknown timeline feature");
+    let tui_error = tui_call(
+        TIMELINE_COMMAND_ID,
+        json!({
+            "bundle_path": tui_root.to_string_lossy(),
+            "feature_id": "missing-feature",
+        }),
+    )
+    .expect_err("TUI rejects an unknown timeline feature");
+
+    assert_eq!(cli_error["code"], "invalid_request");
+    assert_eq!(mcp_error["code"], cli_error["code"]);
+    assert_eq!(tui_error["code"], cli_error["code"]);
+    assert!(
+        cli_error["arg"]
+            .as_str()
+            .expect("CLI error has an argument")
+            .contains("history feature not found")
+    );
+    assert_eq!(canonical_semantics(&cli_root), before[0]);
+    assert_eq!(canonical_semantics(&mcp_root), before[1]);
+    assert_eq!(canonical_semantics(&tui_root), before[2]);
+
+    let malformed_role = "l-bracket-plate-diagonal";
+    let malformed_cli = cli_call([
+        OsString::from("--machine"),
+        OsString::from("timeline"),
+        OsString::from(cli_root.to_string_lossy().into_owned()),
+        OsString::from("--feature-id"),
+        OsString::from(malformed_role),
+    ])
+    .expect_err("CLI rejects an incompatible role-qualified reference");
+    let malformed_mcp = mcp_call(
+        "threeterm.command.timeline/1",
+        json!({
+            "bundle_path": mcp_root.to_string_lossy(),
+            "feature_id": malformed_role,
+        }),
+    )
+    .expect_err("MCP rejects an incompatible role-qualified reference");
+    let malformed_tui = tui_call(
+        TIMELINE_COMMAND_ID,
+        json!({
+            "bundle_path": tui_root.to_string_lossy(),
+            "feature_id": malformed_role,
+        }),
+    )
+    .expect_err("TUI rejects an incompatible role-qualified reference");
+    assert_eq!(malformed_cli["code"], "invalid_request");
+    assert_eq!(malformed_mcp["code"], malformed_cli["code"]);
+    assert_eq!(malformed_tui["code"], malformed_cli["code"]);
+    let malformed_restore_tui = tui_call(
+        RESTORE_REVISION_COMMAND_ID,
+        json!({
+            "bundle_path": tui_root.to_string_lossy(),
+            "feature_id": malformed_role,
+            "name": "before-bracket",
+        }),
+    )
+    .expect_err("TUI rejects an incompatible restore reference");
+    assert_eq!(malformed_restore_tui["code"], "persistence_failure");
+
+    let restore_cli = cli_restore_result(&cli_root, "l-bracket", "before-bracket");
+    let restore_mcp = mcp_restore_result(&mcp_root, "l-bracket", "before-bracket");
+    let restore_tui = tui_restore_result(&tui_root, "before-bracket");
+    assert!(
+        restore_cli.is_err(),
+        "CLI rejects a predated named revision"
+    );
+    assert!(
+        restore_mcp.is_err(),
+        "MCP rejects a predated named revision"
+    );
+    assert!(
+        restore_tui.is_err(),
+        "TUI rejects a predated named revision"
+    );
+    let restore_tui_error = restore_tui.expect_err("TUI error is structured");
+    assert_eq!(restore_tui_error["code"], "history_rejected");
+
+    let malformed_restore_cli = cli_restore_result(&cli_root, malformed_role, "before-bracket");
+    let malformed_restore_mcp = mcp_restore_result(&mcp_root, malformed_role, "before-bracket");
+    assert!(
+        malformed_restore_cli.is_err(),
+        "CLI rejects an incompatible restore reference"
+    );
+    assert!(
+        malformed_restore_mcp.is_err(),
+        "MCP rejects an incompatible restore reference"
+    );
+
+    for (index, root) in [&cli_root, &mcp_root, &tui_root].into_iter().enumerate() {
+        assert_eq!(canonical_semantics(root), before[index]);
+        assert_eq!(
+            fs::read(root.join("manifest.json")).expect("manifest remains readable"),
+            before_manifest[index]
+        );
+        assert_eq!(
+            fs::read(root.join("transactions.log")).expect("log remains readable"),
+            before_log[index]
+        );
+        assert_eq!(bundle_inventory(root), before_inventory[index]);
+    }
+
+    for root in [cli_root, mcp_root, tui_root] {
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 fn semantic_history(value: &Value) -> Value {
@@ -960,12 +1725,12 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
 }
 
 #[test]
-fn divergent_work_preserves_and_restores_the_named_future_through_all_adapters() {
-    let Some(worker) = require_occt_worker(
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn object_timeline_restore_preserves_and_restores_the_divergent_named_future_through_all_adapters()
+{
+    let worker = require_native_occt_worker(
         "divergent_work_preserves_and_restores_the_named_future_through_all_adapters",
-    ) else {
-        return;
-    };
+    );
 
     let cli_root = temp_root("cli-divergence");
     let mcp_root = temp_root("mcp-divergence");

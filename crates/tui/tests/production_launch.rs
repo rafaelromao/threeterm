@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
-use threeterm_protocol::schema::EXTRUDE_COMMAND_ID;
+use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch,
 };
@@ -275,6 +275,33 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
 
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn interactive_capability_gate() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-interactive-capability-gate-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let mut terminal = ScriptedTerminal {
+        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        ..Default::default()
+    };
+
+    let result = launch(&host, &root, &mut terminal, official_environment())
+        .expect("positive attachment-scoped probe admits startup");
+    assert!(result.event_loop_entered);
+    assert!(terminal.events_read >= 2);
+    assert!(
+        terminal
+            .writes
+            .windows(b"a=T,t=d".len())
+            .any(|window| window == b"a=T,t=d")
+    );
     std::fs::remove_dir_all(root).expect("project is removed");
 }
 
@@ -855,6 +882,125 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
     assert_ne!(committed_log, log_before);
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interactive_production_event_loop() {
+    OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("interactive production event loop requires OCCT: {error}"));
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-interactive-bracket-event-loop-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("keyboard-first seed project persists");
+    let before = host.identity(&root).expect("seed identity reads");
+    let request = br#"{"bracket_id":"l-bracket","length":60,"width":30,"height":40,"thickness":3}"#;
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"bracket".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"w".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("keyboard-first bracket workflow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, before.transaction_count + 1);
+    assert_ne!(identity.revision_hash, before.revision_hash);
+    assert!(root.join("brep/l-bracket.brep").is_file());
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    for acknowledgement in [
+        "[outline] Command Palette",
+        "[outline] Draft: bracket",
+        "[dashed-outline] Preview: bracket",
+        "[selection-glyph] Commit: bracket",
+        "[selection-glyph]",
+        "[motion-trail] Orbit up",
+        "[motion-trail] Pan up",
+        "[motion-trail] Zoom in",
+    ] {
+        assert!(
+            output.contains(acknowledgement),
+            "missing acknowledgement: {acknowledgement}"
+        );
+    }
+    assert!(output.contains("a=d,d=I,i=5"));
+    assert!(output.contains("?1049l"));
+    assert_eq!(terminal.prepare_calls, 1);
+    assert_eq!(terminal.restore_calls, 1);
+    assert_eq!(
+        terminal
+            .read_events
+            .iter()
+            .filter_map(|event| parse_ack(event).ok())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+
+    let headless_root = std::env::temp_dir().join(format!(
+        "threeterm-interactive-bracket-headless-{}-{suffix}",
+        std::process::id()
+    ));
+    let headless_host = Host::new();
+    headless_host
+        .save(&headless_root, "seed", "box")
+        .expect("headless seed project persists");
+    let headless_before = headless_host
+        .identity(&headless_root)
+        .expect("headless identity reads");
+    let headless = headless_host
+        .execute_domain_command(
+            BRACKET_COMMAND_ID,
+            json!({
+                "bundle_path": headless_root.to_string_lossy(),
+                "bracket_id": "l-bracket",
+                "length": 60.0,
+                "width": 30.0,
+                "height": 40.0,
+                "thickness": 3.0,
+                "expected_revision": headless_before.revision_hash,
+            }),
+        )
+        .expect("headless bracket commit succeeds");
+    let headless_identity = headless_host
+        .identity(&headless_root)
+        .expect("headless committed identity reads");
+    assert_eq!(headless["revision_hash"], identity.revision_hash);
+    assert_eq!(
+        headless_identity.transaction_count,
+        identity.transaction_count
+    );
+    assert_eq!(
+        fs::read(root.join("brep/l-bracket.brep")).expect("interactive BREP reads"),
+        fs::read(headless_root.join("brep/l-bracket.brep")).expect("headless BREP reads")
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(headless_root);
 }
 
 #[test]

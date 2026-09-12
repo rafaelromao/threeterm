@@ -89,6 +89,12 @@ bash tests/test-test-suite.sh
 echo "==> fast test suite"
 bash .github/scripts/test-suite.sh fast
 
+echo "==> interactive native acceptance filters"
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+    cargo test --workspace --jobs 1 interactive_shared_command_semantics -- --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+    cargo test --workspace --jobs 1 interactive_production_event_loop -- --test-threads=1
+
 echo "==> canonical real-worker integration tests"
 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test worker_integration \
     --jobs 1 -- --test-threads=1

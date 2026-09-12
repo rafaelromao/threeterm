@@ -5896,21 +5896,9 @@ impl Host {
                 &expected_revision,
                 &staged_root.result_sha256,
             );
-            let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
-                schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
-                command: "bracket".to_string(),
-                operation: "bracket".to_string(),
-                request_id: key.clone(),
-                deterministic_inputs: BracketDeterministicInputs {
-                    length: staged_root.request.length,
-                    width: staged_root.request.width,
-                    height: staged_root.request.height,
-                    thickness: staged_root.request.thickness,
-                },
-                affected_semantic_ids: bracket_affected_semantic_ids(&staged_root.feature_id),
-                source_revision: expected_revision.clone(),
-                worker_requirements: expected_occt_worker_fingerprint(),
-            });
+            // History-event geometry commits carry the event as provenance
+            // (like the staged-families branch below), not a canonical
+            // command intent, so no intent identity constrains the key.
             bundle.replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload_and_intent(
                 &staged_root.feature_id,
                 &bracket_kind(&staged_root.request),
@@ -5919,7 +5907,7 @@ impl Host {
                 Some(&key),
                 Some(&payload),
                 &staged_root.bytes,
-                &intent,
+                None,
                 Some(&event),
             )?
         } else if restore_graph.is_some() {
@@ -11409,7 +11397,7 @@ impl Host {
                     idempotency_key,
                     idempotency_payload,
                     bytes,
-                    intent,
+                    Some(intent),
                     history_event,
                 )?,
             None => bundle.append_feature_with_brep_if_revision(

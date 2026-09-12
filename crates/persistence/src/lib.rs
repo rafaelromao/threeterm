@@ -3799,7 +3799,7 @@ impl Bundle {
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
         brep_bytes: &[u8],
-        intent: &CanonicalIntent,
+        intent: Option<&CanonicalIntent>,
         history_event: Option<&HistoryEvent>,
     ) -> Result<LoadedBundle, BundleError> {
         let Some(idempotency_key) = idempotency_key else {
@@ -3825,7 +3825,7 @@ impl Bundle {
                 false,
                 false,
                 true,
-                Some(intent),
+                intent,
             )
         })
     }

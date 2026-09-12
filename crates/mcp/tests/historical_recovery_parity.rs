@@ -26,6 +26,52 @@ fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("threeterm-historical-parity-{label}-{suffix}"))
 }
 
+fn copy_historical_fixture(root: &Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/project");
+    fs::create_dir_all(root.join("brep")).expect("historical fixture BREP directory creates");
+    for file in ["manifest.json", "transactions.log"] {
+        fs::copy(fixture.join(file), root.join(file)).expect("historical fixture file copies");
+    }
+    fs::copy(
+        fixture.join("brep/l-bracket.brep"),
+        root.join("brep/l-bracket.brep"),
+    )
+    .expect("historical fixture BREP copies");
+}
+
+fn historical_fixture_roots(label: &str) -> [PathBuf; 3] {
+    let roots = [
+        temp_root(&format!("{label}-cli")),
+        temp_root(&format!("{label}-mcp")),
+        temp_root(&format!("{label}-tui")),
+    ];
+    for root in &roots {
+        copy_historical_fixture(root);
+    }
+    roots
+}
+
+struct TempPaths(Vec<PathBuf>);
+
+impl TempPaths {
+    fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(paths.into_iter().collect())
+    }
+
+    fn track(&mut self, path: PathBuf) {
+        self.0.push(path);
+    }
+}
+
+impl Drop for TempPaths {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn require_occt_worker(test_name: &str) -> Option<OcctWorker> {
     match OcctWorker::locate() {
         Ok(worker) => Some(worker),
@@ -43,13 +89,6 @@ fn require_occt_worker(test_name: &str) -> Option<OcctWorker> {
 }
 
 fn require_native_occt_worker(test_name: &str) -> OcctWorker {
-    if std::env::var_os("THREETERM_REQUIRE_OCCT").is_none()
-        || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_none()
-    {
-        panic!(
-            "{test_name}: native proof requires THREETERM_REQUIRE_OCCT=1 and THREETERM_REQUIRE_REAL_WORKER=1"
-        );
-    }
     OcctWorker::locate()
         .unwrap_or_else(|error| panic!("{test_name}: OCCT worker unavailable: {error}"))
 }
@@ -417,6 +456,15 @@ fn current_brep(root: &Path) -> Vec<u8> {
     fs::read(root.join("brep/l-bracket.brep")).expect("current BREP reads")
 }
 
+fn delete_derived_results(root: &Path) {
+    for directory in ["brep", "cache", ".derived", "stage"] {
+        let path = root.join(directory);
+        if path.exists() {
+            fs::remove_dir_all(path).expect("derived result directory removes");
+        }
+    }
+}
+
 fn semantic_history_feature(value: &Value) -> Value {
     json!({
         "id": value["id"],
@@ -425,6 +473,26 @@ fn semantic_history_feature(value: &Value) -> Value {
         "last_valid_geometry_fingerprint": value["last_valid_geometry_fingerprint"],
         "stale_last_valid_geometry": value["stale_last_valid_geometry"],
         "diagnostic": value["diagnostic"],
+    })
+}
+
+fn reloaded_history_projection(root: &Path) -> Value {
+    let active = Bundle::at(root)
+        .open()
+        .expect("history reloads for semantic projection")
+        .history
+        .active_snapshot()
+        .clone();
+    json!({
+        "active_revision": active.revision_id,
+        "features": active.features.values().map(|feature| json!({
+            "id": feature.id,
+            "status": feature.status,
+            "input_value": feature.input_value,
+            "geometry_fingerprint": feature.geometry_fingerprint,
+            "last_valid_geometry_fingerprint": feature.last_valid_geometry_fingerprint,
+            "diagnostic": feature.diagnostic,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1343,6 +1411,349 @@ fn semantic_stale_features(value: &Value) -> Vec<Value> {
 }
 
 #[test]
+fn historical_edit_stop_point() {
+    let roots = historical_fixture_roots("stop-point");
+    let _cleanup = TempPaths::new(roots.iter().cloned());
+    let roots = [&roots[0], &roots[1], &roots[2]];
+    let before = roots.map(|root| {
+        Bundle::at(root)
+            .open()
+            .expect("historical fixture opens")
+            .history
+    });
+    let revisions = [
+        cli_create_revision(roots[0], "before-failure"),
+        mcp_create_revision(roots[1], "before-failure"),
+        tui_create_revision(roots[2], "before-failure"),
+    ];
+    assert!(revisions.iter().all(|value| value["status"] == "ok"));
+    let named = roots.map(|root| named_revision_semantics(root, "before-failure"));
+
+    let results = [
+        cli_historical_edit(roots[0], 0.0),
+        mcp_historical_edit(roots[1], 0.0),
+        tui_historical_edit(roots[2], 0.0),
+    ];
+    assert_eq!(semantic_history(&results[0]), semantic_history(&results[1]));
+    assert_eq!(semantic_history(&results[0]), semantic_history(&results[2]));
+    assert_eq!(results[0]["status"], "degraded");
+    assert_eq!(
+        results[0]["dirty_features"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(results[0]["evaluated_features"], json!([]));
+    assert_eq!(
+        results[0]["blocked_features"],
+        json!(["l-bracket-bend", "l-bracket-finish"])
+    );
+    assert_eq!(
+        results[0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics are an array")
+            .len(),
+        1
+    );
+    assert_eq!(
+        results[0]["diagnostics"][0]["code"],
+        "historical_geometry_invalid"
+    );
+    assert_eq!(
+        results[0]["diagnostics"][0]["affected_ids"],
+        json!(["l-bracket-base", "l-bracket-bend", "l-bracket-finish"])
+    );
+
+    for ((root, prior), named_revision) in roots.into_iter().zip(before).zip(named) {
+        let loaded = Bundle::at(root)
+            .open()
+            .expect("degraded historical fixture reloads");
+        let active = loaded.history.active_snapshot();
+        assert_eq!(
+            active.features["l-bracket-base"].status,
+            HistoryStatus::Broken
+        );
+        assert_eq!(
+            active.features["l-bracket-base"].last_valid_geometry_fingerprint,
+            prior.active_snapshot().features["l-bracket-base"].geometry_fingerprint
+        );
+        assert_eq!(active.features["l-bracket-base"].geometry_fingerprint, None);
+        let diagnostic = active.features["l-bracket-base"]
+            .diagnostic
+            .as_ref()
+            .expect("historical failure diagnostic persists after reload");
+        assert_eq!(diagnostic.code, "historical_geometry_invalid");
+        assert_eq!(
+            diagnostic.affected_ids,
+            [
+                "l-bracket-base".to_string(),
+                "l-bracket-bend".to_string(),
+                "l-bracket-finish".to_string(),
+            ]
+        );
+        for feature_id in ["l-bracket-bend", "l-bracket-finish"] {
+            assert_eq!(
+                active.features[feature_id].status,
+                HistoryStatus::BlockedByFailure
+            );
+            assert_eq!(
+                active.features[feature_id].last_valid_geometry_fingerprint,
+                prior.active_snapshot().features[feature_id].geometry_fingerprint
+            );
+            assert_eq!(active.features[feature_id].geometry_fingerprint, None);
+        }
+        assert_eq!(
+            active.features["l-bracket-independent-base"].status,
+            HistoryStatus::CurrentValid
+        );
+        assert_eq!(
+            active.features["l-bracket-independent-base"].geometry_fingerprint,
+            prior.active_snapshot().features["l-bracket-independent-base"].geometry_fingerprint
+        );
+        assert_eq!(
+            named_revision,
+            named_revision_semantics(root, "before-failure"),
+            "invalid edit preserves Named Revision provenance"
+        );
+    }
+}
+
+#[test]
+fn historical_edit_unaffected_geometry() {
+    let roots = historical_fixture_roots("unaffected-geometry");
+    let _cleanup = TempPaths::new(roots.iter().cloned());
+    let before = roots.clone().map(|root| {
+        Bundle::at(root)
+            .open()
+            .expect("historical fixture opens")
+            .history
+    });
+    let before_geometry = roots.clone().map(|root| current_brep(&root));
+    let results = [
+        cli_historical_edit(&roots[0], 0.0),
+        mcp_historical_edit(&roots[1], 0.0),
+        tui_historical_edit(&roots[2], 0.0),
+    ];
+    assert_eq!(semantic_history(&results[0]), semantic_history(&results[1]));
+    assert_eq!(semantic_history(&results[0]), semantic_history(&results[2]));
+
+    for (root, prior) in roots.iter().zip(before) {
+        let active = Bundle::at(root)
+            .open()
+            .expect("degraded historical fixture reloads")
+            .history
+            .active_snapshot()
+            .clone();
+        for feature_id in ["l-bracket-independent-base", "l-bracket-independent-finish"] {
+            let previous = &prior.active_snapshot().features[feature_id];
+            let current = &active.features[feature_id];
+            assert_eq!(current.status, HistoryStatus::CurrentValid);
+            assert_eq!(current.input_value, previous.input_value);
+            assert_eq!(current.geometry_fingerprint, previous.geometry_fingerprint);
+            assert_eq!(current.last_valid_geometry_fingerprint, None);
+        }
+        for feature_id in ["l-bracket-base", "l-bracket-bend", "l-bracket-finish"] {
+            assert_eq!(
+                active.features[feature_id].last_valid_geometry_fingerprint,
+                prior.active_snapshot().features[feature_id].geometry_fingerprint
+            );
+        }
+    }
+    for (index, root) in roots.iter().enumerate() {
+        assert_eq!(current_brep(root), before_geometry[index]);
+    }
+    let reloaded = roots.map(|root| reloaded_history_projection(&root));
+    assert_eq!(reloaded[0], reloaded[1]);
+    assert_eq!(reloaded[0], reloaded[2]);
+}
+
+#[test]
+fn stale_last_valid_export_refusal() {
+    let roots = historical_fixture_roots("stale-export");
+    let mut cleanup = TempPaths::new(roots.iter().cloned());
+    let before = roots.clone().map(|root| {
+        Bundle::at(root)
+            .open()
+            .expect("historical fixture opens")
+            .history
+    });
+    let _results = [
+        cli_historical_edit(&roots[0], 0.0),
+        mcp_historical_edit(&roots[1], 0.0),
+        tui_historical_edit(&roots[2], 0.0),
+    ];
+    let output_roots = [
+        temp_root("stale-export-cli"),
+        temp_root("stale-export-mcp"),
+        temp_root("stale-export-tui"),
+    ];
+    for output in &output_roots {
+        cleanup.track(output.clone());
+    }
+    for output in &output_roots {
+        fs::create_dir_all(output).expect("stale export directory creates");
+        fs::write(output.join("sentinel.txt"), b"preserve me").expect("export sentinel writes");
+    }
+    let canonical_before = roots.clone().map(|root| {
+        (
+            fs::read(root.join("manifest.json")).expect("manifest reads before stale export"),
+            fs::read(root.join("transactions.log")).expect("log reads before stale export"),
+            bundle_inventory(&root),
+        )
+    });
+
+    let errors = [
+        cli_export(&roots[0], &output_roots[0]).expect_err("CLI refuses stale geometry"),
+        mcp_call(
+            "threeterm.command.export/1",
+            export_request(&roots[1], &output_roots[1]),
+        )
+        .expect_err("MCP refuses stale geometry"),
+        tui_export(&roots[2], &output_roots[2]).expect_err("TUI refuses stale geometry"),
+    ];
+    let semantic_errors = errors.map(|error| semantic_stale_export_error(&error));
+    assert_eq!(semantic_errors[0], semantic_errors[1]);
+    assert_eq!(semantic_errors[0], semantic_errors[2]);
+    assert_eq!(semantic_errors[0]["code"], "stale_last_valid_geometry");
+    assert_eq!(semantic_errors[0]["override_eligible"], false);
+    assert_eq!(
+        semantic_errors[0]["stale_features"],
+        json!([
+            {
+                "feature_id": "l-bracket-base",
+                "status": "broken",
+                "last_valid_geometry_fingerprint": before[0]
+                    .active_snapshot()
+                    .features["l-bracket-base"]
+                    .geometry_fingerprint,
+            },
+            {
+                "feature_id": "l-bracket-bend",
+                "status": "blocked-by-failure",
+                "last_valid_geometry_fingerprint": before[0]
+                    .active_snapshot()
+                    .features["l-bracket-bend"]
+                    .geometry_fingerprint,
+            },
+            {
+                "feature_id": "l-bracket-finish",
+                "status": "blocked-by-failure",
+                "last_valid_geometry_fingerprint": before[0]
+                    .active_snapshot()
+                    .features["l-bracket-finish"]
+                    .geometry_fingerprint,
+            },
+        ])
+    );
+    assert_eq!(
+        semantic_errors[0]["recovery"],
+        "correct or restore the feature and recompute current geometry"
+    );
+
+    for (index, root) in roots.iter().enumerate() {
+        assert_eq!(
+            fs::read(root.join("manifest.json")).expect("manifest remains unchanged"),
+            canonical_before[index].0
+        );
+        assert_eq!(
+            fs::read(root.join("transactions.log")).expect("log remains unchanged"),
+            canonical_before[index].1
+        );
+        assert_eq!(bundle_inventory(root), canonical_before[index].2);
+        assert_eq!(
+            fs::read(output_roots[index].join("sentinel.txt")).expect("sentinel remains"),
+            b"preserve me"
+        );
+        assert_eq!(
+            fs::read_dir(&output_roots[index])
+                .expect("stale output directory reads")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn historical_named_revision_restore() {
+    let worker = require_native_occt_worker("historical_named_revision_restore");
+    let root = temp_root("named-revision-restore");
+    let mut cleanup = TempPaths::new([root.clone()]);
+    seed_bundle(&root, &worker);
+    let before_geometry = current_brep(&root);
+    let host = Host::new();
+    host.create_named_revision(&root, "before-failure")
+        .expect("Named Revision creates before the invalid edit");
+    let named_before = named_revision_semantics(&root, "before-failure");
+    let log_len_before_edit = Bundle::at(&root)
+        .open()
+        .expect("bundle opens before the invalid edit")
+        .log
+        .len();
+    let log_before_edit =
+        fs::read(root.join("transactions.log")).expect("log reads before the invalid edit");
+    host.historical_edit(&root, "l-bracket-base", "length", 0.0)
+        .expect("invalid historical edit records a degraded revision");
+    delete_derived_results(&root);
+
+    let restored = Host::new()
+        .restore_named_revision(&root, "l-bracket", "before-failure")
+        .expect("restore recomputes after Derived Result deletion");
+    let loaded = Bundle::at(&root).open().expect("restored bundle opens");
+    let log_after_restore =
+        fs::read(root.join("transactions.log")).expect("log reads after restore");
+    assert_eq!(
+        loaded.log.len(),
+        log_len_before_edit + 2,
+        "historical edit and restore append transactions without rewriting history"
+    );
+    assert!(
+        log_after_restore.starts_with(&log_before_edit),
+        "restore preserves the pre-edit canonical log as an exact prefix"
+    );
+    assert_eq!(
+        named_revision_semantics(&root, "before-failure"),
+        named_before,
+        "restore preserves Named Revision provenance and log position"
+    );
+    assert!(
+        loaded
+            .history
+            .active_snapshot()
+            .features
+            .values()
+            .all(|feature| {
+                feature.status == HistoryStatus::CurrentValid
+                    && feature.last_valid_geometry_fingerprint.is_none()
+                    && feature.diagnostic.is_none()
+            })
+    );
+    assert_eq!(current_brep(&root), before_geometry);
+    assert_eq!(
+        restored.history.active_snapshot().revision_id,
+        "history-revision-2"
+    );
+
+    let output = temp_root("named-revision-restore-export");
+    cleanup.track(output.clone());
+    fs::create_dir_all(&output).expect("restored export directory creates");
+    let exported = Host::new()
+        .export(
+            &root,
+            "l-bracket",
+            &["stl".to_string()],
+            &output,
+            0.5,
+            false,
+            true,
+            &[],
+        )
+        .expect("restored current geometry exports");
+    assert_eq!(
+        exported.source_snapshot.revision_hash,
+        loaded.revision_hash_hex()
+    );
+    assert!(output.join("l-bracket.stl").is_file());
+}
+
+#[test]
 fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapters() {
     let Some(worker) = require_occt_worker(
         "successful_historical_edit_has_equivalent_current_geometry_through_all_adapters",
@@ -1438,12 +1849,8 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
 }
 
 #[test]
-fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state() {
-    let Some(worker) = require_occt_worker(
-        "failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state",
-    ) else {
-        return;
-    };
+fn historical_recovery_adapter_parity() {
+    let worker = require_native_occt_worker("historical_recovery_adapter_parity");
 
     let cli_root = temp_root("cli-failure");
     let mcp_root = temp_root("mcp-failure");
@@ -1633,6 +2040,10 @@ fn failed_historical_edit_preserves_independent_geometry_and_exposes_stale_state
             .collect::<Vec<_>>();
         entries.sort();
         assert_eq!(entries, vec!["sentinel.txt"]);
+    }
+
+    for root in [&cli_root, &mcp_root, &tui_root] {
+        delete_derived_results(root);
     }
 
     let restores = [

@@ -1415,7 +1415,7 @@ fn historical_edit_stop_point() {
     let roots = historical_fixture_roots("stop-point");
     let _cleanup = TempPaths::new(roots.iter().cloned());
     let roots = [&roots[0], &roots[1], &roots[2]];
-    let before = roots.clone().map(|root| {
+    let before = roots.map(|root| {
         Bundle::at(root)
             .open()
             .expect("historical fixture opens")

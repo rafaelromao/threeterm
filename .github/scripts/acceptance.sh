@@ -353,7 +353,7 @@ if [[ -f "${NATIVE_MANIFEST}" ]]; then
     if WORKERS="$(jq -c '
         .workers
         | to_entries
-        | map(.value + {worker_id: .key})
+        | map({key: .key, value: (.value + {worker_id: .key})})
         | from_entries
     ' "${NATIVE_MANIFEST}" 2>/dev/null)"; then
         :

@@ -13695,10 +13695,17 @@ fn materialize_component_instance_geometry_with_worker(
                 threeterm_occt_worker::Operation::Translate,
                 worker,
             )?;
-            let result = derived.result.clone();
+            // Acceptance promotes (renames) the worker's `.partial` file, so
+            // read the promoted artifact path, not the worker-reported path.
+            let artifact_path = derived.artifact.path.clone();
+            let artifact_sha256 = derived.artifact.sha256.clone();
+            let artifact_bytes =
+                usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
+                    detail: "translated component BREP has an invalid byte count".to_string(),
+                })?;
             let bytes = match read_brep_verified(
-                &result.brep_path,
-                Some((result.brep_bytes, &result.brep_sha256)),
+                &artifact_path,
+                Some((artifact_bytes, artifact_sha256.as_str())),
             ) {
                 Ok(bytes) => bytes,
                 Err(error) => {

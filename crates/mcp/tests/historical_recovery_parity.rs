@@ -89,13 +89,6 @@ fn require_occt_worker(test_name: &str) -> Option<OcctWorker> {
 }
 
 fn require_native_occt_worker(test_name: &str) -> OcctWorker {
-    if std::env::var_os("THREETERM_REQUIRE_OCCT").is_none()
-        || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_none()
-    {
-        panic!(
-            "{test_name}: native proof requires THREETERM_REQUIRE_OCCT=1 and THREETERM_REQUIRE_REAL_WORKER=1"
-        );
-    }
     OcctWorker::locate()
         .unwrap_or_else(|error| panic!("{test_name}: OCCT worker unavailable: {error}"))
 }
@@ -1666,7 +1659,6 @@ fn stale_last_valid_export_refusal() {
 }
 
 #[test]
-#[ignore = "requires the pinned native OCCT worker; run with --ignored and the worker environment"]
 fn historical_named_revision_restore() {
     let worker = require_native_occt_worker("historical_named_revision_restore");
     let root = temp_root("named-revision-restore");
@@ -1844,7 +1836,6 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
 }
 
 #[test]
-#[ignore = "requires the pinned native OCCT worker; run with --ignored and the worker environment"]
 fn historical_recovery_adapter_parity() {
     let worker = require_native_occt_worker("historical_recovery_adapter_parity");
 

@@ -45,7 +45,23 @@ jobs:
               -v "${HOME}/.cargo:/root/.cargo" \
               -w /workspace \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
-              bash /workspace/.github/scripts/acceptance.sh
+              bash -lc '
+                set -euo pipefail
+                channel="$(tr -d "[:space:]" < rust-toolchain-channel.txt)"
+                if ! command -v rustc >/dev/null 2>&1; then
+                  pacman -Syu --noconfirm rustup gcc
+                fi
+                if ! command -v cc >/dev/null 2>&1; then
+                  pacman -Syu --noconfirm gcc
+                fi
+                pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 fontconfig libx11
+                if ! rustup toolchain list 2>/dev/null | grep -q "^${channel}"; then
+                  rustup toolchain install "${channel}" \
+                    --profile minimal --component rustfmt --component clippy
+                fi
+                rustup default "${channel}" >/dev/null
+                bash /workspace/.github/scripts/acceptance.sh
+              '
           acceptance_status=$?
           set -e
           test "${acceptance_status}" -ne 0

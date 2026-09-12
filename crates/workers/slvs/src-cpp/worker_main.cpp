@@ -213,7 +213,7 @@ std::string attachment_field(const Json& args, const char* name) {
            << escape(provenance == nullptr ? "" : string_field(*provenance, "source_revision_id"))
            << "\",\"source_face_id\":\""
            << escape(provenance == nullptr ? "" : string_field(*provenance, "source_face_id"))
-           << "},\"evidence\":{";
+           << "\"},\"evidence\":{";
     const Json* evidence = field(*found, "evidence");
     output << "\"topology_kind\":\""
            << escape(evidence == nullptr ? "" : string_field(*evidence, "topology_kind"))

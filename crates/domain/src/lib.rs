@@ -11,7 +11,7 @@ pub mod graph {
 
 pub mod component {
     pub use super::{
-        ComponentCommand, ComponentDefinition, ComponentGraph, ComponentInstance,
+        ComponentCommand, ComponentDefinition, ComponentGraph, ComponentInstance, ComponentReuse,
         EdgeGeometricEvidence, EdgeProvenance, EdgeReattachmentOutcome, LBracketDescriptor,
         PostEditEdgeCandidate, ReferenceOutcome, SelectedEdgeReference, SemanticReference,
         resolve_edge_reference, resolve_semantic_reference,
@@ -708,6 +708,24 @@ pub struct ComponentInstance {
     pub id: String,
     pub definition_id: String,
     pub transform: [f64; 3],
+    #[serde(default)]
+    pub reuse: ComponentReuse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComponentReuse {
+    Linked,
+    Independent {
+        source_instance_id: String,
+        source_definition_id: String,
+    },
+}
+
+impl Default for ComponentReuse {
+    fn default() -> Self {
+        Self::Linked
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1139,6 +1157,12 @@ impl ComponentGraph {
                 })?;
             }
             ComponentCommand::CreateInstance { instance } => {
+                if !matches!(&instance.reuse, ComponentReuse::Linked) {
+                    return Err(
+                        "component instances created from a definition must use linked reuse"
+                            .to_string(),
+                    );
+                }
                 if instance.id.is_empty()
                     || instance.definition_id.is_empty()
                     || !instance
@@ -1195,6 +1219,10 @@ impl ComponentGraph {
                         id: instance_id.clone(),
                         definition_id: definition_id.clone(),
                         transform: source.transform,
+                        reuse: ComponentReuse::Independent {
+                            source_instance_id: source_instance_id.clone(),
+                            source_definition_id: source.definition_id,
+                        },
                     },
                 );
             }
@@ -1744,6 +1772,7 @@ mod tests {
                     id: "bracket".to_string(),
                     definition_id: "bracket".to_string(),
                     transform: [0.0, 0.0, 0.0],
+                    reuse: ComponentReuse::Linked,
                 },
             }),
             Err("component ID already exists".to_string())
@@ -1773,6 +1802,7 @@ mod tests {
                         id: id.to_string(),
                         definition_id: "shared".to_string(),
                         transform,
+                        reuse: ComponentReuse::Linked,
                     },
                 })
                 .expect("shared instance is valid");
@@ -1812,6 +1842,68 @@ mod tests {
             graph.instances["copy-instance"].transform,
             [10.0, 0.0, 90.0]
         );
+    }
+
+    #[test]
+    fn reusable_geometry_canonical_intent() {
+        let mut graph = ComponentGraph::default();
+        graph
+            .apply(&ComponentCommand::Capture {
+                definition_id: "shared".to_string(),
+                selected_feature_ids: vec![
+                    "bracket-base".to_string(),
+                    "bracket-bend".to_string(),
+                    "bracket-finish".to_string(),
+                    "bracket-independent-base".to_string(),
+                ],
+                descriptor: LBracketDescriptor {
+                    feature_id: "shared-feature".to_string(),
+                    length: 60.0,
+                    width: 30.0,
+                    height: 40.0,
+                    thickness: 3.0,
+                },
+            })
+            .expect("shared definition is valid");
+        for id in ["linked-a", "linked-b"] {
+            graph
+                .apply(&ComponentCommand::CreateInstance {
+                    instance: ComponentInstance {
+                        id: id.to_string(),
+                        definition_id: "shared".to_string(),
+                        transform: [0.0, 0.0, 0.0],
+                        reuse: ComponentReuse::Linked,
+                    },
+                })
+                .expect("linked instance is valid");
+        }
+        graph
+            .apply(&ComponentCommand::MakeIndependent {
+                source_instance_id: "linked-b".to_string(),
+                definition_id: "copy".to_string(),
+                instance_id: "independent".to_string(),
+                feature_id: "copy-feature".to_string(),
+            })
+            .expect("independent instance is valid");
+
+        assert_eq!(graph.instances["linked-a"].reuse, ComponentReuse::Linked);
+        assert_eq!(graph.instances["linked-b"].reuse, ComponentReuse::Linked);
+        assert_eq!(
+            graph.instances["independent"].reuse,
+            ComponentReuse::Independent {
+                source_instance_id: "linked-b".to_string(),
+                source_definition_id: "shared".to_string(),
+            }
+        );
+        assert_eq!(
+            graph.definitions["copy"].selected_feature_ids,
+            graph.definitions["shared"].selected_feature_ids
+        );
+        let encoded = serde_json::to_vec(&graph.instances["independent"])
+            .expect("canonical reuse intent serializes");
+        let decoded: ComponentInstance =
+            serde_json::from_slice(&encoded).expect("canonical reuse intent replays");
+        assert_eq!(decoded, graph.instances["independent"]);
     }
 
     #[test]

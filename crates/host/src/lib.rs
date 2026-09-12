@@ -13334,6 +13334,7 @@ fn component_command_from_value(
                 id: string("instance_id")?,
                 definition_id: string("definition_id")?,
                 transform: transform()?,
+                reuse: threeterm_domain::ComponentReuse::Linked,
             },
         }),
         TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID => Ok(ComponentCommand::TransformInstance {

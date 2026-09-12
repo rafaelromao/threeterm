@@ -6433,7 +6433,15 @@ fn derived_result_metadata(
 }
 
 fn write_success(stdout: &mut dyn Write, value: &Value, stderr: &mut dyn Write) -> i32 {
-    match serde_json::to_writer_pretty(&mut *stdout, value) {
+    let mut output = value.clone();
+    if let Some(operation) = output
+        .get("operation")
+        .and_then(Value::as_str)
+        .map(|operation| operation.replace('_', "-"))
+    {
+        output["operation"] = Value::String(operation);
+    }
+    match serde_json::to_writer_pretty(&mut *stdout, &output) {
         Ok(()) => {
             let _ = writeln!(stdout);
             EXIT_OK
@@ -6618,6 +6626,7 @@ pub fn host_error_diagnostic(error: &HostError) -> Diagnostic {
             .map(|request_id| format!("request_id={request_id}; {detail}"))
             .unwrap_or_else(|| detail.clone()),
         HostError::Validation { detail } => detail.clone(),
+        HostError::Persistence(error) => error.diagnostic_detail().to_string(),
         _ => error.to_string(),
     };
     match error {

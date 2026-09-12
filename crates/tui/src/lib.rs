@@ -3438,6 +3438,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 if !matches!(
                     command,
                     threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID

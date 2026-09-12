@@ -3242,6 +3242,20 @@ impl Host {
             }
             if command == BRACKET_COMMAND_ID {
                 let bundle_path = string_field("bundle_path")?;
+                let expected_revision = request
+                    .get("expected_revision")
+                    .and_then(serde_json::Value::as_str);
+                if let Some(expected_revision) = expected_revision {
+                    let current = self.load(bundle_path)?;
+                    if current.revision_hash != expected_revision {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "bracket source revision {expected_revision:?} does not match current revision {:?}",
+                                current.revision_hash
+                            ),
+                        });
+                    }
+                }
                 let bracket_id = string_field("bracket_id")?;
                 let length = request["length"]
                     .as_f64()
@@ -4475,6 +4489,70 @@ impl Host {
                 ExecutionError::InvalidRequest(detail) => ExecutionError::InvalidRequest(detail),
                 ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
             });
+        }
+        if command == BRACKET_COMMAND_ID {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+            let expected_revision = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str);
+            if let Some(expected_revision) = expected_revision
+                && current.revision_hash != expected_revision
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "bracket source revision {expected_revision:?} does not match current revision {:?}",
+                        current.revision_hash
+                    ),
+                }));
+            }
+            let bracket_id = request
+                .get("bracket_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bracket_id".to_string()))?;
+            if !valid_feature_path_component(bracket_id) {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: "bracket IDs must be plain path components".to_string(),
+                }));
+            }
+            let dimension = |name: &str| {
+                request
+                    .get(name)
+                    .and_then(serde_json::Value::as_f64)
+                    .ok_or_else(|| ExecutionError::InvalidRequest(format!("missing {name}")))
+            };
+            let typed = BracketRequest::new(
+                threeterm_occt_worker::new_request_id(),
+                dimension("length")?,
+                dimension("width")?,
+                dimension("height")?,
+                dimension("thickness")?,
+            )
+            .with_output_path(
+                Bundle::at(bundle_path).canonical_root().join("stage"),
+                "bracket-preview.brep",
+            )
+            .with_feature_id(bracket_id);
+            typed
+                .validate()
+                .map_err(|detail| ExecutionError::Handler(HostError::Validation { detail }))?;
+            let worker = OcctWorker::locate().map_err(|error| {
+                ExecutionError::Handler(HostError::WorkerUnavailable {
+                    detail: error.to_string(),
+                })
+            })?;
+            return self.preview_occt_result::<_, BracketResult>(
+                Path::new(bundle_path),
+                &typed,
+                threeterm_occt_worker::Operation::Bracket,
+                &worker,
+                command,
+                expected_revision,
+                &request,
+            );
         }
         if command == SKETCH_SOLVE_COMMAND_ID {
             let bundle_path = request

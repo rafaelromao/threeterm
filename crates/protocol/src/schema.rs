@@ -1883,13 +1883,11 @@ pub static REPLAY_VERIFY_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
-/// Canonical request schema document for the `bracket` command. The numeric
-/// dimensions are stored in the canonical transaction log but no OCCT
-/// geometry is computed in this slice — that is the responsibility of a
-/// future worker slice. The four dimensions must each be strictly positive
-/// (`minimum > 0`); zero, negative, NaN, or infinite values describe a
-/// degenerate solid and are rejected by the schema validator before they
-/// reach the host.
+/// Canonical request schema document for the `bracket` command. The optional
+/// revision fields are transient adapter metadata and never become canonical
+/// intent. The four dimensions must each be strictly positive (`minimum > 0`);
+/// zero, negative, NaN, or infinite values describe a degenerate solid and are
+/// rejected by the schema validator before they reach the host.
 pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1900,7 +1898,9 @@ pub static BRACKET_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "length": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
             "width": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
             "height": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
-            "thickness": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 }
+            "thickness": { "type": "number", "minimum": 0, "exclusiveMinimum": 0 },
+            "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "preview_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         },
         "additionalProperties": false
     })

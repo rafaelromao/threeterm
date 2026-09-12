@@ -7,8 +7,14 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "${ROOT}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || {
+    printf '%s\n' 'acceptance catalog: unable to resolve repository root' >&2
+    exit 1
+}
+cd "${ROOT}" || {
+    printf '%s\n' 'acceptance catalog: unable to enter repository root' >&2
+    exit 1
+}
 
 export CARGO_TARGET_DIR="${ROOT}/target/acceptance-run"
 CATALOG="${THREETERM_ACCEPTANCE_CATALOG:-${ROOT}/target/acceptance-catalog.json}"
@@ -18,16 +24,28 @@ LIBSLVS_ARTIFACT="${CARGO_TARGET_DIR}/libslvs-artifact"
 ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
-mkdir -p "$(dirname "${CATALOG}")"
-rm -rf -- "${CARGO_TARGET_DIR}"
-mkdir -p "${LOG_ROOT}"
+if ! mkdir -p "$(dirname "${CATALOG}")"; then
+    printf '%s\n' 'acceptance catalog: unable to create catalog directory' >&2
+    exit 1
+fi
+if ! rm -rf -- "${CARGO_TARGET_DIR}"; then
+    printf '%s\n' 'acceptance catalog: unable to clear acceptance run directory' >&2
+    exit 1
+fi
+if ! mkdir -p "${LOG_ROOT}"; then
+    printf '%s\n' 'acceptance catalog: unable to create acceptance log directory' >&2
+    exit 1
+fi
 
 readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CLEAN=true
-if [[ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]]; then
+SOURCE_STATUS=''
+if ! SOURCE_STATUS="$(git status --porcelain --untracked-files=all 2>/dev/null)"; then
+    SOURCE_CLEAN=false
+elif [[ -n "${SOURCE_STATUS}" ]]; then
     SOURCE_CLEAN=false
 fi
 
@@ -264,7 +282,10 @@ run_gate performance.claims \
 SOURCE_COMMIT_AFTER="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CHANGED=false
 SOURCE_CLEAN_AFTER=true
-if [[ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]]; then
+SOURCE_STATUS_AFTER=''
+if ! SOURCE_STATUS_AFTER="$(git status --porcelain --untracked-files=all 2>/dev/null)"; then
+    SOURCE_CLEAN_AFTER=false
+elif [[ -n "${SOURCE_STATUS_AFTER}" ]]; then
     SOURCE_CLEAN_AFTER=false
 fi
 if [[ "${SOURCE_COMMIT_AFTER}" != "${SOURCE_COMMIT}" || "${SOURCE_CLEAN_AFTER}" != true ]]; then
@@ -369,6 +390,58 @@ if [[ -f "${NATIVE_MANIFEST}" ]]; then
     fi
 fi
 
+EVIDENCE_VALID=true
+if [[ ! -f "${NATIVE_MANIFEST}" ]] || ! jq -e '
+    .schema_version == "threeterm.ci.native-workers/2" and
+    (.workers.occt.executed == true) and
+    (.workers.libslvs.executed == true) and
+    (.workers.occt.executable.path | type == "string") and
+    (.workers.libslvs.executable.path | type == "string") and
+    (.workers.occt.executable.sha256 | test("^[0-9a-f]{64}$")) and
+    (.workers.libslvs.executable.sha256 | test("^[0-9a-f]{64}$"))
+    ' "${NATIVE_MANIFEST}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
+if [[ ! -f "${SCHEMA_RESPONSE}" ]] || [[ ! -f "${SCHEMA_PROJECT}/manifest.json" ]] || \
+    ! jq -e '
+    (.schema_version | type == "string" and length > 0) and
+    (.command_registry_hash | type == "string" and length > 0) and
+    (.feature_schema_version | type == "string" and length > 0) and
+    (.protocol_schema_version | type == "string" and length > 0) and
+    (.occt_worker.worker_schema_version | type == "string" and length > 0) and
+    (.slvs_worker.worker_schema_version | type == "string" and length > 0)
+    ' "${SCHEMA_PROJECT}/manifest.json" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
+if [[ "${SCHEMAS}" == '{}' ]] || ! jq -e '
+    all([.project_manifest, .command_registry, .feature, .protocol,
+         .occt_worker, .slvs_worker, .native_worker_manifest,
+         .libslvs_artifact][]; type == "string" and length > 0 and . != "unknown")
+    ' <<<"${SCHEMAS}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
+if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
+    (.occt.worker_id == "occt") and
+    (.libslvs.worker_id == "libslvs") and
+    (.occt.executable.sha256 | test("^[0-9a-f]{64}$")) and
+    (.libslvs.executable.sha256 | test("^[0-9a-f]{64}$"))
+    ' <<<"${WORKERS}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
+for evidence_path in "${NATIVE_MANIFEST}" "${LIBSLVS_ARTIFACT}/manifest.json" \
+    "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json"; do
+    evidence_relative="$(relative_artifact_path "${evidence_path}" || true)"
+    if [[ -z "${evidence_relative}" ]] || ! jq -e --arg path "${evidence_relative}" '
+        any(.[]; .path == $path and (.bytes | type == "number" and . >= 0)
+            and (.sha256 | test("^[0-9a-f]{64}$")))
+        ' <<<"${ARTIFACTS}" >/dev/null 2>&1; then
+        EVIDENCE_VALID=false
+    fi
+done
+if [[ "${EVIDENCE_VALID}" != true ]]; then
+    FAILURE_COUNT=$((FAILURE_COUNT + 1))
+fi
+
 GATES='[]'
 for index in "${!GATE_IDS[@]}"; do
     log_relative="$(relative_artifact_path "${GATE_LOGS[${index}]}" || printf '%s' unknown)"
@@ -403,6 +476,7 @@ jq -S -n \
     --argjson source_clean "${SOURCE_CLEAN}" \
     --argjson source_clean_after "${SOURCE_CLEAN_AFTER}" \
     --argjson source_changed "${SOURCE_CHANGED}" \
+    --argjson evidence_complete "${EVIDENCE_VALID}" \
     --arg result "${CATALOG_RESULT}" \
     --argjson gates "${GATES}" \
     --argjson workflows "${WORKFLOWS}" \
@@ -414,6 +488,7 @@ jq -S -n \
                commit_after: $source_commit_after, clean: $source_clean,
                clean_after: $source_clean_after,
                changed_during_run: $source_changed},
+      evidence: {complete: $evidence_complete},
       source_commit: $source_commit,
       schemas: $schemas,
       registry_hash: $schemas.command_registry,
@@ -426,12 +501,17 @@ jq -S -n \
 if jq -e \
     '.schema_version == "threeterm.acceptance.catalog/1" and
      (.source.commit | type == "string") and
+     (.evidence.complete | type == "boolean") and
      (.schemas | type == "object") and
      (.gates | length > 0) and
      (.gates | all(.status == "passed" or .status == "failed")) and
      (.artifacts | all((.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))) and
      (.result == "passed" or .result == "failed")' "${CATALOG_TMP}" >/dev/null; then
-    mv -f -- "${CATALOG_TMP}" "${CATALOG}"
+    if ! mv -f -- "${CATALOG_TMP}" "${CATALOG}"; then
+        printf '%s\n' 'acceptance catalog: unable to publish catalog atomically' >&2
+        rm -f -- "${CATALOG_TMP}"
+        exit 1
+    fi
 else
     printf '%s\n' 'acceptance catalog: generated JSON failed validation' >&2
     rm -f -- "${CATALOG_TMP}"

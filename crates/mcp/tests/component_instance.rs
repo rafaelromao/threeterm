@@ -33,7 +33,10 @@ fn cli() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_threeterm")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm")
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+                .join("debug/threeterm")
         })
 }
 
@@ -41,7 +44,10 @@ fn mcp() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_threeterm_mcp")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm-mcp")
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+                .join("debug/threeterm-mcp")
         })
 }
 

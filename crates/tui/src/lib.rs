@@ -3596,6 +3596,22 @@ impl<R: Renderer> TuiViewportSession<R> {
         let input = decode_terminal_input(bytes).ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
         })?;
+        if matches!(
+            input,
+            TerminalInput::Arrow(_)
+                | TerminalInput::Character(_)
+                | TerminalInput::Backspace
+                | TerminalInput::Escape
+                | TerminalInput::Preview
+                | TerminalInput::Commit
+                | TerminalInput::Enter
+                | TerminalInput::OpenPalette
+        ) && matches!(self.tui.state().command_phase, CommandPhase::Outcome { .. })
+        {
+            self.tui
+                .transition_interaction(InteractionEvent::CloseCommand)
+                .map_err(TuiViewportError::Tui)?;
+        }
         if matches!(input, TerminalInput::Pick { .. }) && self.command_input_active() {
             return Ok(self.keyboard_overlay(
                 "[focus-glyph] Pick ignored while command input is active".to_string(),

@@ -333,7 +333,29 @@ fn viewport_shape(scene: &ViewportScene) -> Value {
     })
 }
 
-fn portable_export_response(value: &Value) -> Value {
+/// Zero the volatile `FILE_NAME` timestamp OCCT embeds in STEP exports so
+/// adapter comparisons assert geometry content rather than wall-clock time.
+fn normalize_step_timestamp(bytes: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"FILE_NAME('Open CASCADE Shape Model','";
+    let Some(prefix_start) = bytes
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    else {
+        return bytes.to_vec();
+    };
+    let timestamp_start = prefix_start + PREFIX.len();
+    let Some(timestamp_len) = bytes[timestamp_start..]
+        .windows(2)
+        .position(|window| window == b"',")
+    else {
+        return bytes.to_vec();
+    };
+    let mut normalized = bytes.to_vec();
+    normalized[timestamp_start..timestamp_start + timestamp_len].fill(b'0');
+    normalized
+}
+
+fn portable_export_response(value: &Value, root: &Path) -> Value {
     let mut portable = value.clone();
     if let Some(object) = portable.as_object_mut() {
         object.remove("generation_id");
@@ -350,10 +372,20 @@ fn portable_export_response(value: &Value) -> Value {
     }
     if let Some(derived) = portable["derived_artifacts"].as_array_mut() {
         for artifact in derived {
-            artifact
+            let object = artifact
                 .as_object_mut()
-                .expect("derived export artifact is an object")
-                .remove("request_id");
+                .expect("derived export artifact is an object");
+            object.remove("request_id");
+            if object["artifact_kind"] == "step"
+                && let Some(name) = object["artifact_name"].as_str()
+            {
+                let bytes = fs::read(root.join("exports").join(name))
+                    .expect("STEP export reads for portable comparison");
+                object.insert(
+                    "sha256".to_string(),
+                    json!(sha256_hex(&normalize_step_timestamp(&bytes))),
+                );
+            }
         }
     }
     portable
@@ -886,10 +918,15 @@ fn l_bracket_artifact_discard_replay() {
             assert_eq!(metadata["sha256"], sha256_hex(&bytes));
             assert_eq!(metadata["operation"], "export");
             assert_eq!(metadata["feature_id"], "l-bracket");
+            let comparable_bytes = if format == "step" {
+                normalize_step_timestamp(&bytes)
+            } else {
+                bytes.clone()
+            };
             file_shapes.push(json!({
                 "format": format,
-                "bytes": bytes.len(),
-                "sha256": sha256_hex(&bytes),
+                "bytes": comparable_bytes.len(),
+                "sha256": sha256_hex(&comparable_bytes),
             }));
         }
         let reloaded_brep =
@@ -900,7 +937,7 @@ fn l_bracket_artifact_discard_replay() {
             "terminal_log_digest": expected_terminal_log_digest,
             "worker_fingerprint": expected_worker_fingerprint,
             "viewport": viewport_shape(&scene),
-            "export": portable_export_response(&exported),
+            "export": portable_export_response(&exported, session.root()),
             "files": file_shapes,
         }));
     }

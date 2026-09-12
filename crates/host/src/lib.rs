@@ -16331,7 +16331,7 @@ mod tests {
                 .expect("timeline opens for a preserved canonical object")
                 .timeline
                 .feature_id,
-            "second-plate-vertical"
+            "second"
         );
         host.restore_named_revision(&root, "second-plate-vertical", preserved)
             .expect("preserved future restores through canonical identity");

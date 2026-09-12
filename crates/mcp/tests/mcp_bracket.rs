@@ -1025,7 +1025,7 @@ fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
     assert_eq!(responses.len(), 1);
     assert!(responses[0]["error"].is_null());
     let timeline = &responses[0]["result"]["structuredContent"];
-    assert_eq!(timeline["feature_id"], "l-1-base");
+    assert_eq!(timeline["feature_id"], "l-1");
     assert_eq!(timeline["revisions"][0]["ordinal"], 1);
     assert_eq!(timeline["revisions"][0]["status"], "current-valid");
 

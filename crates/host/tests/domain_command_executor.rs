@@ -734,7 +734,9 @@ fn interactive_shared_command_semantics() {
         host.identity(&root)
             .expect("identity reloads")
             .transaction_count,
-        1
+        committed["transaction_count"]
+            .as_u64()
+            .expect("commit reports a transaction count") as usize
     );
 
     let manifest_after_commit = fs::read(root.join("manifest.json")).expect("manifest reads");

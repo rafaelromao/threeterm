@@ -6625,12 +6625,26 @@ impl Host {
                     detail: format!("{} intent has no affected feature", intent.command()),
                 })?;
             if !loaded.graph.contains_feature(&feature_id) {
-                return Err(HostError::Validation {
-                    detail: format!(
-                        "{} replay feature is not in the Revision Snapshot: {feature_id}",
-                        intent.command()
-                    ),
-                });
+                // A bracket family absent from both the graph and the active
+                // history snapshot was removed by a later undo or named
+                // restore; its sealed log intents belong to diverged-away
+                // history and must not resurrect it. Anything else is a
+                // graph/snapshot desync and stays a hard error.
+                let diverged_away = matches!(intent, CanonicalIntent::Bracket(_))
+                    && !loaded
+                        .history
+                        .active_snapshot()
+                        .features
+                        .contains_key(&format!("{feature_id}-base"));
+                if !diverged_away {
+                    return Err(HostError::Validation {
+                        detail: format!(
+                            "{} replay feature is not in the Revision Snapshot: {feature_id}",
+                            intent.command()
+                        ),
+                    });
+                }
+                continue;
             }
             let base_path = if let Some(base_feature_id) = intent.base_reference() {
                 if let Some(path) = replayed_paths.get(base_feature_id) {

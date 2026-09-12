@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
+use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
@@ -123,6 +124,11 @@ fn required_worker(test_name: &str) -> Option<OcctWorker> {
             None
         }
     }
+}
+
+fn required_native_worker(test_name: &str) -> OcctWorker {
+    OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("{test_name}: OCCT worker is required: {error}"))
 }
 
 fn setup_captured_component(root: &PathBuf) {
@@ -873,25 +879,35 @@ impl ComponentSession {
     }
 
     fn make_independent(&self) -> Value {
+        self.make_independent_from("second", "copy", "copy-instance", "copy-feature")
+    }
+
+    fn make_independent_from(
+        &self,
+        source_instance_id: &str,
+        definition_id: &str,
+        instance_id: &str,
+        feature_id: &str,
+    ) -> Value {
         self.command(
             "make-component-independent",
             MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
             json!({
                 "bundle_path": self.root.to_string_lossy(),
-                "source_instance_id": "second",
-                "definition_id": "copy",
-                "instance_id": "copy-instance",
-                "feature_id": "copy-feature",
+                "source_instance_id": source_instance_id,
+                "definition_id": definition_id,
+                "instance_id": instance_id,
+                "feature_id": feature_id,
             }),
             &[
                 "--source-instance-id",
-                "second",
+                source_instance_id,
                 "--definition-id",
-                "copy",
+                definition_id,
                 "--instance-id",
-                "copy-instance",
+                instance_id,
                 "--feature-id",
-                "copy-feature",
+                feature_id,
             ],
         )
     }
@@ -946,9 +962,13 @@ impl ComponentSession {
     }
 
     fn export(&self, output_dir: &Path) -> Value {
+        self.export_feature("copy-instance", output_dir)
+    }
+
+    fn export_feature(&self, feature_id: &str, output_dir: &Path) -> Value {
         let request = json!({
             "bundle_path": self.root.to_string_lossy(),
-            "feature_id": "copy-instance",
+            "feature_id": feature_id,
             "formats": ["stl", "step"],
             "output_dir": output_dir.to_string_lossy(),
             "tessellation_deflection": 0.1,
@@ -956,7 +976,7 @@ impl ComponentSession {
             "accept_stale_geometry": false,
         });
         match self.adapter {
-            ComponentAdapter::Cli => cli_export(&self.root, output_dir),
+            ComponentAdapter::Cli => cli_export(&self.root, feature_id, output_dir),
             ComponentAdapter::Mcp => mcp_command("threeterm.command.export/1", request),
             ComponentAdapter::Tui => {
                 execute_domain_command(&self.tui_host, EXPORT_COMMAND_ID, request)
@@ -966,9 +986,15 @@ impl ComponentSession {
     }
 
     fn scene(&self) -> Vec<SceneSolid> {
+        self.scene_for(&["first", "second", "copy-instance"])
+    }
+
+    fn scene_for(&self, feature_ids: &[&str]) -> Vec<SceneSolid> {
         match self.adapter {
-            ComponentAdapter::Tui => component_scene_from_host(&self.tui_host),
-            ComponentAdapter::Cli | ComponentAdapter::Mcp => component_scene(&self.root),
+            ComponentAdapter::Tui => component_scene_from_host_for(&self.tui_host, feature_ids),
+            ComponentAdapter::Cli | ComponentAdapter::Mcp => {
+                component_scene_for(&self.root, feature_ids)
+            }
         }
     }
 }
@@ -993,7 +1019,7 @@ fn component_features() -> Vec<&'static str> {
     ]
 }
 
-fn cli_export(root: &Path, output_dir: &Path) -> Value {
+fn cli_export(root: &Path, feature_id: &str, output_dir: &Path) -> Value {
     let root = root.to_string_lossy();
     let output_dir = output_dir.to_string_lossy();
     let output = Command::new(cli())
@@ -1003,7 +1029,7 @@ fn cli_export(root: &Path, output_dir: &Path) -> Value {
             "--bundle",
             root.as_ref(),
             "--feature-id",
-            "copy-instance",
+            feature_id,
             "--formats",
             "stl,step",
             "--output-dir",
@@ -1038,28 +1064,31 @@ fn portable_component_state(state: &Value) -> Value {
 }
 
 fn component_scene(root: &Path) -> Vec<SceneSolid> {
+    component_scene_for(root, &["first", "second", "copy-instance"])
+}
+
+fn component_scene_for(root: &Path, feature_ids: &[&str]) -> Vec<SceneSolid> {
     let host = Host::new();
     host.load_with_geometry_replay(root)
         .expect("component bundle loads for viewport projection");
-    component_scene_from_host(&host)
+    component_scene_from_host_for(&host, feature_ids)
 }
 
-fn component_scene_from_host(host: &Host) -> Vec<SceneSolid> {
+fn component_scene_from_host_for(host: &Host, feature_ids: &[&str]) -> Vec<SceneSolid> {
     let scene = host
         .presentation_viewport_scene()
         .expect("component viewport scene builds");
     let mut solids: Vec<_> = scene
         .solids
         .into_iter()
-        .filter(|solid| {
-            matches!(
-                solid.feature_id.as_str(),
-                "first" | "second" | "copy-instance"
-            )
-        })
+        .filter(|solid| feature_ids.contains(&solid.feature_id.as_str()))
         .collect();
     solids.sort_by(|left, right| left.feature_id.cmp(&right.feature_id));
-    assert_eq!(solids.len(), 3, "all component instances render");
+    assert_eq!(
+        solids.len(),
+        feature_ids.len(),
+        "all component instances render"
+    );
     assert!(
         solids.iter().all(|solid| !solid.triangles.is_empty()),
         "all component instance solids contain triangles"
@@ -1123,12 +1152,21 @@ fn validate_export(
     output_dir: &Path,
     revision: &str,
 ) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
+    validate_export_for(response, output_dir, revision, "copy-instance")
+}
+
+fn validate_export_for(
+    response: &Value,
+    output_dir: &Path,
+    revision: &str,
+    feature_id: &str,
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
     assert_eq!(response["status"], "ok");
-    assert_eq!(response["feature_id"], "copy-instance");
+    assert_eq!(response["feature_id"], feature_id);
     let mut exports = BTreeMap::new();
     let mut metadata_by_format = BTreeMap::new();
     for format in ["stl", "step"] {
-        let path = output_dir.join(format!("copy-instance.{format}"));
+        let path = output_dir.join(format!("{feature_id}.{format}"));
         let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
         assert!(!bytes.is_empty(), "{format} export is non-empty");
         assert!(
@@ -1145,7 +1183,7 @@ fn validate_export(
             .iter()
             .find(|artifact| artifact["artifact_kind"] == format)
             .unwrap_or_else(|| panic!("metadata for {format} export is present"));
-        assert_eq!(metadata["artifact_name"], format!("copy-instance.{format}"));
+        assert_eq!(metadata["artifact_name"], format!("{feature_id}.{format}"));
         assert_eq!(metadata["source_revision_id"], revision);
         assert_eq!(metadata["byte_count"], bytes.len());
         assert_eq!(metadata["sha256"], sha256_hex(&bytes));
@@ -1206,6 +1244,41 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
             .as_str()
             .expect("identity revision is a string"),
     );
+    ComponentSnapshot {
+        state,
+        identity,
+        scene,
+        exports,
+        export_metadata,
+        manifest: fs::read(session.root.join("manifest.json")).expect("manifest reads"),
+        log: fs::read(session.root.join("transactions.log")).expect("transaction log reads"),
+        source_brep: fs::read(session.root.join("brep/bracket.brep")).expect("source BREP reads"),
+    }
+}
+
+fn snapshot_reusable_component(session: &ComponentSession, output_name: &str) -> ComponentSnapshot {
+    let state = session.state();
+    let identity = session.identity();
+    assert_current_component_state(&state, &identity, &session.root);
+    let feature_ids = ["first", "second", "copy-instance"];
+    let scene = session.scene_for(&feature_ids);
+    let mut exports = BTreeMap::new();
+    let mut export_metadata = BTreeMap::new();
+    let revision = identity["revision_hash"]
+        .as_str()
+        .expect("identity revision is a string");
+    for feature_id in feature_ids {
+        let output_dir = session.root.join(format!("{output_name}-{feature_id}"));
+        let response = session.export_feature(feature_id, &output_dir);
+        let (feature_exports, feature_metadata) =
+            validate_export_for(&response, &output_dir, revision, feature_id);
+        for (format, bytes) in feature_exports {
+            exports.insert(format!("{feature_id}:{format}"), bytes);
+        }
+        for (format, metadata) in feature_metadata {
+            export_metadata.insert(format!("{feature_id}:{format}"), metadata);
+        }
+    }
     ComponentSnapshot {
         state,
         identity,
@@ -1427,4 +1500,342 @@ fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
     assert_eq!(cli_metadata, mcp_metadata);
     assert_eq!(cli_metadata, tui_metadata);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn reusable_geometry_artifact_discard_replay() {
+    let _worker = required_native_worker("reusable_geometry_artifact_discard_replay");
+
+    for adapter in [
+        ComponentAdapter::Cli,
+        ComponentAdapter::Mcp,
+        ComponentAdapter::Tui,
+    ] {
+        let root = bundle();
+        let session = ComponentSession::new(adapter, root.clone());
+        prepare_component_workflow(&session);
+        let canonical = canonical_component_state(&root);
+        let before = snapshot_reusable_component(&session, "replay-before");
+
+        discard_component_artifacts(&root);
+        assert_disposable_artifacts_are_absent(&root);
+        assert_eq!(canonical, canonical_component_state(&root));
+
+        session.load();
+        let after = snapshot_reusable_component(&session, "replay-after");
+        assert_eq!(canonical, canonical_component_state(&root));
+        assert_replayed_component_snapshot(&before, &after);
+
+        discard_component_artifacts(&root);
+        assert_disposable_artifacts_are_absent(&root);
+        session.load();
+        let repeated = snapshot_reusable_component(&session, "replay-repeated");
+        assert_replayed_component_snapshot(&after, &repeated);
+
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+fn canonical_component_state(root: &Path) -> Value {
+    let loaded = Bundle::at(root)
+        .open()
+        .expect("canonical component bundle opens");
+    serde_json::to_value(loaded.components).expect("canonical component graph serializes")
+}
+
+fn discard_component_artifacts(root: &Path) {
+    for directory in [
+        "brep",
+        ".derived",
+        "cache",
+        "checkpoints",
+        "stage",
+        "replay-before-first",
+        "replay-before-second",
+        "replay-before-copy-instance",
+        "replay-after-first",
+        "replay-after-second",
+        "replay-after-copy-instance",
+        "replay-repeated-first",
+        "replay-repeated-second",
+        "replay-repeated-copy-instance",
+    ] {
+        let path = root.join(directory);
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap_or_else(|error| panic!("remove {path:?}: {error}"));
+        }
+    }
+}
+
+fn assert_disposable_artifacts_are_absent(root: &Path) {
+    for directory in [
+        "brep",
+        ".derived",
+        "cache",
+        "checkpoints",
+        "stage",
+        "replay-before-first",
+        "replay-before-second",
+        "replay-before-copy-instance",
+        "replay-after-first",
+        "replay-after-second",
+        "replay-after-copy-instance",
+        "replay-repeated-first",
+        "replay-repeated-second",
+        "replay-repeated-copy-instance",
+    ] {
+        assert!(
+            !root.join(directory).exists(),
+            "{directory} artifacts are absent"
+        );
+    }
+}
+
+fn assert_replayed_component_snapshot(before: &ComponentSnapshot, after: &ComponentSnapshot) {
+    assert_eq!(
+        portable_component_state(&before.state),
+        portable_component_state(&after.state),
+        "replayed component state matches"
+    );
+    assert_eq!(
+        portable_identity(&before.identity),
+        portable_identity(&after.identity),
+        "replayed project identity matches"
+    );
+    assert_eq!(
+        before.scene, after.scene,
+        "replayed viewport geometry matches"
+    );
+    assert_eq!(before.exports, after.exports, "replayed export bytes match");
+    assert_eq!(
+        before.export_metadata, after.export_metadata,
+        "replayed export metadata matches"
+    );
+    assert_eq!(
+        before.manifest, after.manifest,
+        "replay does not mutate manifest"
+    );
+    assert_eq!(
+        before.log, after.log,
+        "replay does not mutate transaction log"
+    );
+    assert_eq!(
+        before.source_brep, after.source_brep,
+        "replayed source BREP matches"
+    );
+}
+
+#[test]
+fn reusable_geometry_adapter_parity() {
+    let _worker = required_native_worker("reusable_geometry_adapter_parity");
+
+    let mut outcomes = Vec::new();
+    for (adapter, label) in [
+        (ComponentAdapter::Cli, "cli"),
+        (ComponentAdapter::Mcp, "mcp"),
+        (ComponentAdapter::Tui, "tui"),
+    ] {
+        let root = bundle();
+        let session = ComponentSession::new(adapter, root.clone());
+        session.bracket();
+        session.capture();
+        session.create_instance("linked-a", [0.0, 0.0, 0.0]);
+        session.create_instance("linked-b", [10.0, 0.0, 0.0]);
+        session.make_independent_from("linked-b", "copy", "independent", "copy-feature");
+
+        let state = session.state();
+        let identity = session.identity();
+        let scene = session.scene_for(&["linked-a", "linked-b", "independent"]);
+        let revision = identity["revision_hash"]
+            .as_str()
+            .expect("parity identity has a revision");
+        let mut exports = BTreeMap::new();
+        let mut export_metadata = BTreeMap::new();
+        for feature_id in ["linked-a", "linked-b", "independent"] {
+            let output_dir = session.root.join(format!("parity-export-{feature_id}"));
+            let response = session.export_feature(feature_id, &output_dir);
+            let (feature_exports, feature_metadata) =
+                validate_export_for(&response, &output_dir, revision, feature_id);
+            for (format, bytes) in feature_exports {
+                exports.insert(format!("{feature_id}:{format}"), bytes);
+            }
+            for (format, metadata) in feature_metadata {
+                export_metadata.insert(format!("{feature_id}:{format}"), metadata);
+            }
+        }
+
+        assert_eq!(state["instances"]["linked-a"]["reuse"]["mode"], "linked");
+        assert_eq!(state["instances"]["linked-b"]["reuse"]["mode"], "linked");
+        assert_eq!(
+            state["instances"]["independent"]["reuse"],
+            json!({
+                "mode": "independent",
+                "source_instance_id": "linked-b",
+                "source_definition_id": "shared",
+            })
+        );
+        for instance_id in ["linked-a", "linked-b", "independent"] {
+            assert!(
+                state["instances"][instance_id]["geometry_digest"].is_string(),
+                "{label} {instance_id} has real derived geometry"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+        outcomes.push((state, identity, scene, exports, export_metadata));
+    }
+
+    for pair in outcomes.windows(2) {
+        assert_eq!(
+            portable_component_state(&pair[0].0),
+            portable_component_state(&pair[1].0),
+            "adapter canonical component outcomes match"
+        );
+        assert_eq!(
+            portable_identity(&pair[0].1),
+            portable_identity(&pair[1].1),
+            "adapter project identities match"
+        );
+        assert_eq!(pair[0].2, pair[1].2, "adapter viewport geometry matches");
+        assert_eq!(pair[0].3, pair[1].3, "adapter export bytes match");
+        assert_eq!(pair[0].4, pair[1].4, "adapter export metadata matches");
+    }
+}
+
+#[test]
+fn reusable_geometry_divergence() {
+    let _worker = required_native_worker("reusable_geometry_divergence");
+
+    let session = ComponentSession::new(ComponentAdapter::Cli, bundle());
+    session.bracket();
+    session.capture();
+    session.create_instance("linked-a", [0.0, 0.0, 0.0]);
+    session.create_instance("linked-b", [10.0, 0.0, 0.0]);
+    session.make_independent_from("linked-b", "copy", "independent", "copy-feature");
+
+    let before_shared = session.state();
+    let before_scene = session.scene_for(&["linked-a", "linked-b", "independent"]);
+    let before_linked_export =
+        export_bytes(&session, "linked-a", "divergence-linked-before", "linked-a");
+    let before_independent_export = export_bytes(
+        &session,
+        "independent",
+        "divergence-independent-before",
+        "independent",
+    );
+
+    session.edit_parameter("shared", "width", 35.0);
+    let after_shared = session.state();
+    let after_shared_scene = session.scene_for(&["linked-a", "linked-b", "independent"]);
+    let after_shared_linked_export = export_bytes(
+        &session,
+        "linked-a",
+        "divergence-linked-shared-edit",
+        "linked-a",
+    );
+    let after_shared_independent_export = export_bytes(
+        &session,
+        "independent",
+        "divergence-independent-shared-edit",
+        "independent",
+    );
+
+    assert_eq!(
+        after_shared["definitions"]["shared"]["descriptor"]["width"],
+        35.0
+    );
+    assert_eq!(
+        after_shared["definitions"]["copy"]["descriptor"]["width"],
+        30.0
+    );
+    assert_ne!(
+        before_shared["instances"]["linked-a"]["geometry_digest"],
+        after_shared["instances"]["linked-a"]["geometry_digest"]
+    );
+    assert_ne!(
+        before_shared["instances"]["linked-b"]["geometry_digest"],
+        after_shared["instances"]["linked-b"]["geometry_digest"]
+    );
+    assert_eq!(
+        before_shared["instances"]["independent"]["geometry_digest"],
+        after_shared["instances"]["independent"]["geometry_digest"]
+    );
+    assert_ne!(
+        solid(&before_scene, "linked-a"),
+        solid(&after_shared_scene, "linked-a")
+    );
+    assert_eq!(
+        solid(&before_scene, "independent"),
+        solid(&after_shared_scene, "independent")
+    );
+    assert_ne!(before_linked_export, after_shared_linked_export);
+    assert_eq!(before_independent_export, after_shared_independent_export);
+
+    session.edit_parameter("copy", "length", 75.0);
+    let after_copy = session.state();
+    let after_copy_scene = session.scene_for(&["linked-a", "linked-b", "independent"]);
+    let after_copy_linked_export = export_bytes(
+        &session,
+        "linked-a",
+        "divergence-linked-copy-edit",
+        "linked-a",
+    );
+    let after_copy_independent_export = export_bytes(
+        &session,
+        "independent",
+        "divergence-independent-copy-edit",
+        "independent",
+    );
+
+    assert_eq!(
+        after_copy["definitions"]["copy"]["descriptor"]["length"],
+        75.0
+    );
+    assert_eq!(
+        after_copy["instances"]["linked-a"]["geometry_digest"],
+        after_shared["instances"]["linked-a"]["geometry_digest"]
+    );
+    assert_eq!(
+        after_copy["instances"]["linked-b"]["geometry_digest"],
+        after_shared["instances"]["linked-b"]["geometry_digest"]
+    );
+    assert_ne!(
+        after_copy["instances"]["independent"]["geometry_digest"],
+        after_shared["instances"]["independent"]["geometry_digest"]
+    );
+    assert_eq!(
+        solid(&after_shared_scene, "linked-a"),
+        solid(&after_copy_scene, "linked-a")
+    );
+    assert_ne!(
+        solid(&after_shared_scene, "independent"),
+        solid(&after_copy_scene, "independent")
+    );
+    assert_eq!(after_shared_linked_export, after_copy_linked_export);
+    assert_ne!(
+        after_shared_independent_export,
+        after_copy_independent_export
+    );
+}
+
+fn export_bytes(
+    session: &ComponentSession,
+    feature_id: &str,
+    output_name: &str,
+    expected_feature_id: &str,
+) -> BTreeMap<String, Vec<u8>> {
+    let output_dir = session.root.join(output_name);
+    let response = session.export_feature(feature_id, &output_dir);
+    let identity = session.identity();
+    let revision = identity["revision_hash"]
+        .as_str()
+        .expect("divergence identity has a revision");
+    let (exports, _) = validate_export_for(&response, &output_dir, revision, expected_feature_id);
+    exports
+}
+
+fn solid<'a>(scene: &'a [SceneSolid], feature_id: &str) -> &'a SceneSolid {
+    scene
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("scene contains {feature_id}"))
 }

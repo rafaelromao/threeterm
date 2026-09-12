@@ -5,7 +5,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-use threeterm_domain::{ComponentCommand, ComponentDefinition, LBracketDescriptor};
+use threeterm_domain::{ComponentCommand, ComponentDefinition, ComponentReuse, LBracketDescriptor};
 use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
@@ -95,6 +95,7 @@ fn instance_ids_cannot_escape_the_derived_result_namespace() {
                     id: "../escape".to_string(),
                     definition_id: "bracket".to_string(),
                     transform: [0.0, 0.0, 0.0],
+                    reuse: ComponentReuse::Linked,
                 },
             },
         )
@@ -132,6 +133,7 @@ fn component_state_does_not_fall_back_to_metadata_when_geometry_is_missing() {
                 id: "first".to_string(),
                 definition_id: "bracket".to_string(),
                 transform: [0.0, 0.0, 0.0],
+                reuse: ComponentReuse::Linked,
             },
         })
         .expect("instance commits");
@@ -174,6 +176,7 @@ fn independent_copy_materializes_its_own_definition_and_geometry() {
                     id: id.to_string(),
                     definition_id: "shared".to_string(),
                     transform,
+                    reuse: ComponentReuse::Linked,
                 },
             },
         )

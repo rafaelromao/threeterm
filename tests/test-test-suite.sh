@@ -23,7 +23,7 @@ run_selector() {
     fi
 }
 
-run_selector fast "test --workspace -- --skip supervised_occt_extrude --skip required_occt_worker --skip historical_named_revision_restore --skip historical_recovery_adapter_parity --skip generation_identity --skip generation_publication --skip generation_interruption_recovery --skip reusable_geometry_artifact_discard_replay --skip reusable_geometry_adapter_parity --skip reusable_geometry_divergence --skip interactive_shared_command_semantics --skip interactive_production_event_loop"
+run_selector fast "test --workspace -- --skip supervised_occt_extrude --skip supervised_occt_replay --skip canonical_extrude_replay --skip required_occt_worker --skip historical_named_revision_restore --skip historical_recovery_adapter_parity --skip generation_identity --skip generation_publication --skip generation_interruption_recovery --skip reusable_geometry_artifact_discard_replay --skip reusable_geometry_adapter_parity --skip reusable_geometry_divergence --skip interactive_shared_command_semantics --skip interactive_production_event_loop"
 run_selector slow "test --workspace --jobs 1 -- --ignored --test-threads=1"
 run_selector e2e "test --workspace --jobs 1 -- --include-ignored --test-threads=1"
 

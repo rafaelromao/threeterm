@@ -684,7 +684,7 @@ printf '{{"kind":"completed","schema_version":"threeterm.protocol/1","request_id
 }
 
 #[test]
-fn canonical_extrude_replay_failure() {
+fn replay_batch_failure_is_atomic_and_retryable() {
     let root = temp_root("replay-batch-atomicity");
     let worker_root = temp_root("replay-batch-atomicity-bin");
     fs::create_dir_all(&worker_root).expect("worker directory creates");

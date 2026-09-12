@@ -1059,7 +1059,9 @@ fn component_scene_from_host(host: &Host) -> Vec<SceneSolid> {
         })
         .collect();
     solids.sort_by(|left, right| left.feature_id.cmp(&right.feature_id));
-    assert_eq!(solids.len(), 3, "all component instances render");
+    // NOTE: no instance-count assertion here; intermediate workflow phases
+    // (e.g. before `copy-instance` exists) legitimately render fewer solids.
+    // Snapshot call sites assert the full set once all instances exist.
     assert!(
         solids.iter().all(|solid| !solid.triangles.is_empty()),
         "all component instance solids contain triangles"
@@ -1197,6 +1199,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
     let identity = session.identity();
     assert_current_component_state(&state, &identity, &session.root);
     let scene = session.scene();
+    assert_eq!(scene.len(), 3, "all component instances render");
     let output_dir = session.root.join(output_name);
     let response = session.export(&output_dir);
     let (exports, export_metadata) = validate_export(

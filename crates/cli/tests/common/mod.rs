@@ -105,6 +105,21 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
     }
 }
 
+/// Shell-fixture CLI contracts run in the workerless fast tier. In the
+/// real-worker tier the compiled-in worker shadows `THREETERM_OCCTBUILD_WORKER`
+/// inside CLI subprocesses, so the fixture would never receive the request.
+/// Real boolean behavior in that tier is covered by the real-worker
+/// `boolean_fuse_e2e`/`boolean_cut_common_e2e` suites.
+pub fn skip_shell_fixture_contract_in_real_worker_tier(test: &str) -> bool {
+    if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+        eprintln!(
+            "skipping {test}: shell-fixture worker is shadowed by the real worker in this tier"
+        );
+        return true;
+    }
+    false
+}
+
 pub fn install_occt_failure_fixture() -> OcctFixture {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

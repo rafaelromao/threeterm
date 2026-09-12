@@ -10,7 +10,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
 
-export CARGO_TARGET_DIR="${THREETERM_ACCEPTANCE_TARGET_DIR:-${ROOT}/target/acceptance-run}"
+export CARGO_TARGET_DIR="${ROOT}/target/acceptance-run"
 CATALOG="${THREETERM_ACCEPTANCE_CATALOG:-${ROOT}/target/acceptance-catalog.json}"
 LOG_ROOT="${CARGO_TARGET_DIR}/logs"
 NATIVE_MANIFEST="${CARGO_TARGET_DIR}/native-worker-manifest.json"
@@ -241,6 +241,8 @@ run_gate documentation.workspace \
         grep -Fq ".github/scripts/acceptance.sh" README.md
         grep -Fq "direct-Ghostty" README.md
         grep -Fq "Project Manifest" README.md
+        grep -Fq "cargo run -p threeterm-cli --bin threeterm" docs/research/rehearsal-evidence/README.md
+        grep -Fq -- "--machine rehearse" docs/research/rehearsal-evidence/README.md
         grep -Fq "threeterm-tui" crates/tui/Cargo.toml
         test -f crates/cli/src/bin/threeterm.rs
         test -f crates/tui/src/bin/threeterm-tui.rs
@@ -261,7 +263,11 @@ run_gate performance.claims \
 
 SOURCE_COMMIT_AFTER="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CHANGED=false
-if [[ "${SOURCE_COMMIT_AFTER}" != "${SOURCE_COMMIT}" ]]; then
+SOURCE_CLEAN_AFTER=true
+if [[ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]]; then
+    SOURCE_CLEAN_AFTER=false
+fi
+if [[ "${SOURCE_COMMIT_AFTER}" != "${SOURCE_COMMIT}" || "${SOURCE_CLEAN_AFTER}" != true ]]; then
     SOURCE_CHANGED=true
     FAILURE_COUNT=$((FAILURE_COUNT + 1))
 fi
@@ -296,6 +302,7 @@ add_artifact "${ROOT}/rust-toolchain-channel.txt"
 add_artifact "${ROOT}/docs/release/trademark-and-namespace-gate.md"
 add_artifact "${ROOT}/docs/release/six-gate-performance-claims-gate.md"
 add_artifact "${ROOT}/docs/release/performance-claim-limitations.md"
+add_artifact "${ROOT}/docs/research/rehearsal-evidence/README.md"
 while IFS= read -r -d '' artifact; do
     add_artifact "${artifact}"
 done < <(find "${LIBSLVS_ARTIFACT}" -type f -print0 2>/dev/null || true)
@@ -394,6 +401,7 @@ jq -S -n \
     --arg source_commit "${SOURCE_COMMIT}" \
     --arg source_commit_after "${SOURCE_COMMIT_AFTER}" \
     --argjson source_clean "${SOURCE_CLEAN}" \
+    --argjson source_clean_after "${SOURCE_CLEAN_AFTER}" \
     --argjson source_changed "${SOURCE_CHANGED}" \
     --arg result "${CATALOG_RESULT}" \
     --argjson gates "${GATES}" \
@@ -404,6 +412,7 @@ jq -S -n \
     '{schema_version: $schema_version,
       source: {repository: $repository, commit: $source_commit,
                commit_after: $source_commit_after, clean: $source_clean,
+               clean_after: $source_clean_after,
                changed_during_run: $source_changed},
       source_commit: $source_commit,
       schemas: $schemas,

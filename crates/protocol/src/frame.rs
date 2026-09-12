@@ -186,7 +186,7 @@ impl std::error::Error for FrameError {
 /// host logs; truncation is by char boundary so the excerpt stays valid
 /// UTF-8.
 fn excerpt_frame(line: &str) -> String {
-    const MAX_EXCERPT_CHARS: usize = 512;
+    const MAX_EXCERPT_CHARS: usize = 2048;
     let total = line.chars().count();
     if total <= MAX_EXCERPT_CHARS {
         line.to_string()
@@ -359,7 +359,7 @@ mod tests {
             other => panic!("expected InvalidJson; got {other:?}"),
         }
 
-        let long = format!("{{\"kind\":\"x{}}}", "y".repeat(1024));
+        let long = format!("{{\"kind\":\"x{}}}", "y".repeat(2048));
         let mut parser = FrameParser::new();
         let error = parser
             .push(format!("{long}\n").as_bytes())
@@ -367,11 +367,11 @@ mod tests {
         match &error {
             FrameError::InvalidJson { excerpt, .. } => {
                 assert!(
-                    excerpt.chars().count() < long.chars().count(),
-                    "excerpt must be truncated"
+                    excerpt.starts_with("{\"kind\":\"x"),
+                    "excerpt keeps the line prefix"
                 );
                 assert!(
-                    excerpt.ends_with("[truncated 1035 chars total]"),
+                    excerpt.ends_with("[truncated 2059 chars total]"),
                     "truncation must record the total; got {excerpt}"
                 );
             }

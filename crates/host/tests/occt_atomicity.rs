@@ -211,7 +211,7 @@ fn brep_inventory(root: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-fn supervised_occt_extrude_promotes_a_real_worker_result() {
+fn supervised_occt_replay() {
     let worker = threeterm_occt_worker::OcctWorker::locate()
         .expect("supervised_occt_extrude requires the real OCCT worker");
     let root = fresh_bundle_with_feature("supervised-extrude", "seed", "box");
@@ -269,9 +269,13 @@ fn supervised_occt_extrude_promotes_a_real_worker_result() {
     let _ = fs::remove_dir_all(root.join(".derived"));
     let _ = fs::remove_dir_all(root.join("cache"));
     let replayed = Host::new()
-        .load_with_extrude_replay(&root)
-        .expect("production reload replays through supervised OCCT");
-    assert_eq!(replayed, committed.snapshot);
+        .execute_domain_command(LOAD_COMMAND_ID, json!({"bundle_path": root}))
+        .expect("registered load replays through supervised OCCT");
+    assert_eq!(replayed["revision_hash"], committed.snapshot.revision_hash);
+    assert_eq!(
+        replayed["feature_graph_hash"],
+        committed.snapshot.feature_graph_hash
+    );
     assert_eq!(
         fs::read(&committed.result.brep_path).expect("replayed BREP reads"),
         brep

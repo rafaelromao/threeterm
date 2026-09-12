@@ -5880,13 +5880,15 @@ impl Host {
                         detail: format!("read bracket source BREP failed: {error}"),
                     },
                 )?;
-            let key = canonical_bracket_request_id(
-                &staged_root.feature_id,
-                staged_root.request.length,
-                staged_root.request.width,
-                staged_root.request.height,
-                staged_root.request.thickness,
-            );
+            // Scope the idempotency key to this commit attempt, like the
+            // staged-families branch below. The params-derived canonical
+            // request identity would collide with the original create's key
+            // whenever a history commit recomputes identical geometry (e.g.
+            // restoring a snapshot whose parameters match the create), while
+            // the payload legitimately differs by parent revision. Retries
+            // reuse the same parent revision and ordinal, so deduplication
+            // still holds.
+            let key = format!("history-{operation}-{ordinal}");
             let payload = history_recompute_idempotency_payload(
                 &staged_root.feature_id,
                 &staged_root.request,

@@ -128,6 +128,26 @@ run_gate worker.native \
         finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}" true
     '
 
+catalog_worker_path() {
+    local worker_id="$1"
+    local candidate
+    for candidate in "${CARGO_TARGET_DIR}/debug/build/threeterm-${worker_id}-"*/out/bin/threeterm-${worker_id}-worker; do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ACCEPTANCE_OCCT_WORKER="$(catalog_worker_path occt 2>/dev/null)" && \
+    ACCEPTANCE_SLVS_WORKER="$(catalog_worker_path slvs 2>/dev/null)"; then
+    export THREETERM_OCCT_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_OCCT_WORKER}" | cut -d' ' -f1)"
+    export THREETERM_SLVS_WORKER_SHA256="$(sha256sum "${ACCEPTANCE_SLVS_WORKER}" | cut -d' ' -f1)"
+else
+    FAILURE_COUNT=$((FAILURE_COUNT + 1))
+fi
+
 run_gate baseline \
     'rustc pin, workspace check, format, and lint' \
     bash -e -u -o pipefail -c '

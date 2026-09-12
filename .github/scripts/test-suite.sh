@@ -18,6 +18,7 @@ case "${1:-}" in
             --skip generation_interruption_recovery \
             --skip reusable_geometry_artifact_discard_replay \
             --skip reusable_geometry_adapter_parity \
+            --skip reusable_geometry_divergence \
             --skip interactive_shared_command_semantics \
             --skip interactive_production_event_loop
         ;;

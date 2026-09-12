@@ -8,9 +8,9 @@ use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, EXTRUDE_COMMAND_ID,
-    HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID, MIRROR_COMMAND_ID,
-    REHEARSE_COMMAND_ID, REVOLVE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
+    EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    MIRROR_COMMAND_ID, REHEARSE_COMMAND_ID, REVOLVE_COMMAND_ID,
 };
 use threeterm_protocol::schema_validator::validate;
 
@@ -676,6 +676,90 @@ fn derived_geometry_commands_reject_unproven_base_breps_before_worker_execution(
 
     assert_eq!(Bundle::at(&root).open().expect("bundle opens").log.len(), 0);
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn interactive_shared_command_semantics() {
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("interactive bracket semantics require OCCT: {error}"));
+    let root = root("interactive-bracket-semantics");
+    Bundle::create(&root).expect("bundle creates");
+    let host = Host::new();
+    let initial = host
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&root))
+        .expect("identity executes");
+    let request = json!({
+        "bundle_path": root.to_string_lossy(),
+        "bracket_id": "l-bracket",
+        "length": 60.0,
+        "width": 30.0,
+        "height": 40.0,
+        "thickness": 3.0,
+        "expected_revision": initial["revision_hash"],
+    });
+    let manifest_before = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before = fs::read(root.join("transactions.log")).expect("log reads");
+
+    let preview = host
+        .preview_domain_command(BRACKET_COMMAND_ID, request.clone())
+        .expect("bracket preview executes through the shared seam");
+    assert_eq!(preview.source_revision, initial["revision_hash"]);
+    assert!(!preview.preview_revision.is_empty());
+    assert_eq!(
+        fs::read(root.join("manifest.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(fs::read(root.join("transactions.log")).unwrap(), log_before);
+    assert!(!root.join("brep/l-bracket.brep").exists());
+    let identity_after_preview = host.identity(&root).expect("identity reads after preview");
+    assert_eq!(
+        identity_after_preview.revision_hash,
+        initial["revision_hash"]
+            .as_str()
+            .expect("revision is a string")
+    );
+    assert_eq!(identity_after_preview.transaction_count, 0);
+
+    let mut commit_request = request.clone();
+    commit_request["preview_revision"] = json!(preview.preview_revision);
+    let committed = host
+        .execute_domain_command(BRACKET_COMMAND_ID, commit_request.clone())
+        .expect("bracket commit executes through the shared seam");
+    assert_eq!(committed["status"], "ok");
+    assert_eq!(committed["feature_id"], "l-bracket");
+    assert_ne!(committed["revision_hash"], initial["revision_hash"]);
+    assert!(root.join("brep/l-bracket.brep").is_file());
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity reloads")
+            .transaction_count,
+        1
+    );
+
+    let manifest_after_commit = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_after_commit = fs::read(root.join("transactions.log")).expect("log reads");
+    let stale = host.execute_domain_command(BRACKET_COMMAND_ID, commit_request);
+    assert!(matches!(
+        stale,
+        Err(ExecutionError::Handler(HostError::Validation { .. }))
+    ));
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("manifest reads after stale commit"),
+        manifest_after_commit
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("log reads after stale commit"),
+        log_after_commit
+    );
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity remains readable")
+            .transaction_count,
+        1
+    );
+
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

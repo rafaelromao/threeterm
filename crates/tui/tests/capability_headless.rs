@@ -126,7 +126,7 @@ fn absent_probe_refuses_interactive_and_routes_bracket_to_headless_with_structur
 }
 
 #[test]
-fn capability_probe_positive_gate_admits_interactive_when_present() {
+fn interactive_capability_gate() {
     // Proves the opposite path: a valid probe vector admits InteractiveReady.
     let root = temporary_bundle_root();
     let host = Host::new();

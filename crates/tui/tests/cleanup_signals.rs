@@ -354,3 +354,50 @@ fn failure_retryable_preserves_host() {
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn interactive_terminal_cleanup() {
+    for (label, cleanup) in [
+        ("close", 0_u8),
+        ("sigint", 1_u8),
+        ("sigterm", 2_u8),
+        ("panic", 3_u8),
+    ] {
+        let root = temporary_bundle_root();
+        let host = Host::new();
+        host.save(&root, "feature-a", "box")
+            .expect("feature is persisted");
+        let before = host.current().expect("canonical state exists");
+        let renderer = GhosttyRenderer::new(RecordingWriter::default());
+        let mut renderer = renderer;
+        renderer.admit(&valid_capabilities()).expect("admit");
+        let mut session =
+            TuiViewportSession::from_host_with_probe(&host, 64, 48, renderer, &probe_result())
+                .expect("session");
+        session
+            .process_terminal_input(b"\x1b[B")
+            .expect("viewport frame submits");
+
+        match cleanup {
+            0 => session.handle_close().expect("close cleanup"),
+            1 => session.handle_sigint().expect("SIGINT cleanup"),
+            2 => session.handle_sigterm().expect("SIGTERM cleanup"),
+            _ => session.handle_panic("test panic").expect("panic cleanup"),
+        };
+        let bytes = session.coordinator().renderer().writer().bytes.clone();
+        assert!(
+            bytes
+                .windows(b"a=d,d=I".len())
+                .any(|window| window == b"a=d,d=I"),
+            "{label} deletes its active viewport image"
+        );
+        assert!(
+            bytes
+                .windows(b"?1049l".len())
+                .any(|window| window == b"?1049l")
+        );
+        assert_eq!(session.state().lifecycle, LifecycleState::Closed);
+        assert_eq!(host.current(), Some(before));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+}

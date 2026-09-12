@@ -3,11 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::Host;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
-    CaptureState, CommandEvent, CommandOutcome, CommandPhase, FeatureTarget, FocusCaptureEvent,
-    FocusState, HistoryApplyResult, HistoryDirection, HistoryEvent, HistoryState, InteractionEvent,
-    InteractionMode, InteractionTool, LifecycleEvent, LifecycleState, PointerOrigin, PreviewResult,
-    SelectionEvent, SelectionState, SelectionVerification, StateAxis, StateEvent,
-    TuiDiagnosticCode, TuiSession,
+    ArrowKey, CaptureState, CommandEvent, CommandOutcome, CommandPhase, FeatureTarget,
+    FocusCaptureEvent, FocusState, HistoryApplyResult, HistoryDirection, HistoryEvent,
+    HistoryState, InteractionEvent, InteractionMode, InteractionTool, LifecycleEvent,
+    LifecycleState, PointerOrigin, PreviewResult, SelectionEvent, SelectionState,
+    SelectionVerification, StateAcknowledgement, StateAxis, StateEvent, TuiDiagnosticCode,
+    TuiSession,
 };
 
 fn temporary_bundle_root() -> std::path::PathBuf {
@@ -274,6 +275,122 @@ fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
             .transition(StateEvent::Lifecycle(LifecycleEvent::ProbeStarted))
             .is_err()
     );
+}
+
+#[test]
+fn interactive_non_color_acknowledgements() {
+    fn record_state(
+        acknowledgements: &mut Vec<(String, String)>,
+        acknowledgement: StateAcknowledgement,
+    ) {
+        acknowledgements.push((
+            acknowledgement.text,
+            acknowledgement.marker.as_str().to_string(),
+        ));
+    }
+
+    let mut session = TuiSession::new([FeatureTarget::new("l-bracket", "bracket")], "revision");
+    let mut acknowledgements = vec![(
+        session.press(ArrowKey::Down).frame.acknowledgement.text,
+        session
+            .state()
+            .last_acknowledgement
+            .expect("navigation acknowledgement")
+            .marker
+            .as_str()
+            .to_string(),
+    )];
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::FocusLost)
+            .expect("focus loss acknowledges")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::FocusIn)
+            .expect("focus recovery starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::RecoveryCompleted)
+            .expect("focus recovery completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_lifecycle(LifecycleEvent::ResizeStarted)
+            .expect("resize starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_lifecycle(LifecycleEvent::ResizeCompleted)
+            .expect("resize completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_interaction(InteractionEvent::OpenCommand {
+                command: "bracket".to_string(),
+            })
+            .expect("bracket command opens")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::DraftUpdated {
+                input_fingerprint: "dimensions".to_string(),
+            })
+            .expect("draft edit acknowledges")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::PreviewRequested)
+            .expect("preview starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
+            .expect("preview completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::CommitRequested)
+            .expect("commit starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::CommitAccepted {
+                source_revision: "revision".to_string(),
+                validated_revision: "revision".to_string(),
+                revision: "revision-committed".to_string(),
+            })
+            .expect("commit completes")
+            .acknowledgement,
+    );
+
+    for (text, marker) in acknowledgements {
+        assert!(!text.is_empty());
+        assert!(!marker.is_empty());
+    }
+    assert_eq!(session.state().canonical_revision, "revision-committed");
 }
 
 #[test]

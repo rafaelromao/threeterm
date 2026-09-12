@@ -358,7 +358,12 @@ fn canonical_extrude_replay() {
     };
     assert_eq!(intent.command, "extrude");
     assert_eq!(intent.operation, "additive");
+    assert_eq!(intent.mode, "additive");
     assert_eq!(intent.affected_semantic_ids, ["replay-box-1"]);
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
     assert_eq!(
         intent.source_revision,
         committed["source_snapshot"]["revision_hash"]
@@ -367,10 +372,18 @@ fn canonical_extrude_replay() {
     );
     assert_eq!(intent.deterministic_inputs.height, 3.0);
     assert_eq!(intent.worker_requirements.worker_kind, "occt");
+    let identity_before_replay = Host::new()
+        .identity(&root)
+        .expect("project identity reads before replay");
 
-    fs::remove_file(&original_brep_path).expect("promoted BREP removes");
+    for (filename, _) in brep_inventory(&root) {
+        fs::remove_file(root.join("brep").join(filename)).expect("derived BREP removes");
+    }
+    assert!(brep_inventory(&root).is_empty());
     let _ = fs::remove_dir_all(root.join(".derived"));
     let _ = fs::remove_dir_all(root.join("cache"));
+    assert!(!root.join(".derived").exists());
+    assert!(!root.join("cache").exists());
     let replayed = Host::new()
         .execute_domain_command(LOAD_COMMAND_ID, json!({"bundle_path": root}))
         .expect("registered load command recomputes extrude");
@@ -394,6 +407,12 @@ fn canonical_extrude_replay() {
     assert_eq!(
         fs::read(root.join(TRANSACTIONS_LOG_FILENAME)).expect("log rereads"),
         log
+    );
+    assert_eq!(
+        Host::new()
+            .identity(&root)
+            .expect("project identity reads after replay"),
+        identity_before_replay
     );
     assert_eq!(replayed["recovered_from_previous"], false);
 

@@ -126,6 +126,11 @@ fn required_worker(test_name: &str) -> Option<OcctWorker> {
     }
 }
 
+fn required_native_worker(test_name: &str) -> OcctWorker {
+    OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("{test_name}: OCCT worker is required: {error}"))
+}
+
 fn setup_captured_component(root: &PathBuf) {
     cli_command(
         "bracket",
@@ -1499,9 +1504,7 @@ fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
 
 #[test]
 fn reusable_geometry_artifact_discard_replay() {
-    let Some(_) = required_worker("reusable_geometry_artifact_discard_replay") else {
-        return;
-    };
+    let _worker = required_native_worker("reusable_geometry_artifact_discard_replay");
 
     for adapter in [
         ComponentAdapter::Cli,
@@ -1624,9 +1627,7 @@ fn assert_replayed_component_snapshot(before: &ComponentSnapshot, after: &Compon
 
 #[test]
 fn reusable_geometry_adapter_parity() {
-    let Some(_) = required_worker("reusable_geometry_adapter_parity") else {
-        return;
-    };
+    let _worker = required_native_worker("reusable_geometry_adapter_parity");
 
     let mut outcomes = Vec::new();
     for (adapter, label) in [
@@ -1702,9 +1703,7 @@ fn reusable_geometry_adapter_parity() {
 
 #[test]
 fn reusable_geometry_divergence() {
-    let Some(_) = required_worker("reusable_geometry_divergence") else {
-        return;
-    };
+    let _worker = required_native_worker("reusable_geometry_divergence");
 
     let session = ComponentSession::new(ComponentAdapter::Cli, bundle());
     session.bracket();

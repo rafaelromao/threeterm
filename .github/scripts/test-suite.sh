@@ -7,15 +7,18 @@ set -euo pipefail
 
 case "${1:-}" in
     fast)
-        # These acceptance tests intentionally fail closed when the immutable
-        # OCCT worker is absent; native-e2e runs them unskipped with
-        # THREETERM_REQUIRE_OCCT=1 and the worker installed.
+        # Native acceptance tests require the immutable OCCT worker; native-e2e
+        # runs them unskipped with THREETERM_REQUIRE_OCCT=1 and the worker
+        # installed.
         cargo test --workspace -- \
             --skip supervised_occt_extrude \
             --skip required_occt_worker \
             --skip generation_identity \
             --skip generation_publication \
-            --skip generation_interruption_recovery
+            --skip generation_interruption_recovery \
+            --skip reusable_geometry_artifact_discard_replay \
+            --skip reusable_geometry_adapter_parity \
+            --skip reusable_geometry_divergence
         ;;
     slow)
         cargo test --workspace --jobs 1 -- --ignored --test-threads=1

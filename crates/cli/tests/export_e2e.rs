@@ -509,12 +509,11 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
             output.to_str().unwrap(),
         ],
     );
-    assert_eq!(refused["code"], "invalid_request");
-    assert!(
-        refused["arg"]
-            .as_str()
-            .is_some_and(|arg| arg.starts_with("stale last-valid geometry cannot be exported"))
-    );
+    assert_eq!(refused["code"], "stale_last_valid_geometry");
+    assert_eq!(refused["feature_id"], "l-bracket");
+    assert_eq!(refused["stale_features"].as_array().unwrap().len(), 3);
+    assert_eq!(refused["override_eligible"], false);
+    assert!(refused["arg"].as_str().is_none());
     assert!(!output.exists());
     assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);
@@ -545,12 +544,11 @@ fn stale_geometry_is_observable_across_cli_reload_tui_and_export_gate() {
             "--accept-stale-geometry",
         ],
     );
-    assert_eq!(still_refused["code"], "invalid_request");
-    assert!(
-        still_refused["arg"]
-            .as_str()
-            .is_some_and(|arg| arg.starts_with("stale last-valid geometry cannot be exported"))
-    );
+    assert_eq!(still_refused["code"], "stale_last_valid_geometry");
+    assert_eq!(still_refused["feature_id"], "l-bracket");
+    assert_eq!(still_refused["stale_features"].as_array().unwrap().len(), 3);
+    assert_eq!(still_refused["override_eligible"], false);
+    assert!(still_refused["arg"].as_str().is_none());
     assert!(!output.exists());
     assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);

@@ -69,7 +69,10 @@ impl FrameParser {
                 Ok(value) => value,
                 Err(error) => {
                     self.buffer.clear();
-                    return Err(FrameError::InvalidJson(error));
+                    return Err(FrameError::InvalidJson {
+                        error,
+                        excerpt: excerpt_frame(line_str),
+                    });
                 }
             };
             let kind_string = value
@@ -90,7 +93,10 @@ impl FrameParser {
                         if message.contains("unknown variant") || message.contains("unknown kind") {
                             FrameError::UnknownKind(kind.to_string())
                         } else {
-                            FrameError::InvalidJson(error)
+                            FrameError::InvalidJson {
+                                error,
+                                excerpt: excerpt_frame(line_str),
+                            }
                         }
                     })?,
             };
@@ -125,8 +131,14 @@ impl Default for FrameParser {
 pub enum FrameError {
     /// A frame contained a non-UTF8 byte. The line is dropped.
     NonUtf8,
-    /// A frame's body was not valid JSON.
-    InvalidJson(serde_json::Error),
+    /// A frame's body was not valid JSON. Carries a bounded excerpt of the
+    /// offending line so worker protocol violations stay diagnosable from
+    /// host-side logs alone; the excerpt is truncated and never affects
+    /// the stable `"frame is not valid JSON"` Display prefix.
+    InvalidJson {
+        error: serde_json::Error,
+        excerpt: String,
+    },
     /// A frame's JSON body had no `kind` discriminator or had a non-string
     /// `kind`.
     MissingKind,
@@ -141,7 +153,10 @@ impl fmt::Display for FrameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NonUtf8 => formatter.write_str("frame contains non-UTF8 bytes"),
-            Self::InvalidJson(error) => write!(formatter, "frame is not valid JSON: {error}"),
+            Self::InvalidJson { error, excerpt } => write!(
+                formatter,
+                "frame is not valid JSON: {error}; offending frame excerpt: {excerpt}"
+            ),
             Self::MissingKind => formatter.write_str("frame is missing the `kind` discriminator"),
             Self::UnknownKind(kind) => {
                 write!(
@@ -160,9 +175,24 @@ impl fmt::Display for FrameError {
 impl std::error::Error for FrameError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidJson(error) => Some(error),
+            Self::InvalidJson { error, .. } => Some(error),
             _ => None,
         }
+    }
+}
+
+/// Bounded excerpt of an offending frame for diagnostics. The excerpt is
+/// truncated to a fixed char budget so a hostile or buggy peer cannot flood
+/// host logs; truncation is by char boundary so the excerpt stays valid
+/// UTF-8.
+fn excerpt_frame(line: &str) -> String {
+    const MAX_EXCERPT_CHARS: usize = 512;
+    let total = line.chars().count();
+    if total <= MAX_EXCERPT_CHARS {
+        line.to_string()
+    } else {
+        let truncated: String = line.chars().take(MAX_EXCERPT_CHARS).collect();
+        format!("{truncated}...[truncated {total} chars total]")
     }
 }
 
@@ -250,7 +280,7 @@ mod tests {
             .push(b"this is not json\n")
             .expect_err("non-JSON frame must be rejected");
         assert!(
-            matches!(error, FrameError::InvalidJson(_)),
+            matches!(error, FrameError::InvalidJson { .. }),
             "expected InvalidJson; got {error:?}"
         );
         assert!(parser.buffer.is_empty(), "buffer cleared after error");
@@ -262,7 +292,7 @@ mod tests {
         let error = parser
             .push(b"not json\n{\"kind\":\"worker_ready\"")
             .expect_err("malformed frame must be rejected");
-        assert!(matches!(error, FrameError::InvalidJson(_)));
+        assert!(matches!(error, FrameError::InvalidJson { .. }));
         assert!(!parser.has_buffered_bytes(), "malformed input clears carry");
 
         let ready = Envelope::WorkerReady {
@@ -310,6 +340,43 @@ mod tests {
         assert!(!parser.buffer.is_empty());
         parser.reset();
         assert!(parser.buffer.is_empty(), "reset clears the buffer");
+    }
+
+    #[test]
+    fn invalid_json_carries_a_bounded_excerpt_of_the_offending_frame() {
+        let mut parser = FrameParser::new();
+        let error = parser
+            .push(b"{\"kind\":\"completed\",\"result\":oops}\n")
+            .expect_err("malformed frame must be rejected");
+        match &error {
+            FrameError::InvalidJson { excerpt, .. } => {
+                assert_eq!(excerpt, "{\"kind\":\"completed\",\"result\":oops}");
+                assert!(
+                    error.to_string().contains(excerpt),
+                    "Display surfaces the excerpt; got {error}"
+                );
+            }
+            other => panic!("expected InvalidJson; got {other:?}"),
+        }
+
+        let long = format!("{{\"kind\":\"x{}}}", "y".repeat(1024));
+        let mut parser = FrameParser::new();
+        let error = parser
+            .push(format!("{long}\n").as_bytes())
+            .expect_err("long malformed frame must be rejected");
+        match &error {
+            FrameError::InvalidJson { excerpt, .. } => {
+                assert!(
+                    excerpt.chars().count() < long.chars().count(),
+                    "excerpt must be truncated"
+                );
+                assert!(
+                    excerpt.ends_with("[truncated 1035 chars total]"),
+                    "truncation must record the total; got {excerpt}"
+                );
+            }
+            other => panic!("expected InvalidJson; got {other:?}"),
+        }
     }
 
     #[test]

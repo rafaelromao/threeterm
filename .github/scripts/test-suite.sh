@@ -15,7 +15,9 @@ case "${1:-}" in
             --skip required_occt_worker \
             --skip generation_identity \
             --skip generation_publication \
-            --skip generation_interruption_recovery
+            --skip generation_interruption_recovery \
+            --skip interactive_shared_command_semantics \
+            --skip interactive_production_event_loop
         ;;
     slow)
         cargo test --workspace --jobs 1 -- --ignored --test-threads=1

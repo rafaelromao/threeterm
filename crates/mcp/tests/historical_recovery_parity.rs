@@ -1476,6 +1476,19 @@ fn historical_edit_stop_point() {
             prior.active_snapshot().features["l-bracket-base"].geometry_fingerprint
         );
         assert_eq!(active.features["l-bracket-base"].geometry_fingerprint, None);
+        let diagnostic = active.features["l-bracket-base"]
+            .diagnostic
+            .as_ref()
+            .expect("historical failure diagnostic persists after reload");
+        assert_eq!(diagnostic.code, "historical_geometry_invalid");
+        assert_eq!(
+            diagnostic.affected_ids,
+            [
+                "l-bracket-base".to_string(),
+                "l-bracket-bend".to_string(),
+                "l-bracket-finish".to_string(),
+            ]
+        );
         for feature_id in ["l-bracket-bend", "l-bracket-finish"] {
             assert_eq!(
                 active.features[feature_id].status,

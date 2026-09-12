@@ -8,6 +8,7 @@ use threeterm_domain::{
     ProjectGeneration, SketchPlacement, resolve_planar_face_reference,
 };
 use threeterm_host::Host;
+use threeterm_occt_worker::{BracketRequest, new_request_id};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_slvs_worker::{
     SketchConstraint as WorkerSketchConstraint, SketchEntity as WorkerSketchEntity,
@@ -400,21 +401,16 @@ fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
     };
     let path = root();
     write_fresh(&path, ProjectGeneration::with_id("reload-derived-sketch")).expect("fresh bundle");
-    let source = fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
-    ))
-    .expect("fixture BREP reads");
-    let bundle = Bundle::at(&path);
-    let revision = bundle
-        .open()
-        .expect("bundle opens")
-        .revision_hash_hex()
-        .to_string();
-    bundle
-        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
-        .expect("authenticated BREP appends");
     let host = Host::new();
+    // `solid` must be intent-backed rather than an imported fixture BREP so
+    // geometry replay can rebuild it after the derived file is deleted below;
+    // a plain imported BREP has no worker-recomputable provenance.
+    host.create_bracket(
+        &path,
+        BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("solid"),
+        &occt,
+    )
+    .expect("solid L-bracket commits");
     let candidate = host
         .planar_face_candidates(&path, "solid")
         .expect("production OCCT returns planar face evidence")

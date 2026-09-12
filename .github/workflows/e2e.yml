@@ -36,17 +36,67 @@ jobs:
               exit 1
           fi
 
-      - name: Run native E2E script in Arch container
+      - name: Run acceptance catalog in Arch container
         run: |
           set -euo pipefail
           mkdir -p "${HOME}/.cargo"
+          set +e
           podman run --rm \
               --security-opt label=disable \
               -v "${PWD}:/workspace" \
               -v "${HOME}/.cargo:/root/.cargo" \
               -w /workspace \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
-              bash /workspace/.github/scripts/e2e.sh
+              bash -lc '
+                set -euo pipefail
+                channel="$(tr -d "[:space:]" < rust-toolchain-channel.txt)"
+                if ! command -v rustc >/dev/null 2>&1; then
+                  pacman -Syu --noconfirm rustup gcc
+                fi
+                if ! command -v cc >/dev/null 2>&1; then
+                  pacman -Syu --noconfirm gcc
+                fi
+                pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 fontconfig libx11
+                if ! rustup toolchain list 2>/dev/null | grep -q "^${channel}"; then
+                  rustup toolchain install "${channel}" \
+                    --profile minimal --component rustfmt --component clippy
+                fi
+                rustup default "${channel}" >/dev/null
+                bash /workspace/.github/scripts/acceptance.sh
+              '
+          acceptance_status=$?
+          set -e
+          test "${acceptance_status}" -ne 0
+
+      - name: Validate failed acceptance catalog
+        run: |
+          set -euo pipefail
+          test -s target/acceptance-catalog.json
+          expected_commit="$(git rev-parse HEAD)"
+          jq -e --arg commit "${expected_commit}" '
+            .schema_version == "threeterm.acceptance.catalog/1" and
+            .source.commit == $commit and
+            .source.changed_during_run == false and
+            .result == "failed" and
+            (.gates | length == 17) and
+            ([.gates[].id] | index("workflow.l-bracket")) and
+            ([.gates[].id] | index("workflow.box-with-lid")) and
+            ([.gates[].id] | index("workflow.reusable-component")) and
+            ([.gates[].id] | index("workflow.historical-edit")) and
+            ([.gates[].id] | index("workflow.object-timeline")) and
+            ([.gates[].id] | index("workflow.keyboard-first")) and
+            ([.gates[].id] | index("workflow.invalid-edit-recovery")) and
+            ([.gates[].id] | index("replay.canonical-extrude")) and
+            ([.gates[].id] | index("registry.command-schemas")) and
+            ([.gates[].id] | index("worker.native")) and
+            ([.gates[].id] | index("licensing.libslvs")) and
+            ([.gates[].id] | index("release.namespace")) and
+            ([.gates[].id] | index("documentation.workspace")) and
+            ([.gates[].id] | index("performance.claims")) and
+            (.artifacts | length > 0) and
+            (.artifacts | all((.bytes | type == "number") and
+                              (.sha256 | test("^[0-9a-f]{64}$"))))
+          ' target/acceptance-catalog.json
 
       - name: Upload native-worker execution manifest
         if: always()
@@ -54,6 +104,8 @@ jobs:
         with:
           name: native-worker-manifest
           path: |
-            target/native-worker-manifest.json
-            target/libslvs-artifact
+            target/acceptance-catalog.json
+            target/acceptance-run/logs
+            target/acceptance-run/native-worker-manifest.json
+            target/acceptance-run/libslvs-artifact
           if-no-files-found: error

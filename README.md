@@ -26,6 +26,7 @@ owns its own per-crate `schema_version()` constant under the spec's
 | `crates/lua-bridge`           | `threeterm-lua-bridge`     | Restricted Lua bridge for keymaps and registered-command automation. |
 | `crates/domain`               | `threeterm-domain`         | Canonical ThreeTerm feature graph and domain model. |
 | `crates/protocol`             | `threeterm-protocol`       | Versioned newline-framed worker protocol shared by host and disposable workers. |
+| `crates/rehearsal`            | `rehearsal`                | Production L-bracket rehearsal and evidence catalog workflow. |
 
 ## Toolchain
 
@@ -58,14 +59,18 @@ bash .github/scripts/test-suite.sh fast
 # Run only the opt-in slow tests
 bash .github/scripts/test-suite.sh slow
 
-# Run every test, including native-worker and slow E2E coverage. This is the
-# same expensive immutable-worker setup used by the manual E2E workflow.
-bash .github/scripts/e2e.sh
+# Run the commit-bound production conformance catalog. The command runs every
+# required workflow, replay, registry, worker, licensing, release,
+# documentation, and performance gate. It always writes
+# `target/acceptance-catalog.json`; an unavailable worker or unsigned release
+# gate is recorded as failed and returns a non-zero status.
+bash .github/scripts/acceptance.sh
 ```
 
-The local acceptance verifier `.github/scripts/acceptance.sh` runs the four
-checks above and additionally asserts the toolchain pin and the exact
-thirteen-member workspace contract.
+The manual native E2E workflow remains available for focused test-tier runs.
+The acceptance catalog is the production closure command and records the exact
+source commit, schema and worker identities, gate outcomes, and artifact
+checksums.
 
 ## Test suites
 

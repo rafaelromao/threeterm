@@ -2180,6 +2180,12 @@ pub struct CanonicalState {
     pub feature_ids: Vec<FeatureId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHistoryFeature {
+    pub canonical_id: String,
+    pub history_id: String,
+}
+
 impl LoadedBundle {
     pub fn feature_graph_hash_hex(&self) -> &str {
         &self.manifest.feature_graph_hash
@@ -2210,46 +2216,92 @@ impl LoadedBundle {
     }
 
     pub fn feature_timeline(&self, feature_id: &str) -> Result<HistoryTimeline, BundleError> {
-        let history_feature_id = self.resolve_history_feature_id(feature_id)?;
-        let mut timeline = project_feature_timeline(&self.history_events, &history_feature_id)
+        let resolved = self.resolve_history_feature(feature_id)?;
+        let mut timeline = project_feature_timeline(&self.history_events, &resolved.history_id)
             .map_err(|error| BundleError::Invalid(error.to_string()))?;
-        // History events retain their role-level IDs for persisted replay, but
-        // callers must see the canonical identity they selected.
-        timeline.feature_id = feature_id.to_string();
+        timeline.feature_id = resolved.canonical_id;
         Ok(timeline)
     }
 
-    /// Resolve a public canonical graph identity to the persisted history
-    /// feature that owns its object timeline. Direct history IDs remain
-    /// readable for old bundles and headless callers.
+    /// Resolve the persisted history owner and canonical public identity for a
+    /// selected feature. Legacy role IDs remain accepted as input aliases.
     pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
-        if project_feature_timeline(&self.history_events, feature_id).is_ok() {
-            return Ok(feature_id.to_string());
-        }
-        if !self.graph.contains_feature(feature_id) {
-            return Err(BundleError::Invalid(format!(
-                "history feature not found: {feature_id}"
-            )));
-        }
-        let family = feature_id
-            .strip_suffix("-plate-vertical")
-            .or_else(|| feature_id.strip_suffix("-plate-horizontal"))
-            .unwrap_or(feature_id);
-        let history_feature_id = format!("{family}-base");
-        if project_feature_timeline(&self.history_events, &history_feature_id).is_ok()
-            || self
-                .history
-                .named_revisions()
-                .values()
-                .any(|revision| revision.snapshot.features.contains_key(&history_feature_id))
-        {
-            Ok(history_feature_id)
-        } else {
-            Err(BundleError::Invalid(format!(
-                "history feature not found: {feature_id}"
-            )))
-        }
+        Ok(self.resolve_history_feature(feature_id)?.history_id)
     }
+
+    pub fn resolve_history_feature(
+        &self,
+        feature_id: &str,
+    ) -> Result<ResolvedHistoryFeature, BundleError> {
+        let mut initialized_brackets = self
+            .history_events
+            .iter()
+            .filter_map(|event| match &event.operation {
+                HistoryOperation::InitializeLBracket { bracket_id, .. } => {
+                    Some(bracket_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        initialized_brackets.sort_by_key(|bracket_id| std::cmp::Reverse(bracket_id.len()));
+        let has_history = |id: &str| {
+            project_feature_timeline(&self.history_events, id).is_ok()
+                || self
+                    .history
+                    .named_revisions()
+                    .values()
+                    .any(|revision| revision.snapshot.features.contains_key(id))
+        };
+
+        // Prefer an exact initialized bracket identity so a real root named
+        // "fixture-base" is not mistaken for the base role of "fixture".
+        for bracket_id in initialized_brackets.iter().copied() {
+            if feature_id == bracket_id {
+                let history_id = format!("{bracket_id}-base");
+                if has_history(&history_id) {
+                    return Ok(ResolvedHistoryFeature {
+                        canonical_id: bracket_id.to_string(),
+                        history_id,
+                    });
+                }
+            }
+        }
+        for bracket_id in initialized_brackets.iter().copied() {
+            if history_role_matches(bracket_id, feature_id) {
+                let history_id = format!("{bracket_id}-base");
+                if has_history(&history_id) {
+                    return Ok(ResolvedHistoryFeature {
+                        canonical_id: bracket_id.to_string(),
+                        history_id,
+                    });
+                }
+            }
+        }
+
+        if has_history(feature_id) {
+            return Ok(ResolvedHistoryFeature {
+                canonical_id: feature_id.to_string(),
+                history_id: feature_id.to_string(),
+            });
+        }
+        Err(BundleError::Invalid(format!(
+            "history feature not found: {feature_id}"
+        )))
+    }
+}
+
+fn history_role_matches(bracket_id: &str, feature_id: &str) -> bool {
+    [
+        "-independent-finish",
+        "-independent-base",
+        "-finish",
+        "-bend",
+        "-base",
+        "-plate-vertical",
+        "-plate-horizontal",
+    ]
+    .iter()
+    .any(|suffix| feature_id == format!("{bracket_id}{suffix}"))
 }
 
 #[derive(Debug)]

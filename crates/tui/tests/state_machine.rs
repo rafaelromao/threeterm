@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use threeterm_domain::{Feature, FeatureGraph};
 use threeterm_host::Host;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
@@ -127,12 +128,12 @@ fn feature_timeline_reload_renders_the_stale_marker_on_live_input() {
     let mut session = TuiSession::from_feature_graph(&graph, &before.revision_hash);
     session
         .transition_selection(SelectionEvent::Nominate {
-            candidates: vec!["l-bracket-base".to_string()],
+            candidates: vec!["l-bracket".to_string()],
         })
         .expect("feature is nominated");
     session
         .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-            stable_ids: vec!["l-bracket-base".to_string()],
+            stable_ids: vec!["l-bracket".to_string()],
         }))
         .expect("feature selection is verified");
     session
@@ -147,6 +148,35 @@ fn feature_timeline_reload_renders_the_stale_marker_on_live_input() {
     assert_eq!(host.current(), Some(before));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn feature_targets_prefer_an_exact_root_ending_in_base() {
+    let mut graph = FeatureGraph::empty();
+    for (id, kind) in [
+        ("fixture", "history-feature"),
+        ("fixture-plate-vertical", "plate-vertical"),
+        ("fixture-base", "history-feature"),
+        ("fixture-base-plate-vertical", "plate-vertical"),
+    ] {
+        graph.add_feature(Feature::new(id, kind).expect("feature is valid"));
+    }
+
+    let mut session = TuiSession::from_feature_graph(&graph, "history-revision-1");
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("exact canonical root is a selectable target");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("exact canonical root remains selectable");
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
 }
 
 #[test]
@@ -969,7 +999,7 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
             .feature_timeline
             .as_ref()
             .map(|timeline| timeline.feature_id.as_str()),
-        Some("l-plate-vertical")
+        Some("l")
     );
     let timeline = session.state().feature_timeline.expect("timeline state");
     assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
@@ -998,6 +1028,45 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
     );
     assert!(session.state().feature_timeline.is_none());
     assert_eq!(session.state().canonical_revision, "history-revision-1");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn object_timeline_adapter_parity_preserves_the_registered_timeline_contract() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+
+    let mut session = TuiSession::new(
+        [FeatureTarget::new("l-plate-vertical", "plate")],
+        "history-revision-1",
+    );
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["l-plate-vertical".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["l-plate-vertical".to_string()],
+        }))
+        .expect("feature selects");
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("timeline opens through the TUI adapter");
+
+    let timeline = session
+        .state()
+        .feature_timeline
+        .expect("timeline state is available");
+    assert_eq!(timeline.feature_id, "l");
+    assert_eq!(timeline.active_revision, "history-revision-1");
+    assert_eq!(timeline.revisions[0].ordinal, 1);
+    assert_eq!(timeline.revisions[0].revision_id, "history-revision-1");
+    assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(timeline.revisions[0].status, "current-valid");
 
     let _ = std::fs::remove_dir_all(root);
 }

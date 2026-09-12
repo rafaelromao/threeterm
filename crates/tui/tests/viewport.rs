@@ -152,7 +152,7 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
         headless.state.lifecycle,
         threeterm_tui::LifecycleState::HeadlessOnly
     );
-    assert_eq!(host.current(), Some(before));
+    assert_eq!(host.current(), Some(before.clone()));
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }
@@ -229,6 +229,8 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
         .expect("history initializes");
     host.save(&root, "l-bracket-base", "history-feature")
         .expect("history feature is available to selection");
+    host.create_named_revision(&root, "before-edit")
+        .expect("named revision is available to restore");
     host.historical_edit(&root, "l-bracket-base", "length", 0.0)
         .expect("failed edit commits its stale marker");
     let before = host.current().expect("canonical state exists");
@@ -240,31 +242,33 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
         session
             .process_terminal_input(b"\x1b[B")
             .expect("selection enters the production viewport path");
-        if session.state().selected_target.as_deref() == Some("l-bracket-base") {
+        if session.state().selected_target.as_deref() == Some("l-bracket") {
             break;
         }
     }
     assert_eq!(
         session.state().selected_target.as_deref(),
-        Some("l-bracket-base")
+        Some("l-bracket")
     );
     session
         .open_feature_timeline(&host, &root)
         .expect("history selection reloads stale geometry");
-    let rendered = session
-        .process_terminal_input(b"\x1b[B")
-        .expect("history marker is rendered on live input");
+    assert_eq!(session.state().stale_last_valid_geometry.len(), 3);
+    assert_eq!(host.current(), Some(before.clone()));
 
-    assert!(rendered.rendered.overlay.contains("[warning-glyph]"));
-    assert!(
-        rendered
-            .rendered
-            .overlay
-            .contains("stale-last-valid-geometry")
+    let generation_before_restore = session.state().presentation_generation;
+    let restored = session
+        .restore_feature_timeline(&host, &root, "before-edit")
+        .expect("viewport restore refreshes the canonical scene");
+    assert_eq!(
+        restored.history.active_snapshot().revision_id,
+        "history-revision-1"
     );
-    assert!(rendered.rendered.overlay.contains("l-bracket-base"));
-    assert_eq!(session.state().stale_last_valid_geometry.len(), 1);
-    assert_eq!(host.current(), Some(before));
+    assert!(session.state().stale_last_valid_geometry.is_empty());
+    assert!(session.state().presentation_generation > generation_before_restore);
+    let after_restore = host.current().expect("restored canonical state exists");
+    assert_eq!(after_restore.feature_graph_hash, before.feature_graph_hash);
+    assert_ne!(after_restore.revision_hash, before.revision_hash);
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }

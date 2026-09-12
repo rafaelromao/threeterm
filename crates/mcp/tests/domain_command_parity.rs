@@ -1491,25 +1491,81 @@ fn stale_geometry_export_is_fatal_and_equivalent_for_every_override_combination(
     }
 }
 
+fn cli_extrude(root: &Path, profile_file: &Path) -> Value {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let root = root.to_string_lossy().into_owned();
+    let profile_file = profile_file.to_string_lossy().into_owned();
+    let status = threeterm_cli::dispatch::dispatch(
+        [
+            "--machine",
+            "extrude",
+            "--bundle",
+            root.as_str(),
+            "--feature-id",
+            "extrude",
+            "--profile-file",
+            profile_file.as_str(),
+            "--height",
+            "2.0",
+            "--mode",
+            "additive",
+        ]
+        .into_iter()
+        .map(OsString::from),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(
+        status,
+        0,
+        "CLI extrude failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    serde_json::from_slice(&stdout).expect("CLI extrude returns JSON")
+}
+
+fn normalized_extrude_response(response: &Value) -> Value {
+    let mut normalized = response.clone();
+    normalized["brep_path"] = json!("<derived-brep>");
+    normalized
+}
+
+fn canonical_extrude_intent(root: &Path) -> Value {
+    let bundle = Bundle::at(root).open().expect("parity bundle opens");
+    serde_json::to_value(
+        bundle
+            .log
+            .entries()
+            .last()
+            .expect("extrude transaction exists")
+            .intent
+            .as_ref()
+            .expect("extrude intent persists"),
+    )
+    .expect("canonical intent serializes")
+}
+
 #[test]
-fn shared_extrude_execution_routes_cli_mcp_and_tui_through_the_shared_executor() {
+fn adapter_command_parity() {
     let cli_root = root("extrude-cli");
     let mcp_root = root("extrude-mcp");
     let tui_root = root("extrude-tui");
-    for path in [&cli_root, &mcp_root, &tui_root] {
-        Bundle::create(path).expect("bundle creates");
+    let lua_root = root("extrude-lua");
+    let profile_file = root("extrude-profile").with_extension("json");
+    OcctWorker::locate().expect("adapter_command_parity requires the real OCCT worker");
+    for path in [&cli_root, &mcp_root, &tui_root, &lua_root] {
+        Bundle::create_for_test(path, "11".repeat(16).as_str()).expect("bundle creates");
     }
 
-    let cli = threeterm_cli::dispatch::dispatch_registered_command(
-        &threeterm_host::Host::new(),
-        EXTRUDE_COMMAND_ID,
-        extrude_request(&cli_root),
-    );
+    fs::write(&profile_file, "[[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]]").expect("CLI profile writes");
+    let cli = cli_extrude(&cli_root, &profile_file);
     let tui = threeterm_tui::execute_domain_command(
         &threeterm_host::Host::new(),
         EXTRUDE_COMMAND_ID,
         extrude_request(&tui_root),
-    );
+    )
+    .expect("TUI extrude executes");
     let mcp = McpServer::new().handle_request(&JsonRpcRequest {
         id: json!(1),
         is_notification: false,
@@ -1519,34 +1575,61 @@ fn shared_extrude_execution_routes_cli_mcp_and_tui_through_the_shared_executor()
             "arguments": extrude_request(&mcp_root)
         }),
     });
+    assert!(mcp.error.is_none(), "MCP extrude returns no JSON-RPC error");
+    let mcp = mcp.result.expect("MCP extrude executes")["structuredContent"].clone();
+    let lua_source = format!(
+        r#"keymap.bind("F2", "extrude", {{
+            bundle_path = "{}",
+            feature_id = "extrude",
+            profile = {{ {{0.0, 0.0}}, {{4.0, 0.0}}, {{0.0, 4.0}} }},
+            height = 2.0,
+            mode = "additive"
+        }})"#,
+        lua_root.display()
+    );
+    let lua =
+        threeterm_cli::dispatch::dispatch_lua_key(&lua_source, "F2", &threeterm_host::Host::new())
+            .expect("Lua extrude executes");
 
-    if threeterm_occt_worker::OcctWorker::locate().is_err() {
-        assert!(
-            !format!("{cli:?}").contains("UnsupportedTool")
-                && !format!("{tui:?}").contains("not handled")
-                && mcp.error.is_none()
-                && mcp
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result["isError"] == true),
-            "adapters must route extrude through the executor"
-        );
-    } else {
-        let cli = cli.expect("CLI extrude executes");
-        let tui = tui.expect("TUI extrude executes");
-        let mcp = mcp.result.expect("MCP extrude executes")["structuredContent"].clone();
-        for result in [&cli, &tui, &mcp] {
-            assert_eq!(result["status"], "ok");
-            assert_eq!(result["operation"], "extrude");
-            assert_eq!(result["feature_id"], "extrude");
-        }
-        assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
-        assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+    for result in [&cli, &tui, &mcp, &lua] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "extrude");
+        assert_eq!(result["feature_id"], "extrude");
+        assert_eq!(result["mode"], "additive");
+        assert_eq!(result["worker_fingerprint"]["worker_kind"], "occt");
+    }
+    let normalized = [
+        normalized_extrude_response(&cli),
+        normalized_extrude_response(&tui),
+        normalized_extrude_response(&mcp),
+        normalized_extrude_response(&lua),
+    ];
+    for response in &normalized[1..] {
+        assert_eq!(response, &normalized[0]);
+    }
+    let roots = [&cli_root, &mcp_root, &tui_root, &lua_root];
+    let identities = roots.map(|path| {
+        threeterm_host::Host::new()
+            .identity(path)
+            .expect("adapter identity reads")
+    });
+    for identity in &identities[1..] {
+        assert_eq!(identity, &identities[0]);
+    }
+    let intents = roots.map(|path| canonical_extrude_intent(path));
+    for intent in &intents[1..] {
+        assert_eq!(intent, &intents[0]);
+    }
+    let breps = roots.map(|path| fs::read(path.join("brep/extrude.brep")).expect("BREP reads"));
+    for brep in &breps[1..] {
+        assert_eq!(brep, &breps[0]);
     }
 
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);
+    let _ = fs::remove_dir_all(lua_root);
+    let _ = fs::remove_file(profile_file);
 }
 
 #[test]

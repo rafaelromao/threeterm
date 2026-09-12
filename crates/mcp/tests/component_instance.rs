@@ -1634,7 +1634,8 @@ fn reusable_geometry_adapter_parity() {
         (ComponentAdapter::Mcp, "mcp"),
         (ComponentAdapter::Tui, "tui"),
     ] {
-        let session = ComponentSession::new(adapter, bundle());
+        let root = bundle();
+        let session = ComponentSession::new(adapter, root.clone());
         session.bracket();
         session.capture();
         session.create_instance("linked-a", [0.0, 0.0, 0.0]);
@@ -1644,13 +1645,23 @@ fn reusable_geometry_adapter_parity() {
         let state = session.state();
         let identity = session.identity();
         let scene = session.scene_for(&["linked-a", "linked-b", "independent"]);
-        let output_dir = session.root.join("parity-export");
-        let response = session.export_feature("independent", &output_dir);
         let revision = identity["revision_hash"]
             .as_str()
             .expect("parity identity has a revision");
-        let (exports, export_metadata) =
-            validate_export_for(&response, &output_dir, revision, "independent");
+        let mut exports = BTreeMap::new();
+        let mut export_metadata = BTreeMap::new();
+        for feature_id in ["linked-a", "linked-b", "independent"] {
+            let output_dir = session.root.join(format!("parity-export-{feature_id}"));
+            let response = session.export_feature(feature_id, &output_dir);
+            let (feature_exports, feature_metadata) =
+                validate_export_for(&response, &output_dir, revision, feature_id);
+            for (format, bytes) in feature_exports {
+                exports.insert(format!("{feature_id}:{format}"), bytes);
+            }
+            for (format, metadata) in feature_metadata {
+                export_metadata.insert(format!("{feature_id}:{format}"), metadata);
+            }
+        }
 
         assert_eq!(state["instances"]["linked-a"]["reuse"]["mode"], "linked");
         assert_eq!(state["instances"]["linked-b"]["reuse"]["mode"], "linked");
@@ -1668,6 +1679,7 @@ fn reusable_geometry_adapter_parity() {
                 "{label} {instance_id} has real derived geometry"
             );
         }
+        let _ = fs::remove_dir_all(root);
         outcomes.push((state, identity, scene, exports, export_metadata));
     }
 

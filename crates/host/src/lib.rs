@@ -14911,13 +14911,9 @@ fn canonical_occt_response(
     let value = serde_json::to_value(result).map_err(|error| HostError::Validation {
         detail: format!("OCCT result serialization failed: {error}"),
     })?;
-    let operation = value["operation"]
-        .as_str()
-        .unwrap_or_default()
-        .replace('_', "-");
     Ok(serde_json::json!({
         "status": value["status"],
-        "operation": operation,
+        "operation": value["operation"],
         "feature_id": value["feature_id"],
         "feature_graph_hash": snapshot.feature_graph_hash,
         "revision_hash": snapshot.revision_hash,

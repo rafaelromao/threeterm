@@ -1,13 +1,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use threeterm_domain::{Feature, FeatureGraph};
 use threeterm_host::Host;
 use threeterm_theme::NonColorMarker;
 use threeterm_tui::{
-    CaptureState, CommandEvent, CommandOutcome, CommandPhase, FeatureTarget, FocusCaptureEvent,
-    FocusState, HistoryApplyResult, HistoryDirection, HistoryEvent, HistoryState, InteractionEvent,
-    InteractionMode, InteractionTool, LifecycleEvent, LifecycleState, PointerOrigin, PreviewResult,
-    SelectionEvent, SelectionState, SelectionVerification, StateAxis, StateEvent,
-    TuiDiagnosticCode, TuiSession,
+    ArrowKey, CaptureState, CommandEvent, CommandOutcome, CommandPhase, FeatureTarget,
+    FocusCaptureEvent, FocusState, HistoryApplyResult, HistoryDirection, HistoryEvent,
+    HistoryState, InteractionEvent, InteractionMode, InteractionTool, LifecycleEvent,
+    LifecycleState, PointerOrigin, PreviewResult, SelectionEvent, SelectionState,
+    SelectionVerification, StateAcknowledgement, StateAxis, StateEvent, TuiDiagnosticCode,
+    TuiSession,
 };
 
 fn temporary_bundle_root() -> std::path::PathBuf {
@@ -150,6 +152,35 @@ fn feature_timeline_reload_renders_the_stale_marker_on_live_input() {
 }
 
 #[test]
+fn feature_targets_prefer_an_exact_root_ending_in_base() {
+    let mut graph = FeatureGraph::empty();
+    for (id, kind) in [
+        ("fixture", "history-feature"),
+        ("fixture-plate-vertical", "plate-vertical"),
+        ("fixture-base", "history-feature"),
+        ("fixture-base-plate-vertical", "plate-vertical"),
+    ] {
+        graph.add_feature(Feature::new(id, kind).expect("feature is valid"));
+    }
+
+    let mut session = TuiSession::from_feature_graph(&graph, "history-revision-1");
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("exact canonical root is a selectable target");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("exact canonical root remains selectable");
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
+}
+
+#[test]
 fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
     let mut session = TuiSession::new_probing([], "revision-lifecycle");
     assert_eq!(session.state().lifecycle, LifecycleState::Probing);
@@ -274,6 +305,122 @@ fn lifecycle_handlers_cover_probe_recovery_resize_and_close() {
             .transition(StateEvent::Lifecycle(LifecycleEvent::ProbeStarted))
             .is_err()
     );
+}
+
+#[test]
+fn interactive_non_color_acknowledgements() {
+    fn record_state(
+        acknowledgements: &mut Vec<(String, String)>,
+        acknowledgement: StateAcknowledgement,
+    ) {
+        acknowledgements.push((
+            acknowledgement.text,
+            acknowledgement.marker.as_str().to_string(),
+        ));
+    }
+
+    let mut session = TuiSession::new([FeatureTarget::new("l-bracket", "bracket")], "revision");
+    let mut acknowledgements = vec![(
+        session.press(ArrowKey::Down).frame.acknowledgement.text,
+        session
+            .state()
+            .last_acknowledgement
+            .expect("navigation acknowledgement")
+            .marker
+            .as_str()
+            .to_string(),
+    )];
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::FocusLost)
+            .expect("focus loss acknowledges")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::FocusIn)
+            .expect("focus recovery starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_focus_capture(FocusCaptureEvent::RecoveryCompleted)
+            .expect("focus recovery completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_lifecycle(LifecycleEvent::ResizeStarted)
+            .expect("resize starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_lifecycle(LifecycleEvent::ResizeCompleted)
+            .expect("resize completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_interaction(InteractionEvent::OpenCommand {
+                command: "bracket".to_string(),
+            })
+            .expect("bracket command opens")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::DraftUpdated {
+                input_fingerprint: "dimensions".to_string(),
+            })
+            .expect("draft edit acknowledges")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::PreviewRequested)
+            .expect("preview starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
+            .expect("preview completes")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::CommitRequested)
+            .expect("commit starts")
+            .acknowledgement,
+    );
+    record_state(
+        &mut acknowledgements,
+        session
+            .transition_command(CommandEvent::CommitAccepted {
+                source_revision: "revision".to_string(),
+                validated_revision: "revision".to_string(),
+                revision: "revision-committed".to_string(),
+            })
+            .expect("commit completes")
+            .acknowledgement,
+    );
+
+    for (text, marker) in acknowledgements {
+        assert!(!text.is_empty());
+        assert!(!marker.is_empty());
+    }
+    assert_eq!(session.state().canonical_revision, "revision-committed");
 }
 
 #[test]
@@ -1108,6 +1255,45 @@ fn selected_feature_timeline_rejects_a_feature_without_history_without_mutation(
         log_before
     );
     assert_eq!(session.state().canonical_revision, revision);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn object_timeline_adapter_parity_preserves_the_registered_timeline_contract() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "l", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+
+    let mut session = TuiSession::new(
+        [FeatureTarget::new("l-plate-vertical", "plate")],
+        "history-revision-1",
+    );
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["l-plate-vertical".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["l-plate-vertical".to_string()],
+        }))
+        .expect("feature selects");
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("timeline opens through the TUI adapter");
+
+    let timeline = session
+        .state()
+        .feature_timeline
+        .expect("timeline state is available");
+    assert_eq!(timeline.feature_id, "l");
+    assert_eq!(timeline.active_revision, "history-revision-1");
+    assert_eq!(timeline.revisions[0].ordinal, 1);
+    assert_eq!(timeline.revisions[0].revision_id, "history-revision-1");
+    assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(timeline.revisions[0].status, "current-valid");
 
     let _ = std::fs::remove_dir_all(root);
 }

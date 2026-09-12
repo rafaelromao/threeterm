@@ -164,6 +164,55 @@ fn feature_timeline_accepts_the_selected_canonical_feature_identity() {
 }
 
 #[test]
+fn object_timeline_semantic_identity_uses_one_canonical_bracket_id() {
+    let path = root("object-timeline-semantic-identity");
+    let bundle = Bundle::at(&path);
+    write_fresh(
+        &path,
+        ProjectGeneration::with_id("object-timeline-semantic-identity"),
+    )
+    .expect("fresh bundle");
+    let state = HistoryState::default();
+    let event = state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("history event");
+    bundle
+        .append_features_with_history(
+            &[
+                ("first", "bracket:length=10;width=5;height=3;thickness=1"),
+                ("first-plate-vertical", "plate-vertical"),
+                ("first-plate-horizontal", "plate-horizontal"),
+            ],
+            &event,
+        )
+        .expect("canonical graph publishes");
+
+    let loaded = bundle.open().expect("bundle opens");
+    let canonical = loaded
+        .resolve_history_feature("first")
+        .expect("canonical bracket resolves");
+    let role = loaded
+        .resolve_history_feature("first-plate-vertical")
+        .expect("legacy role resolves");
+    assert_eq!(canonical.canonical_id, "first");
+    assert_eq!(canonical.history_id, "first-base");
+    assert_eq!(role, canonical);
+    assert_eq!(
+        loaded.feature_timeline("first").unwrap().feature_id,
+        "first"
+    );
+    assert_eq!(
+        loaded
+            .feature_timeline("first-plate-vertical")
+            .unwrap()
+            .feature_id,
+        "first"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
 fn exact_initialized_bracket_identity_wins_over_a_legacy_base_role() {
     let path = root("canonical-base-suffix");
     let bundle = Bundle::at(&path);
@@ -184,6 +233,18 @@ fn exact_initialized_bracket_identity_wins_over_a_legacy_base_role() {
     }
 
     let loaded = bundle.open().expect("bundle opens");
+    let exact = bundle
+        .feature_timeline("fixture-base")
+        .expect("exact canonical identity resolves");
+    let legacy = bundle
+        .feature_timeline("fixture-base-base")
+        .expect("legacy base role remains readable");
+    assert_eq!(exact.feature_id, "fixture-base");
+    assert_eq!(legacy.feature_id, "fixture-base");
+    assert_eq!(exact.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(legacy.revisions[0].operation, "initialize-l-bracket");
+    assert_eq!(exact.revisions[0].revision_id, "history-revision-2");
+    assert_eq!(legacy.revisions[0].revision_id, "history-revision-2");
     assert_eq!(
         loaded
             .feature_timeline("fixture-base")

@@ -2224,20 +2224,18 @@ impl LoadedBundle {
         Ok(timeline)
     }
 
-    /// Resolve a public canonical graph identity to the persisted history
-    /// feature that owns its feature timeline. Direct history IDs remain
-    /// readable for old bundles and headless callers.
+    /// Resolve the persisted history owner and canonical public identity for a
+    /// selected feature. Legacy role IDs remain accepted as input aliases.
     pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
         Ok(self.resolve_history_feature(feature_id)?.history_id)
     }
-
     /// Resolve a selected graph identity to its persisted timeline feature while
     /// keeping the public identity stable across legacy history records.
     pub fn resolve_history_feature(
         &self,
         feature_id: &str,
     ) -> Result<ResolvedHistoryFeature, BundleError> {
-        let initialized_brackets = self
+        let mut initialized_brackets = self
             .history_events
             .iter()
             .filter_map(|event| match &event.operation {
@@ -2247,6 +2245,7 @@ impl LoadedBundle {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        initialized_brackets.sort_by_key(|bracket_id| std::cmp::Reverse(bracket_id.len()));
         let has_history = |id: &str| {
             project_feature_timeline(&self.history_events, id).is_ok()
                 || self

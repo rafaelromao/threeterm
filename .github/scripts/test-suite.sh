@@ -15,7 +15,9 @@ case "${1:-}" in
             --skip required_occt_worker \
             --skip generation_identity \
             --skip generation_publication \
-            --skip generation_interruption_recovery
+            --skip generation_interruption_recovery \
+            --skip interactive_shared_command_semantics \
+            --skip interactive_production_event_loop
         ;;
     slow)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \

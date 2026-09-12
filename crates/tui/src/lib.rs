@@ -1000,12 +1000,25 @@ pub struct FeatureTarget {
 }
 
 fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
+    let bracket_roots = graph
+        .features()
+        .filter_map(|feature| {
+            if matches!(feature.kind.as_str(), "plate-vertical" | "plate-horizontal") {
+                feature
+                    .id
+                    .as_str()
+                    .strip_suffix("-plate-vertical")
+                    .or_else(|| feature.id.as_str().strip_suffix("-plate-horizontal"))
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut targets = Vec::new();
     for feature in graph.features() {
-        // Only known history-role graph records are normalized. A real graph
-        // feature may legitimately end in `-base`, so preserve that identity.
-        let id = canonical_feature_id_for_kind(feature.id.as_str(), &feature.kind).to_string();
+        let id = canonical_feature_id_for_kind(feature.id.as_str(), &feature.kind, &bracket_roots);
         if seen.insert(id.clone()) {
             let label = if id == feature.id.as_str() {
                 feature.kind.to_string()
@@ -1018,15 +1031,51 @@ fn feature_targets(graph: &FeatureGraph) -> Vec<FeatureTarget> {
     targets
 }
 
-fn canonical_feature_id_for_kind<'a>(feature_id: &'a str, kind: &str) -> &'a str {
-    if matches!(
-        kind,
-        "history-feature" | "plate-vertical" | "plate-horizontal"
-    ) {
-        canonical_feature_id(feature_id)
-    } else {
-        feature_id
+fn canonical_feature_id_for_kind(
+    feature_id: &str,
+    kind: &str,
+    bracket_roots: &BTreeSet<String>,
+) -> String {
+    if matches!(kind, "plate-vertical" | "plate-horizontal") {
+        return feature_id
+            .strip_suffix("-plate-vertical")
+            .or_else(|| feature_id.strip_suffix("-plate-horizontal"))
+            .unwrap_or(feature_id)
+            .to_string();
     }
+    if kind == "history-feature"
+        && let Some(root) = matching_bracket_root(bracket_roots, feature_id)
+    {
+        return root.clone();
+    }
+    feature_id.to_string()
+}
+
+fn history_role_matches(bracket_id: &str, feature_id: &str) -> bool {
+    [
+        "-independent-finish",
+        "-independent-base",
+        "-finish",
+        "-bend",
+        "-base",
+    ]
+    .iter()
+    .any(|suffix| feature_id == format!("{bracket_id}{suffix}"))
+}
+
+fn matching_bracket_root<'a>(
+    bracket_roots: &'a BTreeSet<String>,
+    feature_id: &str,
+) -> Option<&'a String> {
+    bracket_roots
+        .iter()
+        .find(|root| root.as_str() == feature_id)
+        .or_else(|| {
+            bracket_roots
+                .iter()
+                .filter(|root| history_role_matches(root.as_str(), feature_id))
+                .max_by_key(|root| root.len())
+        })
 }
 
 fn canonical_feature_id(feature_id: &str) -> &str {
@@ -1042,6 +1091,58 @@ fn canonical_feature_id(feature_id: &str) -> &str {
     .iter()
     .find_map(|suffix| feature_id.strip_suffix(suffix))
     .unwrap_or(feature_id)
+}
+
+fn canonical_scene_feature_id(scene: &ViewportScene, feature_id: &str) -> String {
+    let Some(feature) = scene
+        .features
+        .iter()
+        .find(|feature| feature.id == feature_id)
+    else {
+        return feature_id.to_string();
+    };
+    if matches!(feature.kind.as_str(), "plate-vertical" | "plate-horizontal") {
+        return feature_id
+            .strip_suffix("-plate-vertical")
+            .or_else(|| feature_id.strip_suffix("-plate-horizontal"))
+            .unwrap_or(feature_id)
+            .to_string();
+    }
+    if feature.kind == "history-feature" {
+        let bracket_roots = scene
+            .features
+            .iter()
+            .filter_map(|feature| {
+                if matches!(feature.kind.as_str(), "plate-vertical" | "plate-horizontal") {
+                    feature
+                        .id
+                        .strip_suffix("-plate-vertical")
+                        .or_else(|| feature.id.strip_suffix("-plate-horizontal"))
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        if let Some(root) = matching_bracket_root(&bracket_roots, feature_id) {
+            return root.clone();
+        }
+    }
+    feature_id.to_string()
+}
+
+fn scene_feature_selection_id(scene: &ViewportScene, selected_id: &str) -> Option<String> {
+    scene
+        .features
+        .iter()
+        .find(|feature| feature.id == selected_id)
+        .or_else(|| {
+            scene
+                .features
+                .iter()
+                .find(|feature| canonical_scene_feature_id(scene, &feature.id) == selected_id)
+        })
+        .map(|feature| feature.id.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1509,6 +1610,8 @@ impl TuiSession {
             timeline.named_revisions,
             timeline.named_revision_provenance,
         )?;
+        // The registered response carries stale fingerprints per revision. The
+        // current stale overlay is a projection of the active history snapshot.
         let history = host.history(root).map_err(|error| {
             self.operation_diagnostic(
                 TuiDiagnosticCode::HistoryRejected,
@@ -3225,15 +3328,13 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     pub fn render_current(&mut self) -> Result<SubmitOutcome, ViewportDiagnostic> {
-        let state = self.tui.state();
-        self.scene.selected_id = state.selected_target.map(|target| {
-            self.scene
-                .features
-                .iter()
-                .find(|feature| canonical_feature_id_for_kind(&feature.id, &feature.kind) == target)
-                .map_or(target.clone(), |feature| feature.id.clone())
-        });
-        let generation = state.presentation_generation;
+        self.scene.selected_id = self
+            .tui
+            .state()
+            .selected_target
+            .as_deref()
+            .and_then(|selected_id| scene_feature_selection_id(&self.scene, selected_id));
+        let generation = self.tui.state().presentation_generation;
         let frame = ProtocolNeutralViewport::project(
             &self.scene,
             ViewportRequest::new(
@@ -3369,7 +3470,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         let candidates = pick
             .candidates
             .into_iter()
-            .map(|candidate| candidate.semantic_id)
+            .map(|candidate| canonical_scene_feature_id(&self.scene, &candidate.semantic_id))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Ok(PickInputOutcome {
@@ -3381,18 +3482,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
         let canonical_candidates = candidates
             .iter()
-            .map(|candidate| {
-                self.scene
-                    .features
-                    .iter()
-                    .find(|feature| feature.id == *candidate)
-                    .map_or_else(
-                        || candidate.clone(),
-                        |feature| {
-                            canonical_feature_id_for_kind(&feature.id, &feature.kind).to_string()
-                        },
-                    )
-            })
+            .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -3639,6 +3729,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 if !matches!(
                     command,
                     threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID
@@ -4190,10 +4281,10 @@ impl<R: Renderer> TuiViewportSession<R> {
             .restore_feature_timeline(host, root, name)
             .map_err(TuiViewportError::Tui)?;
         self.refresh_scene_from_host(host)?;
+        self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
         self.render_current().map_err(TuiViewportError::Viewport)?;
         Ok(view)
     }
-
     pub fn refresh_stale_last_valid_geometry(
         &mut self,
         host: &Host,

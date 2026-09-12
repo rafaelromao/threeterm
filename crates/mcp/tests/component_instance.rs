@@ -1064,15 +1064,13 @@ fn portable_exports(
     let normalized_metadata = export_metadata
         .into_iter()
         .map(|(format, mut metadata)| {
-            if format == "step" {
-                if let Some(digest) = normalized_exports
+            if format == "step"
+                && let Some(digest) = normalized_exports
                     .get(&format)
                     .map(|bytes| sha256_hex(bytes))
-                {
-                    if let Some(object) = metadata.as_object_mut() {
-                        object.insert("sha256".to_string(), Value::String(digest));
-                    }
-                }
+                && let Some(object) = metadata.as_object_mut()
+            {
+                object.insert("sha256".to_string(), Value::String(digest));
             }
             (format, metadata)
         })

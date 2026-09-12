@@ -1021,6 +1021,65 @@ fn cli_export(root: &Path, output_dir: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI export returns JSON")
 }
 
+/// Zero the volatile `FILE_NAME` timestamp OCCT embeds in STEP exports so
+/// export comparisons assert geometry content, not wall-clock time (STL
+/// exports are already deterministic and keep their exact digests).
+fn normalize_step_timestamp(bytes: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"FILE_NAME('Open CASCADE Shape Model','";
+    let Some(prefix_start) = bytes
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    else {
+        return bytes.to_vec();
+    };
+    let timestamp_start = prefix_start + PREFIX.len();
+    let Some(timestamp_len) = bytes[timestamp_start..]
+        .windows(2)
+        .position(|window| window == b"',")
+    else {
+        return bytes.to_vec();
+    };
+    let mut normalized = bytes.to_vec();
+    normalized[timestamp_start..timestamp_start + timestamp_len].fill(b'0');
+    normalized
+}
+
+/// Store timestamp-normalized STEP exports (and their content digests) so
+/// snapshot comparisons across reloads and adapters ignore the volatile
+/// writer timestamp while still pinning every content byte.
+fn portable_exports(
+    exports: BTreeMap<String, Vec<u8>>,
+    export_metadata: BTreeMap<String, Value>,
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
+    let normalized_exports = exports
+        .into_iter()
+        .map(|(format, bytes)| {
+            if format == "step" {
+                (format, normalize_step_timestamp(&bytes))
+            } else {
+                (format, bytes)
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let normalized_metadata = export_metadata
+        .into_iter()
+        .map(|(format, mut metadata)| {
+            if format == "step" {
+                if let Some(digest) = normalized_exports
+                    .get(&format)
+                    .map(|bytes| sha256_hex(bytes))
+                {
+                    if let Some(object) = metadata.as_object_mut() {
+                        object.insert("sha256".to_string(), Value::String(digest));
+                    }
+                }
+            }
+            (format, metadata)
+        })
+        .collect::<BTreeMap<_, _>>();
+    (normalized_exports, normalized_metadata)
+}
+
 fn portable_component_state(state: &Value) -> Value {
     let mut portable = state.clone();
     let instances = portable
@@ -1209,6 +1268,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
             .as_str()
             .expect("identity revision is a string"),
     );
+    let (exports, export_metadata) = portable_exports(exports, export_metadata);
     ComponentSnapshot {
         state,
         identity,

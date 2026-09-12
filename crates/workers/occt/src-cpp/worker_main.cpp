@@ -49,6 +49,7 @@
 #include <Message_PrinterOStream.hxx>
 #include <Standard_IStream.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_Version.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -980,7 +981,9 @@ bool write_brep(const TopoDS_Shape& shape, const std::filesystem::path& path, st
 
 bool analyze_brep(const TopoDS_Shape& shape) {
     BRepCheck_Analyzer analyzer(shape);
+#if OCC_VERSION_HEX >= 0x070900
     analyzer.SetParallel(false);
+#endif
     return analyzer.IsValid() != 0;
 }
 
@@ -2430,7 +2433,11 @@ bool handle_mirror(const JsonParser::Value& request, std::string& error) {
         gp_Trsf transform;
         transform.SetMirror(mirror_plane);
 
+#if OCC_VERSION_HEX >= 0x070900
         BRepBuilderAPI_Transform mirror_op(base, transform, Standard_False, Standard_False);
+#else
+        BRepBuilderAPI_Transform mirror_op(base, transform, Standard_False);
+#endif
         mirror_op.Build();
         if (!mirror_op.IsDone()) {
             error = "BRepBuilderAPI_Transform did not complete";
@@ -2521,7 +2528,11 @@ bool handle_translate(const JsonParser::Value& request, std::string& error) {
         gp_Trsf transform;
         transform.SetTranslation(offset);
 
+#if OCC_VERSION_HEX >= 0x070900
         BRepBuilderAPI_Transform translate_op(base, transform, Standard_False, Standard_False);
+#else
+        BRepBuilderAPI_Transform translate_op(base, transform, Standard_False);
+#endif
         translate_op.Build();
         if (!translate_op.IsDone()) {
             error = "BRepBuilderAPI_Transform did not complete";
@@ -2762,7 +2773,11 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
         for (std::uint32_t index = 1; index < count; ++index) {
             gp_Trsf transform;
             transform.SetTranslation(step * static_cast<double>(index));
+#if OCC_VERSION_HEX >= 0x070900
             BRepBuilderAPI_Transform translated(base, transform, Standard_False, Standard_False);
+#else
+            BRepBuilderAPI_Transform translated(base, transform, Standard_False);
+#endif
             translated.Build();
             if (!translated.IsDone()) {
                 error = "BRepBuilderAPI_Transform did not complete during linear pattern copy";
@@ -2898,7 +2913,11 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
         for (std::uint32_t index = 1; index < count; ++index) {
             gp_Trsf transform;
             transform.SetRotation(rotation_axis, angle_step * static_cast<double>(index));
+#if OCC_VERSION_HEX >= 0x070900
             BRepBuilderAPI_Transform rotated(base, transform, Standard_False, Standard_False);
+#else
+            BRepBuilderAPI_Transform rotated(base, transform, Standard_False);
+#endif
             rotated.Build();
             if (!rotated.IsDone()) {
                 error = "BRepBuilderAPI_Transform did not complete during circular pattern copy";

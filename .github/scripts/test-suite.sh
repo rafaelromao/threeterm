@@ -13,6 +13,8 @@ case "${1:-}" in
         cargo test --workspace -- \
             --skip supervised_occt_extrude \
             --skip required_occt_worker \
+            --skip historical_named_revision_restore \
+            --skip historical_recovery_adapter_parity \
             --skip generation_identity \
             --skip generation_publication \
             --skip generation_interruption_recovery \

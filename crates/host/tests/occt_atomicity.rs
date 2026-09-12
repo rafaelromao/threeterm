@@ -324,6 +324,9 @@ fn canonical_extrude_replay() {
     threeterm_occt_worker::OcctWorker::locate()
         .expect("canonical_extrude_replay requires the real OCCT worker");
     let root = fresh_bundle_with_feature("replay", "box-seed", "box");
+    let initial_identity = Host::new()
+        .identity(&root)
+        .expect("initial project identity reads");
     let committed = Host::new()
         .execute_domain_command(
             EXTRUDE_COMMAND_ID,
@@ -336,6 +339,15 @@ fn canonical_extrude_replay() {
             }),
         )
         .expect("registered extrude command commits");
+    assert_ne!(committed["revision_hash"], initial_identity.revision_hash);
+    let committed_identity = Host::new()
+        .identity(&root)
+        .expect("committed project identity reads");
+    assert_eq!(
+        committed_identity.transaction_count,
+        initial_identity.transaction_count + 1
+    );
+    assert_eq!(committed["revision_hash"], committed_identity.revision_hash);
     let original_brep_path = PathBuf::from(
         committed["brep_path"]
             .as_str()

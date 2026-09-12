@@ -1549,17 +1549,30 @@ fn canonical_extrude_intent(root: &Path) -> Value {
 #[test]
 fn adapter_command_parity() {
     let cli_root = root("extrude-cli");
+    let cli_registered_root = root("extrude-cli-registered");
     let mcp_root = root("extrude-mcp");
     let tui_root = root("extrude-tui");
     let lua_root = root("extrude-lua");
     let profile_file = root("extrude-profile").with_extension("json");
     OcctWorker::locate().expect("adapter_command_parity requires the real OCCT worker");
-    for path in [&cli_root, &mcp_root, &tui_root, &lua_root] {
+    for path in [
+        &cli_root,
+        &cli_registered_root,
+        &mcp_root,
+        &tui_root,
+        &lua_root,
+    ] {
         Bundle::create_for_test(path, "11".repeat(16).as_str()).expect("bundle creates");
     }
 
     fs::write(&profile_file, "[[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]]").expect("CLI profile writes");
     let cli = cli_extrude(&cli_root, &profile_file);
+    let cli_registered = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        EXTRUDE_COMMAND_ID,
+        extrude_request(&cli_registered_root),
+    )
+    .expect("registered CLI extrude executes");
     let tui = threeterm_tui::execute_domain_command(
         &threeterm_host::Host::new(),
         EXTRUDE_COMMAND_ID,
@@ -1591,7 +1604,7 @@ fn adapter_command_parity() {
         threeterm_cli::dispatch::dispatch_lua_key(&lua_source, "F2", &threeterm_host::Host::new())
             .expect("Lua extrude executes");
 
-    for result in [&cli, &tui, &mcp, &lua] {
+    for result in [&cli, &cli_registered, &tui, &mcp, &lua] {
         assert_eq!(result["status"], "ok");
         assert_eq!(result["operation"], "extrude");
         assert_eq!(result["feature_id"], "extrude");
@@ -1600,6 +1613,7 @@ fn adapter_command_parity() {
     }
     let normalized = [
         normalized_extrude_response(&cli),
+        normalized_extrude_response(&cli_registered),
         normalized_extrude_response(&tui),
         normalized_extrude_response(&mcp),
         normalized_extrude_response(&lua),
@@ -1607,7 +1621,13 @@ fn adapter_command_parity() {
     for response in &normalized[1..] {
         assert_eq!(response, &normalized[0]);
     }
-    let roots = [&cli_root, &mcp_root, &tui_root, &lua_root];
+    let roots = [
+        &cli_root,
+        &cli_registered_root,
+        &mcp_root,
+        &tui_root,
+        &lua_root,
+    ];
     let identities = roots.map(|path| {
         threeterm_host::Host::new()
             .identity(path)
@@ -1626,6 +1646,7 @@ fn adapter_command_parity() {
     }
 
     let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(cli_registered_root);
     let _ = fs::remove_dir_all(mcp_root);
     let _ = fs::remove_dir_all(tui_root);
     let _ = fs::remove_dir_all(lua_root);

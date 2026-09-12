@@ -712,20 +712,15 @@ pub struct ComponentInstance {
     pub reuse: ComponentReuse,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComponentReuse {
+    #[default]
     Linked,
     Independent {
         source_instance_id: String,
         source_definition_id: String,
     },
-}
-
-impl Default for ComponentReuse {
-    fn default() -> Self {
-        Self::Linked
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

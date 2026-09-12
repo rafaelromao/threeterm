@@ -1059,7 +1059,7 @@ fn portable_component_state(state: &Value) -> Value {
 }
 
 fn component_scene(root: &Path) -> Vec<SceneSolid> {
-    component_scene_for(&root, &["first", "second", "copy-instance"])
+    component_scene_for(root, &["first", "second", "copy-instance"])
 }
 
 fn component_scene_for(root: &Path, feature_ids: &[&str]) -> Vec<SceneSolid> {

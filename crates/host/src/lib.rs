@@ -1930,7 +1930,7 @@ fn sketch_support_failure_response(
             Vec::new()
         }
     };
-    SketchSolveResponse {
+    normalize_sketch_response(SketchSolveResponse {
         schema_version: threeterm_slvs_worker::SCHEMA_VERSION.to_string(),
         request_id: request.request_id.clone(),
         operation: "sketch_solve".to_string(),
@@ -1955,7 +1955,12 @@ fn sketch_support_failure_response(
         support: request.support.clone(),
         placement: request.placement,
         reattachment_outcome: Some(reattachment_outcome_name(outcome).to_string()),
-    }
+    })
+}
+
+fn normalize_sketch_response(mut response: SketchSolveResponse) -> SketchSolveResponse {
+    response.operation = "sketch-solve".to_string();
+    response
 }
 
 fn sketch_dimension_value(
@@ -2437,10 +2442,10 @@ impl Host {
             .with_revision_id(source_revision)
             .solve(&request)
             .map_err(HostError::from)?;
-        Ok(SketchSolveResponse {
+        Ok(normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        })
+        }))
     }
 
     pub fn commit_sketch_solve(
@@ -2528,10 +2533,10 @@ impl Host {
             .with_revision_id(loaded.revision_hash_hex())
             .solve(&request)
             .map_err(HostError::from)?;
-        Ok(SketchSolveResponse {
+        Ok(normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        })
+        }))
     }
 
     /// Build a presentation scene from a freshly recomputed sketch result.
@@ -2640,10 +2645,10 @@ impl Host {
             .with_revision_id(source_revision.clone())
             .solve(&request)
             .map_err(HostError::from)?;
-        let result = SketchSolveResponse {
+        let result = normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        };
+        });
         if !result.is_success() {
             return Err(HostError::Validation {
                 detail: serde_json::to_string(&result).expect("sketch result serializes"),

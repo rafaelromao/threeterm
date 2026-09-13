@@ -6544,6 +6544,9 @@ impl Host {
         root: impl AsRef<Path>,
     ) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
+        // Derived results belong to the loaded canonical revision; discard
+        // cached entries before a reload can rebuild missing artifacts.
+        self.layer1_results.borrow_mut().clear();
         let view = self.load(root)?;
         let loaded = Bundle::at(root).open()?;
         let replay_needed = loaded

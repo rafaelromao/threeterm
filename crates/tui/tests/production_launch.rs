@@ -263,6 +263,23 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"c=80,r=24"),
         "production frame uses the detected terminal cell placement"
     );
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(
+        output.contains("[ready-status] Interactive Modeling ready"),
+        "readiness is visible only after the positive probe and initial frame"
+    );
+    assert!(
+        output.contains("\"state\":\"valid\"")
+            && output.contains("\"direct_ghostty\":true")
+            && output.contains("\"kitty_acknowledgements\":true")
+            && output.contains("\"kitty_keyboard\":true")
+            && output.contains("\"sgr_mouse_cell\":true")
+            && output.contains("\"sgr_mouse_pixel\":true")
+            && output.contains("\"focus_reporting\":true")
+            && output.contains("\"alternate_screen\":true")
+            && output.contains("\"resize_events\":true"),
+        "readiness retains structured capability evidence"
+    );
     assert!(
         !terminal
             .writes

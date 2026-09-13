@@ -10,8 +10,9 @@ use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
-    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
-    ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
+    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement,
+    TerminalCapabilityVector, TerminalEnvironment, ViewportDiagnostic, ViewportDiagnosticCode,
+    parse_ack,
 };
 
 use crate::{
@@ -279,7 +280,13 @@ fn run_session<W: InteractiveTerminal>(
     let launch_result = match session_result {
         Ok(mut session) => {
             let result = match catch_unwind(AssertUnwindSafe(|| {
-                run_event_loop(&mut session, host, root, &probe.unrelated_input)
+                run_event_loop(
+                    &mut session,
+                    host,
+                    root,
+                    &probe.capabilities,
+                    &probe.unrelated_input,
+                )
             })) {
                 Ok(result) => result,
                 Err(payload) => Err(LaunchError::Runtime(format!(
@@ -309,6 +316,7 @@ fn run_event_loop<W: InteractiveTerminal>(
     session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
     host: &Host,
     root: &Path,
+    capabilities: &TerminalCapabilityVector,
     replayed_probe_input: &[u8],
 ) -> Result<(), LaunchError> {
     let initial = session
@@ -324,6 +332,20 @@ fn run_event_loop<W: InteractiveTerminal>(
             ))
         })?;
     acknowledge_frame(session, initial.frame_token)?;
+    let capability_evidence =
+        serde_json::to_string(capabilities).expect("capability vector is serializable");
+    let revision = session.state().canonical_revision;
+    session
+        .coordinator_mut()
+        .renderer_mut()
+        .write_control(
+            format!(
+                "\r\n[ready-status] Interactive Modeling ready probe={capability_evidence}\r\n"
+            )
+            .as_bytes(),
+            &revision,
+        )
+        .map_err(LaunchError::Viewport)?;
     session
         .coordinator_mut()
         .renderer_mut()

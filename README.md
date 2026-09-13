@@ -67,6 +67,40 @@ bash .github/scripts/test-suite.sh slow
 bash .github/scripts/acceptance.sh
 ```
 
+## Qualified Graphical Verification
+
+The real Ghostty launch is intentionally separate from headless and native
+worker tiers. A qualified graphical environment must provide Weston with its
+headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
+`grim`, Tesseract, ImageMagick, `jq`, Coreutils, and util-linux. The exact
+`--version` output tokens for those tools are recorded in
+`.github/graphical-toolchain.env` by the qualified runner environment.
+
+The named test creates a fresh L-bracket Project Generation with the real OCCT
+worker, launches the production TUI as Ghostty's child, and retains evidence
+under the temporary project root:
+
+```sh
+cargo test -p threeterm-tui --test graphical_launch \
+  production_tui_ghostty_session -- --ignored --exact --test-threads=1
+```
+
+The runner uses `LC_ALL=C.UTF-8`, `LANG=C.UTF-8`, an 800x600 compositor, an
+80x24 terminal, and a top-left 800x480 viewport crop. It fails closed when the
+version contract, compositor, input, screenshot, OCR, positive capability
+probe, visible readiness, or cleanup evidence is missing. It never sets
+`TERM` or `TERM_PROGRAM`; those values must come from real Ghostty.
+
+The runner contract can be checked without graphical dependencies:
+
+```sh
+bash tests/graphical-runner-contract.sh
+```
+
+Each graphical run retains `manifest.json`, PTY input/output logs, TUI and
+compositor diagnostics, startup/orbit/cleanup screenshots, and SHA-256 artifact
+records. The manifest itself is not included in its own hash list.
+
 The manual native E2E workflow remains available for focused test-tier runs.
 The acceptance catalog is the production closure command and records the exact
 source commit, schema and worker identities, gate outcomes, and artifact

@@ -278,7 +278,7 @@ fn run_session<W: InteractiveTerminal>(
         probe,
         theme,
     );
-    let launch_result = match session_result {
+    match session_result {
         Ok(mut session) => {
             let result = match catch_unwind(AssertUnwindSafe(|| {
                 run_event_loop(&mut session, host, root, &probe.unrelated_input)
@@ -301,9 +301,8 @@ fn run_session<W: InteractiveTerminal>(
                 }),
             }
         }
-        Err(error) => return Err(LaunchError::Viewport(error)),
-    };
-    launch_result
+        Err(error) => Err(LaunchError::Viewport(error)),
+    }
 }
 
 fn run_event_loop<W: InteractiveTerminal>(

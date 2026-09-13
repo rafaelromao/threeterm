@@ -393,7 +393,7 @@ fn tui_call(
     };
     let root = request["bundle_path"]
         .as_str()
-        .ok_or_else(|| "TUI request has no bundle path")?;
+        .ok_or("TUI request has no bundle path")?;
     Ok(production_tui::execute(
         _host,
         Path::new(root),

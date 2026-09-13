@@ -1930,7 +1930,7 @@ fn sketch_support_failure_response(
             Vec::new()
         }
     };
-    SketchSolveResponse {
+    normalize_sketch_response(SketchSolveResponse {
         schema_version: threeterm_slvs_worker::SCHEMA_VERSION.to_string(),
         request_id: request.request_id.clone(),
         operation: "sketch_solve".to_string(),
@@ -1955,7 +1955,12 @@ fn sketch_support_failure_response(
         support: request.support.clone(),
         placement: request.placement,
         reattachment_outcome: Some(reattachment_outcome_name(outcome).to_string()),
-    }
+    })
+}
+
+fn normalize_sketch_response(mut response: SketchSolveResponse) -> SketchSolveResponse {
+    response.operation = "sketch-solve".to_string();
+    response
 }
 
 fn sketch_dimension_value(
@@ -2437,10 +2442,10 @@ impl Host {
             .with_revision_id(source_revision)
             .solve(&request)
             .map_err(HostError::from)?;
-        Ok(SketchSolveResponse {
+        Ok(normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        })
+        }))
     }
 
     pub fn commit_sketch_solve(
@@ -2528,10 +2533,10 @@ impl Host {
             .with_revision_id(loaded.revision_hash_hex())
             .solve(&request)
             .map_err(HostError::from)?;
-        Ok(SketchSolveResponse {
+        Ok(normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        })
+        }))
     }
 
     /// Build a presentation scene from a freshly recomputed sketch result.
@@ -2640,10 +2645,10 @@ impl Host {
             .with_revision_id(source_revision.clone())
             .solve(&request)
             .map_err(HostError::from)?;
-        let result = SketchSolveResponse {
+        let result = normalize_sketch_response(SketchSolveResponse {
             reattachment_outcome: request.support.as_ref().map(|_| "resolved".to_string()),
             ..result
-        };
+        });
         if !result.is_success() {
             return Err(HostError::Validation {
                 detail: serde_json::to_string(&result).expect("sketch result serializes"),
@@ -7788,7 +7793,13 @@ impl Host {
             Some((bytes, derived.artifact.sha256.as_str())),
         )
         .map_err(|detail| HostError::BrepIo { detail })?;
-        let content = Self::authenticated_replay_bytes(root, loaded, feature_id, &content)?;
+        let content = Self::authenticated_replay_bytes(
+            root,
+            loaded,
+            feature_id,
+            derived.artifact.request_id.as_str(),
+            &content,
+        )?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),
@@ -7801,6 +7812,7 @@ impl Host {
         _root: &Path,
         loaded: &LoadedBundle,
         feature_id: &str,
+        request_id: &str,
         replayed: &[u8],
     ) -> Result<Vec<u8>, HostError> {
         let entry = loaded
@@ -7812,6 +7824,10 @@ impl Host {
                 entry.feature_id == feature_id
                     && entry.brep_byte_count.is_some()
                     && entry.brep_sha256.is_some()
+                    && entry
+                        .intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.request_id() == request_id)
             })
             .ok_or_else(|| HostError::Validation {
                 detail: format!("replay provenance is missing: {feature_id}"),

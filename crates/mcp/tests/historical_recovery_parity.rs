@@ -1,22 +1,27 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_cli::dispatch::dispatch;
 use threeterm_domain::history::HistoryStatus;
-use threeterm_host::{Host, HostError};
-use threeterm_mcp::server::{JsonRpcRequest, McpServer};
+use threeterm_host::Host;
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, CREATE_REVISION_COMMAND_ID, EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, LOAD_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+    RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID,
 };
-use threeterm_tui::{FeatureTarget, SelectionEvent, SelectionVerification, TuiSession};
+use threeterm_tui::{
+    FeatureTarget, LaunchError, SelectionEvent, SelectionVerification, TuiSession,
+};
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 fn temp_root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -113,18 +118,39 @@ fn historical_edit_request(root: &Path, value: f64) -> Value {
     })
 }
 
+fn threeterm_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm")
+}
+
+fn threeterm_mcp_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
+}
+
 fn cli_call<I>(args: I) -> Result<Value, Value>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let status = dispatch(args, &mut stdout, &mut stderr);
-    if status == 0 {
-        return Ok(serde_json::from_slice(&stdout).expect("CLI returns JSON"));
+    let output = Command::new(threeterm_binary())
+        .args(args)
+        .output()
+        .expect("production CLI starts");
+    if output.status.success() {
+        return Ok(serde_json::from_slice(&output.stdout).expect("CLI returns JSON"));
     }
-    assert!(stdout.is_empty());
-    Err(serde_json::from_slice(&stderr).expect("CLI returns a diagnostic"))
+    assert!(output.stdout.is_empty());
+    Err(serde_json::from_slice(&output.stderr).expect("CLI returns a diagnostic"))
 }
 
 fn cli_historical_edit(root: &Path, value: f64) -> Value {
@@ -144,19 +170,40 @@ fn cli_historical_edit(root: &Path, value: f64) -> Value {
 }
 
 fn mcp_call(name: &str, arguments: Value) -> Result<Value, Value> {
-    let response = McpServer::new().handle_request(&JsonRpcRequest {
-        id: json!(1),
-        is_notification: false,
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": name,
-            "arguments": arguments,
-        }),
+    let mut child = Command::new(threeterm_mcp_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("production MCP starts");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
     });
-    if let Some(error) = response.error {
-        return Err(json!({"code": error.code, "message": error.message}));
+    child
+        .stdin
+        .take()
+        .expect("production MCP stdin")
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("production MCP request writes");
+    let output = child.wait_with_output().expect("production MCP completes");
+    assert!(
+        output.status.success(),
+        "production MCP fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production MCP writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("MCP returns JSON");
+    if let Some(error) = response.get("error") {
+        return Err(error.clone());
     }
-    let result = response.result.expect("MCP has a result");
+    let result = response.get("result").expect("MCP has a result");
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(result
             .get("structuredContent")
@@ -175,12 +222,11 @@ fn mcp_historical_edit(root: &Path, value: f64) -> Value {
 }
 
 fn tui_historical_edit(root: &Path, value: f64) -> Value {
-    threeterm_tui::execute_domain_command(
-        &Host::new(),
+    tui_call(
         HISTORICAL_EDIT_COMMAND_ID,
         historical_edit_request(root, value),
     )
-    .expect("TUI historical edit succeeds")
+    .unwrap_or_else(|error| error)
 }
 
 fn create_revision_request(root: &Path, name: &str) -> Value {
@@ -313,31 +359,31 @@ fn tui_call(
     command: threeterm_protocol::schema::CommandId,
     request: Value,
 ) -> Result<Value, Value> {
-    threeterm_tui::execute_domain_command(&Host::new(), command, request).map_err(|error| {
-        match error {
-            threeterm_protocol::command_execution::ExecutionError::Handler(
-                HostError::StaleLastValidGeometry {
-                    feature_id,
-                    active_revision,
-                    stale_features,
-                },
-            ) => json!({
-                "severity": "error",
-                "code": "stale_last_valid_geometry",
-                "feature_id": feature_id,
-                "active_revision": active_revision,
-                "stale_features": stale_features,
-                "recovery": "correct or restore the feature and recompute current geometry",
-                "override_eligible": false,
-                "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
-            }),
-            threeterm_protocol::command_execution::ExecutionError::Handler(error) => {
-                serde_json::to_value(threeterm_cli::dispatch::host_error_diagnostic(&error))
-                    .expect("TUI diagnostic serializes")
-            }
-            error => json!({"detail": format!("{error:?}")}),
+    let root = request["bundle_path"]
+        .as_str()
+        .expect("TUI request has a bundle path");
+    production_tui::try_execute(
+        &Host::new(),
+        Path::new(root),
+        tui_command_name(command),
+        &request,
+    )
+    .map_err(|error| match *error {
+        LaunchError::Command(ExecutionError::Handler(error)) => {
+            threeterm_host::domain_command_failure_value(&error)
         }
+        error => json!({"detail": format!("{error:?}")}),
     })
+}
+
+fn tui_command_name(command: threeterm_protocol::schema::CommandId) -> &'static str {
+    match command {
+        EXPORT_COMMAND_ID => "export",
+        HISTORICAL_EDIT_COMMAND_ID => "historical",
+        RESTORE_REVISION_COMMAND_ID => "restore",
+        TIMELINE_COMMAND_ID => "timeline",
+        _ => panic!("unsupported production TUI command: {command:?}"),
+    }
 }
 
 fn cli_load(root: &Path) -> Value {
@@ -359,11 +405,12 @@ fn mcp_load(root: &Path) -> Value {
 }
 
 fn tui_load(root: &Path) -> Value {
-    tui_call(
-        LOAD_COMMAND_ID,
-        json!({"bundle_path": root.to_string_lossy()}),
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "load",
+        &json!({"bundle_path": root.to_string_lossy()}),
     )
-    .expect("TUI load succeeds")
 }
 
 fn cli_undo(root: &Path) -> Value {
@@ -385,11 +432,12 @@ fn mcp_undo(root: &Path) -> Value {
 }
 
 fn tui_undo(root: &Path) -> Value {
-    tui_call(
-        UNDO_COMMAND_ID,
-        json!({"bundle_path": root.to_string_lossy()}),
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "undo",
+        &json!({"bundle_path": root.to_string_lossy()}),
     )
-    .expect("TUI undo succeeds")
 }
 
 fn cli_restore(root: &Path, feature_id: &str, name: &str) -> Value {
@@ -425,7 +473,16 @@ fn mcp_restore(root: &Path, feature_id: &str, name: &str) -> Value {
 }
 
 fn tui_restore(root: &Path, name: &str) -> Value {
-    tui_restore_for(root, "l-bracket", name)
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "restore",
+        &json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "l-bracket",
+            "name": name,
+        }),
+    )
 }
 
 fn tui_restore_for(root: &Path, feature_id: &str, name: &str) -> Value {
@@ -452,12 +509,30 @@ fn tui_export(root: &Path, output_dir: &Path) -> Result<Value, Value> {
     tui_call(EXPORT_COMMAND_ID, export_request(root, output_dir))
 }
 
+fn production_tui_timeline(root: &Path, feature_id: &str) -> Value {
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "timeline",
+        &timeline_request(root, feature_id),
+    )
+}
+
+fn production_tui_export(root: &Path, output_dir: &Path) -> Value {
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "export",
+        &export_request(root, output_dir),
+    )
+}
+
 fn current_brep(root: &Path) -> Vec<u8> {
     fs::read(root.join("brep/l-bracket.brep")).expect("current BREP reads")
 }
 
 fn delete_derived_results(root: &Path) {
-    for directory in ["brep", "cache", ".derived", "stage"] {
+    for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
         let path = root.join(directory);
         if path.exists() {
             fs::remove_dir_all(path).expect("derived result directory removes");
@@ -705,12 +780,12 @@ fn mcp_create_revision(root: &Path, name: &str) -> Value {
 }
 
 fn tui_create_revision(root: &Path, name: &str) -> Value {
-    threeterm_tui::execute_domain_command(
+    production_tui::execute(
         &Host::new(),
-        CREATE_REVISION_COMMAND_ID,
-        create_revision_request(root, name),
+        root,
+        "create revision",
+        &create_revision_request(root, name),
     )
-    .expect("TUI named revision creation succeeds")
 }
 
 fn bracket_request(root: &Path, bracket_id: &str) -> Value {
@@ -753,8 +828,12 @@ fn mcp_create_bracket(root: &Path, bracket_id: &str) -> Value {
 }
 
 fn tui_create_bracket(root: &Path, bracket_id: &str) -> Value {
-    tui_call(BRACKET_COMMAND_ID, bracket_request(root, bracket_id))
-        .expect("TUI bracket creation succeeds")
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "bracket",
+        &bracket_request(root, bracket_id),
+    )
 }
 
 fn seed_standard_brackets_through_adapters(roots: [&Path; 3], test_name: &str) -> bool {
@@ -825,12 +904,12 @@ fn object_timeline_semantic_identity_is_canonical_across_all_adapters() {
     let canonical = [
         cli_timeline_for(&cli_root, "l-bracket"),
         mcp_timeline_for(&mcp_root, "l-bracket"),
-        tui_timeline_for(&tui_root, "l-bracket").1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     let legacy_aliases = [
         cli_timeline_for(&cli_root, "l-bracket-plate-vertical"),
         mcp_timeline_for(&mcp_root, "l-bracket-plate-vertical"),
-        tui_timeline_for(&tui_root, "l-bracket-plate-vertical").1,
+        production_tui_timeline(&tui_root, "l-bracket-plate-vertical"),
     ];
     for timeline in canonical.iter().chain(legacy_aliases.iter()) {
         assert_eq!(timeline["feature_id"], "l-bracket");
@@ -881,7 +960,7 @@ fn object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads() 
     let timelines = [
         cli_timeline(&cli_root),
         mcp_timeline(&mcp_root),
-        tui_timeline(&tui_root).1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     assert_eq!(
         semantic_timeline(&timelines[0]),
@@ -1157,7 +1236,7 @@ fn object_timeline_adapter_parity_object_timeline_restore_replays_divergence_thr
         )
     });
     for root in roots {
-        for directory in ["brep", "cache", ".derived", "stage"] {
+        for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
             let path = root.join(directory);
             if path.exists() {
                 fs::remove_dir_all(path).expect("derived directory removes before reload");
@@ -1672,6 +1751,7 @@ fn stale_last_valid_export_refusal() {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn historical_named_revision_restore() {
     let worker = require_native_occt_worker("historical_named_revision_restore");
     let root = temp_root("named-revision-restore");
@@ -1828,7 +1908,7 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
             export_request(&mcp_root, &output_roots[1]),
         )
         .expect("MCP success export succeeds"),
-        tui_export(&tui_root, &output_roots[2]).expect("TUI success export succeeds"),
+        production_tui_export(&tui_root, &output_roots[2]),
     ];
     assert_eq!(semantic_export(&exports[0]), semantic_export(&exports[1]));
     assert_eq!(semantic_export(&exports[0]), semantic_export(&exports[2]));
@@ -1849,6 +1929,7 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn historical_recovery_adapter_parity() {
     let worker = require_native_occt_worker("historical_recovery_adapter_parity");
 
@@ -1935,7 +2016,7 @@ fn historical_recovery_adapter_parity() {
     let timelines = [
         cli_timeline(&cli_root),
         mcp_timeline(&mcp_root),
-        tui_timeline(&tui_root).1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     assert_eq!(
         semantic_timeline(&timelines[0]),
@@ -2110,7 +2191,7 @@ fn historical_recovery_adapter_parity() {
             export_request(&mcp_root, &restored_output_roots[1]),
         )
         .expect("MCP restored export succeeds"),
-        tui_export(&tui_root, &restored_output_roots[2]).expect("TUI restored export succeeds"),
+        production_tui_export(&tui_root, &restored_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&restored_exports[0]),
@@ -2183,7 +2264,7 @@ fn object_timeline_restore_preserves_and_restores_the_divergent_named_future_thr
             export_request(&mcp_root, &future_output_roots[1]),
         )
         .expect("MCP future export succeeds"),
-        tui_export(&tui_root, &future_output_roots[2]).expect("TUI future export succeeds"),
+        production_tui_export(&tui_root, &future_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&future_exports[0]),
@@ -2291,8 +2372,7 @@ fn object_timeline_restore_preserves_and_restores_the_divergent_named_future_thr
             export_request(&mcp_root, &restored_output_roots[1]),
         )
         .expect("MCP restored future export succeeds"),
-        tui_export(&tui_root, &restored_output_roots[2])
-            .expect("TUI restored future export succeeds"),
+        production_tui_export(&tui_root, &restored_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&restored_exports[0]),

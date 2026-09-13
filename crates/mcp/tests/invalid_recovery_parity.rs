@@ -293,12 +293,7 @@ fn invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostic
         assert_eq!(canonical_files(root), files.clone());
         assert_eq!(file_inventory(root), inventory.clone());
         assert!(!root.join("brep/invalid-cut.brep").exists());
-        assert!(
-            fs::read_dir(root.join("stage"))
-                .expect("stage directory reads")
-                .next()
-                .is_none()
-        );
+        assert!(!root.join("stage").exists());
     }
 
     for root in [&cli_root, &mcp_root, &tui_root] {

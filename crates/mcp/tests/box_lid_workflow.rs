@@ -665,23 +665,23 @@ fn box_lid_adapter_parity() {
         "CLI and TUI lid geometry differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].0),
-        portable_extrude_response(&outcomes[1].0),
+        portable_extrude_response(outcomes[0].0),
+        portable_extrude_response(outcomes[1].0),
         "CLI and MCP box domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].0),
-        portable_extrude_response(&outcomes[2].0),
+        portable_extrude_response(outcomes[0].0),
+        portable_extrude_response(outcomes[2].0),
         "CLI and TUI box domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].1),
-        portable_extrude_response(&outcomes[1].1),
+        portable_extrude_response(outcomes[0].1),
+        portable_extrude_response(outcomes[1].1),
         "CLI and MCP lid domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].1),
-        portable_extrude_response(&outcomes[2].1),
+        portable_extrude_response(outcomes[0].1),
+        portable_extrude_response(outcomes[2].1),
         "CLI and TUI lid domain results differ"
     );
     assert_eq!(outcomes[0].2, outcomes[1].2, "canonical geometry differs");

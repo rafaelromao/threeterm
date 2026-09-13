@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -74,6 +76,99 @@ fn required_worker(test_name: &str) -> bool {
             false
         }
     }
+}
+
+fn threeterm_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm")
+}
+
+fn threeterm_mcp_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
+}
+
+fn production_cli_bracket(root: &Path) -> Value {
+    let output = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(root)
+        .args([
+            "--bracket-id",
+            "l-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("production CLI starts");
+    assert!(
+        output.status.success(),
+        "production CLI bracket fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production CLI bracket writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("production CLI returns JSON")
+}
+
+fn production_mcp_bracket(root: &Path) -> Value {
+    let mut child = Command::new(threeterm_mcp_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("production MCP starts");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.bracket/1",
+            "arguments": bracket_request(root),
+        }
+    });
+    child
+        .stdin
+        .take()
+        .expect("production MCP stdin")
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("production MCP request writes");
+    let output = child.wait_with_output().expect("production MCP completes");
+    assert!(
+        output.status.success(),
+        "production MCP bracket fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production MCP bracket writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("production MCP returns JSON");
+    assert!(
+        response["error"].is_null(),
+        "production MCP returns an error: {response}"
+    );
+    response["result"]["structuredContent"].clone()
 }
 
 fn bracket_request(root: &Path) -> Value {
@@ -475,14 +570,8 @@ fn l_bracket_adapter_parity() {
         Bundle::create(path).expect("bundle creates");
     }
 
-    let cli =
-        dispatch_registered_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&cli_root))
-            .expect("CLI bracket command commits");
-    let mcp = mcp_call(
-        &McpServer::new(),
-        "threeterm.command.bracket/1",
-        bracket_request(&mcp_root),
-    );
+    let cli = production_cli_bracket(&cli_root);
+    let mcp = production_mcp_bracket(&mcp_root);
     let tui = execute_domain_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&tui_root))
         .expect("TUI bracket command commits");
 
@@ -773,11 +862,12 @@ fn l_bracket_artifact_discard_replay() {
 
         fs::remove_file(session.root().join("brep/l-bracket.brep"))
             .expect("derived bracket BREP removes");
-        for disposable in ["cache", ".derived", ".canonical-brep"] {
+        for disposable in ["cache", ".derived", ".canonical-brep", "stage"] {
             let path = session.root().join(disposable);
             if path.exists() {
-                fs::remove_dir_all(path).expect("disposable derived directory removes");
+                fs::remove_dir_all(&path).expect("disposable derived directory removes");
             }
+            assert!(!path.exists(), "derived result remains at {path:?}");
         }
         if let Ok(entries) = fs::read_dir(session.root().join("exports")) {
             for entry in entries {

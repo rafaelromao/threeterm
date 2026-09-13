@@ -31,6 +31,20 @@ done
 [[ "${GATE_EXITS[0]}" == 124 ]]
 [[ "${GATE_TIMED_OUT[0]}" == true ]]
 [[ "${GATE_DURATIONS_MS[0]}" =~ ^[1-9][0-9]*$ ]]
+timeout_log="${GATE_LOGS[0]}"
+timeout_bytes="$(wc -c <"${timeout_log}" | tr -d ' ')"
+timeout_sha256="$(sha256sum "${timeout_log}" | cut -d' ' -f1)"
+[[ "${GATE_LOG_BYTES[0]}" == "${timeout_bytes}" ]]
+[[ "${GATE_LOG_SHA256[0]}" == "${timeout_sha256}" ]]
+gate_metadata="$(jq -cn \
+    --arg path "$(realpath --relative-to="${ROOT}" "${timeout_log}")" \
+    --argjson bytes "${GATE_LOG_BYTES[0]}" \
+    --arg sha256 "${GATE_LOG_SHA256[0]}" \
+    '{path: $path, bytes: $bytes, sha256: $sha256}')"
+jq -e \
+    '(.path | type == "string" and length > 0) and
+     (.bytes | type == "number" and . > 0) and
+     (.sha256 | test("^[0-9a-f]{64}$"))' <<<"${gate_metadata}" >/dev/null
 
 run_gate test.after 'a later gate still executes after timeout' true
 [[ "${GATE_IDS[1]}" == test.after ]]

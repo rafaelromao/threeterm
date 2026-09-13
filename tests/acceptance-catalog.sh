@@ -15,7 +15,9 @@ gate_count="$(grep -Ec '^run_gate ' "${SCRIPT}")"
 }
 
 for gate in \
+    l_bracket_adapter_parity \
     l_bracket_artifact_discard_replay \
+    box_lid_adapter_parity \
     box_lid_artifact_discard_replay \
     reusable_geometry_artifact_discard_replay \
     successful_historical_edit_has_equivalent_current_geometry_through_all_adapters \
@@ -40,6 +42,7 @@ for required in \
     'schema_version' \
     'release.sh verify' \
     'verify_performance_material' \
+    'verify_native_worker_manifest' \
     'tools_list_advertises_every_registered_command_with_populated_schemas' \
     'THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS' \
     'THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS' \

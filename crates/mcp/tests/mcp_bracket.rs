@@ -42,12 +42,10 @@ fn threeterm_binary() -> PathBuf {
         return PathBuf::from(path);
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("threeterm")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("..").join("..").join("target"));
+    target.join("debug/threeterm")
 }
 
 fn threeterm_mcp_binary() -> PathBuf {
@@ -55,12 +53,10 @@ fn threeterm_mcp_binary() -> PathBuf {
         return PathBuf::from(path);
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("threeterm-mcp")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("..").join("..").join("target"));
+    target.join("debug/threeterm-mcp")
 }
 
 fn require_native_occt_worker(test_name: &str) -> bool {
@@ -1606,11 +1602,45 @@ fn mcp_process_browses_and_restores_the_divergent_feature_timeline() {
             .features
             .contains_key("third-base")
     );
-    let _ = std::fs::remove_dir_all(root.join("brep"));
+    let expected_graph = loaded.feature_graph_hash_hex().to_string();
+    let expected_revision = loaded.revision_hash_hex().to_string();
+    let expected_transaction_count = loaded.log.len();
+    let expected_terminal_log_digest = loaded.manifest.terminal_log_digest.clone();
+    let expected_worker_fingerprint =
+        serde_json::to_value(&loaded.manifest.occt_worker).expect("worker fingerprint serializes");
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let transactions_before =
+        std::fs::read(root.join("transactions.log")).expect("transactions read");
+    for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
+        let path = root.join(directory);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).expect("derived result directory removes");
+        }
+        assert!(!path.exists(), "derived result remains at {path:?}");
+    }
     let reloaded = threeterm_host::Host::new()
         .load_with_geometry_replay(&root)
         .expect("restored bundle replays after derived results are removed");
-    assert_eq!(reloaded.revision_hash, restored["revision_hash"]);
+    assert_eq!(reloaded.feature_graph_hash, expected_graph);
+    assert_eq!(reloaded.revision_hash, expected_revision);
+    let after = Bundle::at(&root).open().expect("replayed bundle opens");
+    assert_eq!(after.log.len(), expected_transaction_count);
+    assert_eq!(
+        after.manifest.terminal_log_digest,
+        expected_terminal_log_digest
+    );
+    assert_eq!(
+        serde_json::to_value(&after.manifest.occt_worker).expect("worker fingerprint serializes"),
+        expected_worker_fingerprint
+    );
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads after replay"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transactions read after replay"),
+        transactions_before
+    );
 
     let post_restore = mcp_call(
         find(TIMELINE_COMMAND_ID)

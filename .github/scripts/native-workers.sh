@@ -135,6 +135,61 @@ worker_linked_libraries() {
     done | jq -s 'unique_by(.path) | sort_by(.path)'
 }
 
+verify_native_worker_manifest() {
+    local manifest="${1:-${CARGO_TARGET_DIR}/native-worker-manifest.json}"
+    local artifact_root="${2:-${CARGO_TARGET_DIR}/libslvs-artifact}"
+    [[ -f "${manifest}" ]] || return 1
+    jq -e \
+        --arg image "${NATIVE_ARCH_IMAGE}" \
+        --arg occt_repository "${OCCT_SOURCE_REPOSITORY}" \
+        --arg occt_commit "${OCCT_SOURCE_COMMIT}" \
+        --arg slvs_repository "${SLVS_SOURCE_REPOSITORY}" \
+        --arg slvs_commit "${SLVS_SOURCE_COMMIT}" '
+        .schema_version == "threeterm.ci.native-workers/2" and
+        .container_image == $image and
+        (.workers.occt.worker_id == "occt") and
+        (.workers.libslvs.worker_id == "slvs") and
+        (.workers.occt.worker_schema_version == "threeterm.workers.occt/1") and
+        (.workers.libslvs.worker_schema_version == "threeterm.workers.slvs/1") and
+        (.workers.occt.protocol_schema_version == "threeterm.protocol/1") and
+        (.workers.libslvs.protocol_schema_version == "threeterm.protocol/1") and
+        (.workers.occt.source_repository == $occt_repository) and
+        (.workers.occt.source_commit == $occt_commit) and
+        (.workers.libslvs.source_repository == $slvs_repository) and
+        (.workers.libslvs.source_commit == $slvs_commit) and
+        (.workers.occt.package_identity == "source-commit") and
+        (.workers.libslvs.package_identity == "source-commit") and
+        (.workers.occt.executed == true) and
+        (.workers.libslvs.executed == true) and
+        (.workers.occt.executable.path | type == "string" and length > 0) and
+        (.workers.libslvs.executable.path | type == "string" and length > 0) and
+        (.workers.occt.executable.sha256 | test("^[0-9a-f]{64}$")) and
+        (.workers.libslvs.executable.sha256 | test("^[0-9a-f]{64}$")) and
+        (.workers.occt.linked_libraries | type == "array" and length > 0 and all(.[]; (.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))) and
+        (.workers.libslvs.linked_libraries | type == "array" and length > 0 and all(.[]; (.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))) and
+        (.libslvs_artifact.manifest_path == "libslvs-artifact/manifest.json") and
+        (.libslvs_artifact.manifest_sha256 | test("^[0-9a-f]{64}$"))
+        ' "${manifest}" >/dev/null || return 1
+
+    local path expected actual
+    while IFS=$'\t' read -r path expected; do
+        [[ -x "${path}" ]] || return 1
+        actual="$(sha256sum "${path}" | cut -d' ' -f1)"
+        [[ "${actual}" == "${expected}" ]] || return 1
+    done < <(jq -r '.workers | to_entries[] | .value.executable | [.path, .sha256] | @tsv' "${manifest}")
+    while IFS=$'\t' read -r path expected; do
+        [[ -f "${path}" ]] || return 1
+        actual="$(sha256sum "${path}" | cut -d' ' -f1)"
+        [[ "${actual}" == "${expected}" ]] || return 1
+    done < <(jq -r '.workers | to_entries[] | .value.linked_libraries[] | [.path, .sha256] | @tsv' "${manifest}")
+
+    verify_libslvs_artifact "${artifact_root}/manifest.json" "${artifact_root}" || return 1
+    [[ "$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)" == \
+        "$(jq -er '.libslvs_artifact.manifest_sha256' "${manifest}")" ]] || return 1
+    [[ "$(jq -er '.artifact.executable.sha256' "${artifact_root}/manifest.json")" == \
+        "$(jq -er '.workers.libslvs.executable.sha256' "${manifest}")" ]] || return 1
+}
+
 finalize_native_worker_manifest() {
     local occt_worker="$1"
     local slvs_worker="$2"

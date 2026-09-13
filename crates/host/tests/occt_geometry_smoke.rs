@@ -65,11 +65,7 @@ fn smoke_diagnostic(code: &str, detail: impl std::fmt::Display) -> ! {
 fn evidence_root() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .expect("repository root resolves")
-                .join("target")
-        })
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
         .join("occt-geometry-smoke")
 }
 
@@ -100,16 +96,28 @@ fn linked_library_evidence(worker: &Path) -> (Vec<Value>, Vec<Value>) {
                 format!("unresolved linked library: {line}"),
             );
         }
-        let Some((name, resolved)) = line.split_once("=>") else {
-            continue;
+        let (name, path) = if let Some((name, resolved)) = line.split_once("=>") {
+            let Some(path) = resolved.split_whitespace().next() else {
+                continue;
+            };
+            if !path.starts_with('/') {
+                continue;
+            }
+            (name.trim().to_owned(), PathBuf::from(path))
+        } else {
+            let Some(path) = line.split_whitespace().next() else {
+                continue;
+            };
+            if !path.starts_with('/') {
+                continue;
+            }
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_owned();
+            (name, PathBuf::from(path))
         };
-        let Some(path) = resolved.split_whitespace().next() else {
-            continue;
-        };
-        if !path.starts_with('/') {
-            continue;
-        }
-        let path = PathBuf::from(path);
         if !path.is_file() {
             smoke_diagnostic(
                 "worker_unavailable",
@@ -117,13 +125,16 @@ fn linked_library_evidence(worker: &Path) -> (Vec<Value>, Vec<Value>) {
             );
         }
         let identity = json!({
-            "name": name.trim(),
+            "name": name,
             "path": path,
             "sha256": sha256_file(&path).unwrap_or_else(|error| {
                 smoke_diagnostic("worker_identity", format!("kernel library hash failed: {error}"))
             }),
         });
-        if name.trim_start().starts_with("libTK") {
+        if identity["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("libTK"))
+        {
             kernel.push(identity.clone());
         }
         linked.push(identity);
@@ -181,7 +192,15 @@ fn real_occt_geometry_smoke() {
     let worker_hash = sha256_file(&worker_path).unwrap_or_else(|error| {
         smoke_diagnostic("worker_identity", format!("worker hash: {error}"))
     });
-    assert_eq!(worker_hash, fingerprint.binary_sha256);
+    if worker_hash != fingerprint.binary_sha256 {
+        smoke_diagnostic(
+            "worker_identity",
+            format!(
+                "worker fingerprint hash {} differs from executed binary hash {}",
+                fingerprint.binary_sha256, worker_hash
+            ),
+        );
+    }
     let (linked_libraries, kernel_libraries) = linked_library_evidence(&worker_path);
 
     let export_worker =
@@ -195,14 +214,25 @@ fn real_occt_geometry_smoke() {
     let export_worker_hash = sha256_file(&export_worker_path).unwrap_or_else(|error| {
         smoke_diagnostic("worker_identity", format!("export worker hash: {error}"))
     });
-    assert_eq!(
-        export_worker_path, worker_path,
-        "export must resolve the same pinned OCCT worker"
-    );
-    assert_eq!(
-        export_worker_hash, worker_hash,
-        "export must resolve the same OCCT worker binary"
-    );
+    if export_worker_path != worker_path {
+        smoke_diagnostic(
+            "worker_identity",
+            format!(
+                "export resolved {} instead of {}",
+                export_worker_path.display(),
+                worker_path.display()
+            ),
+        );
+    }
+    if export_worker_hash != worker_hash {
+        smoke_diagnostic(
+            "worker_identity",
+            format!(
+                "export worker hash {} differs from smoke worker hash {}",
+                export_worker_hash, worker_hash
+            ),
+        );
+    }
 
     let workspace = SmokeWorkspace::new();
     Bundle::create(&workspace.project).expect("isolated project creates");

@@ -7793,7 +7793,13 @@ impl Host {
             Some((bytes, derived.artifact.sha256.as_str())),
         )
         .map_err(|detail| HostError::BrepIo { detail })?;
-        let content = Self::authenticated_replay_bytes(root, loaded, feature_id, &content)?;
+        let content = Self::authenticated_replay_bytes(
+            root,
+            loaded,
+            feature_id,
+            derived.artifact.request_id.as_str(),
+            &content,
+        )?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),
@@ -7806,6 +7812,7 @@ impl Host {
         _root: &Path,
         loaded: &LoadedBundle,
         feature_id: &str,
+        request_id: &str,
         replayed: &[u8],
     ) -> Result<Vec<u8>, HostError> {
         let entry = loaded
@@ -7817,6 +7824,10 @@ impl Host {
                 entry.feature_id == feature_id
                     && entry.brep_byte_count.is_some()
                     && entry.brep_sha256.is_some()
+                    && entry
+                        .intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.request_id() == request_id)
             })
             .ok_or_else(|| HostError::Validation {
                 detail: format!("replay provenance is missing: {feature_id}"),

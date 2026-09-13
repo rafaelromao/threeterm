@@ -409,8 +409,8 @@ run_gate documentation.workspace \
         grep -Fq "Headless Automation adapters" README.md
         grep -Fq "CLI and MCP do not provide a graphical viewport" README.md
         grep -Fq "bash .github/scripts/acceptance.sh" README.md
-        grep -Fq 'PODMAN_ROOTLESS: "1"' .github/workflows/e2e.yml
-        grep -Fq 'docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309' .github/workflows/e2e.yml
+        grep -Fq "PODMAN_ROOTLESS: \"1\"" .github/workflows/e2e.yml
+        grep -Fq "docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309" .github/workflows/e2e.yml
         grep -Fq "cargo run -p threeterm-cli --bin threeterm" docs/research/rehearsal-evidence/README.md
         grep -Fq -- "--machine rehearse" docs/research/rehearsal-evidence/README.md
         grep -Fq "threeterm-tui" crates/tui/Cargo.toml

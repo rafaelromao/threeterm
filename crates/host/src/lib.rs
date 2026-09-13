@@ -36,18 +36,17 @@ use threeterm_occt_worker::{
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, BRACKET_INTENT_SCHEMA_VERSION, BracketDeterministicInputs,
-    Bundle, BundleError, CANONICAL_BREP_CHECKPOINT_SUBDIR, CHAMFER_INTENT_SCHEMA_VERSION,
-    CanonicalBooleanIntent, CanonicalBracketIntent, CanonicalChamferIntent,
-    CanonicalCircularPatternIntent, CanonicalDraftIntent, CanonicalEdgeReference,
-    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
-    CanonicalLinearPatternIntent, CanonicalLoftIntent, CanonicalMirrorIntent,
-    CanonicalRevolveIntent, CanonicalShellIntent, CircularPatternDeterministicInputs,
-    DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance,
-    ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION, HOLE_INTENT_SCHEMA_VERSION,
-    HistoryBrepReplacement, HoleDeterministicInputs, LOFT_INTENT_SCHEMA_VERSION,
-    LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle, MirrorDeterministicInputs,
-    RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load, load_with_policy,
-    previous_generation_path, replay_canonical_state,
+    Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalBooleanIntent,
+    CanonicalBracketIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
+    CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
+    CanonicalHoleIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalLoftIntent,
+    CanonicalMirrorIntent, CanonicalRevolveIntent, CanonicalShellIntent,
+    CircularPatternDeterministicInputs, DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION,
+    EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION,
+    HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement, HoleDeterministicInputs,
+    LOFT_INTENT_SCHEMA_VERSION, LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle,
+    MirrorDeterministicInputs, RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load,
+    load_with_policy, previous_generation_path, replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -7799,7 +7798,7 @@ impl Host {
     }
 
     fn authenticated_replay_bytes(
-        root: &Path,
+        _root: &Path,
         loaded: &LoadedBundle,
         feature_id: &str,
         replayed: &[u8],
@@ -7833,18 +7832,9 @@ impl Host {
             return Ok(replayed.to_vec());
         }
 
-        let checkpoint = root
-            .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
-            .join(format!("{feature_id}.brep"));
-        if !checkpoint.is_file() {
-            return Err(HostError::BrepIo {
-                detail: format!(
-                    "replayed BREP does not match authenticated geometry: {feature_id}"
-                ),
-            });
-        }
-        read_brep_verified(&checkpoint, Some((expected_bytes, expected_sha)))
-            .map_err(|detail| HostError::BrepIo { detail })
+        Err(HostError::BrepIo {
+            detail: format!("replayed BREP does not match authenticated geometry: {feature_id}"),
+        })
     }
 
     /* fn load_with_extrude_replay_legacy(
@@ -13338,19 +13328,13 @@ fn replay_finishing_geometry(
                 Some((result.brep_bytes, result.brep_sha256.as_str())),
             )
             .map_err(|detail| HostError::BrepIo { detail })?;
-            let bytes = if bytes.len() != expected_bytes || sha256_hex(&bytes) != expected_sha {
-                let checkpoint = root
-                    .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
-                    .join(format!("{feature_id}.brep"));
-                if checkpoint.is_file() {
-                    read_brep_verified(&checkpoint, Some((expected_bytes, expected_sha)))
-                        .map_err(|detail| HostError::BrepIo { detail })?
-                } else {
-                    bytes
-                }
-            } else {
-                bytes
-            };
+            if bytes.len() != expected_bytes || sha256_hex(&bytes) != expected_sha {
+                return Err(HostError::BrepIo {
+                    detail: format!(
+                        "replayed finishing BREP does not match authenticated geometry: {feature_id}"
+                    ),
+                });
+            }
             bytes
         }};
     }

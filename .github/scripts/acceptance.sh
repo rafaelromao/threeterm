@@ -25,6 +25,10 @@ ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
+EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
+EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
+EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
+EXPECTED_PROTOCOL_SCHEMA='threeterm.protocol/1'
 if ! mkdir -p "$(dirname "${CATALOG}")"; then
     printf '%s\n' 'acceptance catalog: unable to create catalog directory' >&2
     exit 1
@@ -38,7 +42,7 @@ if ! mkdir -p "${LOG_ROOT}"; then
     exit 1
 fi
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
@@ -428,6 +432,10 @@ if [[ ! -f "${NATIVE_MANIFEST}" ]] || ! jq -e '
     EVIDENCE_VALID=false
 fi
 if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
+    .worker.source_repository == $source_repository and
+    .worker.source_commit == $source_commit and
+    .worker.worker_schema_version == $worker_schema and
+    .worker.protocol_schema_version == $protocol_schema and
     .schema_version == "threeterm.smoke.real-occt/1" and
     .test == "real_occt_geometry_smoke" and
     (.worker.path | type == "string" and length > 0) and
@@ -437,7 +445,11 @@ if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
     (.kernel.occt_libraries | type == "array" and length > 0) and
     all(.kernel.linked_libraries[]; (.path | type == "string" and startswith("/")) and (.sha256 | test("^[0-9a-f]{64}$"))) and
     all(.kernel.occt_libraries[]; (.path | type == "string" and startswith("/")) and (.sha256 | test("^[0-9a-f]{64}$")))
-    ' "${OCCT_SMOKE_EVIDENCE}" >/dev/null 2>&1; then
+    ' --arg source_repository "${EXPECTED_OCCT_SOURCE_REPOSITORY}" \
+      --arg source_commit "${EXPECTED_OCCT_SOURCE_COMMIT}" \
+      --arg worker_schema "${EXPECTED_OCCT_WORKER_SCHEMA}" \
+      --arg protocol_schema "${EXPECTED_PROTOCOL_SCHEMA}" \
+      "${OCCT_SMOKE_EVIDENCE}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
 if [[ ! -f "${SCHEMA_RESPONSE}" ]] || [[ ! -f "${SCHEMA_PROJECT}/manifest.json" ]] || \

@@ -643,7 +643,7 @@ for index in "${!GATE_IDS[@]}"; do
         --arg command "${GATE_COMMANDS[${index}]}" \
         --arg status "${GATE_STATUSES[${index}]}" \
         --argjson exit_status "${GATE_EXITS[${index}]}" \
-        --argjson timed_out "${GATE_TIMED_OUT[${index]}:-false}" \
+        --argjson timed_out "${GATE_TIMED_OUT[$index]:-false}" \
         --argjson duration_ms "${GATE_DURATIONS_MS[${index}]:-0}" \
         --argjson output "${output_json}" \
         '. + [{id: $id, command: $command, status: $status,

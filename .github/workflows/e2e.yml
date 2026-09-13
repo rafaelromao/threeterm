@@ -25,6 +25,7 @@ jobs:
     env:
       PODMAN_ROOTLESS: "1"
       THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
+      THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,6 +58,7 @@ jobs:
               -v "${HOME}/.cargo:/root/.cargo" \
               -w /workspace \
               -e "THREETERM_EXPECTED_ACCEPTANCE_RESULT=${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
+              -e "THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS=${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS}" \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash -lc '
                 set -euo pipefail

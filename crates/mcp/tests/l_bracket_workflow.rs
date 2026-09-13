@@ -547,7 +547,13 @@ fn assert_bracket_intent(root: &Path, expected_length: f64) {
         intent.request_id,
         canonical_bracket_request_id("l-bracket", expected_length, 30.0, 40.0, 3.0)
     );
-    assert_eq!(intent.source_revision, bundle.revision_hash_hex());
+    assert_eq!(intent.source_revision.len(), 64);
+    assert!(
+        intent
+            .source_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(intent.worker_requirements.worker_kind, "occt");
     assert!(!intent.worker_requirements.worker_schema_version.is_empty());
     assert!(

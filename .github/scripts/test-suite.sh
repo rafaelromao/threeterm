@@ -12,6 +12,9 @@ case "${1:-}" in
         # installed.
         cargo test --workspace -- \
             --skip supervised_occt_extrude \
+            --skip supervised_occt_replay \
+            --skip canonical_extrude_replay \
+            --skip adapter_command_parity \
             --skip required_occt_worker \
             --skip historical_named_revision_restore \
             --skip historical_recovery_adapter_parity \

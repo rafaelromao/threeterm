@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_cli::dispatch::dispatch;
 use threeterm_domain::history::HistoryStatus;
 use threeterm_host::{Host, HostError};
-use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
@@ -113,18 +113,39 @@ fn historical_edit_request(root: &Path, value: f64) -> Value {
     })
 }
 
+fn threeterm_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm")
+}
+
+fn threeterm_mcp_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
+}
+
 fn cli_call<I>(args: I) -> Result<Value, Value>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let status = dispatch(args, &mut stdout, &mut stderr);
-    if status == 0 {
-        return Ok(serde_json::from_slice(&stdout).expect("CLI returns JSON"));
+    let output = Command::new(threeterm_binary())
+        .args(args)
+        .output()
+        .expect("production CLI starts");
+    if output.status.success() {
+        return Ok(serde_json::from_slice(&output.stdout).expect("CLI returns JSON"));
     }
-    assert!(stdout.is_empty());
-    Err(serde_json::from_slice(&stderr).expect("CLI returns a diagnostic"))
+    assert!(output.stdout.is_empty());
+    Err(serde_json::from_slice(&output.stderr).expect("CLI returns a diagnostic"))
 }
 
 fn cli_historical_edit(root: &Path, value: f64) -> Value {
@@ -144,19 +165,40 @@ fn cli_historical_edit(root: &Path, value: f64) -> Value {
 }
 
 fn mcp_call(name: &str, arguments: Value) -> Result<Value, Value> {
-    let response = McpServer::new().handle_request(&JsonRpcRequest {
-        id: json!(1),
-        is_notification: false,
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": name,
-            "arguments": arguments,
-        }),
+    let mut child = Command::new(threeterm_mcp_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("production MCP starts");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
     });
-    if let Some(error) = response.error {
-        return Err(json!({"code": error.code, "message": error.message}));
+    child
+        .stdin
+        .take()
+        .expect("production MCP stdin")
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("production MCP request writes");
+    let output = child.wait_with_output().expect("production MCP completes");
+    assert!(
+        output.status.success(),
+        "production MCP fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production MCP writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("MCP returns JSON");
+    if let Some(error) = response.get("error") {
+        return Err(error.clone());
     }
-    let result = response.result.expect("MCP has a result");
+    let result = response.get("result").expect("MCP has a result");
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(result
             .get("structuredContent")
@@ -1672,6 +1714,7 @@ fn stale_last_valid_export_refusal() {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn historical_named_revision_restore() {
     let worker = require_native_occt_worker("historical_named_revision_restore");
     let root = temp_root("named-revision-restore");
@@ -1849,6 +1892,7 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn historical_recovery_adapter_parity() {
     let worker = require_native_occt_worker("historical_recovery_adapter_parity");
 

@@ -77,8 +77,8 @@ checksums.
 The interactive MVP supports only a direct local `xterm-ghostty/1.3.1-arch2`
 attachment with the positively probed Terminal Capability Vector described as
 the Official Interactive Environment. `threeterm-tui` owns that interactive
-surface; `threeterm` and `threeterm-mcp` are Headless Automation adapters. All
-three adapters consume the same versioned domain command registry and Project
+surface; `threeterm` and `threeterm-mcp` are Headless Automation adapters. The
+CLI, MCP, and TUI all consume the same versioned domain command registry and Project
 Manifest contract, but CLI and MCP do not provide a graphical viewport or
 replace the direct-Ghostty capability gate.
 

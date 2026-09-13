@@ -610,11 +610,7 @@ fn tools_list_advertises_every_registered_command_with_populated_schemas() {
             .find(|tool| tool["name"] == schema.schema_version)
             .expect("every registered command is advertised");
         assert_eq!(tool["inputSchema"], schema.request_schema);
-        if schema.response_schema["type"] == "object" {
-            assert_eq!(tool["outputSchema"], schema.response_schema);
-        } else {
-            assert!(tool.get("outputSchema").is_none());
-        }
+        assert_eq!(tool["outputSchema"], schema.response_schema);
     }
 }
 

@@ -87,26 +87,29 @@ run_gate() {
     started_ms="$(date +%s%3N)"
     setsid --wait -- "$@" >>"${log}" 2>&1 &
     pid=$!
-    (
-        sleep "${GATE_TIMEOUT_SECONDS}"
-        if kill -0 "${pid}" 2>/dev/null; then
-            printf '%s\n' 'gate watchdog: timeout expired; terminating process group' >>"${log}"
-            printf '%s\n' timed_out >"${timeout_marker}"
-            kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
-            sleep "${GATE_KILL_GRACE_SECONDS}"
-            if kill -0 -- "-${pid}" 2>/dev/null; then
-                printf '%s\n' 'gate watchdog: grace period expired; killing process group' >>"${log}"
-                kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    setsid --wait -- bash -e -u -o pipefail -c "
+        sleep \"\$1\"
+        if kill -0 \"\$2\" 2>/dev/null; then
+            printf '%s\\n' 'gate watchdog: timeout expired; terminating process group' >>\"\$3\"
+            printf '%s\\n' timed_out >\"\$4\"
+            kill -TERM -- \"-\$2\" 2>/dev/null || kill -TERM \"\$2\" 2>/dev/null || true
+            sleep \"\$5\"
+            if kill -0 -- \"-\$2\" 2>/dev/null; then
+                printf '%s\\n' 'gate watchdog: grace period expired; killing process group' >>\"\$3\"
+                kill -KILL -- \"-\$2\" 2>/dev/null || kill -KILL \"\$2\" 2>/dev/null || true
             fi
         fi
-    ) &
+    " _ "${GATE_TIMEOUT_SECONDS}" "${pid}" "${log}" "${timeout_marker}" "${GATE_KILL_GRACE_SECONDS}" &
     watchdog_pid=$!
     if wait "${pid}"; then
         status=0
     else
         status=$?
     fi
-    kill "${watchdog_pid}" 2>/dev/null || true
+    kill -TERM -- "-${watchdog_pid}" 2>/dev/null || kill -TERM "${watchdog_pid}" 2>/dev/null || true
+    if kill -0 -- "-${watchdog_pid}" 2>/dev/null; then
+        kill -KILL -- "-${watchdog_pid}" 2>/dev/null || true
+    fi
     wait "${watchdog_pid}" 2>/dev/null || true
     finished_ms="$(date +%s%3N)"
     duration_ms=$((finished_ms - started_ms))

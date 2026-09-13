@@ -77,8 +77,7 @@ impl ToolDescriptor {
             name: schema.schema_version.to_string(),
             description: "ThreeTerm versioned domain command (see threeterm_protocol::schema).",
             input_schema: schema.request_schema.clone(),
-            output_schema: (schema.response_schema["type"] == "object")
-                .then(|| schema.response_schema.clone()),
+            output_schema: Some(schema.response_schema.clone()),
         }
     }
 }

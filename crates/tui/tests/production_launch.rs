@@ -807,7 +807,12 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .expect("keyboard-only production workflow succeeds");
 
     let identity = host.identity(&root).expect("committed identity reads");
-    assert_eq!(identity.transaction_count, before.transaction_count + 1);
+    assert_eq!(
+        identity.transaction_count,
+        before.transaction_count + 1,
+        "identity={identity:?}, before={before:?}, writes={}",
+        String::from_utf8_lossy(&terminal.writes)
+    );
     assert_ne!(identity.revision_hash, before.revision_hash);
     assert!(root.join("brep/keyboard-extrude.brep").is_file());
 

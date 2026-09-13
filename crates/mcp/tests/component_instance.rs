@@ -1150,7 +1150,11 @@ fn component_scene_from_host_for(host: &Host, feature_ids: &[&str]) -> Vec<Scene
     assert_eq!(
         solids.len(),
         feature_ids.len(),
-        "all component instances render"
+        "all component instances render; requested={feature_ids:?}, rendered={:?}",
+        solids
+            .iter()
+            .map(|solid| solid.feature_id.as_str())
+            .collect::<Vec<_>>()
     );
     assert!(
         solids.iter().all(|solid| !solid.triangles.is_empty()),

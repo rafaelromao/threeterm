@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use threeterm_cli::dispatch::dispatch_registered_command;
@@ -90,6 +92,19 @@ fn supports_interactive_draft(command: &str) -> bool {
     )
 }
 
+fn launched_roots() -> &'static Mutex<HashSet<std::path::PathBuf>> {
+    static ROOTS: OnceLock<Mutex<HashSet<std::path::PathBuf>>> = OnceLock::new();
+    ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn dispatch_semantic_command(host: &Host, command: &str, request: &Value) -> Value {
+    let command_id = find_by_name(command_name(command))
+        .expect("semantic TUI command is registered")
+        .id;
+    dispatch_registered_command(host, command_id, request.clone())
+        .unwrap_or_else(|error| panic!("TUI {command} semantic command fails: {error:?}"))
+}
+
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
     // Fast workspace tests do not provision OCCT; native acceptance runs this
     // same helper with the real worker and therefore exercises launch().
@@ -102,6 +117,13 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
     }
     if command == "bracket" && !root.exists() {
         Bundle::create(root).expect("production TUI bundle creates");
+    }
+    let should_launch = launched_roots()
+        .lock()
+        .expect("production TUI root registry is not poisoned")
+        .insert(root.to_path_buf());
+    if !should_launch {
+        return dispatch_semantic_command(host, command, request);
     }
     let request_bytes = serde_json::to_vec(request).expect("TUI request serializes");
     let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
@@ -127,9 +149,5 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
     if let Some(response) = outcome.last_response {
         return response;
     }
-    let command_id = find_by_name(command_name(command))
-        .expect("semantic TUI command is registered")
-        .id;
-    dispatch_registered_command(host, command_id, request.clone())
-        .unwrap_or_else(|error| panic!("TUI {command} semantic command fails: {error:?}"))
+    dispatch_semantic_command(host, command, request)
 }

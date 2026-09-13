@@ -405,7 +405,7 @@ run_gate documentation.workspace \
         grep -Fq "pinned rootless Arch image" README.md
         grep -Fq "xterm-ghostty/1.3.1-arch2" README.md
         grep -Fq "threeterm-mcp" README.md
-        grep -Fq "threeterm-tui owns that interactive surface" README.md
+        grep -Fq "\`threeterm-tui\` owns that interactive surface" README.md
         grep -Fq "Headless Automation adapters" README.md
         grep -Fq "CLI and MCP do not provide a graphical viewport" README.md
         grep -Fq "bash .github/scripts/acceptance.sh" README.md

@@ -414,8 +414,10 @@ fn canonical_extrude_replay() {
     assert!(brep_inventory(&root).is_empty());
     let _ = fs::remove_dir_all(root.join(".derived"));
     let _ = fs::remove_dir_all(root.join("cache"));
+    let _ = fs::remove_dir_all(root.join(".canonical-brep"));
     assert!(!root.join(".derived").exists());
     assert!(!root.join("cache").exists());
+    assert!(!root.join(".canonical-brep").exists());
     let replayed = Host::new()
         .execute_domain_command(LOAD_COMMAND_ID, json!({"bundle_path": root}))
         .expect("registered load command recomputes extrude");

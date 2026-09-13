@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="${ROOT}/.github/scripts/acceptance.sh"
 
 bash -n "${SCRIPT}"
+bash -n "${ROOT}/tests/acceptance-runner.sh"
+bash "${ROOT}/tests/acceptance-runner.sh"
+
+gate_count="$(grep -Ec '^run_gate ' "${SCRIPT}")"
+[[ "${gate_count}" -eq 17 ]] || {
+    printf 'expected 17 canonical gates, got %s\n' "${gate_count}" >&2
+    exit 1
+}
 
 for gate in \
     l_bracket_artifact_discard_replay \
@@ -31,7 +39,13 @@ for required in \
     'worker_id' \
     'schema_version' \
     'release.sh verify' \
-    'verify_performance_material'; do
+    'verify_performance_material' \
+    'tools_list_advertises_every_registered_command_with_populated_schemas' \
+    'THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS' \
+    'THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS' \
+    'THREETERM_ACCEPTANCE_LIBRARY_ONLY' \
+    'timed_out' \
+    'setsid --wait'; do
     grep -Fq "${required}" "${SCRIPT}" || {
         printf 'acceptance script is missing %s\n' "${required}" >&2
         exit 1

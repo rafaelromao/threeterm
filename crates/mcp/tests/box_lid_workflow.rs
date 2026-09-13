@@ -770,7 +770,7 @@ fn box_lid_artifact_discard_replay() {
             .expect("transactions read before derived deletion");
 
         fs::remove_dir_all(session.root().join("brep")).expect("derived BREP directory deletes");
-        for disposable in ["cache", ".derived"] {
+        for disposable in ["cache", ".derived", ".canonical-brep"] {
             let path = session.root().join(disposable);
             if path.exists() {
                 fs::remove_dir_all(path).expect("disposable derived directory removes");

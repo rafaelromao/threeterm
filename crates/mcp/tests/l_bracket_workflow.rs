@@ -773,7 +773,7 @@ fn l_bracket_artifact_discard_replay() {
 
         fs::remove_file(session.root().join("brep/l-bracket.brep"))
             .expect("derived bracket BREP removes");
-        for disposable in ["cache", ".derived"] {
+        for disposable in ["cache", ".derived", ".canonical-brep"] {
             let path = session.root().join(disposable);
             if path.exists() {
                 fs::remove_dir_all(path).expect("disposable derived directory removes");

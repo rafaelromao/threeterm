@@ -457,7 +457,7 @@ fn current_brep(root: &Path) -> Vec<u8> {
 }
 
 fn delete_derived_results(root: &Path) {
-    for directory in ["brep", "cache", ".derived", "stage"] {
+    for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
         let path = root.join(directory);
         if path.exists() {
             fs::remove_dir_all(path).expect("derived result directory removes");
@@ -1157,7 +1157,7 @@ fn object_timeline_adapter_parity_object_timeline_restore_replays_divergence_thr
         )
     });
     for root in roots {
-        for directory in ["brep", "cache", ".derived", "stage"] {
+        for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
             let path = root.join(directory);
             if path.exists() {
                 fs::remove_dir_all(path).expect("derived directory removes before reload");

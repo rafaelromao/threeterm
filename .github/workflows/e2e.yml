@@ -2,6 +2,15 @@ name: native-e2e
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_catalog_result:
+        description: "Expected acceptance catalog result for this checkout"
+        required: false
+        default: failed
+        type: choice
+        options:
+          - failed
+          - passed
   pull_request:
     branches: [main]
 
@@ -15,6 +24,7 @@ jobs:
     timeout-minutes: 120
     env:
       PODMAN_ROOTLESS: "1"
+      THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,6 +56,7 @@ jobs:
               -v "${PWD}:/workspace" \
               -v "${HOME}/.cargo:/root/.cargo" \
               -w /workspace \
+              -e "THREETERM_EXPECTED_ACCEPTANCE_RESULT=${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash -lc '
                 set -euo pipefail
@@ -66,33 +77,38 @@ jobs:
               '
           acceptance_status=$?
           set -e
-          test "${acceptance_status}" -ne 0
+          if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == passed ]]; then
+            test "${acceptance_status}" -eq 0
+          else
+            test "${acceptance_status}" -ne 0
+          fi
 
-      - name: Validate failed acceptance catalog
+      - name: Validate acceptance catalog
         run: |
           set -euo pipefail
           test -s target/acceptance-catalog.json
           expected_commit="$(git rev-parse HEAD)"
-          jq -e --arg commit "${expected_commit}" '
+          jq -e --arg commit "${expected_commit}" \
+            --arg expected_result "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" '
             .schema_version == "threeterm.acceptance.catalog/1" and
             .source.commit == $commit and
             .source.changed_during_run == false and
-            .result == "failed" and
-            (.gates | length == 17) and
-            ([.gates[].id] | index("workflow.l-bracket")) and
-            ([.gates[].id] | index("workflow.box-with-lid")) and
-            ([.gates[].id] | index("workflow.reusable-component")) and
-            ([.gates[].id] | index("workflow.historical-edit")) and
-            ([.gates[].id] | index("workflow.object-timeline")) and
-            ([.gates[].id] | index("workflow.keyboard-first")) and
-            ([.gates[].id] | index("workflow.invalid-edit-recovery")) and
-            ([.gates[].id] | index("replay.canonical-extrude")) and
-            ([.gates[].id] | index("registry.command-schemas")) and
-            ([.gates[].id] | index("worker.native")) and
-            ([.gates[].id] | index("licensing.libslvs")) and
-            ([.gates[].id] | index("release.namespace")) and
-            ([.gates[].id] | index("documentation.workspace")) and
-            ([.gates[].id] | index("performance.claims")) and
+            .result == $expected_result and
+            ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
+              "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
+              "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
+              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "registry.command-schemas",
+              "schema.identities", "licensing.libslvs", "release.namespace",
+              "documentation.workspace", "performance.claims"]) and
+            (if $expected_result == "passed" then
+               (.gates | all(.status == "passed" and .timed_out == false))
+             else
+               (.gates | all(if .id == "release.namespace" then
+                              .status == "failed" and .timed_out == false
+                            else
+                              .status == "passed" and .timed_out == false
+                            end))
+             end) and
             (.artifacts | length > 0) and
             (.artifacts | all((.bytes | type == "number") and
                               (.sha256 | test("^[0-9a-f]{64}$"))))

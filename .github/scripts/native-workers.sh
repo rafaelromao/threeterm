@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/licensing.sh"
 
 NATIVE_WORKER_MANIFEST_SCHEMA="threeterm.ci.native-workers/2"
+NATIVE_PROTOCOL_SCHEMA="threeterm.protocol/1"
+OCCT_WORKER_SCHEMA="threeterm.workers.occt/1"
+SLVS_WORKER_SCHEMA="threeterm.workers.slvs/1"
 NATIVE_ARCH_IMAGE="docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309"
 OCCT_SOURCE_REPOSITORY="https://github.com/Open-Cascade-SAS/OCCT"
 OCCT_SOURCE_COMMIT="c5f20409c52bf8f658314d205a0e5d6f0be0969c"
@@ -114,7 +117,7 @@ verify_native_worker_execution() {
     # Send a valid envelope with no args so both workers return a structured
     # malformed-request response without mutating a workspace.
     output="$(printf '%s\n' '{"kind":"request","schema_version":"threeterm.protocol/1","request_id":"ci-probe","command_id":"ci_probe"}' | timeout 10s "${worker}" 2>&1)" || status=$?
-    if [[ "${status}" -ne 2 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* || "${output}" != *"\"code\":\"request_malformed\""* ]]; then
+    if [[ "${status}" -ne 2 || "${output}" != *"\"kind\":\"worker_ready\""* || "${output}" != *"\"schema_version\":\"${NATIVE_PROTOCOL_SCHEMA}\""* || "${output}" != *"\"worker_id\":\"${worker_id}\""* || "${output}" != *"\"code\":\"request_malformed\""* ]]; then
         printf 'native %s worker did not complete its ready handshake: %s (status=%s)\n' \
             "${worker_id}" "${worker}" "${status}" >&2
         printf '%s\n' "${output}" >&2
@@ -156,12 +159,18 @@ finalize_native_worker_manifest() {
         --arg container_image "${NATIVE_ARCH_IMAGE}" \
         --arg occt_repository "${OCCT_SOURCE_REPOSITORY}" \
         --arg occt_commit "${OCCT_SOURCE_COMMIT}" \
+        --arg occt_worker_id occt \
+        --arg occt_worker_schema "${OCCT_WORKER_SCHEMA}" \
+        --arg occt_protocol_schema "${NATIVE_PROTOCOL_SCHEMA}" \
         --arg occt_path "${occt_worker}" \
         --arg occt_sha256 "${occt_sha256}" \
         --argjson occt_executed "${executed}" \
         --argjson occt_libraries "$(worker_linked_libraries "${occt_worker}")" \
         --arg slvs_repository "${SLVS_SOURCE_REPOSITORY}" \
         --arg slvs_commit "${SLVS_SOURCE_COMMIT}" \
+        --arg slvs_worker_id slvs \
+        --arg slvs_worker_schema "${SLVS_WORKER_SCHEMA}" \
+        --arg slvs_protocol_schema "${NATIVE_PROTOCOL_SCHEMA}" \
         --arg slvs_path "${slvs_worker}" \
         --arg slvs_sha256 "${slvs_sha256}" \
         --argjson slvs_executed "${executed}" \
@@ -173,20 +182,35 @@ finalize_native_worker_manifest() {
           libslvs_artifact: {manifest_path: $artifact_manifest_path,
                              manifest_sha256: $artifact_manifest_sha256},
           workers: {
-            occt: {source_repository: $occt_repository, source_commit: $occt_commit,
-                   package_identity: "source-commit",
+             occt: {worker_id: $occt_worker_id, worker_schema_version: $occt_worker_schema,
+                    protocol_schema_version: $occt_protocol_schema,
+                    source_repository: $occt_repository, source_commit: $occt_commit,
+                    package_identity: "source-commit",
                     executed: $occt_executed,
                    executable: {path: $occt_path, sha256: $occt_sha256}, linked_libraries: $occt_libraries},
-            libslvs: {source_repository: $slvs_repository, source_commit: $slvs_commit,
+             libslvs: {worker_id: $slvs_worker_id, worker_schema_version: $slvs_worker_schema,
+                       protocol_schema_version: $slvs_protocol_schema,
+                       source_repository: $slvs_repository, source_commit: $slvs_commit,
                       package_identity: "source-commit",
                       executed: $slvs_executed,
                       executable: {path: $slvs_path, sha256: $slvs_sha256}, linked_libraries: $slvs_libraries}
           }}' > "${temporary}"
     mv "${temporary}" "${manifest}"
 
-    jq -e '.schema_version == "threeterm.ci.native-workers/2" and
+    jq -e --arg occt_commit "${OCCT_SOURCE_COMMIT}" --arg slvs_commit "${SLVS_SOURCE_COMMIT}" '
+           .schema_version == "threeterm.ci.native-workers/2" and
+           (.workers.occt.worker_id == "occt") and
+           (.workers.libslvs.worker_id == "slvs") and
+           (.workers.occt.worker_schema_version == "threeterm.workers.occt/1") and
+           (.workers.libslvs.worker_schema_version == "threeterm.workers.slvs/1") and
+           (.workers.occt.protocol_schema_version == "threeterm.protocol/1") and
+           (.workers.libslvs.protocol_schema_version == "threeterm.protocol/1") and
+           (.workers.occt.source_commit == $occt_commit) and
+           (.workers.libslvs.source_commit == $slvs_commit) and
            (.workers.occt.executable.sha256 | length == 64) and
            (.workers.libslvs.executable.sha256 | length == 64) and
+           (.workers.occt.linked_libraries | length > 0) and
+           (.workers.libslvs.linked_libraries | length > 0) and
            (.libslvs_artifact.manifest_sha256 | length == 64)' "${manifest}" >/dev/null
     [[ "$(jq -er '.libslvs_artifact.manifest_path' "${manifest}")" == libslvs-artifact/manifest.json ]] || return 1
     [[ "$(sha256sum "${artifact_root}/manifest.json" | cut -d' ' -f1)" == \

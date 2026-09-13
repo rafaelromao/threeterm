@@ -18,7 +18,7 @@ use threeterm_host::{
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     CommandId, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
 };
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
@@ -4016,7 +4016,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),
             );
-            if let Some(preview) = self.draft.preview() {
+            if draft.command == SKETCH_SOLVE_COMMAND_ID
+                && let Some(preview) = self.draft.preview()
+            {
                 object.insert(
                     "preview_revision".to_string(),
                     Value::String(preview.preview_revision.clone()),

@@ -1366,10 +1366,10 @@ fn prepare_component_workflow(session: &ComponentSession) {
     session.create_instance("first", [0.0, 0.0, 0.0]);
     session.create_instance("second", [10.0, 0.0, 0.0]);
     let before_transform = session.state();
-    let before_transform_scene = session.scene();
+    let before_transform_scene = session.scene_for(&["first", "second"]);
     session.transform_instance("second", [0.0, 0.0, 90.0]);
     let after_transform = session.state();
-    let after_transform_scene = session.scene();
+    let after_transform_scene = session.scene_for(&["first", "second"]);
     assert_eq!(
         after_transform["instances"]["first"]["geometry_digest"],
         before_transform["instances"]["first"]["geometry_digest"]

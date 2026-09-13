@@ -1,14 +1,11 @@
-use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
-use threeterm_cli::dispatch::dispatch_registered_command;
 use threeterm_host::Host;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::find_by_name;
-use threeterm_tui::{InteractiveTerminal, launch};
+use threeterm_tui::{InteractiveTerminal, execute_domain_command, launch_command};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
 #[derive(Default)]
@@ -85,69 +82,43 @@ fn command_name(command: &str) -> &str {
     }
 }
 
-fn supports_interactive_draft(command: &str) -> bool {
-    matches!(
-        command,
-        "bracket" | "sketch" | "extrude" | "fillet" | "chamfer" | "shell" | "draft" | "loft"
-    )
-}
-
-fn launched_roots() -> &'static Mutex<HashSet<std::path::PathBuf>> {
-    static ROOTS: OnceLock<Mutex<HashSet<std::path::PathBuf>>> = OnceLock::new();
-    ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn dispatch_semantic_command(host: &Host, command: &str, request: &Value) -> Value {
-    let command_id = find_by_name(command_name(command))
+fn command_id(command: &str) -> threeterm_protocol::schema::CommandId {
+    find_by_name(command_name(command))
         .expect("semantic TUI command is registered")
-        .id;
-    dispatch_registered_command(host, command_id, request.clone())
-        .unwrap_or_else(|error| panic!("TUI {command} semantic command fails: {error:?}"))
+        .id
 }
 
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
     // Fast workspace tests do not provision OCCT; native acceptance runs this
     // same helper with the real worker and therefore exercises launch().
     if threeterm_occt_worker::OcctWorker::locate().is_err() {
-        let command_id = find_by_name(command_name(command))
-            .expect("fallback TUI command is registered")
-            .id;
-        return dispatch_registered_command(host, command_id, request.clone())
+        return execute_domain_command(host, command_id(command), request.clone())
             .expect("fallback TUI command succeeds");
     }
     if command == "bracket" && !root.exists() {
         Bundle::create(root).expect("production TUI bundle creates");
     }
-    let should_launch = launched_roots()
-        .lock()
-        .expect("production TUI root registry is not poisoned")
-        .insert(root.to_path_buf());
-    if !should_launch {
-        return dispatch_semantic_command(host, command, request);
-    }
-    let request_bytes = serde_json::to_vec(request).expect("TUI request serializes");
-    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
-    events.extend(command_name(command).bytes().map(|byte| vec![byte]));
-    events.push(b"\r".to_vec());
-    if supports_interactive_draft(command) {
-        events.extend([request_bytes, b"\x16".to_vec(), b"\x1b[13;5u".to_vec()]);
-        events.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
-    } else {
-        // Non-modeling commands are discoverable but intentionally not
-        // interactive. Dismiss the palette before using the shared adapter.
-        events.push(b"\x1b".to_vec());
-    }
-    events.push(b"q".to_vec());
+    let mut events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ];
     events.reverse();
 
     let mut terminal = ScriptedTerminal {
         events,
         writes: Vec::new(),
     };
-    let outcome = launch(host, root, &mut terminal, environment())
-        .unwrap_or_else(|error| panic!("production TUI {command} command fails: {error}"));
-    if let Some(response) = outcome.last_response {
-        return response;
-    }
-    dispatch_semantic_command(host, command, request)
+    let outcome = launch_command(
+        host,
+        root,
+        &mut terminal,
+        environment(),
+        command_id(command),
+        request.clone(),
+    )
+    .unwrap_or_else(|error| panic!("production TUI {command} command fails: {error}"));
+    outcome
+        .last_response
+        .unwrap_or_else(|| panic!("production TUI {command} produced no domain response"))
 }

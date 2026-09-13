@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 use threeterm_host::Host;
+use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
@@ -147,6 +148,27 @@ pub fn launch<W: InteractiveTerminal>(
     terminal: &mut W,
     environment: TerminalEnvironment,
 ) -> Result<LaunchOutcome, LaunchError> {
+    launch_inner(host, root, terminal, environment, None)
+}
+
+pub fn launch_command<W: InteractiveTerminal>(
+    host: &Host,
+    root: impl AsRef<Path>,
+    terminal: &mut W,
+    environment: TerminalEnvironment,
+    command: CommandId,
+    request: Value,
+) -> Result<LaunchOutcome, LaunchError> {
+    launch_inner(host, root, terminal, environment, Some((command, request)))
+}
+
+fn launch_inner<W: InteractiveTerminal>(
+    host: &Host,
+    root: impl AsRef<Path>,
+    terminal: &mut W,
+    environment: TerminalEnvironment,
+    initial_command: Option<(CommandId, Value)>,
+) -> Result<LaunchOutcome, LaunchError> {
     let root = root.as_ref();
     let prepared = environment.foreground_tty;
     if prepared && let Err(error) = terminal.prepare() {
@@ -211,7 +233,15 @@ pub fn launch<W: InteractiveTerminal>(
     })?;
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(
-        host, root, width, height, placement, terminal, &probe, theme,
+        host,
+        root,
+        width,
+        height,
+        placement,
+        terminal,
+        &probe,
+        theme,
+        initial_command,
     );
     let launch_result = with_restore_result(launch_result, terminal.restore());
     let last_response = launch_result?;
@@ -269,6 +299,7 @@ fn run_session<W: InteractiveTerminal>(
     terminal: &mut W,
     probe: &CapabilityProbeResult,
     theme: ThemeContext,
+    initial_command: Option<(CommandId, Value)>,
 ) -> Result<Option<Value>, LaunchError> {
     let session_result = TuiViewportSession::from_host_with_probe_and_theme(
         host,
@@ -281,7 +312,13 @@ fn run_session<W: InteractiveTerminal>(
     match session_result {
         Ok(mut session) => {
             let result = match catch_unwind(AssertUnwindSafe(|| {
-                run_event_loop(&mut session, host, root, &probe.unrelated_input)
+                run_event_loop(
+                    &mut session,
+                    host,
+                    root,
+                    &probe.unrelated_input,
+                    initial_command,
+                )
             })) {
                 Ok(result) => result,
                 Err(payload) => Err(LaunchError::Runtime(format!(
@@ -310,6 +347,7 @@ fn run_event_loop<W: InteractiveTerminal>(
     host: &Host,
     root: &Path,
     replayed_probe_input: &[u8],
+    initial_command: Option<(CommandId, Value)>,
 ) -> Result<Option<Value>, LaunchError> {
     let mut last_response = None;
     let initial = session
@@ -325,6 +363,22 @@ fn run_event_loop<W: InteractiveTerminal>(
             ))
         })?;
     acknowledge_frame(session, initial.frame_token)?;
+
+    if let Some((command, request)) = initial_command {
+        let response = crate::execute_domain_command(host, command, request)
+            .map_err(|error| LaunchError::Runtime(format!("TUI command failed: {error:?}")))?;
+        session
+            .refresh_scene_from_host(host)
+            .map_err(|error| match error {
+                crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
+                crate::TuiViewportError::Tui(error) => LaunchError::Runtime(format!("{error:?}")),
+            })?;
+        let rendered = session.render_current().map_err(LaunchError::Viewport)?;
+        if let Some(frame) = rendered.started {
+            acknowledge_frame(session, frame.frame_token)?;
+        }
+        last_response = Some(response);
+    }
     session
         .coordinator_mut()
         .renderer_mut()

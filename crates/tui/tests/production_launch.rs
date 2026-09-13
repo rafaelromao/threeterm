@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
-use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID};
+use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
-    InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch,
+    InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
 };
 use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment, parse_ack};
 
@@ -274,6 +274,45 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_executes_registered_noninteractive_command() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-command-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        ..Default::default()
+    };
+
+    let result = launch_command(
+        &host,
+        &root,
+        &mut terminal,
+        official_environment(),
+        LOAD_COMMAND_ID,
+        json!({"bundle_path": root.to_string_lossy()}),
+    )
+    .expect("registered command runs inside the production TUI");
+    assert!(result.event_loop_entered);
+    let response = result.last_response.expect("command response");
+    assert_eq!(
+        response["schema_version"],
+        "threeterm.command.load.response/2"
+    );
+    assert!(response["feature_graph_hash"].is_string());
+    assert_eq!(terminal.events_read, 4);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

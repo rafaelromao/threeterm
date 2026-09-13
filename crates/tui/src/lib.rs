@@ -31,7 +31,7 @@ use threeterm_viewport::{
 
 pub use launch::{
     EXIT_CAPABILITY_FAILURE, EXIT_LAUNCH_FAILURE, InteractiveTerminal, LaunchError, LaunchOutcome,
-    launch,
+    launch, launch_command,
 };
 
 pub fn schema_version() -> &'static str {

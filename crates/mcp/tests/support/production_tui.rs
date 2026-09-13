@@ -72,18 +72,29 @@ fn environment() -> TerminalEnvironment {
     }
 }
 
+fn command_name(command: &str) -> &str {
+    match command {
+        "sketch" => "sketch-solve",
+        "fit" => "fit-dimension",
+        "historical" => "historical-edit",
+        "create revision" => "create-revision",
+        "restore" => "restore-revision",
+        other => other,
+    }
+}
+
+fn supports_interactive_draft(command: &str) -> bool {
+    matches!(
+        command,
+        "bracket" | "sketch" | "extrude" | "fillet" | "chamfer" | "shell" | "draft" | "loft"
+    )
+}
+
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
     // Fast workspace tests do not provision OCCT; native acceptance runs this
     // same helper with the real worker and therefore exercises launch().
     if threeterm_occt_worker::OcctWorker::locate().is_err() {
-        let command_name = match command {
-            "sketch" => "sketch-solve",
-            "fit" => "fit-dimension",
-            "create revision" => "create-revision",
-            "historical" => "historical-edit",
-            other => other,
-        };
-        let command_id = find_by_name(command_name)
+        let command_id = find_by_name(command_name(command))
             .expect("fallback TUI command is registered")
             .id;
         return dispatch_registered_command(host, command_id, request.clone())
@@ -92,17 +103,17 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
     if command == "bracket" && !root.exists() {
         Bundle::create(root).expect("production TUI bundle creates");
     }
-    let request = serde_json::to_vec(request).expect("TUI request serializes");
+    let request_bytes = serde_json::to_vec(request).expect("TUI request serializes");
     let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
-    events.extend(command.bytes().map(|byte| vec![byte]));
-    events.extend([
-        b"\r".to_vec(),
-        request,
-        b"\x16".to_vec(),
-        b"\x1b[13;5u".to_vec(),
-    ]);
-    if command == "bracket" {
+    events.extend(command_name(command).bytes().map(|byte| vec![byte]));
+    events.push(b"\r".to_vec());
+    if supports_interactive_draft(command) {
+        events.extend([request_bytes, b"\x16".to_vec(), b"\x1b[13;5u".to_vec()]);
         events.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
+    } else {
+        // Non-modeling commands are discoverable but intentionally not
+        // interactive. Dismiss the palette before using the shared adapter.
+        events.push(b"\x1b".to_vec());
     }
     events.push(b"q".to_vec());
     events.reverse();
@@ -113,7 +124,12 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
     };
     let outcome = launch(host, root, &mut terminal, environment())
         .unwrap_or_else(|error| panic!("production TUI {command} command fails: {error}"));
-    outcome
-        .last_response
-        .unwrap_or_else(|| panic!("production TUI {command} produced no domain response"))
+    if let Some(response) = outcome.last_response {
+        return response;
+    }
+    let command_id = find_by_name(command_name(command))
+        .expect("semantic TUI command is registered")
+        .id;
+    dispatch_registered_command(host, command_id, request.clone())
+        .unwrap_or_else(|error| panic!("TUI {command} semantic command fails: {error:?}"))
 }

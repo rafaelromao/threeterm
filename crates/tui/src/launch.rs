@@ -386,7 +386,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                 "unknown",
                 "restore the terminal and retry Interactive Modeling",
             ))
-    })?;
+        })?;
     acknowledge_frame(session, initial.frame_token)?;
 
     if let Some((command, request)) = initial_command {

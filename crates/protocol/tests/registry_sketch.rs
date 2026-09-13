@@ -35,7 +35,7 @@ fn sketch_solve_response_schema_accepts_a_normalized_success() {
         &json!({
             "schema_version": SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION,
             "request_id": "req-1",
-            "operation": "sketch_solve",
+            "operation": "sketch-solve",
             "feature_id": "rectangle",
             "status": "solved",
             "dof": 0,

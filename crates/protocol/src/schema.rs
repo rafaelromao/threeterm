@@ -2156,7 +2156,7 @@ pub static SKETCH_SOLVE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             }, "additionalProperties": false } },
             "schema_version": { "type": "string", "minLength": 1 },
             "request_id": { "type": "string", "minLength": 1 },
-            "operation": { "const": "sketch_solve" },
+            "operation": { "const": "sketch-solve" },
             "feature_id": { "type": "string", "minLength": 1 },
             "source_revision": { "type": "string", "minLength": 1 },
             "reattachment_outcome": { "type": "string", "enum": ["resolved", "ambiguous", "lost", "incompatible"] },

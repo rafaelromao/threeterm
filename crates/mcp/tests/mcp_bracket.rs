@@ -25,7 +25,7 @@ use threeterm_domain::{ProjectGeneration, history::HistoryState};
 use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, write_fresh};
-use threeterm_protocol::schema::{RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find};
+use threeterm_protocol::schema::{RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find, iter};
 use threeterm_protocol::schema_validator::validate;
 use threeterm_tui::{SelectionEvent, SelectionVerification, TuiSession};
 
@@ -42,12 +42,10 @@ fn threeterm_binary() -> PathBuf {
         return PathBuf::from(path);
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("threeterm")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("..").join("..").join("target"));
+    target.join("debug/threeterm")
 }
 
 fn threeterm_mcp_binary() -> PathBuf {
@@ -55,12 +53,29 @@ fn threeterm_mcp_binary() -> PathBuf {
         return PathBuf::from(path);
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("threeterm-mcp")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("..").join("..").join("target"));
+    target.join("debug/threeterm-mcp")
+}
+
+fn require_native_occt_worker(test_name: &str) -> bool {
+    match OcctWorker::locate() {
+        Ok(worker) => {
+            drop(worker);
+            true
+        }
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
+        {
+            panic!("{test_name}: OCCT worker unavailable: {error}");
+        }
+        Err(error) => {
+            eprintln!("{test_name}: OCCT worker unavailable; skipping: {error}");
+            false
+        }
+    }
 }
 
 fn run_mcp(requests: &[Value]) -> Vec<Value> {
@@ -575,34 +590,35 @@ fn tools_list_advertises_every_registered_command_with_populated_schemas() {
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools is an array");
-    let bracket = tools
+    let actual_names = tools
         .iter()
-        .find(|tool| tool["name"] == "threeterm.command.bracket/1")
-        .expect("bracket is advertised");
-    assert!(bracket["inputSchema"].is_object());
-    assert!(bracket["outputSchema"].is_object());
-    let required = bracket["inputSchema"]["required"]
-        .as_array()
-        .expect("input schema declares required");
-    let required_keys: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
-    for key in [
-        "bundle_path",
-        "bracket_id",
-        "length",
-        "width",
-        "height",
-        "thickness",
-    ] {
-        assert!(
-            required_keys.contains(&key),
-            "advertised input schema must require {key:?}"
-        );
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("advertised tool name is a string")
+        })
+        .collect::<Vec<_>>();
+    let expected_names = iter()
+        .map(|schema| schema.schema_version)
+        .collect::<Vec<_>>();
+    assert_eq!(actual_names, expected_names);
+    assert_eq!(tools.len(), expected_names.len());
+
+    for schema in iter() {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == schema.schema_version)
+            .expect("every registered command is advertised");
+        assert_eq!(tool["inputSchema"], schema.request_schema);
+        assert_eq!(tool["outputSchema"], schema.response_schema);
     }
 }
 
 #[test]
 fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation",
+    ) {
         return;
     }
     let cli_root = fresh_bundle("happy-cli");
@@ -719,7 +735,9 @@ fn tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation() {
 
 #[test]
 fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "production_mcp_streams_real_boolean_pattern_progress_and_commits",
+    ) {
         return;
     }
     let root = fresh_bundle("boolean-pattern-production");
@@ -745,7 +763,7 @@ fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
 
 #[test]
 fn production_mcp_cancels_real_boolean_pattern_before_commit() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker("production_mcp_cancels_real_boolean_pattern_before_commit") {
         return;
     }
     let root = fresh_bundle("boolean-pattern-production-cancel");
@@ -789,7 +807,9 @@ fn production_mcp_cancels_real_boolean_pattern_before_commit() {
 
 #[test]
 fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "bracket_edit_lifecycle_previews_commits_and_discards_through_mcp",
+    ) {
         return;
     }
     let root = fresh_bundle("bracket-edit-lifecycle");
@@ -915,7 +935,8 @@ fn bracket_edit_lifecycle_previews_commits_and_discards_through_mcp() {
 
 #[test]
 fn tools_call_rejects_invalid_arguments_with_invalid_params_code() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker("tools_call_rejects_invalid_arguments_with_invalid_params_code")
+    {
         return;
     }
     let root = fresh_bundle("invalid-args");
@@ -1021,7 +1042,9 @@ fn tools_call_rejects_unknown_tool_with_method_not_found_code() {
 
 #[test]
 fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state",
+    ) {
         return;
     }
     let root = fresh_bundle("tampered");
@@ -1099,7 +1122,9 @@ fn tools_call_on_tampered_bundle_reports_internal_error_and_preserves_state() {
 
 #[test]
 fn tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params",
+    ) {
         return;
     }
     let root = fresh_bundle("empty-bracket-id");
@@ -1171,7 +1196,9 @@ fn tools_call_rejects_empty_bracket_id_violating_min_length_with_invalid_params(
 
 #[test]
 fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params() {
-    if OcctWorker::locate().is_err() {
+    if !require_native_occt_worker(
+        "tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params",
+    ) {
         return;
     }
     let root = fresh_bundle("non-positive-length");
@@ -1571,11 +1598,45 @@ fn mcp_process_browses_and_restores_the_divergent_feature_timeline() {
             .features
             .contains_key("third-base")
     );
-    let _ = std::fs::remove_dir_all(root.join("brep"));
+    let expected_graph = loaded.feature_graph_hash_hex().to_string();
+    let expected_revision = loaded.revision_hash_hex().to_string();
+    let expected_transaction_count = loaded.log.len();
+    let expected_terminal_log_digest = loaded.manifest.terminal_log_digest.clone();
+    let expected_worker_fingerprint =
+        serde_json::to_value(&loaded.manifest.occt_worker).expect("worker fingerprint serializes");
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest reads");
+    let transactions_before =
+        std::fs::read(root.join("transactions.log")).expect("transactions read");
+    for directory in ["brep", "cache", ".derived", ".canonical-brep", "stage"] {
+        let path = root.join(directory);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).expect("derived result directory removes");
+        }
+        assert!(!path.exists(), "derived result remains at {path:?}");
+    }
     let reloaded = threeterm_host::Host::new()
         .load_with_geometry_replay(&root)
         .expect("restored bundle replays after derived results are removed");
-    assert_eq!(reloaded.revision_hash, restored["revision_hash"]);
+    assert_eq!(reloaded.feature_graph_hash, expected_graph);
+    assert_eq!(reloaded.revision_hash, expected_revision);
+    let after = Bundle::at(&root).open().expect("replayed bundle opens");
+    assert_eq!(after.log.len(), expected_transaction_count);
+    assert_eq!(
+        after.manifest.terminal_log_digest,
+        expected_terminal_log_digest
+    );
+    assert_eq!(
+        serde_json::to_value(&after.manifest.occt_worker).expect("worker fingerprint serializes"),
+        expected_worker_fingerprint
+    );
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest reads after replay"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transactions read after replay"),
+        transactions_before
+    );
 
     let post_restore = mcp_call(
         find(TIMELINE_COMMAND_ID)

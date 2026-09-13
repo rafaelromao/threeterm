@@ -1247,6 +1247,7 @@ bool handle_bracket(const JsonParser::Value& request, std::string& error) {
         return false;
     }
     BRepAlgoAPI_Fuse fuse(horizontal.Shape(), vertical.Shape());
+    fuse.SetRunParallel(Standard_False);
     fuse.Build();
     if (!fuse.IsDone()) {
         error = "could not fuse bracket plates";

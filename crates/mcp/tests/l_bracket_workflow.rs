@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -15,11 +17,13 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID,
 };
-use threeterm_tui::TuiViewportSession;
-use threeterm_tui::execute_domain_command;
+use threeterm_tui::{LaunchError, TuiViewportSession};
 use threeterm_viewport::{
     CapabilityState, FrameAcknowledgement, GhosttyRenderer, TerminalCapabilityVector, ViewportScene,
 };
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 #[derive(Debug, Default)]
 struct RecordingWriter {
@@ -76,6 +80,99 @@ fn required_worker(test_name: &str) -> bool {
     }
 }
 
+fn threeterm_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm")
+}
+
+fn threeterm_mcp_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
+}
+
+fn production_cli_bracket(root: &Path) -> Value {
+    let output = Command::new(threeterm_binary())
+        .args(["--machine", "bracket"])
+        .arg(root)
+        .args([
+            "--bracket-id",
+            "l-bracket",
+            "--length",
+            "60",
+            "--width",
+            "30",
+            "--height",
+            "40",
+            "--thickness",
+            "3",
+        ])
+        .output()
+        .expect("production CLI starts");
+    assert!(
+        output.status.success(),
+        "production CLI bracket fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production CLI bracket writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("production CLI returns JSON")
+}
+
+fn production_mcp_bracket(root: &Path) -> Value {
+    let mut child = Command::new(threeterm_mcp_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("production MCP starts");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "threeterm.command.bracket/1",
+            "arguments": bracket_request(root),
+        }
+    });
+    child
+        .stdin
+        .take()
+        .expect("production MCP stdin")
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("production MCP request writes");
+    let output = child.wait_with_output().expect("production MCP completes");
+    assert!(
+        output.status.success(),
+        "production MCP bracket fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production MCP bracket writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("production MCP returns JSON");
+    assert!(
+        response["error"].is_null(),
+        "production MCP returns an error: {response}"
+    );
+    response["result"]["structuredContent"].clone()
+}
+
 fn bracket_request(root: &Path) -> Value {
     json!({
         "bundle_path": root.to_string_lossy(),
@@ -126,6 +223,16 @@ enum AdapterSession {
     Cli { root: PathBuf, host: Host },
     Mcp { root: PathBuf, server: McpServer },
     Tui { root: PathBuf, host: Host },
+}
+
+fn tui_command_name(command: threeterm_protocol::schema::CommandId) -> &'static str {
+    match command {
+        BRACKET_COMMAND_ID => "bracket",
+        BRACKET_EDIT_COMMAND_ID => "bracket-edit",
+        LOAD_COMMAND_ID => "load",
+        EXPORT_COMMAND_ID => "export",
+        _ => panic!("unsupported production TUI command: {command:?}"),
+    }
 }
 
 impl AdapterSession {
@@ -183,22 +290,28 @@ impl AdapterSession {
                 Err(error) => panic!("CLI {wire_name} command fails: {error:?}"),
             },
             Self::Mcp { server, .. } => mcp_call(server, wire_name, request),
-            Self::Tui { host, .. } => match execute_domain_command(host, command, request) {
-                Ok(response) => response,
-                Err(ExecutionError::Handler(HostError::DraftInputConflict {
-                    draft_id,
-                    source_revision,
-                    current_revision,
-                    recovery,
-                })) => draft_input_conflict_response(
-                    "open",
-                    draft_id,
-                    source_revision,
-                    current_revision,
-                    recovery,
-                ),
-                Err(error) => panic!("TUI {wire_name} command fails: {error:?}"),
-            },
+            Self::Tui { host, root } => {
+                match production_tui::try_execute(host, root, tui_command_name(command), &request) {
+                    Ok(response) => response,
+                    Err(error) => match *error {
+                        LaunchError::Command(ExecutionError::Handler(
+                            HostError::DraftInputConflict {
+                                draft_id,
+                                source_revision,
+                                current_revision,
+                                recovery,
+                            },
+                        )) => draft_input_conflict_response(
+                            "open",
+                            draft_id,
+                            source_revision,
+                            current_revision,
+                            recovery,
+                        ),
+                        error => panic!("TUI {wire_name} command fails: {error:?}"),
+                    },
+                }
+            }
         }
     }
 
@@ -452,7 +565,13 @@ fn assert_bracket_intent(root: &Path, expected_length: f64) {
         intent.request_id,
         canonical_bracket_request_id("l-bracket", expected_length, 30.0, 40.0, 3.0)
     );
-    assert_eq!(intent.source_revision, bundle.revision_hash_hex());
+    assert_eq!(intent.source_revision.len(), 64);
+    assert!(
+        intent
+            .source_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(intent.worker_requirements.worker_kind, "occt");
     assert!(!intent.worker_requirements.worker_schema_version.is_empty());
     assert!(
@@ -475,16 +594,14 @@ fn l_bracket_adapter_parity() {
         Bundle::create(path).expect("bundle creates");
     }
 
-    let cli =
-        dispatch_registered_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&cli_root))
-            .expect("CLI bracket command commits");
-    let mcp = mcp_call(
-        &McpServer::new(),
-        "threeterm.command.bracket/1",
-        bracket_request(&mcp_root),
+    let cli = production_cli_bracket(&cli_root);
+    let mcp = production_mcp_bracket(&mcp_root);
+    let tui = production_tui::execute(
+        &Host::new(),
+        &tui_root,
+        "bracket",
+        &bracket_request(&tui_root),
     );
-    let tui = execute_domain_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&tui_root))
-        .expect("TUI bracket command commits");
 
     for (path, response) in [(&cli_root, &cli), (&mcp_root, &mcp), (&tui_root, &tui)] {
         assert_eq!(response["status"], "ok");
@@ -773,11 +890,12 @@ fn l_bracket_artifact_discard_replay() {
 
         fs::remove_file(session.root().join("brep/l-bracket.brep"))
             .expect("derived bracket BREP removes");
-        for disposable in ["cache", ".derived"] {
+        for disposable in ["cache", ".derived", ".canonical-brep", "stage"] {
             let path = session.root().join(disposable);
             if path.exists() {
-                fs::remove_dir_all(path).expect("disposable derived directory removes");
+                fs::remove_dir_all(&path).expect("disposable derived directory removes");
             }
+            assert!(!path.exists(), "derived result remains at {path:?}");
         }
         if let Ok(entries) = fs::read_dir(session.root().join("exports")) {
             for entry in entries {

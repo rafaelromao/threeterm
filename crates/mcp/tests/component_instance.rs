@@ -15,11 +15,13 @@ use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
     CREATE_COMPONENT_INSTANCE_COMMAND_ID, CommandId, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXPORT_COMMAND_ID, IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
     TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
 };
-use threeterm_tui::execute_domain_command;
 use threeterm_viewport::SceneSolid;
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 fn bundle() -> PathBuf {
     let nonce = SystemTime::now()
@@ -790,12 +792,13 @@ impl ComponentSession {
         }
     }
 
-    fn command(&self, name: &str, command: CommandId, request: Value, cli_args: &[&str]) -> Value {
+    fn command(&self, name: &str, _command: CommandId, request: Value, cli_args: &[&str]) -> Value {
         match self.adapter {
             ComponentAdapter::Cli => cli_command(name, &self.root, cli_args),
             ComponentAdapter::Mcp => mcp_command(&format!("threeterm.command.{name}/1"), request),
-            ComponentAdapter::Tui => execute_domain_command(&self.tui_host, command, request)
-                .unwrap_or_else(|error| panic!("TUI {name} command fails: {error:?}")),
+            ComponentAdapter::Tui => {
+                production_tui::execute(&self.tui_host, &self.root, name, &request)
+            }
         }
     }
 
@@ -985,8 +988,7 @@ impl ComponentSession {
             ComponentAdapter::Cli => cli_export(&self.root, feature_id, output_dir),
             ComponentAdapter::Mcp => mcp_command("threeterm.command.export/1", request),
             ComponentAdapter::Tui => {
-                execute_domain_command(&self.tui_host, EXPORT_COMMAND_ID, request)
-                    .unwrap_or_else(|error| panic!("TUI export command fails: {error:?}"))
+                production_tui::execute(&self.tui_host, &self.root, "export", &request)
             }
         }
     }
@@ -1620,6 +1622,7 @@ fn discard_component_artifacts(root: &Path) {
         ".derived",
         "cache",
         "checkpoints",
+        ".canonical-brep",
         "stage",
         "replay-before-first",
         "replay-before-second",
@@ -1644,6 +1647,7 @@ fn assert_disposable_artifacts_are_absent(root: &Path) {
         ".derived",
         "cache",
         "checkpoints",
+        ".canonical-brep",
         "stage",
         "replay-before-first",
         "replay-before-second",

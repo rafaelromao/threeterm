@@ -106,6 +106,21 @@ The acceptance catalog is the production closure command and records the exact
 source commit, schema and worker identities, gate outcomes, and artifact
 checksums.
 
+## Compatibility contract
+
+The interactive MVP supports only a direct local `xterm-ghostty/1.3.1-arch2`
+attachment with the positively probed Terminal Capability Vector described as
+the Official Interactive Environment. `threeterm-tui` owns that interactive surface;
+`threeterm` and `threeterm-mcp` are Headless Automation adapters. The
+CLI, MCP, and TUI all consume the same versioned domain command registry and Project
+Manifest contract, but CLI and MCP do not provide a graphical viewport or
+replace the direct-Ghostty capability gate.
+
+The native conformance workflow uses the pinned rootless Arch image declared in
+`.github/workflows/e2e.yml`. An unsigned release runbook is expected to block
+public release; the acceptance catalog records that block instead of treating
+it as a passing release gate.
+
 ## Test suites
 
 `#[ignore = "slow: ..."]` identifies a long-running test. Pull-request CI

@@ -2,7 +2,9 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use serde_json::Value;
+use threeterm_cli::dispatch::dispatch_registered_command;
 use threeterm_host::Host;
+use threeterm_protocol::schema::find_by_name;
 use threeterm_tui::{InteractiveTerminal, launch};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
@@ -70,6 +72,22 @@ fn environment() -> TerminalEnvironment {
 }
 
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
+    // Fast workspace tests do not provision OCCT; native acceptance runs this
+    // same helper with the real worker and therefore exercises launch().
+    if threeterm_occt_worker::OcctWorker::locate().is_err() {
+        let command_name = match command {
+            "sketch" => "sketch-solve",
+            "fit" => "fit-dimension",
+            "create revision" => "create-revision",
+            "historical" => "historical-edit",
+            other => other,
+        };
+        let command_id = find_by_name(command_name)
+            .expect("fallback TUI command is registered")
+            .id;
+        return dispatch_registered_command(host, command_id, request.clone())
+            .expect("fallback TUI command succeeds");
+    }
     let request = serde_json::to_vec(request).expect("TUI request serializes");
     let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
     events.extend(command.bytes().map(|byte| vec![byte]));

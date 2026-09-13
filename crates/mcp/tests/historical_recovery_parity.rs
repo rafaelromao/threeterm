@@ -12,7 +12,7 @@ use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
-    HISTORICAL_EDIT_COMMAND_ID, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+    EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
     RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID,
 };
 use threeterm_tui::{FeatureTarget, SelectionEvent, SelectionVerification, TuiSession};
@@ -511,12 +511,16 @@ fn tui_restore_result_for(root: &Path, feature_id: &str, name: &str) -> Result<V
 }
 
 fn tui_export(root: &Path, output_dir: &Path) -> Result<Value, Value> {
-    Ok(production_tui::execute(
+    tui_call(EXPORT_COMMAND_ID, export_request(root, output_dir))
+}
+
+fn production_tui_export(root: &Path, output_dir: &Path) -> Value {
+    production_tui::execute(
         &Host::new(),
         root,
         "export",
         &export_request(root, output_dir),
-    ))
+    )
 }
 
 fn current_brep(root: &Path) -> Vec<u8> {
@@ -1900,7 +1904,7 @@ fn successful_historical_edit_has_equivalent_current_geometry_through_all_adapte
             export_request(&mcp_root, &output_roots[1]),
         )
         .expect("MCP success export succeeds"),
-        tui_export(&tui_root, &output_roots[2]).expect("TUI success export succeeds"),
+        production_tui_export(&tui_root, &output_roots[2]),
     ];
     assert_eq!(semantic_export(&exports[0]), semantic_export(&exports[1]));
     assert_eq!(semantic_export(&exports[0]), semantic_export(&exports[2]));
@@ -2183,7 +2187,7 @@ fn historical_recovery_adapter_parity() {
             export_request(&mcp_root, &restored_output_roots[1]),
         )
         .expect("MCP restored export succeeds"),
-        tui_export(&tui_root, &restored_output_roots[2]).expect("TUI restored export succeeds"),
+        production_tui_export(&tui_root, &restored_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&restored_exports[0]),
@@ -2256,7 +2260,7 @@ fn object_timeline_restore_preserves_and_restores_the_divergent_named_future_thr
             export_request(&mcp_root, &future_output_roots[1]),
         )
         .expect("MCP future export succeeds"),
-        tui_export(&tui_root, &future_output_roots[2]).expect("TUI future export succeeds"),
+        production_tui_export(&tui_root, &future_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&future_exports[0]),
@@ -2364,8 +2368,7 @@ fn object_timeline_restore_preserves_and_restores_the_divergent_named_future_thr
             export_request(&mcp_root, &restored_output_roots[1]),
         )
         .expect("MCP restored future export succeeds"),
-        tui_export(&tui_root, &restored_output_roots[2])
-            .expect("TUI restored future export succeeds"),
+        production_tui_export(&tui_root, &restored_output_roots[2]),
     ];
     assert_eq!(
         semantic_export(&restored_exports[0]),

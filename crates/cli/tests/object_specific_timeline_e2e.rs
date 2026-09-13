@@ -4,9 +4,12 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::Bundle;
-use threeterm_protocol::schema::{CREATE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find};
+use threeterm_domain::{ProjectGeneration, history::HistoryState};
+use threeterm_host::Host;
+use threeterm_persistence::{Bundle, write_fresh};
+use threeterm_protocol::schema::{
+    CREATE_REVISION_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find,
+};
 use threeterm_protocol::schema_validator::validate;
 
 fn temp_root() -> PathBuf {
@@ -99,11 +102,8 @@ fn create_revision(bin: &str, root: &Path, name: &str) -> Value {
 }
 
 #[test]
-fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
-    if OcctWorker::locate().is_err() {
-        eprintln!("object_specific_timeline_e2e: OCCT worker unavailable");
-        return;
-    }
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn feature_timeline_browsing_and_restore_use_the_production_cli_path() {
     let bin = env!("CARGO_BIN_EXE_threeterm");
     let root = temp_root();
     bracket(bin, &root, "first");
@@ -141,10 +141,7 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
     );
     let manifest_before_rejection = fs::read(root.join("manifest.json")).expect("manifest");
     let log_before_rejection = fs::read(root.join("transactions.log")).expect("log");
-    for (name, code) in [
-        ("", "unknown_command"),
-        ("before-second", "invalid_request"),
-    ] {
+    for name in ["", "before-second"] {
         let diagnostic = run_failed(
             bin,
             &[
@@ -155,16 +152,7 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
                 name,
             ],
         );
-        assert_eq!(diagnostic["code"], code);
-        if code == "unknown_command" {
-            assert!(
-                diagnostic["arg"]
-                    .as_str()
-                    .is_some_and(|arg| arg.contains("property \"name\""))
-            );
-        } else {
-            assert!(diagnostic.to_string().contains("named revision"));
-        }
+        assert_eq!(diagnostic["code"], "invalid_request");
         assert_eq!(
             fs::read(root.join("manifest.json")).expect("manifest"),
             manifest_before_rejection
@@ -305,6 +293,278 @@ fn object_specific_timeline_browsing_and_restore_use_the_production_cli_path() {
             .active_snapshot()
             .features
             .contains_key("second-base")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_cli_preserves_a_canonical_id_ending_in_base() {
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let root = temp_root();
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("cli-canonical-base-suffix"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        bundle
+            .append_features_with_history(
+                &[(bracket_id, "bracket:length=10;width=5;height=3;thickness=1")],
+                &event,
+            )
+            .expect("history event publishes");
+        state.apply_event(&event).expect("history event applies");
+    }
+
+    let timeline = timeline(bin, &root, "fixture-base");
+    assert_eq!(timeline["feature_id"], "fixture-base");
+    assert_eq!(
+        timeline["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_cli_rejects_unknown_and_incompatible_timeline_references_without_mutation() {
+    let root = temp_root();
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("cli-fail-closed-timeline"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    let first = state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("first history event");
+    state.apply_event(&first).expect("first event applies");
+    bundle
+        .append_features_with_history(
+            &[
+                ("first", "bracket:length=10;width=5;height=3;thickness=1"),
+                ("first-plate-vertical", "plate-vertical"),
+                ("first-plate-horizontal", "plate-horizontal"),
+            ],
+            &first,
+        )
+        .expect("first history publishes");
+    let named = state
+        .create_named_revision("before-second")
+        .expect("named revision event");
+    state.apply_event(&named).expect("named revision applies");
+    bundle
+        .append_features_with_history(&[], &named)
+        .expect("named revision publishes");
+    let second = state
+        .initialize_l_bracket("second", 8.0, 4.0, 2.0, 1.0)
+        .expect("second history event");
+    bundle
+        .append_features_with_history(
+            &[
+                ("second", "bracket:length=8;width=4;height=2;thickness=1"),
+                ("second-plate-vertical", "plate-vertical"),
+                ("second-plate-horizontal", "plate-horizontal"),
+            ],
+            &second,
+        )
+        .expect("second history publishes");
+
+    let manifest_before = fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before = fs::read(root.join("transactions.log")).expect("transaction log");
+    for args in [
+        vec![
+            "--machine",
+            "timeline",
+            root.to_str().expect("utf-8 path"),
+            "--feature-id",
+            "missing-object",
+        ],
+        vec![
+            "--machine",
+            "timeline",
+            root.to_str().expect("utf-8 path"),
+            "--feature-id",
+            "second-plate-vertical/edge",
+        ],
+        vec![
+            "--machine",
+            "restore-revision",
+            root.to_str().expect("utf-8 path"),
+            "--feature-id",
+            "second",
+            "--name",
+            "before-second",
+        ],
+    ] {
+        let diagnostic = run_failed(env!("CARGO_BIN_EXE_threeterm"), &args);
+        assert_eq!(diagnostic["code"], "invalid_request");
+        assert_eq!(
+            fs::read(root.join("manifest.json")).expect("manifest"),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(root.join("transactions.log")).expect("transaction log"),
+            log_before
+        );
+        assert_eq!(
+            Bundle::at(&root)
+                .open()
+                .expect("bundle reopens")
+                .history
+                .active_snapshot()
+                .revision_id,
+            "history-revision-3"
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the native OCCT worker"]
+fn divergent_feature_timeline_restore_replays_after_derived_results_are_removed() {
+    let bin = env!("CARGO_BIN_EXE_threeterm");
+    let root = temp_root();
+    bracket(bin, &root, "first");
+    bracket(bin, &root, "second");
+    let undone = run(
+        bin,
+        &["--machine", "undo", root.to_str().expect("utf-8 path")],
+    );
+    assert_eq!(undone["active_revision"], "history-revision-1");
+    bracket(bin, &root, "third");
+
+    let divergent = timeline(bin, &root, "second");
+    assert_eq!(divergent["feature_id"], "second");
+    assert_eq!(divergent["active_revision"], "history-revision-4");
+    assert_eq!(
+        divergent["revisions"]
+            .as_array()
+            .expect("divergent revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["ordinal"].as_u64().expect("ordinal"),
+                    revision["revision_id"].as_str().expect("revision id"),
+                    revision["operation"].as_str().expect("operation"),
+                    revision["status"].as_str().expect("status"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                2,
+                "history-revision-2",
+                "initialize-l-bracket",
+                "current-valid"
+            ),
+            (3, "history-revision-1", "undo", "absent")
+        ]
+    );
+    assert_eq!(
+        divergent["named_revisions"][0]["name"],
+        "recovered-before-undo-3"
+    );
+    assert_eq!(divergent["named_revisions"][0]["provenance"], "undo");
+
+    let restored = run(
+        bin,
+        &[
+            "--machine",
+            "restore-revision",
+            root.to_str().expect("utf-8 path"),
+            "--feature-id",
+            "second",
+            "--name",
+            "recovered-before-undo-3",
+        ],
+    );
+    validate(
+        &find(RESTORE_REVISION_COMMAND_ID)
+            .expect("restore is registered")
+            .response_schema,
+        &restored,
+    )
+    .expect("CLI restore response validates");
+    assert_eq!(restored["active_revision"], "history-revision-2");
+    let loaded = Bundle::at(&root).open().expect("restored bundle opens");
+    assert!(loaded.graph.contains_feature("first"));
+    assert!(loaded.graph.contains_feature("second"));
+    assert!(!loaded.graph.contains_feature("third"));
+    assert!(
+        loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("first-base")
+    );
+    assert!(
+        loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("second-base")
+    );
+    assert!(
+        !loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("third-base")
+    );
+
+    fs::remove_dir_all(root.join("brep")).expect("derived results are removed");
+    let reloaded = Host::new()
+        .load_with_geometry_replay(&root)
+        .expect("restored bundle replays after derived results are removed");
+    assert_eq!(reloaded.revision_hash, restored["revision_hash"]);
+    assert_eq!(reloaded.feature_graph_hash, loaded.feature_graph_hash_hex());
+
+    let post_restore = timeline(bin, &root, "second");
+    assert_eq!(post_restore["active_revision"], "history-revision-2");
+    assert_eq!(
+        post_restore["revisions"]
+            .as_array()
+            .expect("post-restore revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["ordinal"].as_u64().expect("ordinal"),
+                    revision["revision_id"].as_str().expect("revision id"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (2, "history-revision-2"),
+            (3, "history-revision-1"),
+            (5, "history-revision-2"),
+        ]
+    );
+    assert_eq!(
+        post_restore["revisions"]
+            .as_array()
+            .expect("post-restore revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["operation"].as_str().expect("operation"),
+                    revision["status"].as_str().expect("status"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("initialize-l-bracket", "current-valid"),
+            ("undo", "absent"),
+            ("restore-named-revision", "current-valid"),
+        ]
     );
 
     let _ = fs::remove_dir_all(root);

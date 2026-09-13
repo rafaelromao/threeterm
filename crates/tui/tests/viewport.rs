@@ -274,6 +274,151 @@ fn production_viewport_history_selection_renders_stale_geometry_marker() {
 }
 
 #[test]
+#[ignore = "requires the native OCCT worker"]
+fn production_viewport_browses_and_restores_the_selected_feature_timeline() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "first", 60.0, 30.0, 40.0, 3.0)
+        .expect("first bracket commits");
+    host.save_bracket(&root, "second", 50.0, 25.0, 30.0, 3.0)
+        .expect("second bracket commits");
+    host.undo(&root).expect("undo commits");
+    host.save_bracket(&root, "third", 40.0, 20.0, 20.0, 3.0)
+        .expect("divergent bracket commits");
+
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host projection creates a viewport session");
+    for _ in 0..30 {
+        if session.state().selected_target.as_deref() == Some("second") {
+            break;
+        }
+        session
+            .process_terminal_input(b"\x1b[B")
+            .expect("selection advances through the production viewport path");
+    }
+    assert_eq!(session.state().selected_target.as_deref(), Some("second"));
+
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("selected object opens its timeline");
+    let timeline = session
+        .state()
+        .feature_timeline
+        .expect("timeline is visible");
+    assert_eq!(timeline.feature_id, "second");
+    assert_eq!(timeline.active_revision, "history-revision-4");
+    assert_eq!(
+        timeline
+            .revisions
+            .iter()
+            .map(|revision| (
+                revision.ordinal,
+                revision.revision_id.as_str(),
+                revision.operation.as_str(),
+                revision.status.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                2,
+                "history-revision-2",
+                "initialize-l-bracket",
+                "current-valid"
+            ),
+            (3, "history-revision-1", "undo", "absent"),
+        ]
+    );
+    assert_eq!(timeline.named_revisions, ["recovered-before-undo-3"]);
+    assert_eq!(
+        timeline.named_revision_provenance,
+        [("recovered-before-undo-3".to_string(), "undo".to_string())]
+    );
+
+    let restored = session
+        .restore_feature_timeline(&host, &root, "recovered-before-undo-3")
+        .expect("selected object restores its named revision");
+    assert_eq!(
+        restored.history.active_snapshot().revision_id,
+        "history-revision-2"
+    );
+    let current = Bundle::at(&root)
+        .open()
+        .expect("restored canonical state exists");
+    assert!(current.graph.contains_feature("first"));
+    assert!(current.graph.contains_feature("second"));
+    assert!(!current.graph.contains_feature("third"));
+    assert!(
+        current
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("first-base")
+    );
+    assert!(
+        current
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("second-base")
+    );
+    assert!(
+        !current
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("third-base")
+    );
+    std::fs::remove_dir_all(root.join("brep")).expect("derived results are removed");
+    let reloaded = Host::new()
+        .load_with_geometry_replay(&root)
+        .expect("restored bundle replays after derived results are removed");
+    assert_eq!(reloaded.revision_hash, restored.snapshot.revision_hash);
+    assert_eq!(
+        reloaded.feature_graph_hash,
+        current.feature_graph_hash_hex()
+    );
+
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("restored object reopens its timeline");
+    let restored_timeline = session
+        .state()
+        .feature_timeline
+        .expect("restored timeline is visible");
+    assert_eq!(restored_timeline.active_revision, "history-revision-2");
+    assert_eq!(
+        restored_timeline
+            .revisions
+            .iter()
+            .map(|revision| (
+                revision.ordinal,
+                revision.revision_id.as_str(),
+                revision.operation.as_str(),
+                revision.status.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                2,
+                "history-revision-2",
+                "initialize-l-bracket",
+                "current-valid"
+            ),
+            (3, "history-revision-1", "undo", "absent"),
+            (
+                5,
+                "history-revision-2",
+                "restore-named-revision",
+                "current-valid"
+            ),
+        ]
+    );
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn session_rejects_an_unadmitted_ghostty_renderer() {
     let root = temporary_bundle_root();
     let host = Host::new();
@@ -518,6 +663,37 @@ fn production_pick_validates_semantic_candidates_before_selection() {
         Some("feature-a")
     );
     assert_eq!(host.current(), Some(before));
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+fn production_pick_preserves_a_canonical_id_ending_in_base() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "fixture-base", "box")
+        .expect("canonical feature is persisted");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let initial = session
+        .render_current()
+        .expect("initial frame submits")
+        .started
+        .expect("initial frame is in flight");
+    session
+        .acknowledge(FrameAcknowledgement::from(&initial))
+        .expect("initial frame is acknowledged");
+
+    let picked = session
+        .pick_at(&host, 32, 24)
+        .expect("canonical feature pick succeeds");
+    assert_eq!(picked.candidates, vec!["fixture-base"]);
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
 
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }

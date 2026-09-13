@@ -123,7 +123,7 @@ fn bracket_intent_persists_with_atomic_family_entries_and_replays() {
             Some(&canonical_bracket_request_id("l-bracket", 65.0, 30.0, 40.0, 3.0)),
             Some("{}"),
             b"edited-bracket-brep",
-            &edited_intent,
+            Some(&edited_intent),
             Some(&history_event),
         )
         .expect("parameterized bracket replacement publishes");

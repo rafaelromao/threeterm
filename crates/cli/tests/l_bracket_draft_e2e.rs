@@ -110,7 +110,14 @@ fn boolean_fuse(bin: &str, root: &Path, feature_id: &str, base: &str, tool: &str
     serde_json::from_str(&stdout).expect("response is JSON")
 }
 
-fn draft(bin: &str, root: &Path, feature_id: &str, base: &str, angle: f64) -> Value {
+fn draft(
+    bin: &str,
+    root: &Path,
+    feature_id: &str,
+    base: &str,
+    expected_revision: &str,
+    angle: f64,
+) -> Value {
     let output = Command::new(bin)
         .args([
             "--machine",
@@ -121,6 +128,8 @@ fn draft(bin: &str, root: &Path, feature_id: &str, base: &str, angle: f64) -> Va
             feature_id,
             "--base",
             base,
+            "--expected-revision",
+            expected_revision,
             "--angle",
             &format!("{angle}"),
             "--pull-direction",
@@ -196,6 +205,7 @@ fn l_bracket_draft_commits_through_the_cli() {
         &root,
         "l-bracket-draft-draft",
         "l-bracket-draft",
+        &l_bracket_revision,
         angle,
     );
     assert_ne!(

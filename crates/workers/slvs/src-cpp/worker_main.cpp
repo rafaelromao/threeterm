@@ -213,7 +213,7 @@ std::string attachment_field(const Json& args, const char* name) {
            << escape(provenance == nullptr ? "" : string_field(*provenance, "source_revision_id"))
            << "\",\"source_face_id\":\""
            << escape(provenance == nullptr ? "" : string_field(*provenance, "source_face_id"))
-           << "},\"evidence\":{";
+           << "\"},\"evidence\":{";
     const Json* evidence = field(*found, "evidence");
     output << "\"topology_kind\":\""
            << escape(evidence == nullptr ? "" : string_field(*evidence, "topology_kind"))
@@ -500,6 +500,10 @@ bool solve(const Json& args, const std::string& request_id, std::string& result,
             for (const auto& parameter : params) {
                 if (parameter.h == point.x) x = parameter.val;
                 if (parameter.h == point.y) y = parameter.val;
+            }
+            if (!std::isfinite(x) || !std::isfinite(y)) {
+                error = "solver produced a non-finite coordinate";
+                return false;
             }
             output << "{\"entity_id\":\"" << escape(point.id) << "\",\"x\":" << x << ",\"y\":" << y << '}';
         }

@@ -52,6 +52,7 @@
 #include <Standard_Version.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1025,6 +1026,13 @@ bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& 
         GProp_GProps properties;
         BRepGProp::SurfaceProperties(face, properties);
         const gp_Pnt origin = properties.CentreOfMass();
+        const auto finite = [](double value) { return std::isfinite(value); };
+        if (!finite(origin.X()) || !finite(origin.Y()) || !finite(origin.Z()) ||
+            !finite(normal.X()) || !finite(normal.Y()) || !finite(normal.Z()) ||
+            !finite(x_axis.X()) || !finite(x_axis.Y()) || !finite(x_axis.Z()) ||
+            !finite(y_axis.X()) || !finite(y_axis.Y()) || !finite(y_axis.Z())) {
+            continue;
+        }
         candidates.push_back({origin, normal, x_axis, y_axis});
     }
     std::sort(candidates.begin(), candidates.end(),
@@ -1641,9 +1649,16 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
         out << ",\"edge_candidates\":[]";
         return;
     }
-    const std::string source_feature_id = get_string(*selected, "source_feature_id");
-    const std::string source_revision_id = get_string(*selected, "source_revision_id");
-    const std::string source_edge_id = get_string(*selected, "source_edge_id");
+    const auto* provenance = find_field(*selected, "provenance");
+    const JsonParser::Value* source =
+        provenance != nullptr && provenance->kind == JsonParser::ValueKind::Object
+            ? provenance
+            : selected;
+    const std::string source_feature_id = get_string(*source, "source_feature_id");
+    const std::string source_revision_id = get_string(request, "source_revision_id").empty()
+                                               ? get_string(*source, "source_revision_id")
+                                               : get_string(request, "source_revision_id");
+    const std::string source_edge_id = get_string(*source, "source_edge_id");
     bool first = true;
     out << ",\"edge_candidates\":[";
     for (const TopoDS_Edge& edge : edges) {
@@ -1662,6 +1677,12 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
             (first_point.X() + last_point.X()) / 2.0,
             (first_point.Y() + last_point.Y()) / 2.0,
             (first_point.Z() + last_point.Z()) / 2.0);
+        const auto finite = [](double value) { return std::isfinite(value); };
+        if (!finite(midpoint.X()) || !finite(midpoint.Y()) || !finite(midpoint.Z()) ||
+            !finite(tangent.X()) || !finite(tangent.Y()) || !finite(tangent.Z()) ||
+            !finite(properties.Mass())) {
+            continue;
+        }
         // A candidate role is evidence about the returned edge, not a copy
         // of the caller's claim. Preserve the MVP perimeter role for linear
         // edges and expose a distinct role for curved edit results.
@@ -1681,6 +1702,17 @@ void append_edge_candidates(std::ostringstream& out, const std::vector<TopoDS_Ed
     out << ']';
 }
 
+std::vector<TopoDS_Edge> unique_edges(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
+    std::vector<TopoDS_Edge> edges;
+    edges.reserve(edge_map.Extent());
+    for (int index = 1; index <= edge_map.Extent(); ++index) {
+        edges.push_back(TopoDS::Edge(edge_map(index)));
+    }
+    return edges;
+}
+
 bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) {
     const std::string request_id = get_string(request, "request_id");
     const std::string feature_id = get_string(request, "feature_id");
@@ -1696,10 +1728,7 @@ bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) 
             error = "could not read base BREP at " + base_path;
             return false;
         }
-        std::vector<TopoDS_Edge> edges;
-        for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-            edges.push_back(TopoDS::Edge(explorer.Current()));
-        }
+        const std::vector<TopoDS_Edge> edges = unique_edges(shape);
         std::ostringstream out;
         out << "{\"schema_version\":\"" << kSchemaVersion
             << "\",\"request_id\":\"" << json_escape(request_id)
@@ -1728,8 +1757,7 @@ TopoDS_Edge source_edge_for_context(const TopoDS_Shape& shape,
     if (!(length > 0.0) || !(tangent_length > 0.0)) return {};
 
     TopoDS_Edge match;
-    for (TopExp_Explorer explorer(shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+    for (const TopoDS_Edge& edge : unique_edges(shape)) {
         GProp_GProps properties;
         BRepGProp::LinearProperties(edge, properties);
         TopoDS_Vertex first_vertex;
@@ -2321,6 +2349,10 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             BRepGProp::VolumeProperties(base, base_properties);
             BRepGProp::VolumeProperties(serialized_result, result_properties);
             removed_volume = base_properties.Mass() - result_properties.Mass();
+            if (!std::isfinite(removed_volume)) {
+                error = "hole removed volume is non-finite";
+                return false;
+            }
         }
         std::ifstream stream(output_path, std::ios::binary);
         std::ostringstream bytes;

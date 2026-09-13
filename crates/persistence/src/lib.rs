@@ -87,6 +87,7 @@ pub mod bundle {
 
 pub const PRE_MIGRATION_BACKUP_SUFFIX: &str = ".pre-migration-backup";
 pub const PREVIOUS_GENERATION_SUFFIX: &str = ".previous-generation";
+pub const CANONICAL_BREP_CHECKPOINT_SUBDIR: &str = ".canonical-brep";
 
 pub fn schema_epoch() -> &'static str {
     "threeterm.persistence/1"
@@ -2228,7 +2229,8 @@ impl LoadedBundle {
     pub fn resolve_history_feature_id(&self, feature_id: &str) -> Result<String, BundleError> {
         Ok(self.resolve_history_feature(feature_id)?.history_id)
     }
-
+    /// Resolve a selected graph identity to its persisted timeline feature while
+    /// keeping the public identity stable across legacy history records.
     pub fn resolve_history_feature(
         &self,
         feature_id: &str,
@@ -2253,8 +2255,9 @@ impl LoadedBundle {
                     .any(|revision| revision.snapshot.features.contains_key(id))
         };
 
-        // Prefer an exact initialized bracket identity so a real root named
-        // "fixture-base" is not mistaken for the base role of "fixture".
+        // Prefer an exact initialized bracket identity before interpreting a
+        // legacy role suffix. This keeps IDs such as `fixture-base` distinct
+        // from the `-base` role of a bracket named `fixture`.
         for bracket_id in initialized_brackets.iter().copied() {
             if feature_id == bracket_id {
                 let history_id = format!("{bracket_id}-base");
@@ -3795,7 +3798,7 @@ impl Bundle {
         idempotency_key: Option<&str>,
         idempotency_payload: Option<&str>,
         brep_bytes: &[u8],
-        intent: &CanonicalIntent,
+        intent: Option<&CanonicalIntent>,
         history_event: Option<&HistoryEvent>,
     ) -> Result<LoadedBundle, BundleError> {
         let Some(idempotency_key) = idempotency_key else {
@@ -3821,7 +3824,7 @@ impl Bundle {
                 false,
                 false,
                 true,
-                Some(intent),
+                intent,
             )
         })
     }
@@ -4699,6 +4702,17 @@ impl Bundle {
                     Some(PublicationFailurePoint::BrepRename),
                     Some(PublicationFailurePoint::BrepDirectorySync),
                 )?;
+            }
+            if !breps.is_empty() {
+                let checkpoint_dir = staging.join(CANONICAL_BREP_CHECKPOINT_SUBDIR);
+                fs::create_dir_all(&checkpoint_dir)?;
+                for (feature_id, brep_bytes) in breps {
+                    atomic_write(
+                        &checkpoint_dir.join(format!("{feature_id}.brep")),
+                        brep_bytes,
+                        None,
+                    )?;
+                }
             }
             if !component_geometries.is_empty() {
                 let component_dir = staging
@@ -6862,6 +6876,30 @@ mod tests {
         assert_eq!(loaded.revision_hash_hex(), saved.revision_hash_hex());
         assert!(root.join(MANIFEST_FILENAME).is_file());
         assert!(root.join(TRANSACTIONS_LOG_FILENAME).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn brep_publication_keeps_an_authenticated_geometry_checkpoint() {
+        let root = temp_root("brep-checkpoint");
+        let bundle = Bundle::create_for_test(&root, "00".repeat(16).as_str()).expect("creates");
+        let revision = bundle
+            .open()
+            .expect("opens")
+            .revision_hash_hex()
+            .to_string();
+        let bytes = b"authenticated-brep";
+        bundle
+            .append_feature_with_brep_if_revision("solid-1", "brep:solid-1", &revision, bytes)
+            .expect("BREP publishes");
+
+        let checkpoint = root
+            .join(CANONICAL_BREP_CHECKPOINT_SUBDIR)
+            .join("solid-1.brep");
+        assert_eq!(fs::read(&checkpoint).expect("checkpoint reads"), bytes);
+        fs::remove_file(root.join("brep/solid-1.brep")).expect("derived BREP deletes");
+        bundle.open().expect("bundle reopens without derived BREP");
+        assert_eq!(fs::read(&checkpoint).expect("checkpoint remains"), bytes);
         let _ = fs::remove_dir_all(root);
     }
 

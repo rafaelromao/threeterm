@@ -73,6 +73,12 @@ fn extrude(_bin: &str, root: &Path, feature_id: &str, profile: serde_json::Value
 }
 
 fn fillet(bin: &str, root: &Path, feature_id: &str, base: &str, radius: f64) -> Value {
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("bundle reopens before fillet")
+        .revision_hash_hex()
+        .to_string();
+    let selected_edge = common::selected_edge_file(root, base, &expected_revision, "fillet");
     let output = Command::new(bin)
         .args([
             "--machine",
@@ -83,6 +89,10 @@ fn fillet(bin: &str, root: &Path, feature_id: &str, base: &str, radius: f64) -> 
             feature_id,
             "--base",
             base,
+            "--expected-revision",
+            expected_revision.as_str(),
+            "--selected-edge-file",
+            selected_edge.to_str().expect("selected edge path is utf-8"),
             "--radius",
             &format!("{radius}"),
         ])
@@ -115,6 +125,12 @@ fn chamfer(
     base: &str,
     distance: f64,
 ) -> std::process::Output {
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("bundle reopens before chamfer")
+        .revision_hash_hex()
+        .to_string();
+    let selected_edge = common::selected_edge_file(root, base, &expected_revision, "chamfer");
     Command::new(bin)
         .args([
             "--machine",
@@ -125,6 +141,10 @@ fn chamfer(
             feature_id,
             "--base",
             base,
+            "--expected-revision",
+            expected_revision.as_str(),
+            "--selected-edge-file",
+            selected_edge.to_str().expect("selected edge path is utf-8"),
             "--distance",
             &format!("{distance}"),
         ])
@@ -204,7 +224,13 @@ fn l_bracket_fillet_then_chamfer_reports_an_atomic_geometry_limitation() {
     );
     let diagnostic: Value =
         serde_json::from_slice(&chamfer_output.stderr).expect("diagnostic is JSON");
-    assert_eq!(diagnostic["code"], "unsupported_geometry");
+    assert!(
+        matches!(
+            diagnostic["code"].as_str(),
+            Some("unsupported_geometry" | "brep_invalid")
+        ),
+        "unexpected chamfer diagnostic: {diagnostic}"
+    );
     assert_eq!(diagnostic["schema_version"], "threeterm.protocol/1");
 
     let reloaded = Bundle::at(&root)

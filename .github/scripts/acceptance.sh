@@ -467,7 +467,7 @@ for index in "${!GATE_IDS[@]}"; do
     log_relative="$(relative_artifact_path "${GATE_LOGS[${index}]}" || printf '%s' unknown)"
     output_json="$(jq -cn \
         --arg path "${log_relative}" \
-        --argjson bytes "${GATE_LOG_BYTES[${index]}:-0}" \
+        --argjson bytes "${GATE_LOG_BYTES[$index]:-0}" \
         --arg sha256 "${GATE_LOG_SHA256[${index}]}" \
         '{path: $path, bytes: $bytes, sha256: $sha256}')"
     GATES="$(jq -c \

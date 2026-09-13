@@ -82,23 +82,17 @@ fn cli_sketch_solve_commits_and_renders_the_real_worker_result() {
 
     let loaded = Bundle::at(&path).open().expect("bundle reloads");
     let scene = ViewportScene::from_feature_graph(loaded.revision_hash_hex(), &loaded.graph, None);
-    let frame = ProtocolNeutralViewport::project(
-        &scene,
-        ViewportRequest::new(
-            loaded.revision_hash_hex(),
-            1,
-            160,
-            120,
-            CameraState::default(),
-        ),
-    )
-    .expect("committed rectangle renders");
-    assert!(
-        frame
-            .rgb
-            .chunks_exact(3)
-            .any(|pixel| pixel == [105, 220, 190])
+    let request = ViewportRequest::new(
+        loaded.revision_hash_hex(),
+        1,
+        160,
+        120,
+        CameraState::default(),
     );
+    let sketch_edge = request.colors.edge;
+    let frame =
+        ProtocolNeutralViewport::project(&scene, request).expect("committed rectangle renders");
+    assert!(frame.rgb.chunks_exact(3).any(|pixel| pixel == sketch_edge));
     let _ = fs::remove_file(request_path);
     let _ = fs::remove_dir_all(path);
 }

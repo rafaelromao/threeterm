@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, new_request_id};
+use threeterm_protocol::artifact::sha256_hex;
 
 pub struct OcctFixture {
     root: PathBuf,
@@ -103,6 +105,21 @@ printf '{"kind":"completed","schema_version":"threeterm.protocol/1","request_id"
     }
 }
 
+/// Shell-fixture CLI contracts run in the workerless fast tier. In the
+/// real-worker tier the compiled-in worker shadows `THREETERM_OCCTBUILD_WORKER`
+/// inside CLI subprocesses, so the fixture would never receive the request.
+/// Real boolean behavior in that tier is covered by the real-worker
+/// `boolean_fuse_e2e`/`boolean_cut_common_e2e` suites.
+pub fn skip_shell_fixture_contract_in_real_worker_tier(test: &str) -> bool {
+    if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() {
+        eprintln!(
+            "skipping {test}: shell-fixture worker is shadowed by the real worker in this tier"
+        );
+        return true;
+    }
+    false
+}
+
 pub fn install_occt_failure_fixture() -> OcctFixture {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -157,4 +174,74 @@ pub fn extrude_canonical_with_worker(
             worker,
         )
         .expect("canonical fixture extrude succeeds");
+}
+
+#[allow(dead_code)]
+pub fn selected_edge_file(
+    root: &Path,
+    source_feature_id: &str,
+    source_revision: &str,
+    label: &str,
+) -> PathBuf {
+    let worker = OcctWorker::locate().expect("OCCT worker locates");
+    let inspection = worker
+        .inspect_edges(
+            new_request_id(),
+            root.join("brep").join(format!("{source_feature_id}.brep")),
+            source_feature_id,
+            source_revision,
+            serde_json::json!({
+                "semantic_id": "requested-edge",
+                "source_feature_id": source_feature_id,
+                "source_revision_id": source_revision,
+                "source_edge_id": "requested-edge",
+                "role": "outer-perimeter",
+                "midpoint": [0.0, 0.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 1.0
+            }),
+        )
+        .expect("edge inspection succeeds");
+    let mut semantic_id_counts = HashMap::new();
+    for candidate in &inspection.edge_candidates {
+        let semantic_id = edge_semantic_id(candidate);
+        *semantic_id_counts.entry(semantic_id).or_insert(0) += 1;
+    }
+    let candidate = inspection
+        .edge_candidates
+        .iter()
+        .find(|candidate| semantic_id_counts[&edge_semantic_id(candidate)] == 1)
+        .expect("edge inspection returns an unambiguous candidate");
+    let semantic_id = edge_semantic_id(candidate);
+    let selected_edge = serde_json::json!({
+        "semantic_id": semantic_id,
+        "provenance": {
+            "source_feature_id": source_feature_id,
+            "source_revision_id": source_revision,
+            "source_edge_id": candidate.source_edge_id
+        },
+        "role": candidate.role,
+        "evidence": {
+            "midpoint": candidate.midpoint,
+            "tangent": candidate.tangent,
+            "length": candidate.length
+        }
+    });
+    let path = root.join(format!("{label}-selected-edge.json"));
+    fs::write(
+        &path,
+        serde_json::to_vec(&selected_edge).expect("selected edge serializes"),
+    )
+    .expect("selected edge file writes");
+    path
+}
+
+fn edge_semantic_id(candidate: &threeterm_occt_worker::EdgeCandidateEvidence) -> String {
+    format!(
+        "edge-{}",
+        sha256_hex(
+            &serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+                .expect("edge evidence serializes")
+        )
+    )
 }

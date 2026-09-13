@@ -8,6 +8,7 @@ use threeterm_domain::{
     ProjectGeneration, SketchPlacement, resolve_planar_face_reference,
 };
 use threeterm_host::Host;
+use threeterm_occt_worker::{BracketRequest, new_request_id};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_slvs_worker::{
     SketchConstraint as WorkerSketchConstraint, SketchEntity as WorkerSketchEntity,
@@ -208,27 +209,21 @@ fn real_worker_commit_reload_and_viewport_use_one_production_path() {
             .iter()
             .any(|feature| feature.kind.starts_with("sketch-segment3:"))
     );
-    let frame = ProtocolNeutralViewport::project(
-        &scene,
-        ViewportRequest::new(
-            loaded.revision_hash_hex(),
-            1,
-            160,
-            120,
-            CameraState::default(),
-        ),
-    )
-    .expect("resolved sketch projects to a viewport frame");
-    assert!(
-        frame
-            .rgb
-            .chunks_exact(3)
-            .any(|pixel| pixel == [105, 220, 190])
+    let request = ViewportRequest::new(
+        loaded.revision_hash_hex(),
+        1,
+        160,
+        120,
+        CameraState::default(),
     );
+    let sketch_edge = request.colors.edge;
+    let frame = ProtocolNeutralViewport::project(&scene, request)
+        .expect("resolved sketch projects to a viewport frame");
+    assert!(frame.rgb.chunks_exact(3).any(|pixel| pixel == sketch_edge));
     assert_eq!(committed.snapshot.revision_hash, loaded.revision_hash_hex());
     assert_ne!(baseline.revision_hash_hex(), loaded.revision_hash_hex());
     let reloaded = host
-        .reload_sketch_with_worker(&path, "host-rectangle", &worker)
+        .reload_sketch_with_worker(&path, "rectangle", &worker)
         .expect("canonical attachment reloads through the real worker");
     assert_eq!(reloaded.reattachment_outcome.as_deref(), Some("resolved"));
     drop(occt);
@@ -406,21 +401,16 @@ fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
     };
     let path = root();
     write_fresh(&path, ProjectGeneration::with_id("reload-derived-sketch")).expect("fresh bundle");
-    let source = fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
-    ))
-    .expect("fixture BREP reads");
-    let bundle = Bundle::at(&path);
-    let revision = bundle
-        .open()
-        .expect("bundle opens")
-        .revision_hash_hex()
-        .to_string();
-    bundle
-        .append_feature_with_brep_if_revision("solid", "brep:solid", &revision, &source)
-        .expect("authenticated BREP appends");
     let host = Host::new();
+    // `solid` must be intent-backed rather than an imported fixture BREP so
+    // geometry replay can rebuild it after the derived file is deleted below;
+    // a plain imported BREP has no worker-recomputable provenance.
+    host.create_bracket(
+        &path,
+        BracketRequest::new(new_request_id(), 60.0, 30.0, 40.0, 3.0).with_feature_id("solid"),
+        &occt,
+    )
+    .expect("solid L-bracket commits");
     let candidate = host
         .planar_face_candidates(&path, "solid")
         .expect("production OCCT returns planar face evidence")
@@ -460,14 +450,12 @@ fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
             start: "line-start".into(),
             end: "line-end".into(),
         },
-        WorkerSketchEntity::Circle {
-            id: "circle".into(),
-            center: "center".into(),
-            radius: 1.0,
-        },
-        WorkerSketchEntity::Arc {
-            id: "arc".into(),
-            center: "center".into(),
+        // The sketch must solve exactly: every point is fixed and segments
+        // add no degrees of freedom, while a circle would leave its radius
+        // free (and an arc over fixed endpoints overconstrains), so the
+        // pinned solver could never report `solved` for those shapes here.
+        WorkerSketchEntity::LineSegment {
+            id: "link".into(),
             start: "arc-start".into(),
             end: "arc-end".into(),
         },
@@ -530,19 +518,10 @@ fn production_reload_rebuilds_an_attached_sketch_after_derived_brep_deletion() {
         scene
             .features
             .iter()
-            .any(|feature| feature.kind.starts_with("sketch-segment3:"))
-    );
-    assert!(
-        scene
-            .features
-            .iter()
-            .any(|feature| feature.kind.starts_with("sketch-circle3:"))
-    );
-    assert!(
-        scene
-            .features
-            .iter()
-            .any(|feature| feature.kind.starts_with("sketch-arc3:"))
+            .filter(|feature| feature.kind.starts_with("sketch-segment3:"))
+            .count()
+            >= 2,
+        "both sketch segments render"
     );
     drop(occt);
     let _ = fs::remove_dir_all(path);

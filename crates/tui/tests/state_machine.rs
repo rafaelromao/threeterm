@@ -1119,6 +1119,7 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
         Some("l")
     );
     let timeline = session.state().feature_timeline.expect("timeline state");
+    assert_eq!(timeline.active_revision, "history-revision-1");
     assert_eq!(timeline.revisions[0].operation, "initialize-l-bracket");
     assert_eq!(timeline.revisions[0].status, "current-valid");
 
@@ -1145,6 +1146,115 @@ fn selected_feature_opens_a_host_timeline_and_restricts_named_restore() {
     );
     assert!(session.state().feature_timeline.is_none());
     assert_eq!(session.state().canonical_revision, "history-revision-1");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selected_canonical_id_ending_in_base_is_not_reinterpreted_as_a_role() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save_bracket(&root, "fixture-base", 10.0, 5.0, 3.0, 1.0)
+        .expect("history project persists");
+
+    let mut session = TuiSession::new(
+        [FeatureTarget::new("fixture-base", "bracket")],
+        "history-revision-1",
+    );
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("feature selects");
+
+    session
+        .open_feature_timeline(&host, &root)
+        .expect("exact canonical ID opens its own timeline");
+    assert_eq!(
+        session
+            .state()
+            .feature_timeline
+            .as_ref()
+            .map(|timeline| timeline.feature_id.as_str()),
+        Some("fixture-base")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn graph_selection_preserves_a_canonical_id_ending_in_base() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "fixture-base", "box")
+        .expect("canonical feature persists");
+    let snapshot = host.current().expect("canonical snapshot exists");
+    let graph = host
+        .current_graph()
+        .expect("host exposes the canonical graph");
+    let mut session = TuiSession::from_feature_graph(&graph, &snapshot.revision_hash);
+
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["fixture-base".to_string()],
+        })
+        .expect("canonical feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["fixture-base".to_string()],
+        }))
+        .expect("canonical feature selects");
+
+    assert_eq!(
+        session.state().selected_target.as_deref(),
+        Some("fixture-base")
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selected_feature_timeline_rejects_a_feature_without_history_without_mutation() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "plain", "cube")
+        .expect("plain feature persists");
+    let revision = host
+        .current()
+        .expect("canonical snapshot exists")
+        .revision_hash;
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("transaction log");
+    let mut session = TuiSession::new([FeatureTarget::new("plain", "cube")], revision.clone());
+    session
+        .transition_selection(SelectionEvent::Nominate {
+            candidates: vec!["plain".to_string()],
+        })
+        .expect("feature nominates");
+    session
+        .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+            stable_ids: vec!["plain".to_string()],
+        }))
+        .expect("feature selects");
+
+    let diagnostic = session
+        .open_feature_timeline(&host, &root)
+        .expect_err("feature without a timeline is rejected");
+    assert_eq!(diagnostic.code, TuiDiagnosticCode::HistoryRejected);
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transaction log"),
+        log_before
+    );
+    assert_eq!(session.state().canonical_revision, revision);
 
     let _ = std::fs::remove_dir_all(root);
 }

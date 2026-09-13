@@ -22,6 +22,11 @@ fn root(label: &str) -> PathBuf {
 
 #[test]
 fn boolean_fuse_cli_preserves_the_worker_operation_and_artifact_binding() {
+    if common::skip_shell_fixture_contract_in_real_worker_tier(
+        "boolean_fuse_cli_preserves_the_worker_operation_and_artifact_binding",
+    ) {
+        return;
+    }
     let fixture = common::install_occt_fixture();
     let project = root("boolean-fuse");
     Bundle::create(&project).expect("bundle creates");
@@ -107,6 +112,11 @@ fn boolean_fuse_cli_preserves_the_worker_operation_and_artifact_binding() {
 
 #[test]
 fn boolean_fuse_cli_reports_a_fixture_worker_failure_without_mutating_history() {
+    if common::skip_shell_fixture_contract_in_real_worker_tier(
+        "boolean_fuse_cli_reports_a_fixture_worker_failure_without_mutating_history",
+    ) {
+        return;
+    }
     let fixture = common::install_occt_fixture();
     let project = root("boolean-fuse-failure");
     Bundle::create(&project).expect("bundle creates");
@@ -166,6 +176,11 @@ fn boolean_fuse_cli_reports_a_fixture_worker_failure_without_mutating_history() 
 
 #[test]
 fn boolean_cli_commands_preserve_their_distinct_worker_operation_names() {
+    if common::skip_shell_fixture_contract_in_real_worker_tier(
+        "boolean_cli_commands_preserve_their_distinct_worker_operation_names",
+    ) {
+        return;
+    }
     let fixture = common::install_occt_fixture();
     let project = root("boolean-operation-names");
     Bundle::create(&project).expect("bundle creates");

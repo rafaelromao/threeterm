@@ -16,13 +16,18 @@
 //! - `tools/call` rejects unknown tool names with `code: -32601`.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use threeterm_domain::{ProjectGeneration, history::HistoryState};
+use threeterm_host::Host;
 use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, write_fresh};
+use threeterm_protocol::schema::{RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID, find};
+use threeterm_protocol::schema_validator::validate;
+use threeterm_tui::{SelectionEvent, SelectionVerification, TuiSession};
 
 fn fresh_bundle(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -165,6 +170,276 @@ impl McpSession {
 
 fn structured(responses: &[Value], index: usize) -> &Value {
     &responses[index]["result"]["structuredContent"]
+}
+
+fn mcp_call(name: &str, arguments: Value, id: &str) -> Value {
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    })]);
+    assert_eq!(responses.len(), 1);
+    assert!(
+        responses[0]["error"].is_null(),
+        "MCP error: {}",
+        responses[0]
+    );
+    assert_eq!(responses[0]["result"]["isError"], false);
+    responses[0]["result"]["structuredContent"].clone()
+}
+
+fn mcp_failure(name: &str, arguments: Value, id: &str) -> Value {
+    let responses = run_mcp(&[serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    })]);
+    assert_eq!(responses.len(), 1);
+    assert!(
+        responses[0]["error"].is_null(),
+        "MCP protocol error: {}",
+        responses[0]
+    );
+    assert_eq!(responses[0]["result"]["isError"], true);
+    responses[0].clone()
+}
+
+fn mcp_bracket(root: &std::path::Path, id: &str) -> Value {
+    mcp_call(
+        "threeterm.command.bracket/1",
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "bracket_id": id,
+            "length": 10.0,
+            "width": 5.0,
+            "height": 3.0,
+            "thickness": 1.0
+        }),
+        id,
+    )
+}
+
+fn seed_divergent_timeline(root: &Path) {
+    write_fresh(
+        root,
+        ProjectGeneration::with_id("adapter-timeline-conformance"),
+    )
+    .expect("conformance bundle is created");
+    let bundle = Bundle::at(root);
+    let mut state = HistoryState::default();
+    let mut events = Vec::new();
+    for (id, [length, width, height, thickness]) in [
+        ("first", [10.0, 5.0, 3.0, 1.0]),
+        ("second", [8.0, 4.0, 2.0, 1.0]),
+    ] {
+        let event = state
+            .initialize_l_bracket(id, length, width, height, thickness)
+            .expect("bracket history event");
+        let vertical = format!("{id}-plate-vertical");
+        let horizontal = format!("{id}-plate-horizontal");
+        bundle
+            .append_features_with_history(
+                &[
+                    (id, "bracket:length=10;width=5;height=3;thickness=1"),
+                    (vertical.as_str(), "plate-vertical"),
+                    (horizontal.as_str(), "plate-horizontal"),
+                ],
+                &event,
+            )
+            .expect("bracket history publishes");
+        state.apply_event(&event).expect("bracket history applies");
+        events.push(event);
+    }
+    let undo = state.undo(&events).expect("undo history event");
+    bundle
+        .append_features_with_history(&[], &undo)
+        .expect("undo history publishes");
+    state.apply_event(&undo).expect("undo history applies");
+    events.push(undo);
+
+    let event = state
+        .initialize_l_bracket("third", 6.0, 3.0, 2.0, 1.0)
+        .expect("divergent history event");
+    let vertical = "third-plate-vertical";
+    let horizontal = "third-plate-horizontal";
+    bundle
+        .append_features_with_history(
+            &[
+                ("third", "bracket:length=6;width=3;height=2;thickness=1"),
+                (vertical, "plate-vertical"),
+                (horizontal, "plate-horizontal"),
+            ],
+            &event,
+        )
+        .expect("divergent history publishes");
+}
+
+fn feature_timeline_projection(value: &Value) -> Value {
+    serde_json::json!({
+        "feature_id": value["feature_id"],
+        "active_revision": value["active_revision"],
+        "revisions": value["revisions"].as_array().expect("timeline revisions").iter().map(|revision| {
+            serde_json::json!({
+                "ordinal": revision["ordinal"],
+                "revision_id": revision["revision_id"],
+                "operation": revision["operation"],
+                "status": revision["status"],
+                "named_revision_names": revision["named_revision_names"],
+            })
+        }).collect::<Vec<_>>(),
+        "named_revisions": value["named_revisions"].as_array().expect("named revisions").iter().map(|revision| {
+            serde_json::json!({
+                "name": revision["name"],
+                "provenance": revision["provenance"],
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn tui_feature_timeline_projection(timeline: &threeterm_tui::FeatureTimelineView) -> Value {
+    serde_json::json!({
+        "feature_id": timeline.feature_id,
+        "active_revision": timeline.active_revision,
+        "revisions": timeline.revisions.iter().map(|revision| {
+            serde_json::json!({
+                "ordinal": revision.ordinal,
+                "revision_id": revision.revision_id,
+                "operation": revision.operation,
+                "status": revision.status,
+                "named_revision_names": revision.named_revision_names,
+            })
+        }).collect::<Vec<_>>(),
+        "named_revisions": timeline.named_revision_provenance.iter().map(|(name, provenance)| {
+            serde_json::json!({"name": name, "provenance": provenance})
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn cli_timeline(root: &Path, feature_id: &str) -> Value {
+    let output = Command::new(threeterm_binary())
+        .args(["--machine", "timeline"])
+        .arg(root)
+        .args(["--feature-id", feature_id])
+        .output()
+        .expect("CLI timeline process runs");
+    assert!(
+        output.status.success(),
+        "CLI timeline failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let response: Value = serde_json::from_slice(&output.stdout).expect("CLI timeline is JSON");
+    validate(
+        &find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .response_schema,
+        &response,
+    )
+    .expect("CLI timeline response validates");
+    response
+}
+
+#[test]
+fn production_adapters_report_one_canonical_feature_timeline() {
+    let root = fresh_bundle("adapter-conformance");
+    seed_divergent_timeline(&root);
+
+    let cli = cli_timeline(&root, "second");
+    let mcp = mcp_call(
+        find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "second",
+        }),
+        "conformance",
+    );
+    validate(
+        &find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .response_schema,
+        &mcp,
+    )
+    .expect("MCP timeline response validates");
+
+    let loaded = Bundle::at(&root).open().expect("conformance bundle opens");
+    let mut tui = TuiSession::from_feature_graph(&loaded.graph, loaded.revision_hash_hex());
+    tui.transition_selection(SelectionEvent::Nominate {
+        candidates: vec!["second".to_string()],
+    })
+    .expect("canonical feature nominates");
+    tui.transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
+        stable_ids: vec!["second".to_string()],
+    }))
+    .expect("canonical feature selects");
+    tui.open_feature_timeline(&Host::new(), &root)
+        .expect("TUI opens the canonical timeline");
+    let tui = tui
+        .state()
+        .feature_timeline
+        .expect("TUI timeline is visible");
+
+    let cli = feature_timeline_projection(&cli);
+    let mcp = feature_timeline_projection(&mcp);
+    let tui = tui_feature_timeline_projection(&tui);
+    assert_eq!(cli, mcp);
+    assert_eq!(cli, tui);
+    assert_eq!(cli["feature_id"], "second");
+    assert_eq!(cli["active_revision"], "history-revision-4");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_process_preserves_a_canonical_id_ending_in_base() {
+    let root = fresh_bundle("mcp-canonical-base-suffix");
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("mcp-canonical-base-suffix"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    for bracket_id in ["fixture", "fixture-base"] {
+        let event = state
+            .initialize_l_bracket(bracket_id, 10.0, 5.0, 3.0, 1.0)
+            .expect("history event");
+        bundle
+            .append_features_with_history(
+                &[(bracket_id, "bracket:length=10;width=5;height=3;thickness=1")],
+                &event,
+            )
+            .expect("history event publishes");
+        state.apply_event(&event).expect("history event applies");
+    }
+
+    let response = mcp_call(
+        find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "fixture-base",
+        }),
+        "canonical-base-suffix",
+    );
+    validate(
+        &find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .response_schema,
+        &response,
+    )
+    .expect("MCP timeline response validates");
+    assert_eq!(response["feature_id"], "fixture-base");
+    assert_eq!(
+        response["revisions"][0]["operation"],
+        "initialize-l-bracket"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn create_boolean_pattern_base(root: &std::path::Path) {
@@ -967,10 +1242,8 @@ fn tools_call_rejects_non_positive_length_violating_minimum_with_invalid_params(
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
-    if OcctWorker::locate().is_err() {
-        return;
-    }
     let root = fresh_bundle("timeline");
     let seeded = Command::new(threeterm_binary())
         .args(["--machine", "bracket"])
@@ -1071,6 +1344,286 @@ fn tools_list_and_call_expose_the_feature_scoped_timeline_contract() {
     assert_eq!(
         restored[0]["result"]["structuredContent"]["active_revision"],
         "history-revision-1"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_process_rejects_unknown_and_incompatible_timeline_references_without_mutation() {
+    let root = fresh_bundle("fail-closed-timeline");
+    write_fresh(
+        &root,
+        ProjectGeneration::with_id("mcp-fail-closed-timeline"),
+    )
+    .expect("fresh bundle");
+    let bundle = Bundle::at(&root);
+    let mut state = HistoryState::default();
+    let first = state
+        .initialize_l_bracket("first", 10.0, 5.0, 3.0, 1.0)
+        .expect("first history event");
+    state.apply_event(&first).expect("first event applies");
+    bundle
+        .append_features_with_history(
+            &[
+                ("first", "bracket:length=10;width=5;height=3;thickness=1"),
+                ("first-plate-vertical", "plate-vertical"),
+                ("first-plate-horizontal", "plate-horizontal"),
+            ],
+            &first,
+        )
+        .expect("first history publishes");
+    let named = state
+        .create_named_revision("before-second")
+        .expect("named revision event");
+    state.apply_event(&named).expect("named revision applies");
+    bundle
+        .append_features_with_history(&[], &named)
+        .expect("named revision publishes");
+    let second = state
+        .initialize_l_bracket("second", 8.0, 4.0, 2.0, 1.0)
+        .expect("second history event");
+    bundle
+        .append_features_with_history(
+            &[
+                ("second", "bracket:length=8;width=4;height=2;thickness=1"),
+                ("second-plate-vertical", "plate-vertical"),
+                ("second-plate-horizontal", "plate-horizontal"),
+            ],
+            &second,
+        )
+        .expect("second history publishes");
+
+    let manifest_before = std::fs::read(root.join("manifest.json")).expect("manifest");
+    let log_before = std::fs::read(root.join("transactions.log")).expect("transaction log");
+    for (reference, id) in [
+        ("missing-object", "missing"),
+        ("second-plate-vertical/edge", "edge"),
+    ] {
+        let response = mcp_failure(
+            find(TIMELINE_COMMAND_ID)
+                .expect("timeline is registered")
+                .schema_version,
+            serde_json::json!({
+                "bundle_path": root.to_string_lossy(),
+                "feature_id": reference
+            }),
+            id,
+        );
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("failure text")
+                .contains(reference)
+        );
+        assert_eq!(
+            std::fs::read(root.join("manifest.json")).expect("manifest"),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::read(root.join("transactions.log")).expect("transaction log"),
+            log_before
+        );
+    }
+    let response = mcp_failure(
+        find(RESTORE_REVISION_COMMAND_ID)
+            .expect("restore is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "second",
+            "name": "before-second"
+        }),
+        "restore-mismatch",
+    );
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("failure text")
+            .contains("not present in named revision")
+    );
+    assert_eq!(
+        std::fs::read(root.join("manifest.json")).expect("manifest"),
+        manifest_before
+    );
+    assert_eq!(
+        std::fs::read(root.join("transactions.log")).expect("transaction log"),
+        log_before
+    );
+    assert_eq!(
+        Bundle::at(&root)
+            .open()
+            .expect("bundle reopens")
+            .history
+            .active_snapshot()
+            .revision_id,
+        "history-revision-3"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the native OCCT worker"]
+fn mcp_process_browses_and_restores_the_divergent_feature_timeline() {
+    let root = fresh_bundle("divergent-timeline");
+    mcp_bracket(&root, "first");
+    mcp_bracket(&root, "second");
+    let undone = mcp_call(
+        "threeterm.command.undo/1",
+        serde_json::json!({"bundle_path": root.to_string_lossy()}),
+        "undo",
+    );
+    assert_eq!(undone["active_revision"], "history-revision-1");
+    mcp_bracket(&root, "third");
+
+    let timeline = mcp_call(
+        find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "second"
+        }),
+        "timeline",
+    );
+    validate(
+        &find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .response_schema,
+        &timeline,
+    )
+    .expect("MCP timeline response validates");
+    assert_eq!(timeline["feature_id"], "second");
+    assert_eq!(timeline["active_revision"], "history-revision-4");
+    assert_eq!(
+        timeline["revisions"]
+            .as_array()
+            .expect("timeline revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["ordinal"].as_u64().expect("ordinal"),
+                    revision["revision_id"].as_str().expect("revision id"),
+                    revision["operation"].as_str().expect("operation"),
+                    revision["status"].as_str().expect("status"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                2,
+                "history-revision-2",
+                "initialize-l-bracket",
+                "current-valid"
+            ),
+            (3, "history-revision-1", "undo", "absent")
+        ]
+    );
+    assert_eq!(
+        timeline["named_revisions"][0]["name"],
+        "recovered-before-undo-3"
+    );
+    assert_eq!(timeline["named_revisions"][0]["provenance"], "undo");
+
+    let restored = mcp_call(
+        find(RESTORE_REVISION_COMMAND_ID)
+            .expect("restore is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "second",
+            "name": "recovered-before-undo-3"
+        }),
+        "restore",
+    );
+    validate(
+        &find(RESTORE_REVISION_COMMAND_ID)
+            .expect("restore is registered")
+            .response_schema,
+        &restored,
+    )
+    .expect("MCP restore response validates");
+    assert_eq!(restored["active_revision"], "history-revision-2");
+
+    let loaded = Bundle::at(&root).open().expect("restored bundle opens");
+    assert!(loaded.graph.contains_feature("first"));
+    assert!(loaded.graph.contains_feature("second"));
+    assert!(!loaded.graph.contains_feature("third"));
+    assert!(
+        loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("first-base")
+    );
+    assert!(
+        loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("second-base")
+    );
+    assert!(
+        !loaded
+            .history
+            .active_snapshot()
+            .features
+            .contains_key("third-base")
+    );
+    let _ = std::fs::remove_dir_all(root.join("brep"));
+    let reloaded = threeterm_host::Host::new()
+        .load_with_geometry_replay(&root)
+        .expect("restored bundle replays after derived results are removed");
+    assert_eq!(reloaded.revision_hash, restored["revision_hash"]);
+
+    let post_restore = mcp_call(
+        find(TIMELINE_COMMAND_ID)
+            .expect("timeline is registered")
+            .schema_version,
+        serde_json::json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "second"
+        }),
+        "post-restore-timeline",
+    );
+    assert_eq!(post_restore["feature_id"], "second");
+    assert_eq!(post_restore["active_revision"], "history-revision-2");
+    assert_eq!(
+        post_restore["revisions"]
+            .as_array()
+            .expect("post-restore revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["ordinal"].as_u64().expect("ordinal"),
+                    revision["revision_id"].as_str().expect("revision id"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (2, "history-revision-2"),
+            (3, "history-revision-1"),
+            (5, "history-revision-2"),
+        ]
+    );
+    assert_eq!(
+        post_restore["revisions"]
+            .as_array()
+            .expect("post-restore revisions")
+            .iter()
+            .map(|revision| {
+                (
+                    revision["operation"].as_str().expect("operation"),
+                    revision["status"].as_str().expect("status"),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("initialize-l-bracket", "current-valid"),
+            ("undo", "absent"),
+            ("restore-named-revision", "current-valid"),
+        ]
     );
 
     let _ = std::fs::remove_dir_all(root);

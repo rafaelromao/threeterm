@@ -33,7 +33,10 @@ fn cli() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_threeterm")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm")
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+                .join("debug/threeterm")
         })
 }
 
@@ -41,7 +44,10 @@ fn mcp() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_threeterm_mcp")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm-mcp")
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+                .join("debug/threeterm-mcp")
         })
 }
 
@@ -1047,6 +1053,63 @@ fn cli_export(root: &Path, feature_id: &str, output_dir: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI export returns JSON")
 }
 
+/// Zero the volatile `FILE_NAME` timestamp OCCT embeds in STEP exports so
+/// export comparisons assert geometry content, not wall-clock time (STL
+/// exports are already deterministic and keep their exact digests).
+fn normalize_step_timestamp(bytes: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"FILE_NAME('Open CASCADE Shape Model','";
+    let Some(prefix_start) = bytes
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    else {
+        return bytes.to_vec();
+    };
+    let timestamp_start = prefix_start + PREFIX.len();
+    let Some(timestamp_len) = bytes[timestamp_start..]
+        .windows(2)
+        .position(|window| window == b"',")
+    else {
+        return bytes.to_vec();
+    };
+    let mut normalized = bytes.to_vec();
+    normalized[timestamp_start..timestamp_start + timestamp_len].fill(b'0');
+    normalized
+}
+
+/// Store timestamp-normalized STEP exports (and their content digests) so
+/// snapshot comparisons across reloads and adapters ignore the volatile
+/// writer timestamp while still pinning every content byte.
+fn portable_exports(
+    exports: BTreeMap<String, Vec<u8>>,
+    export_metadata: BTreeMap<String, Value>,
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Value>) {
+    let normalized_exports = exports
+        .into_iter()
+        .map(|(format, bytes)| {
+            if format == "step" {
+                (format, normalize_step_timestamp(&bytes))
+            } else {
+                (format, bytes)
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let normalized_metadata = export_metadata
+        .into_iter()
+        .map(|(format, mut metadata)| {
+            if format == "step"
+                && let Some(digest) = normalized_exports
+                    .get(&format)
+                    .map(|bytes| sha256_hex(bytes))
+                && let Some(object) = metadata.as_object_mut()
+            {
+                object.insert("sha256".to_string(), Value::String(digest));
+            }
+            (format, metadata)
+        })
+        .collect::<BTreeMap<_, _>>();
+    (normalized_exports, normalized_metadata)
+}
+
 fn portable_component_state(state: &Value) -> Value {
     let mut portable = state.clone();
     let instances = portable
@@ -1087,7 +1150,11 @@ fn component_scene_from_host_for(host: &Host, feature_ids: &[&str]) -> Vec<Scene
     assert_eq!(
         solids.len(),
         feature_ids.len(),
-        "all component instances render"
+        "all component instances render; requested={feature_ids:?}, rendered={:?}",
+        solids
+            .iter()
+            .map(|solid| solid.feature_id.as_str())
+            .collect::<Vec<_>>()
     );
     assert!(
         solids.iter().all(|solid| !solid.triangles.is_empty()),
@@ -1235,6 +1302,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
     let identity = session.identity();
     assert_current_component_state(&state, &identity, &session.root);
     let scene = session.scene();
+    assert_eq!(scene.len(), 3, "all component instances render");
     let output_dir = session.root.join(output_name);
     let response = session.export(&output_dir);
     let (exports, export_metadata) = validate_export(
@@ -1244,6 +1312,7 @@ fn snapshot_component(session: &ComponentSession, output_name: &str) -> Componen
             .as_str()
             .expect("identity revision is a string"),
     );
+    let (exports, export_metadata) = portable_exports(exports, export_metadata);
     ComponentSnapshot {
         state,
         identity,
@@ -1272,6 +1341,8 @@ fn snapshot_reusable_component(session: &ComponentSession, output_name: &str) ->
         let response = session.export_feature(feature_id, &output_dir);
         let (feature_exports, feature_metadata) =
             validate_export_for(&response, &output_dir, revision, feature_id);
+        let (feature_exports, feature_metadata) =
+            portable_exports(feature_exports, feature_metadata);
         for (format, bytes) in feature_exports {
             exports.insert(format!("{feature_id}:{format}"), bytes);
         }
@@ -1297,10 +1368,10 @@ fn prepare_component_workflow(session: &ComponentSession) {
     session.create_instance("first", [0.0, 0.0, 0.0]);
     session.create_instance("second", [10.0, 0.0, 0.0]);
     let before_transform = session.state();
-    let before_transform_scene = session.scene();
+    let before_transform_scene = session.scene_for(&["first", "second"]);
     session.transform_instance("second", [0.0, 0.0, 90.0]);
     let after_transform = session.state();
-    let after_transform_scene = session.scene();
+    let after_transform_scene = session.scene_for(&["first", "second"]);
     assert_eq!(
         after_transform["instances"]["first"]["geometry_digest"],
         before_transform["instances"]["first"]["geometry_digest"]

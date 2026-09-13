@@ -111,6 +111,11 @@ fn boolean_fuse(bin: &str, root: &Path, feature_id: &str, base: &str, tool: &str
 }
 
 fn shell(bin: &str, root: &Path, feature_id: &str, base: &str, thickness: f64) -> Value {
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("bundle opens before shell")
+        .revision_hash_hex()
+        .to_string();
     let output = Command::new(bin)
         .args([
             "--machine",
@@ -119,6 +124,8 @@ fn shell(bin: &str, root: &Path, feature_id: &str, base: &str, thickness: f64) -
             root.to_str().expect("utf-8 path"),
             "--feature-id",
             feature_id,
+            "--expected-revision",
+            &expected_revision,
             "--base",
             base,
             "--thickness",

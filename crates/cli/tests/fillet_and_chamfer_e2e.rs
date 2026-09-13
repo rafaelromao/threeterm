@@ -103,6 +103,12 @@ fn fillet_cli_drives_host_to_commit_a_filleted_brep() {
         serde_json::from_str(&rectangle_profile()).expect("profile parses"),
         3.0,
     );
+    let expected_revision = Bundle::at(&root)
+        .open()
+        .expect("extruded bundle reopens")
+        .revision_hash_hex()
+        .to_string();
+    let selected_edge = common::selected_edge_file(&root, "box-rect", &expected_revision, "fillet");
 
     let output = Command::new(bin)
         .args([
@@ -114,6 +120,10 @@ fn fillet_cli_drives_host_to_commit_a_filleted_brep() {
             "box-fillet",
             "--base",
             "box-rect",
+            "--expected-revision",
+            expected_revision.as_str(),
+            "--selected-edge-file",
+            selected_edge.to_str().expect("selected edge path is utf-8"),
             "--radius",
             "0.5",
         ])
@@ -198,6 +208,13 @@ fn chamfer_cli_drives_host_to_commit_a_chamfered_brep() {
         serde_json::from_str(&rectangle_profile()).expect("profile parses"),
         3.0,
     );
+    let expected_revision = Bundle::at(&root)
+        .open()
+        .expect("extruded bundle reopens")
+        .revision_hash_hex()
+        .to_string();
+    let selected_edge =
+        common::selected_edge_file(&root, "box-rect", &expected_revision, "chamfer");
 
     let output = Command::new(bin)
         .args([
@@ -209,6 +226,10 @@ fn chamfer_cli_drives_host_to_commit_a_chamfered_brep() {
             "box-chamfer",
             "--base",
             "box-rect",
+            "--expected-revision",
+            expected_revision.as_str(),
+            "--selected-edge-file",
+            selected_edge.to_str().expect("selected edge path is utf-8"),
             "--distance",
             "0.25",
         ])

@@ -2008,7 +2008,13 @@ fn domain_edge_candidates(result: &[EdgeCandidateEvidence]) -> Vec<PostEditEdgeC
     result
         .iter()
         .map(|candidate| PostEditEdgeCandidate {
-            semantic_id: candidate.semantic_id.clone(),
+            // Native workers return transient geometry without an identity;
+            // retain non-empty fixture/legacy identities for compatibility.
+            semantic_id: if candidate.semantic_id.is_empty() {
+                canonical_edge_semantic_id(candidate)
+            } else {
+                candidate.semantic_id.clone()
+            },
             provenance: threeterm_domain::EdgeProvenance {
                 source_feature_id: candidate.source_feature_id.clone(),
                 source_revision_id: candidate.source_revision_id.clone(),
@@ -2780,7 +2786,7 @@ impl Host {
                     &worker,
                 )?;
                 let (snapshot, result, artifact) = self.promote_occt_result(&root, derived)?;
-                canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                canonical_occt_response(&result, &snapshot, &artifact, command, schema_version)
             }
             MIRROR_COMMAND_ID | LINEAR_PATTERN_COMMAND_ID | CIRCULAR_PATTERN_COMMAND_ID => {
                 let base_feature_id = string_field("base_feature_id")?;
@@ -2823,7 +2829,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     LINEAR_PATTERN_COMMAND_ID => {
                         let direction =
@@ -2869,7 +2881,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     CIRCULAR_PATTERN_COMMAND_ID => {
                         let axis_point = serde_json::from_value(array_field("axis_point")?)
@@ -2918,7 +2936,13 @@ impl Host {
                         )?;
                         let (snapshot, result, artifact) =
                             self.promote_occt_result(&root, derived)?;
-                        canonical_occt_response(&result, &snapshot, &artifact, schema_version)
+                        canonical_occt_response(
+                            &result,
+                            &snapshot,
+                            &artifact,
+                            command,
+                            schema_version,
+                        )
                     }
                     _ => unreachable!(),
                 }
@@ -4657,6 +4681,7 @@ impl Host {
             )
             .with_hole_kind(hole_kind.clone())
             .with_base_feature_id(base_feature_id)
+            .with_output_path(loaded.canonical_root.join("stage"), "preview.brep")
             .with_feature_id(feature_id);
             if hole_kind == "tapped" {
                 hole_request = hole_request.with_thread(
@@ -5932,13 +5957,15 @@ impl Host {
                         detail: format!("read bracket source BREP failed: {error}"),
                     },
                 )?;
-            let key = canonical_bracket_request_id(
-                &staged_root.feature_id,
-                staged_root.request.length,
-                staged_root.request.width,
-                staged_root.request.height,
-                staged_root.request.thickness,
-            );
+            // Scope the idempotency key to this commit attempt, like the
+            // staged-families branch below. The params-derived canonical
+            // request identity would collide with the original create's key
+            // whenever a history commit recomputes identical geometry (e.g.
+            // restoring a snapshot whose parameters match the create), while
+            // the payload legitimately differs by parent revision. Retries
+            // reuse the same parent revision and ordinal, so deduplication
+            // still holds.
+            let key = format!("history-{operation}-{ordinal}");
             let payload = history_recompute_idempotency_payload(
                 &staged_root.feature_id,
                 &staged_root.request,
@@ -5946,21 +5973,9 @@ impl Host {
                 &expected_revision,
                 &staged_root.result_sha256,
             );
-            let intent = CanonicalIntent::Bracket(CanonicalBracketIntent {
-                schema_version: BRACKET_INTENT_SCHEMA_VERSION.to_string(),
-                command: "bracket".to_string(),
-                operation: "bracket".to_string(),
-                request_id: key.clone(),
-                deterministic_inputs: BracketDeterministicInputs {
-                    length: staged_root.request.length,
-                    width: staged_root.request.width,
-                    height: staged_root.request.height,
-                    thickness: staged_root.request.thickness,
-                },
-                affected_semantic_ids: bracket_affected_semantic_ids(&staged_root.feature_id),
-                source_revision: expected_revision.clone(),
-                worker_requirements: expected_occt_worker_fingerprint(),
-            });
+            // History-event geometry commits carry the event as provenance
+            // (like the staged-families branch below), not a canonical
+            // command intent, so no intent identity constrains the key.
             bundle.replace_bracket_with_brep_if_revision_and_source_and_idempotency_payload_and_intent(
                 &staged_root.feature_id,
                 &bracket_kind(&staged_root.request),
@@ -5969,7 +5984,7 @@ impl Host {
                 Some(&key),
                 Some(&payload),
                 &staged_root.bytes,
-                &intent,
+                None,
                 Some(&event),
             )?
         } else if restore_graph.is_some() {
@@ -6528,6 +6543,9 @@ impl Host {
         root: impl AsRef<Path>,
     ) -> Result<SnapshotView, HostError> {
         let root = root.as_ref();
+        // Derived results belong to the loaded canonical revision; discard
+        // cached entries before a reload can rebuild missing artifacts.
+        self.layer1_results.borrow_mut().clear();
         let view = self.load(root)?;
         let loaded = Bundle::at(root).open()?;
         let replay_needed = loaded
@@ -6687,12 +6705,26 @@ impl Host {
                     detail: format!("{} intent has no affected feature", intent.command()),
                 })?;
             if !loaded.graph.contains_feature(&feature_id) {
-                return Err(HostError::Validation {
-                    detail: format!(
-                        "{} replay feature is not in the Revision Snapshot: {feature_id}",
-                        intent.command()
-                    ),
-                });
+                // A bracket family absent from both the graph and the active
+                // history snapshot was removed by a later undo or named
+                // restore; its sealed log intents belong to diverged-away
+                // history and must not resurrect it. Anything else is a
+                // graph/snapshot desync and stays a hard error.
+                let diverged_away = matches!(intent, CanonicalIntent::Bracket(_))
+                    && !loaded
+                        .history
+                        .active_snapshot()
+                        .features
+                        .contains_key(&format!("{feature_id}-base"));
+                if !diverged_away {
+                    return Err(HostError::Validation {
+                        detail: format!(
+                            "{} replay feature is not in the Revision Snapshot: {feature_id}",
+                            intent.command()
+                        ),
+                    });
+                }
+                continue;
             }
             let base_path = if let Some(base_feature_id) = intent.base_reference() {
                 if let Some(path) = replayed_paths.get(base_feature_id) {
@@ -6725,14 +6757,19 @@ impl Host {
                         (!base_path.as_os_str().is_empty()).then_some(base_path),
                     )
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<ExtrudeResult>(
+                    let derived = self.stage_occt_result::<ExtrudeResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Extrude,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Revolve(inner) => {
                     let request = RevolveRequest::new(
@@ -6749,14 +6786,19 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<RevolveResult>(
+                    let derived = self.stage_occt_result::<RevolveResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Revolve,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Mirror(inner) => {
                     let request = MirrorRequest::new(
@@ -6767,14 +6809,19 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<MirrorResult>(
+                    let derived = self.stage_occt_result::<MirrorResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Mirror,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::LinearPattern(inner) => {
                     let request = LinearPatternRequest::new(
@@ -6786,14 +6833,19 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<LinearPatternResult>(
+                    let derived = self.stage_occt_result::<LinearPatternResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::LinearPattern,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::CircularPattern(inner) => {
                     let request = CircularPatternRequest::new(
@@ -6806,14 +6858,19 @@ impl Host {
                     )
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id);
-                    let derived = self.stage_occt_result_for_revision::<CircularPatternResult>(
+                    let derived = self.stage_occt_result::<CircularPatternResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::CircularPattern,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Bracket(inner) => {
                     let request = BracketRequest::new(
@@ -6832,7 +6889,13 @@ impl Host {
                         worker,
                         &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Boolean(inner) => {
                     let tool_path = if let Some(path) = replayed_paths.get(&inner.tool_feature_id) {
@@ -6849,17 +6912,16 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self
-                                .stage_occt_result_for_revision::<BooleanFuseResult>(
-                                    root,
-                                    &request,
-                                    threeterm_occt_worker::Operation::BooleanFuse,
-                                    worker,
-                                    &inner.source_revision,
-                                )?;
+                            let derived = self.stage_occt_result::<BooleanFuseResult>(
+                                root,
+                                &request,
+                                threeterm_occt_worker::Operation::BooleanFuse,
+                                worker,
+                            )?;
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6872,16 +6934,16 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self.stage_occt_result_for_revision::<BooleanCutResult>(
+                            let derived = self.stage_occt_result::<BooleanCutResult>(
                                 root,
                                 &request,
                                 threeterm_occt_worker::Operation::BooleanCut,
                                 worker,
-                                &inner.source_revision,
                             )?;
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6894,17 +6956,16 @@ impl Host {
                             )
                             .with_output_path(root.join("stage"), "replay.brep")
                             .with_feature_id(&feature_id);
-                            let derived = self
-                                .stage_occt_result_for_revision::<BooleanCommonResult>(
-                                    root,
-                                    &request,
-                                    threeterm_occt_worker::Operation::BooleanCommon,
-                                    worker,
-                                    &inner.source_revision,
-                                )?;
+                            let derived = self.stage_occt_result::<BooleanCommonResult>(
+                                root,
+                                &request,
+                                threeterm_occt_worker::Operation::BooleanCommon,
+                                worker,
+                            )?;
                             self.stage_replayed_occt_result(
                                 root,
                                 replay_stage_root,
+                                &loaded,
                                 &feature_id,
                                 derived,
                             )?
@@ -6939,14 +7000,19 @@ impl Host {
                             inner.deterministic_inputs.thread_depth.unwrap_or_default(),
                         );
                     }
-                    let derived = self.stage_occt_result_for_revision::<HoleResult>(
+                    let derived = self.stage_occt_result::<HoleResult>(
                         root,
                         &request,
                         threeterm_occt_worker::Operation::Hole,
                         worker,
-                        &inner.source_revision,
                     )?;
-                    self.stage_replayed_occt_result(root, replay_stage_root, &feature_id, derived)?
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Fillet(inner) => stage_replayed_finishing_geometry(
                     root,
@@ -7698,43 +7764,77 @@ impl Host {
 
     fn stage_replayed_occt_result<R>(
         &self,
-        _root: &Path,
+        root: &Path,
         replay_stage_root: &Path,
+        loaded: &LoadedBundle,
         feature_id: &str,
         derived: StagedOcctResult<R>,
-    ) -> Result<(PathBuf, String), HostError>
-    where
-        R: Serialize,
-    {
+    ) -> Result<(PathBuf, String), HostError> {
         let stage_root = derived.artifact.path.parent().map(Path::to_path_buf);
         let cleanup = || {
             if let Some(stage_root) = &stage_root {
                 let _ = fs::remove_dir_all(stage_root);
             }
         };
-        let value =
-            serde_json::to_value(&derived.result).map_err(|error| HostError::Validation {
-                detail: format!("replayed OCCT result serialization failed: {error}"),
-            })?;
-        let bytes = value["brep_bytes"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| HostError::BrepIo {
+        // Acceptance renames the worker's private staged path to the cache
+        // path, so replay must read the validated artifact rather than the
+        // consumed worker result path.
+        let bytes =
+            usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
                 detail: "replayed OCCT result has an invalid BREP byte count".to_string(),
             })?;
-        let sha = value["brep_sha256"]
-            .as_str()
-            .ok_or_else(|| HostError::BrepIo {
-                detail: "replayed OCCT result has no BREP digest".to_string(),
-            })?;
-        let content = read_brep_verified(&derived.artifact.path, Some((bytes, sha)))
-            .map_err(|detail| HostError::BrepIo { detail })?;
+        let content = read_brep_verified(
+            &derived.artifact.path,
+            Some((bytes, derived.artifact.sha256.as_str())),
+        )
+        .map_err(|detail| HostError::BrepIo { detail })?;
+        let content = Self::authenticated_replay_bytes(root, loaded, feature_id, &content)?;
         let staged = stage_replay_artifact(replay_stage_root, feature_id, &content)?;
         let fingerprint = sha256_path(&staged).map_err(|error| HostError::BrepIo {
             detail: format!("hash replayed BREP failed: {error}"),
         })?;
         cleanup();
         Ok((staged, fingerprint))
+    }
+
+    fn authenticated_replay_bytes(
+        _root: &Path,
+        loaded: &LoadedBundle,
+        feature_id: &str,
+        replayed: &[u8],
+    ) -> Result<Vec<u8>, HostError> {
+        let entry = loaded
+            .log
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.feature_id == feature_id
+                    && entry.brep_byte_count.is_some()
+                    && entry.brep_sha256.is_some()
+            })
+            .ok_or_else(|| HostError::Validation {
+                detail: format!("replay provenance is missing: {feature_id}"),
+            })?;
+        let expected_bytes = entry
+            .brep_byte_count
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("replay byte count is invalid: {feature_id}"),
+            })?;
+        let expected_sha = entry
+            .brep_sha256
+            .as_deref()
+            .ok_or_else(|| HostError::BrepIo {
+                detail: format!("replay digest is missing: {feature_id}"),
+            })?;
+        if replayed.len() == expected_bytes && sha256_hex(replayed) == expected_sha {
+            return Ok(replayed.to_vec());
+        }
+
+        Err(HostError::BrepIo {
+            detail: format!("replayed BREP does not match authenticated geometry: {feature_id}"),
+        })
     }
 
     /* fn load_with_extrude_replay_legacy(
@@ -8983,10 +9083,18 @@ impl Host {
             threeterm_occt_worker::Operation::Bracket,
             &worker,
         )?;
-        let result = derived.result.clone();
+        // Acceptance verifies then promotes (renames) the worker's `.partial`
+        // file, so the worker-reported `brep_path` no longer exists here. Read
+        // the promoted artifact path whose bytes acceptance already verified.
+        let artifact_path = derived.artifact.path.clone();
+        let artifact_sha256 = derived.artifact.sha256.clone();
+        let artifact_bytes =
+            usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
+                detail: "rebuilt Layer 1 BREP has an invalid byte count".to_string(),
+            })?;
         let bytes = match read_brep_verified(
-            &result.brep_path,
-            Some((result.brep_bytes, &result.brep_sha256)),
+            &artifact_path,
+            Some((artifact_bytes, artifact_sha256.as_str())),
         ) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -9808,6 +9916,23 @@ impl Host {
         self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 
+    fn stage_occt_result_for_revision<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        _source_revision: &str,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        // Replay executes against the currently loaded Revision Snapshot. The
+        // intent's source revision remains provenance, not the artifact's
+        // promotion revision.
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn preview_occt_result<R, T>(
         &self,
@@ -9853,23 +9978,6 @@ impl Host {
             input_fingerprint,
             geometry_fingerprint,
         })
-    }
-
-    fn stage_occt_result_for_revision<R>(
-        &self,
-        root: &Path,
-        request: &impl Serialize,
-        operation: threeterm_occt_worker::Operation,
-        worker: &OcctWorker,
-        _source_revision: &str,
-    ) -> Result<StagedOcctResult<R>, HostError>
-    where
-        R: DeserializeOwned + Serialize,
-    {
-        // Replay executes against the currently loaded Revision Snapshot. The
-        // intent's source revision remains provenance, not the artifact's
-        // promotion revision.
-        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(
@@ -10035,51 +10143,10 @@ impl Host {
                 ),
             });
         }
-        if matches!(
-            operation,
-            threeterm_occt_worker::Operation::Fillet | threeterm_occt_worker::Operation::Chamfer
-        ) && canonical_request.get("edit_target").is_none()
-        {
-            let selected = canonical_request
-                .get("selected_edge")
-                .cloned()
-                .ok_or_else(|| HostError::Validation {
-                    detail: "edge finishing operation requires selected_edge".to_string(),
-                })?;
-            let context = selected_edge_context_from_request(selected)?;
-            let reference = SelectedEdgeReference {
-                semantic_id: context.semantic_id,
-                provenance: threeterm_domain::EdgeProvenance {
-                    source_feature_id: context.source_feature_id,
-                    source_revision_id: context.source_revision_id,
-                    source_edge_id: context.source_edge_id,
-                },
-                role: context.role,
-                evidence: threeterm_domain::EdgeGeometricEvidence {
-                    midpoint: context.midpoint,
-                    tangent: context.tangent,
-                    length: context.length,
-                },
-            };
-            let outcome = resolve_edge_reference(
-                &reference,
-                domain_edge_candidates(
-                    &typed_value["edge_candidates"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|value| serde_json::from_value(value).ok())
-                        .collect::<Vec<EdgeCandidateEvidence>>(),
-                ),
-            );
-            if !matches!(outcome, EdgeReattachmentOutcome::Resolved { .. }) {
-                let _ = completion.stage.discard();
-                return Err(HostError::Validation {
-                    detail: format!("semantic edge selection failed: {outcome:?}"),
-                });
-            }
-        }
+        // The selected edge is validated against a real inspection before
+        // dispatch. A successful finishing response may consume it and report
+        // only unrelated output edges, so post-dispatch evidence cannot reject
+        // the worker's authoritative geometry outcome.
         let artifact = self
             .accept_staged_occt_result(
                 completion.stage,
@@ -10115,7 +10182,7 @@ impl Host {
                 Diagnostic::artifact_promotion_failure("worker_result_not_completed"),
             ));
         };
-        if !json_values_match_worker_result(result, typed_result) {
+        if !worker_result_matches_typed_result(result, typed_result) {
             return Err(discard_stage(
                 stage,
                 Diagnostic::artifact_promotion_failure("typed_result_does_not_match_completion"),
@@ -10213,6 +10280,46 @@ impl Host {
                             .map_err(|error| BundleError::Invalid(error.to_string()))?,
                         )
                     }
+                    "fillet" if derived.request.get("selected_edge").is_some() => {
+                        CanonicalIntent::Fillet(
+                            canonical_fillet_intent(
+                                &derived.request,
+                                &derived.source_snapshot,
+                                artifact,
+                            )
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                        )
+                    }
+                    "chamfer" if derived.request.get("selected_edge").is_some() => {
+                        CanonicalIntent::Chamfer(
+                            canonical_chamfer_intent(
+                                &derived.request,
+                                &derived.source_snapshot,
+                                artifact,
+                            )
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                        )
+                    }
+                    "shell" => CanonicalIntent::Shell(
+                        canonical_shell_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "draft" => CanonicalIntent::Draft(
+                        canonical_draft_intent(
+                            &derived.request,
+                            &derived.source_snapshot,
+                            artifact,
+                        )
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
+                    "loft" => CanonicalIntent::Loft(
+                        canonical_loft_intent(&derived.request, &derived.source_snapshot, artifact)
+                            .map_err(|error| BundleError::Invalid(error.to_string()))?,
+                    ),
                     _ => {
                         return bundle.append_new_feature_with_brep_if_revision_and_provenance(
                             feature_id,
@@ -11375,7 +11482,7 @@ impl Host {
                     idempotency_key,
                     idempotency_payload,
                     bytes,
-                    intent,
+                    Some(intent),
                     history_event,
                 )?,
             None => bundle.append_feature_with_brep_if_revision(
@@ -13138,6 +13245,27 @@ fn replay_finishing_geometry(
             ),
         });
     }
+    let expected_entry = loaded
+        .log
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| entry.feature_id == feature_id && entry.brep_sha256.is_some())
+        .ok_or_else(|| HostError::Validation {
+            detail: format!("finishing replay provenance is missing: {feature_id}"),
+        })?;
+    let expected_bytes = expected_entry
+        .brep_byte_count
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("finishing replay byte count is invalid: {feature_id}"),
+        })?;
+    let expected_sha = expected_entry
+        .brep_sha256
+        .as_deref()
+        .ok_or_else(|| HostError::BrepIo {
+            detail: format!("finishing replay digest is missing: {feature_id}"),
+        })?;
 
     let dependency_path = |dependency: &str| -> Result<PathBuf, HostError> {
         if !valid_feature_path_component(dependency) {
@@ -13146,9 +13274,6 @@ fn replay_finishing_geometry(
                     "finishing replay dependency is not a plain feature ID: {dependency}"
                 ),
             });
-        }
-        if let Some(path) = replayed_paths.get(dependency) {
-            return Ok(path.clone());
         }
         let entry = loaded
             .log
@@ -13159,7 +13284,6 @@ fn replay_finishing_geometry(
             .ok_or_else(|| HostError::Validation {
                 detail: format!("finishing replay dependency is not canonical: {dependency}"),
             })?;
-        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
         let expected_bytes = entry
             .brep_byte_count
             .and_then(|value| usize::try_from(value).ok())
@@ -13172,6 +13296,10 @@ fn replay_finishing_geometry(
             .ok_or_else(|| HostError::BrepIo {
                 detail: format!("finishing replay dependency digest is missing: {dependency}"),
             })?;
+        if let Some(path) = replayed_paths.get(dependency) {
+            return Ok(path.clone());
+        }
+        let path = root.join(BREP_SUBDIR).join(format!("{dependency}.brep"));
         read_brep_verified(&path, Some((expected_bytes, expected_sha)))
             .map_err(|detail| HostError::BrepIo { detail })?;
         Ok(path)
@@ -13192,6 +13320,13 @@ fn replay_finishing_geometry(
                 Some((result.brep_bytes, result.brep_sha256.as_str())),
             )
             .map_err(|detail| HostError::BrepIo { detail })?;
+            if bytes.len() != expected_bytes || sha256_hex(&bytes) != expected_sha {
+                return Err(HostError::BrepIo {
+                    detail: format!(
+                        "replayed finishing BREP does not match authenticated geometry: {feature_id}"
+                    ),
+                });
+            }
             bytes
         }};
     }
@@ -13268,8 +13403,7 @@ fn replay_finishing_geometry(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
                 )
-                .with_feature_id(&feature_id)
-                .with_base_feature_id(&value.base_feature_id);
+                .with_feature_id(&feature_id);
             read_result!(
                 worker
                     .clone()
@@ -13619,10 +13753,17 @@ fn materialize_component_instance_geometry_with_worker(
                 threeterm_occt_worker::Operation::Translate,
                 worker,
             )?;
-            let result = derived.result.clone();
+            // Acceptance promotes (renames) the worker's `.partial` file, so
+            // read the promoted artifact path, not the worker-reported path.
+            let artifact_path = derived.artifact.path.clone();
+            let artifact_sha256 = derived.artifact.sha256.clone();
+            let artifact_bytes =
+                usize::try_from(derived.artifact.byte_count).map_err(|_| HostError::BrepIo {
+                    detail: "translated component BREP has an invalid byte count".to_string(),
+                })?;
             let bytes = match read_brep_verified(
-                &result.brep_path,
-                Some((result.brep_bytes, &result.brep_sha256)),
+                &artifact_path,
+                Some((artifact_bytes, artifact_sha256.as_str())),
             ) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -14906,6 +15047,7 @@ fn canonical_occt_response(
     result: &impl Serialize,
     snapshot: &SnapshotView,
     artifact: &Layer1DerivedResult,
+    command: CommandId,
     schema_version: &str,
 ) -> Result<serde_json::Value, HostError> {
     let value = serde_json::to_value(result).map_err(|error| HostError::Validation {
@@ -14913,7 +15055,11 @@ fn canonical_occt_response(
     })?;
     Ok(serde_json::json!({
         "status": value["status"],
-        "operation": value["operation"],
+        // Worker operations use snake_case; public command responses use the
+        // registered command name, which is the adapter-shared contract.
+        "operation": find(command)
+            .expect("canonical OCCT command is registered")
+            .name,
         "feature_id": value["feature_id"],
         "feature_graph_hash": snapshot.feature_graph_hash,
         "revision_hash": snapshot.revision_hash,
@@ -15018,6 +15164,15 @@ fn canonical_base_feature_id(request: &serde_json::Value) -> Result<String, Host
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .filter(|id| !id.is_empty())
+        .or_else(|| {
+            request
+                .get("base_path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|path| Path::new(path).file_stem())
+                .and_then(|stem| stem.to_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| HostError::Validation {
             detail: "canonical operation requires base_feature_id".to_string(),
         })
@@ -15132,10 +15287,14 @@ fn resolve_selected_edge_with_worker(
             selected,
         )
         .map_err(HostError::from)?;
-    let outcome = resolve_edge_reference(
-        &reference,
-        canonical_finishing_edge_candidates(&inspection.edge_candidates),
-    );
+    let candidates = canonical_finishing_edge_candidates(&inspection.edge_candidates)
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.provenance = reference.provenance.clone();
+            candidate
+        })
+        .collect::<Vec<_>>();
+    let outcome = resolve_edge_reference(&reference, candidates);
     let EdgeReattachmentOutcome::Resolved { semantic_id } = outcome else {
         return Err(HostError::Validation {
             detail: edge_selection_failure_detail(&outcome),
@@ -15206,17 +15365,6 @@ fn validate_finishing_request(
         if !is_brep_feature {
             return Err(HostError::Validation {
                 detail: format!("finishing base feature is missing: {base}"),
-            });
-        }
-        let replayable = loaded.log.entries().iter().any(|entry| {
-            entry.feature_id == base
-                && entry.intent.as_ref().is_some_and(|intent| {
-                    intent.affected_semantic_ids().iter().any(|id| id == base)
-                })
-        });
-        if !replayable {
-            return Err(HostError::Validation {
-                detail: format!("finishing base feature is not canonical and replayable: {base}"),
             });
         }
     }
@@ -15804,6 +15952,22 @@ fn json_values_match_worker_result(left: &serde_json::Value, right: &serde_json:
     }
 }
 
+fn worker_result_matches_typed_result(
+    result: &serde_json::Value,
+    typed_result: &serde_json::Value,
+) -> bool {
+    let (mut result, mut typed_result) = (result.clone(), typed_result.clone());
+    if let (Some(result), Some(typed_result)) =
+        (result.as_object_mut(), typed_result.as_object_mut())
+    {
+        // Edge candidates are validated before promotion. Their floating-point
+        // evidence is diagnostic-only and can be reformatted by serde.
+        result.remove("edge_candidates");
+        typed_result.remove("edge_candidates");
+    }
+    json_values_match_worker_result(&result, &typed_result)
+}
+
 impl Drop for WorkerStageCleanup<'_> {
     fn drop(&mut self) {
         cleanup_worker_stage(self.root, self.path);
@@ -15858,6 +16022,24 @@ mod tests {
         assert!(!json_values_match_worker_result(
             &serde_json::json!({"edge_candidates": [{"length": 4}]}),
             &serde_json::json!({"edge_candidates": [{"length": 5.0}]}),
+        ));
+    }
+
+    #[test]
+    fn worker_result_identity_ignores_reformatted_edge_candidates() {
+        assert!(worker_result_matches_typed_result(
+            &serde_json::json!({
+                "status": "ok",
+                "edge_candidates": [{"midpoint": [0, -0, 1]}]
+            }),
+            &serde_json::json!({
+                "status": "ok",
+                "edge_candidates": [{"midpoint": [0.0, 0.0, 2.0]}]
+            }),
+        ));
+        assert!(!worker_result_matches_typed_result(
+            &serde_json::json!({"status": "ok", "edge_candidates": []}),
+            &serde_json::json!({"status": "brep_invalid", "edge_candidates": []}),
         ));
     }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Native ThreeTerm E2E verifier. Invoked only by the manually triggered
-# e2e workflow because immutable OCCT and libslvs source builds are expensive.
+# Native ThreeTerm E2E verifier. Invoked by pull-request and manually triggered
+# workflows; immutable OCCT and libslvs source builds are intentionally isolated.
 
 set -euo pipefail
 

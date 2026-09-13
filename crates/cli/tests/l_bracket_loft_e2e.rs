@@ -81,6 +81,11 @@ fn extrude(_bin: &str, root: &Path, feature_id: &str, profile: serde_json::Value
 }
 
 fn loft(bin: &str, root: &Path, feature_id: &str, profile_files: &[&Path]) -> Value {
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("bundle opens before loft")
+        .revision_hash_hex()
+        .to_string();
     let mut args: Vec<String> = vec![
         "--machine".to_string(),
         "loft".to_string(),
@@ -88,6 +93,8 @@ fn loft(bin: &str, root: &Path, feature_id: &str, profile_files: &[&Path]) -> Va
         root.to_str().expect("utf-8 path").to_string(),
         "--feature-id".to_string(),
         feature_id.to_string(),
+        "--expected-revision".to_string(),
+        expected_revision,
     ];
     for profile in profile_files {
         args.push("--profile-file".to_string());

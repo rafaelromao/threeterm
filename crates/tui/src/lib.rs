@@ -18,7 +18,7 @@ use threeterm_host::{
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     CommandId, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
 };
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
@@ -920,7 +920,9 @@ fn feature_timeline_from_response(response: &Value) -> Result<FeatureTimelineVie
             let stale_last_valid_geometry_fingerprint = revision
                 .get("stale_last_valid_geometry_fingerprint")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
+                .ok_or_else(|| {
+                    "timeline revision has no stale last valid geometry fingerprint".to_string()
+                })?
                 .to_string();
             Ok(FeatureTimelineRevision {
                 ordinal,
@@ -1507,12 +1509,13 @@ impl TuiSession {
     pub fn show_feature_timeline(
         &mut self,
         feature_id: &str,
+        active_revision: impl Into<String>,
         revisions: Vec<FeatureTimelineRevision>,
         named_revisions: Vec<String>,
     ) -> Result<(), TuiDiagnostic> {
         self.show_feature_timeline_with_active_revision(
             feature_id,
-            String::new(),
+            active_revision.into(),
             revisions,
             named_revisions,
             Vec::new(),
@@ -1528,6 +1531,15 @@ impl TuiSession {
         named_revision_provenance: Vec<(String, String)>,
     ) -> Result<(), TuiDiagnostic> {
         let kind = StateEventKind::History(HistoryEventKind::RestoreNamedRevision);
+        if active_revision.is_empty() {
+            return Err(self.operation_diagnostic(
+                TuiDiagnosticCode::HistoryRejected,
+                StateAxis::History,
+                kind,
+                "timeline active revision must not be empty".to_string(),
+                "timeline",
+            ));
+        }
         if self.selected_target().is_none_or(|selected| {
             selected != feature_id && canonical_feature_id(selected) != feature_id
         }) {
@@ -1564,12 +1576,13 @@ impl TuiSession {
                 "timeline",
             )
         })?;
+        let feature_id = selected_feature_id.clone();
         let response = execute_domain_command(
             host,
             TIMELINE_COMMAND_ID,
             json!({
                 "bundle_path": root.to_string_lossy(),
-                "feature_id": selected_feature_id,
+                "feature_id": feature_id,
             }),
         )
         .map_err(|error| {
@@ -3467,24 +3480,30 @@ impl<R: Renderer> TuiViewportSession<R> {
                 diagnostic: None,
             });
         }
+        let canonical_candidates = candidates
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         self.tui
-            .validate_semantic_candidates(&candidates)
+            .validate_semantic_candidates(&canonical_candidates)
             .map_err(TuiViewportError::Tui)?;
         self.tui
             .transition_selection(SelectionEvent::Nominate {
-                candidates: candidates.clone(),
+                candidates: canonical_candidates.clone(),
             })
             .map_err(TuiViewportError::Tui)?;
-        let transition = if candidates.len() == 1 {
+        let transition = if canonical_candidates.len() == 1 {
             self.tui
                 .transition_selection(SelectionEvent::Verify(SelectionVerification::Exact {
-                    stable_ids: candidates.clone(),
+                    stable_ids: canonical_candidates.clone(),
                 }))
                 .map_err(TuiViewportError::Tui)?
         } else {
             self.tui
                 .transition_selection(SelectionEvent::Verify(SelectionVerification::Ambiguous {
-                    stable_ids: candidates.clone(),
+                    stable_ids: canonical_candidates.clone(),
                 }))
                 .map_err(TuiViewportError::Tui)?
         };
@@ -3577,6 +3596,22 @@ impl<R: Renderer> TuiViewportSession<R> {
         let input = decode_terminal_input(bytes).ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("unsupported terminal input"))
         })?;
+        if matches!(
+            input,
+            TerminalInput::Arrow(_)
+                | TerminalInput::Character(_)
+                | TerminalInput::Backspace
+                | TerminalInput::Escape
+                | TerminalInput::Preview
+                | TerminalInput::Commit
+                | TerminalInput::Enter
+                | TerminalInput::OpenPalette
+        ) && matches!(self.tui.state().command_phase, CommandPhase::Outcome { .. })
+        {
+            self.tui
+                .transition_interaction(InteractionEvent::CloseCommand)
+                .map_err(TuiViewportError::Tui)?;
+        }
         if matches!(input, TerminalInput::Pick { .. }) && self.command_input_active() {
             return Ok(self.keyboard_overlay(
                 "[focus-glyph] Pick ignored while command input is active".to_string(),
@@ -3981,7 +4016,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),
             );
-            if let Some(preview) = self.draft.preview() {
+            if draft.command == SKETCH_SOLVE_COMMAND_ID
+                && let Some(preview) = self.draft.preview()
+            {
                 object.insert(
                     "preview_revision".to_string(),
                     Value::String(preview.preview_revision.clone()),
@@ -4266,7 +4303,6 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.render_current().map_err(TuiViewportError::Viewport)?;
         Ok(view)
     }
-
     pub fn refresh_stale_last_valid_geometry(
         &mut self,
         host: &Host,

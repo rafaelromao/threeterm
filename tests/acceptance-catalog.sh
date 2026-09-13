@@ -25,6 +25,8 @@ done
 for required in \
     'threeterm.acceptance.catalog/1' \
     'native-worker-manifest.json' \
+    'occt-geometry-smoke/real-occt-geometry-smoke.json' \
+    'real_occt_geometry_smoke' \
     'libslvs-artifact/manifest.json' \
     'sha256' \
     'source_commit' \

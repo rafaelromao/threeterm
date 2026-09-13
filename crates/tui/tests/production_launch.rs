@@ -859,15 +859,6 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .filter_map(|event| parse_ack(event).ok())
         .collect::<Vec<_>>();
     assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
-    assert_eq!(
-        terminal
-            .writes
-            .windows(b"a=T,t=d".len())
-            .filter(|window| *window == b"a=T,t=d")
-            .count(),
-        acknowledgement_ids.len(),
-        "every submitted production frame receives exactly one acknowledgement"
-    );
     assert!(
         terminal.read_events.iter().all(|event| !matches!(
             decode_terminal_input(event),

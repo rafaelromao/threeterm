@@ -1341,6 +1341,8 @@ fn snapshot_reusable_component(session: &ComponentSession, output_name: &str) ->
         let response = session.export_feature(feature_id, &output_dir);
         let (feature_exports, feature_metadata) =
             validate_export_for(&response, &output_dir, revision, feature_id);
+        let (feature_exports, feature_metadata) =
+            portable_exports(feature_exports, feature_metadata);
         for (format, bytes) in feature_exports {
             exports.insert(format!("{feature_id}:{format}"), bytes);
         }

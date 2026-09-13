@@ -4,6 +4,7 @@ use std::path::Path;
 use serde_json::Value;
 use threeterm_cli::dispatch::dispatch_registered_command;
 use threeterm_host::Host;
+use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::find_by_name;
 use threeterm_tui::{InteractiveTerminal, launch};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
@@ -88,6 +89,9 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
         return dispatch_registered_command(host, command_id, request.clone())
             .expect("fallback TUI command succeeds");
     }
+    if command == "bracket" && !root.exists() {
+        Bundle::create(root).expect("production TUI bundle creates");
+    }
     let request = serde_json::to_vec(request).expect("TUI request serializes");
     let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
     events.extend(command.bytes().map(|byte| vec![byte]));
@@ -96,9 +100,11 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
         request,
         b"\x16".to_vec(),
         b"\x1b[13;5u".to_vec(),
-        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
-        b"q".to_vec(),
     ]);
+    if command == "bracket" {
+        events.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
+    }
+    events.push(b"q".to_vec());
     events.reverse();
 
     let mut terminal = ScriptedTerminal {

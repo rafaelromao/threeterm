@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
-use threeterm_host::Host;
+use threeterm_host::{Host, HostError, domain_command_failure_value};
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
@@ -60,6 +61,7 @@ pub enum LaunchError {
     Capability(ViewportDiagnostic),
     Project(String),
     Viewport(ViewportDiagnostic),
+    Command(ExecutionError<HostError>),
     Runtime(String),
     Cleanup { source: Box<Self>, detail: String },
 }
@@ -79,7 +81,9 @@ impl LaunchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Capability(_) => EXIT_CAPABILITY_FAILURE,
-            Self::Project(_) | Self::Viewport(_) | Self::Runtime(_) => EXIT_LAUNCH_FAILURE,
+            Self::Project(_) | Self::Viewport(_) | Self::Command(_) | Self::Runtime(_) => {
+                EXIT_LAUNCH_FAILURE
+            }
             Self::Cleanup { source, .. } => source.exit_code(),
         }
     }
@@ -119,6 +123,24 @@ impl LaunchError {
                 route: INTERACTIVE_MODELING_ROUTE,
                 recovery: viewport.recovery.clone(),
             },
+            Self::Command(error) => {
+                return match error {
+                    ExecutionError::Handler(error) => {
+                        serde_json::to_string(&domain_command_failure_value(error))
+                            .expect("command failure diagnostic is serializable")
+                    }
+                    error => serde_json::to_string(&LaunchDiagnostic {
+                        schema_version: LAUNCH_SCHEMA_VERSION,
+                        code: "runtime_failure",
+                        detail: format!("TUI command failed: {error:?}"),
+                        source_revision: "unknown".to_string(),
+                        viewport_diagnostic: None,
+                        route: INTERACTIVE_MODELING_ROUTE,
+                        recovery: "correct the command request and retry Interactive Modeling from the official attachment".to_string(),
+                    })
+                    .expect("command failure diagnostic is serializable"),
+                };
+            }
             Self::Runtime(detail) => LaunchDiagnostic {
                 schema_version: LAUNCH_SCHEMA_VERSION,
                 code: "runtime_failure",
@@ -365,8 +387,8 @@ fn run_event_loop<W: InteractiveTerminal>(
     acknowledge_frame(session, initial.frame_token)?;
 
     if let Some((command, request)) = initial_command {
-        let response = crate::execute_domain_command(host, command, request)
-            .map_err(|error| LaunchError::Runtime(format!("TUI command failed: {error:?}")))?;
+        let response =
+            crate::execute_domain_command(host, command, request).map_err(LaunchError::Command)?;
         session
             .refresh_scene_from_host(host)
             .map_err(|error| match error {

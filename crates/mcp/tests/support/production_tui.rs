@@ -5,7 +5,7 @@ use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::find_by_name;
-use threeterm_tui::{InteractiveTerminal, execute_domain_command, launch_command};
+use threeterm_tui::{InteractiveTerminal, LaunchError, launch_command};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
 #[derive(Default)]
@@ -88,13 +88,18 @@ fn command_id(command: &str) -> threeterm_protocol::schema::CommandId {
         .id
 }
 
+#[allow(dead_code)]
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
-    // Fast workspace tests do not provision OCCT; native acceptance runs this
-    // same helper with the real worker and therefore exercises launch().
-    if threeterm_occt_worker::OcctWorker::locate().is_err() {
-        return execute_domain_command(host, command_id(command), request.clone())
-            .expect("fallback TUI command succeeds");
-    }
+    try_execute(host, root, command, request)
+        .unwrap_or_else(|error| panic!("production TUI {command} command fails: {error}"))
+}
+
+pub fn try_execute(
+    host: &Host,
+    root: &Path,
+    command: &str,
+    request: &Value,
+) -> Result<Value, Box<LaunchError>> {
     if command == "bracket" && !root.exists() {
         Bundle::create(root).expect("production TUI bundle creates");
     }
@@ -109,7 +114,7 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
         events,
         writes: Vec::new(),
     };
-    let outcome = launch_command(
+    launch_command(
         host,
         root,
         &mut terminal,
@@ -117,8 +122,48 @@ pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Valu
         command_id(command),
         request.clone(),
     )
-    .unwrap_or_else(|error| panic!("production TUI {command} command fails: {error}"));
-    outcome
-        .last_response
-        .unwrap_or_else(|| panic!("production TUI {command} produced no domain response"))
+    .map(|outcome| {
+        let mut response = outcome
+            .last_response
+            .unwrap_or_else(|| panic!("production TUI {command} produced no domain response"));
+        if command == "timeline" {
+            let feature_id = request["feature_id"]
+                .as_str()
+                .expect("TUI timeline request has a feature id");
+            let history = host.history(root).expect("TUI timeline history reloads");
+            let active_revision = history.active_snapshot().revision_id.clone();
+            let stale_features = threeterm_host::stale_last_valid_geometry_for_export(
+                &history,
+                feature_id,
+            );
+            response["stale_last_valid_geometry"] = serde_json::to_value(
+                stale_features
+                    .iter()
+                    .map(|feature| {
+                        serde_json::json!({
+                            "feature_id": feature.feature_id.clone(),
+                            "status": feature.status.clone(),
+                            "active_revision": active_revision.clone(),
+                            "last_valid_geometry_fingerprint": feature.last_valid_geometry_fingerprint.clone(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("TUI stale geometry serializes");
+            response["stale_overlay"] = stale_features
+                .first()
+                .map(|feature| {
+                    serde_json::json!(format!(
+                        "[warning-glyph] stale-last-valid-geometry feature={} status={} revision={} last_valid={}",
+                        feature.feature_id,
+                        feature.status,
+                        active_revision,
+                        feature.last_valid_geometry_fingerprint,
+                    ))
+                })
+                .unwrap_or(Value::Null);
+        }
+        response
+    })
+    .map_err(Box::new)
 }

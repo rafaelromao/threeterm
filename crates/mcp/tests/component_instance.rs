@@ -15,10 +15,9 @@ use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, CAPTURE_COMPONENT_COMMAND_ID, COMPONENT_STATE_COMMAND_ID,
     CREATE_COMPONENT_INSTANCE_COMMAND_ID, CommandId, EDIT_COMPONENT_PARAMETER_COMMAND_ID,
-    EXPORT_COMMAND_ID, IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
+    IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, MAKE_COMPONENT_INDEPENDENT_COMMAND_ID,
     TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
 };
-use threeterm_tui::execute_domain_command;
 use threeterm_viewport::SceneSolid;
 
 #[path = "support/production_tui.rs"]
@@ -989,8 +988,7 @@ impl ComponentSession {
             ComponentAdapter::Cli => cli_export(&self.root, feature_id, output_dir),
             ComponentAdapter::Mcp => mcp_command("threeterm.command.export/1", request),
             ComponentAdapter::Tui => {
-                execute_domain_command(&self.tui_host, EXPORT_COMMAND_ID, request)
-                    .unwrap_or_else(|error| panic!("TUI export command fails: {error:?}"))
+                production_tui::execute(&self.tui_host, &self.root, "export", &request)
             }
         }
     }

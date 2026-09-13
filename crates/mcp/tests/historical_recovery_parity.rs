@@ -8,14 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_domain::history::HistoryStatus;
-use threeterm_host::{Host, HostError};
+use threeterm_host::Host;
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
+use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
     RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID,
 };
-use threeterm_tui::{FeatureTarget, SelectionEvent, SelectionVerification, TuiSession};
+use threeterm_tui::{
+    FeatureTarget, LaunchError, SelectionEvent, SelectionVerification, TuiSession,
+};
 
 #[path = "support/production_tui.rs"]
 mod production_tui;
@@ -219,19 +222,11 @@ fn mcp_historical_edit(root: &Path, value: f64) -> Value {
 }
 
 fn tui_historical_edit(root: &Path, value: f64) -> Value {
-    if value == 0.0 {
-        return tui_call(
-            HISTORICAL_EDIT_COMMAND_ID,
-            historical_edit_request(root, value),
-        )
-        .expect("TUI historical edit failure is structured");
-    }
-    production_tui::execute(
-        &Host::new(),
-        root,
-        "historical",
-        &historical_edit_request(root, value),
+    tui_call(
+        HISTORICAL_EDIT_COMMAND_ID,
+        historical_edit_request(root, value),
     )
+    .unwrap_or_else(|error| error)
 }
 
 fn create_revision_request(root: &Path, name: &str) -> Value {
@@ -364,31 +359,31 @@ fn tui_call(
     command: threeterm_protocol::schema::CommandId,
     request: Value,
 ) -> Result<Value, Value> {
-    threeterm_tui::execute_domain_command(&Host::new(), command, request).map_err(|error| {
-        match error {
-            threeterm_protocol::command_execution::ExecutionError::Handler(
-                HostError::StaleLastValidGeometry {
-                    feature_id,
-                    active_revision,
-                    stale_features,
-                },
-            ) => json!({
-                "severity": "error",
-                "code": "stale_last_valid_geometry",
-                "feature_id": feature_id,
-                "active_revision": active_revision,
-                "stale_features": stale_features,
-                "recovery": "correct or restore the feature and recompute current geometry",
-                "override_eligible": false,
-                "schema_version": threeterm_protocol::schema::EXPORT_RESPONSE_SCHEMA_VERSION,
-            }),
-            threeterm_protocol::command_execution::ExecutionError::Handler(error) => {
-                serde_json::to_value(threeterm_cli::dispatch::host_error_diagnostic(&error))
-                    .expect("TUI diagnostic serializes")
-            }
-            error => json!({"detail": format!("{error:?}")}),
+    let root = request["bundle_path"]
+        .as_str()
+        .expect("TUI request has a bundle path");
+    production_tui::try_execute(
+        &Host::new(),
+        Path::new(root),
+        tui_command_name(command),
+        &request,
+    )
+    .map_err(|error| match *error {
+        LaunchError::Command(ExecutionError::Handler(error)) => {
+            threeterm_host::domain_command_failure_value(&error)
         }
+        error => json!({"detail": format!("{error:?}")}),
     })
+}
+
+fn tui_command_name(command: threeterm_protocol::schema::CommandId) -> &'static str {
+    match command {
+        EXPORT_COMMAND_ID => "export",
+        HISTORICAL_EDIT_COMMAND_ID => "historical",
+        RESTORE_REVISION_COMMAND_ID => "restore",
+        TIMELINE_COMMAND_ID => "timeline",
+        _ => panic!("unsupported production TUI command: {command:?}"),
+    }
 }
 
 fn cli_load(root: &Path) -> Value {
@@ -512,6 +507,15 @@ fn tui_restore_result_for(root: &Path, feature_id: &str, name: &str) -> Result<V
 
 fn tui_export(root: &Path, output_dir: &Path) -> Result<Value, Value> {
     tui_call(EXPORT_COMMAND_ID, export_request(root, output_dir))
+}
+
+fn production_tui_timeline(root: &Path, feature_id: &str) -> Value {
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "timeline",
+        &timeline_request(root, feature_id),
+    )
 }
 
 fn production_tui_export(root: &Path, output_dir: &Path) -> Value {
@@ -900,12 +904,12 @@ fn object_timeline_semantic_identity_is_canonical_across_all_adapters() {
     let canonical = [
         cli_timeline_for(&cli_root, "l-bracket"),
         mcp_timeline_for(&mcp_root, "l-bracket"),
-        tui_timeline_for(&tui_root, "l-bracket").1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     let legacy_aliases = [
         cli_timeline_for(&cli_root, "l-bracket-plate-vertical"),
         mcp_timeline_for(&mcp_root, "l-bracket-plate-vertical"),
-        tui_timeline_for(&tui_root, "l-bracket-plate-vertical").1,
+        production_tui_timeline(&tui_root, "l-bracket-plate-vertical"),
     ];
     for timeline in canonical.iter().chain(legacy_aliases.iter()) {
         assert_eq!(timeline["feature_id"], "l-bracket");
@@ -956,7 +960,7 @@ fn object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads() 
     let timelines = [
         cli_timeline(&cli_root),
         mcp_timeline(&mcp_root),
-        tui_timeline(&tui_root).1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     assert_eq!(
         semantic_timeline(&timelines[0]),
@@ -2012,7 +2016,7 @@ fn historical_recovery_adapter_parity() {
     let timelines = [
         cli_timeline(&cli_root),
         mcp_timeline(&mcp_root),
-        tui_timeline(&tui_root).1,
+        production_tui_timeline(&tui_root, "l-bracket"),
     ];
     assert_eq!(
         semantic_timeline(&timelines[0]),

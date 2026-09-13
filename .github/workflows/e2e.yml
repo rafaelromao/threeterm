@@ -92,7 +92,7 @@ jobs:
           expected_commit="$(git rev-parse HEAD)"
           if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == failed ]]; then
             grep -Fxq \
-              'release gate: current gate is missing required field: ^Current gate status: `SIGNED`$' \
+            'release gate: current gate is missing required field: ^Current gate status: `SIGNED`$' \
               target/acceptance-run/logs/release.namespace.log
           fi
           jq -e --arg commit "${expected_commit}" \

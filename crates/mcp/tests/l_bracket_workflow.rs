@@ -17,8 +17,7 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, BRACKET_EDIT_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID,
 };
-use threeterm_tui::TuiViewportSession;
-use threeterm_tui::execute_domain_command;
+use threeterm_tui::{LaunchError, TuiViewportSession};
 use threeterm_viewport::{
     CapabilityState, FrameAcknowledgement, GhosttyRenderer, TerminalCapabilityVector, ViewportScene,
 };
@@ -226,6 +225,16 @@ enum AdapterSession {
     Tui { root: PathBuf, host: Host },
 }
 
+fn tui_command_name(command: threeterm_protocol::schema::CommandId) -> &'static str {
+    match command {
+        BRACKET_COMMAND_ID => "bracket",
+        BRACKET_EDIT_COMMAND_ID => "bracket-edit",
+        LOAD_COMMAND_ID => "load",
+        EXPORT_COMMAND_ID => "export",
+        _ => panic!("unsupported production TUI command: {command:?}"),
+    }
+}
+
 impl AdapterSession {
     fn cli(root: PathBuf) -> Self {
         Bundle::create(&root).expect("CLI bundle creates");
@@ -281,22 +290,28 @@ impl AdapterSession {
                 Err(error) => panic!("CLI {wire_name} command fails: {error:?}"),
             },
             Self::Mcp { server, .. } => mcp_call(server, wire_name, request),
-            Self::Tui { host, .. } => match execute_domain_command(host, command, request) {
-                Ok(response) => response,
-                Err(ExecutionError::Handler(HostError::DraftInputConflict {
-                    draft_id,
-                    source_revision,
-                    current_revision,
-                    recovery,
-                })) => draft_input_conflict_response(
-                    "open",
-                    draft_id,
-                    source_revision,
-                    current_revision,
-                    recovery,
-                ),
-                Err(error) => panic!("TUI {wire_name} command fails: {error:?}"),
-            },
+            Self::Tui { host, root } => {
+                match production_tui::try_execute(host, root, tui_command_name(command), &request) {
+                    Ok(response) => response,
+                    Err(error) => match *error {
+                        LaunchError::Command(ExecutionError::Handler(
+                            HostError::DraftInputConflict {
+                                draft_id,
+                                source_revision,
+                                current_revision,
+                                recovery,
+                            },
+                        )) => draft_input_conflict_response(
+                            "open",
+                            draft_id,
+                            source_revision,
+                            current_revision,
+                            recovery,
+                        ),
+                        error => panic!("TUI {wire_name} command fails: {error:?}"),
+                    },
+                }
+            }
         }
     }
 

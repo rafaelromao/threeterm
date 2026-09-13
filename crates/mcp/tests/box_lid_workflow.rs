@@ -12,14 +12,12 @@ use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
-use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, LOAD_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, find,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
-use threeterm_tui::execute_domain_command;
 use threeterm_viewport::ViewportScene;
 
 #[path = "support/production_tui.rs"]
@@ -379,7 +377,7 @@ fn mcp_try_call(server: &McpServer, wire_name: &str, arguments: Value) -> Result
 }
 
 fn tui_call(
-    _host: &Host,
+    host: &Host,
     command: threeterm_protocol::schema::CommandId,
     request: Value,
 ) -> Result<Value, String> {
@@ -394,12 +392,8 @@ fn tui_call(
     let root = request["bundle_path"]
         .as_str()
         .ok_or("TUI request has no bundle path")?;
-    Ok(production_tui::execute(
-        _host,
-        Path::new(root),
-        command_name,
-        &request,
-    ))
+    production_tui::try_execute(host, Path::new(root), command_name, &request)
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn portable_extrude_response(value: &Value) -> Value {
@@ -486,24 +480,7 @@ impl AdapterSession {
                     error => format!("{error:?}"),
                 }),
             Self::Mcp { server, .. } => mcp_try_call(server, wire_name, request),
-            Self::Tui { host, .. } => {
-                if command == SKETCH_SOLVE_COMMAND_ID {
-                    tui_call(host, command, request)
-                } else {
-                    execute_domain_command(host, command, request)
-                        .map_err(|error| match error {
-                            ExecutionError::Handler(HostError::DraftInputConflict {
-                                draft_id,
-                                source_revision,
-                                current_revision,
-                                recovery,
-                            }) => format!(
-                                "draft_input_conflict draft={draft_id} source={source_revision} current={current_revision} recovery={recovery}"
-                            ),
-                            error => format!("{error:?}"),
-                        })
-                }
-            }
+            Self::Tui { host, .. } => tui_call(host, command, request),
         }
     }
 

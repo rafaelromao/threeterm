@@ -48,9 +48,10 @@ pub trait InteractiveTerminal: CapabilityProbeIo + Write {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchOutcome {
     pub event_loop_entered: bool,
+    pub last_response: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -213,10 +214,11 @@ pub fn launch<W: InteractiveTerminal>(
         host, root, width, height, placement, terminal, &probe, theme,
     );
     let launch_result = with_restore_result(launch_result, terminal.restore());
-    launch_result?;
+    let last_response = launch_result?;
 
     Ok(LaunchOutcome {
         event_loop_entered: true,
+        last_response,
     })
 }
 
@@ -240,13 +242,13 @@ fn with_restore_error(source: LaunchError, restore: io::Result<()>) -> LaunchErr
 }
 
 fn with_restore_result(
-    result: Result<(), LaunchError>,
+    result: Result<Option<Value>, LaunchError>,
     restore: io::Result<()>,
-) -> Result<(), LaunchError> {
+) -> Result<Option<Value>, LaunchError> {
     match restore {
-        Ok(()) => result,
+        Ok(_) => result,
         Err(error) => match result {
-            Ok(()) => Err(LaunchError::Runtime(format!(
+            Ok(_) => Err(LaunchError::Runtime(format!(
                 "terminal restore failed: {error}"
             ))),
             Err(source) => Err(LaunchError::Cleanup {
@@ -267,7 +269,7 @@ fn run_session<W: InteractiveTerminal>(
     terminal: &mut W,
     probe: &CapabilityProbeResult,
     theme: ThemeContext,
-) -> Result<(), LaunchError> {
+) -> Result<Option<Value>, LaunchError> {
     let session_result = TuiViewportSession::from_host_with_probe_and_theme(
         host,
         width,
@@ -290,8 +292,8 @@ fn run_session<W: InteractiveTerminal>(
             let cleanup = session.cleanup();
             drop(session);
             match (result, cleanup) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Ok(()), Err(error)) => Err(LaunchError::Viewport(error)),
+                (Ok(response), Ok(())) => Ok(response),
+                (Ok(_), Err(error)) => Err(LaunchError::Viewport(error)),
                 (Err(error), Ok(())) => Err(error),
                 (Err(error), Err(cleanup)) => Err(LaunchError::Cleanup {
                     source: Box::new(error),
@@ -301,8 +303,7 @@ fn run_session<W: InteractiveTerminal>(
         }
         Err(error) => return Err(LaunchError::Viewport(error)),
     };
-    launch_result?;
-    Ok(())
+    launch_result
 }
 
 fn run_event_loop<W: InteractiveTerminal>(
@@ -310,7 +311,8 @@ fn run_event_loop<W: InteractiveTerminal>(
     host: &Host,
     root: &Path,
     replayed_probe_input: &[u8],
-) -> Result<(), LaunchError> {
+) -> Result<Option<Value>, LaunchError> {
+    let mut last_response = None;
     let initial = session
         .render_current()
         .map_err(LaunchError::Viewport)?
@@ -339,7 +341,7 @@ fn run_event_loop<W: InteractiveTerminal>(
             .cleanup_signal()
         {
             handle_cleanup_signal(session, signal)?;
-            return Ok(());
+            return Ok(last_response);
         }
         let bytes = match session
             .coordinator_mut()
@@ -356,7 +358,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                     .cleanup_signal()
                 {
                     handle_cleanup_signal(session, signal)?;
-                    return Ok(());
+                    return Ok(last_response);
                 }
                 return Err(LaunchError::Runtime(format!(
                     "terminal input failed: {error}"
@@ -372,7 +374,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                 session
                     .handle_close()
                     .map_err(|error| LaunchError::Runtime(format!("{error:?}")))?;
-                return Ok(());
+                return Ok(last_response);
             }
             if let Some((image_id, _)) = acknowledgement(&event) {
                 let Some(active) = session.coordinator().in_flight().cloned() else {
@@ -392,6 +394,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                 continue;
             }
             if let Some(input) = decode_terminal_input(&event) {
+                let mut response = None;
                 let overlays = match input {
                     TerminalInput::FocusLost => vec![
                         session
@@ -558,21 +561,22 @@ fn run_event_loop<W: InteractiveTerminal>(
                                 &revision,
                             )
                             .map_err(LaunchError::Viewport)?;
-                        return Ok(());
+                        return Ok(last_response);
                     }
-                    _ => vec![
-                        session
-                            .process_keyboard_input(&event, host, root)
-                            .map_err(|error| match error {
+                    _ => {
+                        let outcome = session.process_keyboard_input(&event, host, root).map_err(
+                            |error| match error {
                                 crate::TuiViewportError::Viewport(error) => {
                                     LaunchError::Viewport(error)
                                 }
                                 crate::TuiViewportError::Tui(error) => {
                                     LaunchError::Runtime(format!("{error:?}"))
                                 }
-                            })?
-                            .overlay,
-                    ],
+                            },
+                        )?;
+                        response = outcome.response;
+                        vec![outcome.overlay]
+                    }
                 };
                 let revision = session.state().canonical_revision;
                 for overlay in overlays {
@@ -582,6 +586,9 @@ fn run_event_loop<W: InteractiveTerminal>(
                         .renderer_mut()
                         .write_control(overlay.as_bytes(), &revision)
                         .map_err(LaunchError::Viewport)?;
+                }
+                if response.is_some() {
+                    last_response = response;
                 }
             } else {
                 let revision = session.state().canonical_revision;

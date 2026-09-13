@@ -21,6 +21,9 @@ use threeterm_protocol::schema::{
 use threeterm_tui::execute_domain_command;
 use threeterm_viewport::SceneSolid;
 
+#[path = "support/production_tui.rs"]
+mod production_tui;
+
 fn bundle() -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -790,12 +793,13 @@ impl ComponentSession {
         }
     }
 
-    fn command(&self, name: &str, command: CommandId, request: Value, cli_args: &[&str]) -> Value {
+    fn command(&self, name: &str, _command: CommandId, request: Value, cli_args: &[&str]) -> Value {
         match self.adapter {
             ComponentAdapter::Cli => cli_command(name, &self.root, cli_args),
             ComponentAdapter::Mcp => mcp_command(&format!("threeterm.command.{name}/1"), request),
-            ComponentAdapter::Tui => execute_domain_command(&self.tui_host, command, request)
-                .unwrap_or_else(|error| panic!("TUI {name} command fails: {error:?}")),
+            ComponentAdapter::Tui => {
+                production_tui::execute(&self.tui_host, &self.root, name, &request)
+            }
         }
     }
 

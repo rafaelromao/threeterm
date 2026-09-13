@@ -3166,6 +3166,7 @@ pub struct KeyboardInputOutcome {
     pub rendered: Option<RenderedInput>,
     pub submission: Option<SubmitOutcome>,
     pub overlay: String,
+    pub response: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3634,6 +3635,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 ),
                 rendered: Some(outcome.rendered),
                 submission: Some(outcome.submission),
+                response: None,
             });
         }
 
@@ -3700,6 +3702,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             rendered: None,
             submission: Some(submission),
             overlay: format!("[motion-trail] {text}"),
+            response: None,
         }))
     }
 
@@ -3982,6 +3985,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "[selection-glyph] Commit: {} revision={revision}",
                 command.0
             ),
+            response: Some(response),
         })
     }
 
@@ -4047,6 +4051,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             rendered: None,
             submission: None,
             overlay,
+            response: None,
         }
     }
 

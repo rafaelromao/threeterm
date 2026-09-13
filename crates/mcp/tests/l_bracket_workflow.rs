@@ -23,6 +23,9 @@ use threeterm_viewport::{
     CapabilityState, FrameAcknowledgement, GhosttyRenderer, TerminalCapabilityVector, ViewportScene,
 };
 
+#[path = "support/production_tui.rs"]
+mod production_tui;
+
 #[derive(Debug, Default)]
 struct RecordingWriter {
     bytes: Vec<u8>,
@@ -578,8 +581,12 @@ fn l_bracket_adapter_parity() {
 
     let cli = production_cli_bracket(&cli_root);
     let mcp = production_mcp_bracket(&mcp_root);
-    let tui = execute_domain_command(&Host::new(), BRACKET_COMMAND_ID, bracket_request(&tui_root))
-        .expect("TUI bracket command commits");
+    let tui = production_tui::execute(
+        &Host::new(),
+        &tui_root,
+        "bracket",
+        &bracket_request(&tui_root),
+    );
 
     for (path, response) in [(&cli_root, &cli), (&mcp_root, &mcp), (&tui_root, &tui)] {
         assert_eq!(response["status"], "ok");

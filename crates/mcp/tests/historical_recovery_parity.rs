@@ -12,11 +12,13 @@ use threeterm_host::{Host, HostError};
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, CREATE_REVISION_COMMAND_ID, EXPORT_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID,
-    HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION, LOAD_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION,
+    RESTORE_REVISION_COMMAND_ID, TIMELINE_COMMAND_ID,
 };
 use threeterm_tui::{FeatureTarget, SelectionEvent, SelectionVerification, TuiSession};
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 fn temp_root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -217,12 +219,19 @@ fn mcp_historical_edit(root: &Path, value: f64) -> Value {
 }
 
 fn tui_historical_edit(root: &Path, value: f64) -> Value {
-    threeterm_tui::execute_domain_command(
+    if value == 0.0 {
+        return tui_call(
+            HISTORICAL_EDIT_COMMAND_ID,
+            historical_edit_request(root, value),
+        )
+        .expect("TUI historical edit failure is structured");
+    }
+    production_tui::execute(
         &Host::new(),
-        HISTORICAL_EDIT_COMMAND_ID,
-        historical_edit_request(root, value),
+        root,
+        "historical",
+        &historical_edit_request(root, value),
     )
-    .expect("TUI historical edit succeeds")
 }
 
 fn create_revision_request(root: &Path, name: &str) -> Value {
@@ -401,11 +410,12 @@ fn mcp_load(root: &Path) -> Value {
 }
 
 fn tui_load(root: &Path) -> Value {
-    tui_call(
-        LOAD_COMMAND_ID,
-        json!({"bundle_path": root.to_string_lossy()}),
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "load",
+        &json!({"bundle_path": root.to_string_lossy()}),
     )
-    .expect("TUI load succeeds")
 }
 
 fn cli_undo(root: &Path) -> Value {
@@ -427,11 +437,12 @@ fn mcp_undo(root: &Path) -> Value {
 }
 
 fn tui_undo(root: &Path) -> Value {
-    tui_call(
-        UNDO_COMMAND_ID,
-        json!({"bundle_path": root.to_string_lossy()}),
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "undo",
+        &json!({"bundle_path": root.to_string_lossy()}),
     )
-    .expect("TUI undo succeeds")
 }
 
 fn cli_restore(root: &Path, feature_id: &str, name: &str) -> Value {
@@ -467,7 +478,16 @@ fn mcp_restore(root: &Path, feature_id: &str, name: &str) -> Value {
 }
 
 fn tui_restore(root: &Path, name: &str) -> Value {
-    tui_restore_for(root, "l-bracket", name)
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "restore",
+        &json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "l-bracket",
+            "name": name,
+        }),
+    )
 }
 
 fn tui_restore_for(root: &Path, feature_id: &str, name: &str) -> Value {
@@ -491,7 +511,12 @@ fn tui_restore_result_for(root: &Path, feature_id: &str, name: &str) -> Result<V
 }
 
 fn tui_export(root: &Path, output_dir: &Path) -> Result<Value, Value> {
-    tui_call(EXPORT_COMMAND_ID, export_request(root, output_dir))
+    Ok(production_tui::execute(
+        &Host::new(),
+        root,
+        "export",
+        &export_request(root, output_dir),
+    ))
 }
 
 fn current_brep(root: &Path) -> Vec<u8> {
@@ -747,12 +772,12 @@ fn mcp_create_revision(root: &Path, name: &str) -> Value {
 }
 
 fn tui_create_revision(root: &Path, name: &str) -> Value {
-    threeterm_tui::execute_domain_command(
+    production_tui::execute(
         &Host::new(),
-        CREATE_REVISION_COMMAND_ID,
-        create_revision_request(root, name),
+        root,
+        "create revision",
+        &create_revision_request(root, name),
     )
-    .expect("TUI named revision creation succeeds")
 }
 
 fn bracket_request(root: &Path, bracket_id: &str) -> Value {
@@ -795,8 +820,12 @@ fn mcp_create_bracket(root: &Path, bracket_id: &str) -> Value {
 }
 
 fn tui_create_bracket(root: &Path, bracket_id: &str) -> Value {
-    tui_call(BRACKET_COMMAND_ID, bracket_request(root, bracket_id))
-        .expect("TUI bracket creation succeeds")
+    production_tui::execute(
+        &Host::new(),
+        root,
+        "bracket",
+        &bracket_request(root, bracket_id),
+    )
 }
 
 fn seed_standard_brackets_through_adapters(roots: [&Path; 3], test_name: &str) -> bool {

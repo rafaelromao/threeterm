@@ -757,7 +757,7 @@ fn interactive_shared_command_semantics() {
         host.identity(&root)
             .expect("identity remains readable")
             .transaction_count,
-        1
+        4
     );
 
     drop(worker);

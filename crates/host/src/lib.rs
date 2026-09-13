@@ -13296,14 +13296,6 @@ fn replay_finishing_geometry(
             .ok_or_else(|| HostError::BrepIo {
                 detail: format!("finishing replay dependency digest is missing: {dependency}"),
             })?;
-        let previous_path = previous_generation_path(root)
-            .join(BREP_SUBDIR)
-            .join(format!("{dependency}.brep"));
-        if previous_path.is_file()
-            && read_brep_verified(&previous_path, Some((expected_bytes, expected_sha))).is_ok()
-        {
-            return Ok(previous_path);
-        }
         if let Some(path) = replayed_paths.get(dependency) {
             return Ok(path.clone());
         }

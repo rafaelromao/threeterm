@@ -13,8 +13,10 @@ use threeterm_protocol::schema::{
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
-use threeterm_tui::execute_domain_command;
 use threeterm_viewport::ViewportScene;
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -131,18 +133,25 @@ fn mcp_call(server: &McpServer, command: &str, arguments: Value) -> Result<Value
 fn tui_call(
     host: &Host,
     command: threeterm_protocol::schema::CommandId,
-    mut request: Value,
+    request: Value,
 ) -> Result<Value, String> {
-    if command == SKETCH_SOLVE_COMMAND_ID {
-        let mut preview = request.clone();
-        preview["phase"] = Value::String("preview".to_string());
-        let preview = host
-            .preview_domain_command(command, preview)
-            .map_err(|error| format!("TUI preview failed: {error:?}"))?;
-        request["phase"] = Value::String("commit".to_string());
-        request["preview_revision"] = Value::String(preview.preview_revision);
-    }
-    execute_domain_command(host, command, request).map_err(|error| format!("{error:?}"))
+    let command_name = match command {
+        SKETCH_SOLVE_COMMAND_ID => "sketch",
+        EXTRUDE_COMMAND_ID => "extrude",
+        FIT_DIMENSION_COMMAND_ID => "fit",
+        EXPORT_COMMAND_ID => "export",
+        _ => return Err(format!("unsupported production TUI command: {command:?}")),
+    };
+    Ok(production_tui::execute(
+        host,
+        Path::new(
+            request["bundle_path"]
+                .as_str()
+                .ok_or("missing bundle path")?,
+        ),
+        command_name,
+        &request,
+    ))
 }
 
 fn build_workflow<F>(root: &Path, mut call: F) -> (Value, Value, Value)

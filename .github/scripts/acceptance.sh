@@ -24,6 +24,12 @@ LIBSLVS_ARTIFACT="${CARGO_TARGET_DIR}/libslvs-artifact"
 ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
+GATE_TIMEOUT_SECONDS="${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS:-900}"
+GATE_KILL_GRACE_SECONDS="${THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS:-10}"
+if [[ ! "${GATE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${GATE_KILL_GRACE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' 'acceptance catalog: gate timeout and kill grace must be positive integers' >&2
+    exit 1
+fi
 if ! mkdir -p "$(dirname "${CATALOG}")"; then
     printf '%s\n' 'acceptance catalog: unable to create catalog directory' >&2
     exit 1
@@ -37,7 +43,7 @@ if ! mkdir -p "${LOG_ROOT}"; then
     exit 1
 fi
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
@@ -56,6 +62,8 @@ declare -a GATE_EXITS=()
 declare -a GATE_LOGS=()
 declare -a GATE_LOG_BYTES=()
 declare -a GATE_LOG_SHA256=()
+declare -a GATE_TIMED_OUT=()
+declare -a GATE_DURATIONS_MS=()
 FAILURE_COUNT=0
 
 run_gate() {
@@ -63,21 +71,62 @@ run_gate() {
     local display="$2"
     shift 2
     local log="${LOG_ROOT}/${id//[^A-Za-z0-9_.-]/_}.log"
+    local timeout_marker="${log}.timeout"
     local status
+    local started_ms finished_ms duration_ms
+    local pid watchdog_pid timed_out=false
+    local command_text
 
-    printf 'command: %s\n' "${display}" >"${log}"
-    if "$@" >>"${log}" 2>&1; then
+    rm -f -- "${timeout_marker}"
+    printf -v command_text '%q ' "$@"
+    command_text="${command_text% }"
+    {
+        printf 'description: %s\n' "${display}"
+        printf 'command: %s\n' "${command_text}"
+    } >"${log}"
+    started_ms="$(date +%s%3N)"
+    setsid --wait -- "$@" >>"${log}" 2>&1 &
+    pid=$!
+    setsid --wait -- bash -e -u -o pipefail -c "
+        sleep \"\$1\"
+        if kill -0 \"\$2\" 2>/dev/null; then
+            printf '%s\\n' 'gate watchdog: timeout expired; terminating process group' >>\"\$3\"
+            printf '%s\\n' timed_out >\"\$4\"
+            kill -TERM -- \"-\$2\" 2>/dev/null || kill -TERM \"\$2\" 2>/dev/null || true
+            sleep \"\$5\"
+            if kill -0 -- \"-\$2\" 2>/dev/null; then
+                printf '%s\\n' 'gate watchdog: grace period expired; killing process group' >>\"\$3\"
+                kill -KILL -- \"-\$2\" 2>/dev/null || kill -KILL \"\$2\" 2>/dev/null || true
+            fi
+        fi
+    " _ "${GATE_TIMEOUT_SECONDS}" "${pid}" "${log}" "${timeout_marker}" "${GATE_KILL_GRACE_SECONDS}" &
+    watchdog_pid=$!
+    if wait "${pid}"; then
         status=0
     else
         status=$?
     fi
+    kill -TERM -- "-${watchdog_pid}" 2>/dev/null || kill -TERM "${watchdog_pid}" 2>/dev/null || true
+    if kill -0 -- "-${watchdog_pid}" 2>/dev/null; then
+        kill -KILL -- "-${watchdog_pid}" 2>/dev/null || true
+    fi
+    wait "${watchdog_pid}" 2>/dev/null || true
+    finished_ms="$(date +%s%3N)"
+    duration_ms=$((finished_ms - started_ms))
+    if [[ -f "${timeout_marker}" ]]; then
+        timed_out=true
+        status=124
+        rm -f -- "${timeout_marker}"
+    fi
 
     GATE_IDS+=("${id}")
-    GATE_COMMANDS+=("${display}")
+    GATE_COMMANDS+=("${command_text}")
     GATE_EXITS+=("${status}")
     GATE_LOGS+=("${log}")
     GATE_LOG_BYTES+=("$(wc -c <"${log}" | tr -d ' ')")
     GATE_LOG_SHA256+=("$(sha256sum "${log}" | cut -d' ' -f1)")
+    GATE_TIMED_OUT+=("${timed_out}")
+    GATE_DURATIONS_MS+=("${duration_ms}")
     if [[ "${status}" -eq 0 ]]; then
         GATE_STATUSES+=(passed)
         printf 'PASS %s\n' "${id}"
@@ -87,6 +136,13 @@ run_gate() {
         printf 'FAIL %s (exit %s)\n' "${id}" "${status}" >&2
     fi
 }
+
+if [[ "${THREETERM_ACCEPTANCE_LIBRARY_ONLY:-false}" == true ]]; then
+    if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+        return 0
+    fi
+    exit 0
+fi
 
 run_gate source-integrity \
     'git checkout is clean and its commit identity is readable' \
@@ -160,61 +216,123 @@ run_gate baseline \
     '
 
 run_gate workflow.l-bracket \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_adapter_parity --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test l_bracket_draft_e2e l_bracket_draft_commits_through_the_cli --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test mcp_bracket tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_adapter_parity \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_artifact_discard_replay \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test l_bracket_draft_e2e \
+            l_bracket_draft_commits_through_the_cli \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test mcp_bracket \
+            tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation \
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.box-with-lid \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test box_lid_workflow box_lid_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test box_lid_workflow box_lid_adapter_parity --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test box_lid_workflow box_lid_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test box_with_lid_e2e box_with_lid_runs_project_sketch_fit_extrude_viewport_export_reload --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test box_lid_workflow box_lid_adapter_parity \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test box_lid_workflow box_lid_artifact_discard_replay \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test box_with_lid_e2e \
+            box_with_lid_runs_project_sketch_fit_extrude_viewport_export_reload \
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.reusable-component \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test component_instance reusable_geometry_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test component_instance reusable_geometry_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test component_instance cli_and_mcp_component_geometry_outcomes_match --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test component_instance reusable_geometry_artifact_discard_replay \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test component_instance \
+            cli_and_mcp_component_geometry_outcomes_match \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.historical-edit \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity successful_historical_edit_has_equivalent_current_geometry_through_all_adapters --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity successful_historical_edit_has_equivalent_current_geometry_through_all_adapters --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test historical_recovery_e2e historical_failure_and_named_restore_use_the_production_cli_path --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test historical_recovery_parity \
             successful_historical_edit_has_equivalent_current_geometry_through_all_adapters \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test historical_recovery_e2e \
+            historical_failure_and_named_restore_use_the_production_cli_path \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.object-timeline \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test object_specific_timeline_e2e feature_timeline_browsing_and_restore_use_the_production_cli_path --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test mcp_bracket tools_list_and_call_expose_the_feature_scoped_timeline_contract --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test historical_recovery_parity \
             object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test object_specific_timeline_e2e \
+            feature_timeline_browsing_and_restore_use_the_production_cli_path \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test mcp_bracket \
+            tools_list_and_call_expose_the_feature_scoped_timeline_contract \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.keyboard-first \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-tui --test production_launch production_launch_completes_keyboard_first_modeling_workflow_end_to_end --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-tui --test production_launch production_launch_completes_keyboard_first_modeling_workflow_end_to_end --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test extrude_e2e generation_publication --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test mcp_bracket tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-tui --test production_launch \
             production_launch_completes_keyboard_first_modeling_workflow_end_to_end \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test extrude_e2e generation_publication \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test mcp_bracket \
+            tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.invalid-edit-recovery \
-    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity historical_recovery_adapter_parity --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test historical_recovery_parity historical_recovery_adapter_parity --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test historical_recovery_e2e historical_failure_and_named_restore_use_the_production_cli_path --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test invalid_recovery_parity invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostics --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test historical_recovery_parity historical_recovery_adapter_parity \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-cli --test historical_recovery_e2e \
+            historical_failure_and_named_restore_use_the_production_cli_path \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test invalid_recovery_parity \
+            invalid_geometry_preserves_canonical_state_and_matches_all_adapter_diagnostics \
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
@@ -227,10 +345,14 @@ run_gate replay.canonical-extrude \
     '
 
 run_gate registry.command-schemas \
-    'cargo test -p threeterm-protocol --test registry_shape --test registry_hash --test registry_bracket --jobs 1 -- --test-threads=1' \
+    'cargo test -p threeterm-protocol --test registry_shape --test registry_hash --test registry_bracket --jobs 1 -- --test-threads=1
+cargo test -p threeterm-mcp --test mcp_bracket tools_list_advertises_every_registered_command_with_populated_schemas --jobs 1 -- --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         cargo test -p threeterm-protocol --test registry_shape --test registry_hash --test registry_bracket \
             --jobs 1 -- --test-threads=1
+        cargo test -p threeterm-mcp --test mcp_bracket \
+            tools_list_advertises_every_registered_command_with_populated_schemas \
+            --jobs 1 -- --exact --test-threads=1
     '
 
 run_gate schema.identities \
@@ -279,10 +401,23 @@ run_gate documentation.workspace \
         grep -Fq ".github/scripts/acceptance.sh" README.md
         grep -Fq "direct-Ghostty" README.md
         grep -Fq "Project Manifest" README.md
+        grep -Fq "Official Interactive Environment" README.md
+        grep -Fq "pinned rootless Arch image" README.md
+        grep -Fq "xterm-ghostty/1.3.1-arch2" README.md
+        grep -Fq "threeterm-mcp" README.md
+        grep -Fq "\`threeterm-tui\` owns that interactive surface" README.md
+        grep -Fq "Headless Automation adapters" README.md
+        grep -Fq "CLI and MCP do not provide a graphical viewport" README.md
+        grep -Fq "bash .github/scripts/acceptance.sh" README.md
+        grep -Fq "PODMAN_ROOTLESS: \"1\"" .github/workflows/e2e.yml
+        grep -Fq "docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309" .github/workflows/e2e.yml
         grep -Fq "cargo run -p threeterm-cli --bin threeterm" docs/research/rehearsal-evidence/README.md
         grep -Fq -- "--machine rehearse" docs/research/rehearsal-evidence/README.md
         grep -Fq "threeterm-tui" crates/tui/Cargo.toml
-        test -f crates/cli/src/bin/threeterm.rs
+        grep -Fq "name = \"threeterm\"" crates/cli/Cargo.toml
+        grep -Fq "name = \"threeterm-mcp\"" crates/mcp/Cargo.toml
+        test -f crates/cli/src/main.rs
+        test -f crates/mcp/src/main.rs
         test -f crates/tui/src/bin/threeterm-tui.rs
     '
 
@@ -292,11 +427,14 @@ run_gate performance.claims \
         source "${ROOT}/.github/scripts/performance-gate.sh"
         material="${THREETERM_RELEASE_MATERIAL:-}"
         tag="${THREETERM_RELEASE_TAG:-}"
-        test -n "${material}"
-        test -n "${tag}"
-        verify_performance_material "${ROOT}" "${material}" \
-            "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
-            "$(git -C "${ROOT}" rev-parse HEAD)" "${tag}"
+        if [[ -n "${material}" ]]; then
+            test -n "${tag}"
+            verify_performance_material "${ROOT}" "${material}" \
+                "${ROOT}/docs/release/six-gate-performance-claims-gate.md" \
+                "$(git -C "${ROOT}" rev-parse HEAD)" "${tag}"
+        else
+            printf "%s\n" "no performance claim material supplied; no target admitted"
+        fi
     '
 
 SOURCE_COMMIT_AFTER="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
@@ -401,7 +539,7 @@ if [[ -f "${NATIVE_MANIFEST}" ]]; then
     if WORKERS="$(jq -c '
         .workers
         | to_entries
-        | map({key: .key, value: (.value + {worker_id: .key})})
+        | map({key: .key, value: (.value + {manifest_key: .key})})
         | from_entries
     ' "${NATIVE_MANIFEST}" 2>/dev/null)"; then
         :
@@ -411,15 +549,37 @@ if [[ -f "${NATIVE_MANIFEST}" ]]; then
 fi
 
 EVIDENCE_VALID=true
+NATIVE_MANIFEST_VERIFIED=false
+if source "${ROOT}/.github/scripts/native-workers.sh"; then
+    set +e
+    if verify_native_worker_manifest "${NATIVE_MANIFEST}" "${LIBSLVS_ARTIFACT}"; then
+        NATIVE_MANIFEST_VERIFIED=true
+    fi
+else
+    set +e
+fi
 if [[ ! -f "${NATIVE_MANIFEST}" ]] || ! jq -e '
     .schema_version == "threeterm.ci.native-workers/2" and
     (.workers.occt.executed == true) and
     (.workers.libslvs.executed == true) and
+    (.workers.occt.worker_id == "occt") and
+    (.workers.libslvs.worker_id == "slvs") and
+    (.workers.occt.worker_schema_version == "threeterm.workers.occt/1") and
+    (.workers.libslvs.worker_schema_version == "threeterm.workers.slvs/1") and
+    (.workers.occt.protocol_schema_version == "threeterm.protocol/1") and
+    (.workers.libslvs.protocol_schema_version == "threeterm.protocol/1") and
+    (.workers.occt.source_commit | test("^[0-9a-f]{40}$")) and
+    (.workers.libslvs.source_commit | test("^[0-9a-f]{40}$")) and
     (.workers.occt.executable.path | type == "string") and
     (.workers.libslvs.executable.path | type == "string") and
     (.workers.occt.executable.sha256 | test("^[0-9a-f]{64}$")) and
-    (.workers.libslvs.executable.sha256 | test("^[0-9a-f]{64}$"))
+    (.workers.libslvs.executable.sha256 | test("^[0-9a-f]{64}$")) and
+    (.workers.occt.linked_libraries | type == "array" and length > 0 and all(.[]; (.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))) and
+    (.workers.libslvs.linked_libraries | type == "array" and length > 0 and all(.[]; (.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$"))))
     ' "${NATIVE_MANIFEST}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
+if [[ "${NATIVE_MANIFEST_VERIFIED}" != true ]]; then
     EVIDENCE_VALID=false
 fi
 if [[ ! -f "${SCHEMA_RESPONSE}" ]] || [[ ! -f "${SCHEMA_PROJECT}/manifest.json" ]] || \
@@ -442,7 +602,15 @@ if [[ "${SCHEMAS}" == '{}' ]] || ! jq -e '
 fi
 if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
     (.occt.worker_id == "occt") and
-    (.libslvs.worker_id == "libslvs") and
+    (.libslvs.worker_id == "slvs") and
+    (.occt.manifest_key == "occt") and
+    (.libslvs.manifest_key == "libslvs") and
+    (.occt.worker_schema_version == "threeterm.workers.occt/1") and
+    (.libslvs.worker_schema_version == "threeterm.workers.slvs/1") and
+    (.occt.protocol_schema_version == "threeterm.protocol/1") and
+    (.libslvs.protocol_schema_version == "threeterm.protocol/1") and
+    (.occt.source_commit | test("^[0-9a-f]{40}$")) and
+    (.libslvs.source_commit | test("^[0-9a-f]{40}$")) and
     (.occt.executable.sha256 | test("^[0-9a-f]{64}$")) and
     (.libslvs.executable.sha256 | test("^[0-9a-f]{64}$"))
     ' <<<"${WORKERS}" >/dev/null 2>&1; then
@@ -475,9 +643,12 @@ for index in "${!GATE_IDS[@]}"; do
         --arg command "${GATE_COMMANDS[${index}]}" \
         --arg status "${GATE_STATUSES[${index}]}" \
         --argjson exit_status "${GATE_EXITS[${index}]}" \
+        --argjson timed_out "${GATE_TIMED_OUT[$index]:-false}" \
+        --argjson duration_ms "${GATE_DURATIONS_MS[${index}]:-0}" \
         --argjson output "${output_json}" \
         '. + [{id: $id, command: $command, status: $status,
-               exit_status: $exit_status, output: $output,
+               exit_status: $exit_status, timed_out: $timed_out,
+               duration_ms: $duration_ms, output: $output,
                output_path: $output.path, output_sha256: $output.sha256}]' <<<"${GATES}")"
 done
 
@@ -525,6 +696,10 @@ if jq -e \
      (.schemas | type == "object") and
      (.gates | length > 0) and
      (.gates | all(.status == "passed" or .status == "failed")) and
+     (.gates | all((.timed_out | type == "boolean") and
+                   (.duration_ms | type == "number" and . >= 0) and
+                   (.output_path | type == "string") and
+                   (.output_sha256 | test("^[0-9a-f]{64}$")))) and
      (.artifacts | all((.path | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))) and
      (.result == "passed" or .result == "failed")' "${CATALOG_TMP}" >/dev/null; then
     if ! mv -f -- "${CATALOG_TMP}" "${CATALOG}"; then

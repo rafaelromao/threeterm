@@ -1,5 +1,8 @@
+use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -9,15 +12,16 @@ use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
-use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
     EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, FIT_DIMENSION_COMMAND_ID, LOAD_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, find,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
-use threeterm_tui::execute_domain_command;
 use threeterm_viewport::ViewportScene;
+
+#[path = "support/production_tui.rs"]
+mod production_tui;
 
 fn root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -40,6 +44,83 @@ fn required_workers(test_name: &str) -> bool {
     }
     eprintln!("{test_name}: real OCCT and libslvs workers unavailable; skipping");
     false
+}
+
+fn threeterm_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm")
+}
+
+fn threeterm_mcp_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
+        return PathBuf::from(path);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
+}
+
+fn run_production_cli(args: Vec<OsString>) -> Value {
+    let output = Command::new(threeterm_binary())
+        .args(args)
+        .output()
+        .expect("production CLI starts");
+    assert!(
+        output.status.success(),
+        "production CLI fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production CLI writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("production CLI returns JSON")
+}
+
+fn run_production_mcp(name: &str, arguments: Value) -> Value {
+    let mut child = Command::new(threeterm_mcp_binary())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("production MCP starts");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    });
+    child
+        .stdin
+        .take()
+        .expect("production MCP stdin")
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("production MCP request writes");
+    let output = child.wait_with_output().expect("production MCP completes");
+    assert!(
+        output.status.success(),
+        "production MCP fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "production MCP writes stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("production MCP returns JSON");
+    assert!(
+        response["error"].is_null(),
+        "production MCP returns an error: {response}"
+    );
+    response["result"]["structuredContent"].clone()
 }
 
 fn sketch_request(root: &Path, feature_id: &str, dimension_id: &str, value: f64) -> Value {
@@ -101,6 +182,167 @@ fn fit_request(root: &Path, expected_revision: &str, clearance: f64) -> Value {
     })
 }
 
+fn production_cli_workflow(root: &Path) -> (Value, Value, Value) {
+    Bundle::create(root).expect("production CLI bundle creates");
+    let box_request_path = root.join("box-sketch-request.json");
+    let lid_request_path = root.join("lid-sketch-request.json");
+    let box_profile_path = root.join("box-profile.json");
+    let lid_profile_path = root.join("lid-profile.json");
+    fs::write(
+        &box_request_path,
+        serde_json::to_vec(&sketch_request(root, "box-sketch", "box-width", 10.0))
+            .expect("box sketch request serializes"),
+    )
+    .expect("box sketch request writes");
+    fs::write(
+        &lid_request_path,
+        serde_json::to_vec(&sketch_request(root, "lid-sketch", "lid-width", 9.6))
+            .expect("lid sketch request serializes"),
+    )
+    .expect("lid sketch request writes");
+    fs::write(
+        &box_profile_path,
+        "[[0.0,0.0],[10.0,0.0],[10.0,8.0],[0.0,8.0]]",
+    )
+    .expect("box profile writes");
+    fs::write(
+        &lid_profile_path,
+        "[[0.2,0.2],[9.8,0.2],[9.8,7.8],[0.2,7.8]]",
+    )
+    .expect("lid profile writes");
+
+    let mut args = vec![OsString::from("--machine"), OsString::from("sketch-solve")];
+    args.extend([
+        OsString::from("--bundle"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--request-file"),
+        box_request_path.as_os_str().to_os_string(),
+    ]);
+    let box_sketch = run_production_cli(args);
+    assert_response(SKETCH_SOLVE_COMMAND_ID, &box_sketch);
+
+    let mut args = vec![OsString::from("--machine"), OsString::from("sketch-solve")];
+    args.extend([
+        OsString::from("--bundle"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--request-file"),
+        lid_request_path.as_os_str().to_os_string(),
+    ]);
+    let lid_sketch = run_production_cli(args);
+    assert_response(SKETCH_SOLVE_COMMAND_ID, &lid_sketch);
+
+    let mut args = vec![OsString::from("--machine"), OsString::from("extrude")];
+    args.extend([
+        OsString::from("--bundle"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--feature-id"),
+        OsString::from("box"),
+        OsString::from("--profile-file"),
+        box_profile_path.as_os_str().to_os_string(),
+        OsString::from("--height"),
+        OsString::from("4.0"),
+        OsString::from("--mode"),
+        OsString::from("additive"),
+    ]);
+    let box_result = run_production_cli(args);
+    assert_response(EXTRUDE_COMMAND_ID, &box_result);
+
+    let mut args = vec![OsString::from("--machine"), OsString::from("extrude")];
+    args.extend([
+        OsString::from("--bundle"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--feature-id"),
+        OsString::from("lid"),
+        OsString::from("--profile-file"),
+        lid_profile_path.as_os_str().to_os_string(),
+        OsString::from("--height"),
+        OsString::from("1.0"),
+        OsString::from("--mode"),
+        OsString::from("additive"),
+    ]);
+    let lid = run_production_cli(args);
+    assert_response(EXTRUDE_COMMAND_ID, &lid);
+
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("production CLI workflow bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let mut args = vec![OsString::from("--machine"), OsString::from("fit-dimension")];
+    args.extend([
+        OsString::from("--bundle"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--expected-revision"),
+        OsString::from(expected_revision),
+        OsString::from("--source-feature-id"),
+        OsString::from("box-sketch"),
+        OsString::from("--target-feature-id"),
+        OsString::from("lid-sketch"),
+        OsString::from("--source-dimension-id"),
+        OsString::from("box-width"),
+        OsString::from("--target-dimension-id"),
+        OsString::from("lid-width"),
+        OsString::from("--dimension"),
+        OsString::from("width"),
+        OsString::from("--clearance"),
+        OsString::from("0.2"),
+    ]);
+    let fit = run_production_cli(args);
+    assert_response(FIT_DIMENSION_COMMAND_ID, &fit);
+    (box_result, lid, fit)
+}
+
+fn production_mcp_workflow(root: &Path) -> (Value, Value, Value) {
+    Bundle::create(root).expect("production MCP bundle creates");
+    let sketch_wire = find(SKETCH_SOLVE_COMMAND_ID)
+        .expect("sketch-solve is registered")
+        .schema_version;
+    let extrude_wire = find(EXTRUDE_COMMAND_ID)
+        .expect("extrude is registered")
+        .schema_version;
+    let fit_wire = find(FIT_DIMENSION_COMMAND_ID)
+        .expect("fit-dimension is registered")
+        .schema_version;
+    let box_sketch = run_production_mcp(
+        sketch_wire,
+        sketch_request(root, "box-sketch", "box-width", 10.0),
+    );
+    assert_response(SKETCH_SOLVE_COMMAND_ID, &box_sketch);
+    let lid_sketch = run_production_mcp(
+        sketch_wire,
+        sketch_request(root, "lid-sketch", "lid-width", 9.6),
+    );
+    assert_response(SKETCH_SOLVE_COMMAND_ID, &lid_sketch);
+    let box_result = run_production_mcp(
+        extrude_wire,
+        extrude_request(
+            root,
+            "box",
+            json!([[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]]),
+            4.0,
+        ),
+    );
+    assert_response(EXTRUDE_COMMAND_ID, &box_result);
+    let lid = run_production_mcp(
+        extrude_wire,
+        extrude_request(
+            root,
+            "lid",
+            json!([[0.2, 0.2], [9.8, 0.2], [9.8, 7.8], [0.2, 7.8]]),
+            1.0,
+        ),
+    );
+    assert_response(EXTRUDE_COMMAND_ID, &lid);
+    let expected_revision = Bundle::at(root)
+        .open()
+        .expect("production MCP workflow bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let fit = run_production_mcp(fit_wire, fit_request(root, &expected_revision, 0.2));
+    assert_response(FIT_DIMENSION_COMMAND_ID, &fit);
+    (box_result, lid, fit)
+}
+
 fn assert_response(command: threeterm_protocol::schema::CommandId, response: &Value) {
     let schema = &find(command)
         .unwrap_or_else(|| panic!("command {} is registered", command.0))
@@ -137,18 +379,21 @@ fn mcp_try_call(server: &McpServer, wire_name: &str, arguments: Value) -> Result
 fn tui_call(
     host: &Host,
     command: threeterm_protocol::schema::CommandId,
-    mut request: Value,
+    request: Value,
 ) -> Result<Value, String> {
-    if command == SKETCH_SOLVE_COMMAND_ID {
-        let mut preview = request.clone();
-        preview["phase"] = Value::String("preview".to_string());
-        let preview = host
-            .preview_domain_command(command, preview)
-            .map_err(|error| format!("TUI preview failed: {error:?}"))?;
-        request["phase"] = Value::String("commit".to_string());
-        request["preview_revision"] = Value::String(preview.preview_revision);
-    }
-    execute_domain_command(host, command, request).map_err(|error| format!("{error:?}"))
+    let command_name = match command {
+        SKETCH_SOLVE_COMMAND_ID => "sketch",
+        EXTRUDE_COMMAND_ID => "extrude",
+        FIT_DIMENSION_COMMAND_ID => "fit",
+        EXPORT_COMMAND_ID => "export",
+        LOAD_COMMAND_ID => "load",
+        _ => return Err(format!("unsupported production TUI command: {command:?}")),
+    };
+    let root = request["bundle_path"]
+        .as_str()
+        .ok_or("TUI request has no bundle path")?;
+    production_tui::try_execute(host, Path::new(root), command_name, &request)
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn portable_extrude_response(value: &Value) -> Value {
@@ -235,24 +480,7 @@ impl AdapterSession {
                     error => format!("{error:?}"),
                 }),
             Self::Mcp { server, .. } => mcp_try_call(server, wire_name, request),
-            Self::Tui { host, .. } => {
-                if command == SKETCH_SOLVE_COMMAND_ID {
-                    tui_call(host, command, request)
-                } else {
-                    execute_domain_command(host, command, request)
-                        .map_err(|error| match error {
-                            ExecutionError::Handler(HostError::DraftInputConflict {
-                                draft_id,
-                                source_revision,
-                                current_revision,
-                                recovery,
-                            }) => format!(
-                                "draft_input_conflict draft={draft_id} source={source_revision} current={current_revision} recovery={recovery}"
-                            ),
-                            error => format!("{error:?}"),
-                        })
-                }
-            }
+            Self::Tui { host, .. } => tui_call(host, command, request),
         }
     }
 
@@ -379,25 +607,33 @@ fn box_lid_adapter_parity() {
     if !required_workers("box_lid_adapter_parity") {
         return;
     }
-    let mut sessions = vec![
-        AdapterSession::cli(root("parity-cli")),
-        AdapterSession::mcp(root("parity-mcp")),
-        AdapterSession::tui(root("parity-tui")),
-    ];
-    let mut outcomes = Vec::new();
+    let cli_root = root("parity-cli");
+    let mcp_root = root("parity-mcp");
+    let tui_session = AdapterSession::tui(root("parity-tui"));
+    let cli = production_cli_workflow(&cli_root);
+    let mcp = production_mcp_workflow(&mcp_root);
+    let tui = tui_session.build_workflow();
 
-    for session in &sessions {
-        let (box_result, lid, fit) = session.build_workflow();
+    for (root, (box_result, lid, fit)) in [
+        (cli_root.as_path(), &cli),
+        (mcp_root.as_path(), &mcp),
+        (tui_session.root(), &tui),
+    ] {
         assert_eq!(box_result["feature_id"], "box");
         assert_eq!(lid["feature_id"], "lid");
         assert_eq!(lid["operation"], box_result["operation"]);
         assert_eq!(box_result["worker_fingerprint"]["worker_kind"], "occt");
         assert_eq!(fit["fit"]["source_value"], 10.0);
         assert_eq!(fit["fit"]["target_value"], 9.6);
-        assert!(session.root().join("brep/box.brep").is_file());
-        assert!(session.root().join("brep/lid.brep").is_file());
-        outcomes.push((box_result, lid, fit, geometry_evidence(session.root())));
+        assert!(root.join("brep/box.brep").is_file());
+        assert!(root.join("brep/lid.brep").is_file());
     }
+
+    let outcomes = [
+        (&cli.0, &cli.1, geometry_evidence(&cli_root)),
+        (&mcp.0, &mcp.1, geometry_evidence(&mcp_root)),
+        (&tui.0, &tui.1, geometry_evidence(tui_session.root())),
+    ];
 
     assert_eq!(
         outcomes[0].0["brep_sha256"], outcomes[1].0["brep_sha256"],
@@ -416,31 +652,31 @@ fn box_lid_adapter_parity() {
         "CLI and TUI lid geometry differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].0),
-        portable_extrude_response(&outcomes[1].0),
+        portable_extrude_response(outcomes[0].0),
+        portable_extrude_response(outcomes[1].0),
         "CLI and MCP box domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].0),
-        portable_extrude_response(&outcomes[2].0),
+        portable_extrude_response(outcomes[0].0),
+        portable_extrude_response(outcomes[2].0),
         "CLI and TUI box domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].1),
-        portable_extrude_response(&outcomes[1].1),
+        portable_extrude_response(outcomes[0].1),
+        portable_extrude_response(outcomes[1].1),
         "CLI and MCP lid domain results differ"
     );
     assert_eq!(
-        portable_extrude_response(&outcomes[0].1),
-        portable_extrude_response(&outcomes[2].1),
+        portable_extrude_response(outcomes[0].1),
+        portable_extrude_response(outcomes[2].1),
         "CLI and TUI lid domain results differ"
     );
-    assert_eq!(outcomes[0].3, outcomes[1].3, "canonical geometry differs");
-    assert_eq!(outcomes[0].3, outcomes[2].3, "canonical geometry differs");
+    assert_eq!(outcomes[0].2, outcomes[1].2, "canonical geometry differs");
+    assert_eq!(outcomes[0].2, outcomes[2].2, "canonical geometry differs");
 
-    for session in sessions.drain(..) {
-        let _ = fs::remove_dir_all(session.root());
-    }
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_session.root());
 }
 
 fn is_revision_hex(value: &str) -> bool {
@@ -770,11 +1006,12 @@ fn box_lid_artifact_discard_replay() {
             .expect("transactions read before derived deletion");
 
         fs::remove_dir_all(session.root().join("brep")).expect("derived BREP directory deletes");
-        for disposable in ["cache", ".derived"] {
+        for disposable in ["cache", ".derived", ".canonical-brep", "stage"] {
             let path = session.root().join(disposable);
             if path.exists() {
-                fs::remove_dir_all(path).expect("disposable derived directory removes");
+                fs::remove_dir_all(&path).expect("disposable derived directory removes");
             }
+            assert!(!path.exists(), "derived result remains at {path:?}");
         }
         if let Ok(entries) = fs::read_dir(session.root().join("exports")) {
             for entry in entries {

@@ -7,6 +7,7 @@
 
 use std::{
     io::Write,
+    path::Path,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +15,8 @@ use std::{
 use threeterm_occt_worker::{
     BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest, ExtrudeMode,
     ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
-    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, WorkerError, schema_version,
+    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, SelectedEdgeContext, WorkerError,
+    schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -314,6 +316,58 @@ fn chamfer_request(base_path: &std::path::Path, label: &str) -> ChamferRequest {
         .with_feature_id("box-chamfered-1")
 }
 
+fn selected_edge_context(
+    worker: &OcctWorker,
+    base_path: &Path,
+    feature_id: &str,
+) -> SelectedEdgeContext {
+    let source_revision_id = "test-revision";
+    let inspection = worker
+        .inspect_edges(
+            unique_request_id("inspect-finishing-edge"),
+            base_path,
+            feature_id,
+            source_revision_id,
+            serde_json::json!({
+                "semantic_id": "requested-edge",
+                "source_feature_id": feature_id,
+                "source_revision_id": source_revision_id,
+                "source_edge_id": "requested-edge",
+                "role": "outer-perimeter",
+                "midpoint": [0.0, 0.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 1.0
+            }),
+        )
+        .expect("edge inspection returns");
+    let candidate = inspection
+        .edge_candidates
+        .iter()
+        .find(|candidate| {
+            inspection
+                .edge_candidates
+                .iter()
+                .filter(|other| {
+                    other.midpoint == candidate.midpoint
+                        && other.tangent == candidate.tangent
+                        && other.length == candidate.length
+                })
+                .count()
+                == 1
+        })
+        .expect("edge inspection returns an unambiguous candidate");
+    SelectedEdgeContext {
+        semantic_id: format!("{feature_id}-edge"),
+        source_feature_id: candidate.source_feature_id.clone(),
+        source_revision_id: candidate.source_revision_id.clone(),
+        source_edge_id: candidate.source_edge_id.clone(),
+        role: candidate.role.clone(),
+        midpoint: candidate.midpoint,
+        tangent: candidate.tangent,
+        length: candidate.length,
+    }
+}
+
 #[test]
 fn fillet_of_extruded_box_returns_ok_with_real_brep() {
     let Some(worker) = locate_worker() else {
@@ -329,6 +383,11 @@ fn fillet_of_extruded_box_returns_ok_with_real_brep() {
     assert_eq!(base_result.status, "ok");
 
     let request = fillet_request(&base_result.brep_path, "fillet-1")
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &base_result.brep_path,
+            "fillet-base-1",
+        ))
         .with_output_path(&temp, "fillet-out.brep");
     let result = worker.fillet(&request).expect("fillet returns");
     assert_eq!(result.status, "ok", "fillet returned {:?}", result);
@@ -368,6 +427,11 @@ fn chamfer_of_extruded_box_returns_ok_with_real_brep() {
     assert_eq!(base_result.status, "ok");
 
     let request = chamfer_request(&base_result.brep_path, "chamfer-1")
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &base_result.brep_path,
+            "chamfer-base-1",
+        ))
         .with_output_path(&temp, "chamfer-out.brep");
     let result = worker.chamfer(&request).expect("chamfer returns");
     assert_eq!(result.status, "ok", "chamfer returned {:?}", result);

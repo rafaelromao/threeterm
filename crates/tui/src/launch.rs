@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
-use threeterm_host::Host;
+use threeterm_host::{Host, HostError, domain_command_failure_value};
+use threeterm_protocol::command_execution::ExecutionError;
+use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
     CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
@@ -48,9 +50,10 @@ pub trait InteractiveTerminal: CapabilityProbeIo + Write {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchOutcome {
     pub event_loop_entered: bool,
+    pub last_response: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -58,6 +61,7 @@ pub enum LaunchError {
     Capability(ViewportDiagnostic),
     Project(String),
     Viewport(ViewportDiagnostic),
+    Command(ExecutionError<HostError>),
     Runtime(String),
     Cleanup { source: Box<Self>, detail: String },
 }
@@ -77,7 +81,9 @@ impl LaunchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Capability(_) => EXIT_CAPABILITY_FAILURE,
-            Self::Project(_) | Self::Viewport(_) | Self::Runtime(_) => EXIT_LAUNCH_FAILURE,
+            Self::Project(_) | Self::Viewport(_) | Self::Command(_) | Self::Runtime(_) => {
+                EXIT_LAUNCH_FAILURE
+            }
             Self::Cleanup { source, .. } => source.exit_code(),
         }
     }
@@ -117,6 +123,24 @@ impl LaunchError {
                 route: INTERACTIVE_MODELING_ROUTE,
                 recovery: viewport.recovery.clone(),
             },
+            Self::Command(error) => {
+                return match error {
+                    ExecutionError::Handler(error) => {
+                        serde_json::to_string(&domain_command_failure_value(error))
+                            .expect("command failure diagnostic is serializable")
+                    }
+                    error => serde_json::to_string(&LaunchDiagnostic {
+                        schema_version: LAUNCH_SCHEMA_VERSION,
+                        code: "runtime_failure",
+                        detail: format!("TUI command failed: {error:?}"),
+                        source_revision: "unknown".to_string(),
+                        viewport_diagnostic: None,
+                        route: INTERACTIVE_MODELING_ROUTE,
+                        recovery: "correct the command request and retry Interactive Modeling from the official attachment".to_string(),
+                    })
+                    .expect("command failure diagnostic is serializable"),
+                };
+            }
             Self::Runtime(detail) => LaunchDiagnostic {
                 schema_version: LAUNCH_SCHEMA_VERSION,
                 code: "runtime_failure",
@@ -145,6 +169,27 @@ pub fn launch<W: InteractiveTerminal>(
     root: impl AsRef<Path>,
     terminal: &mut W,
     environment: TerminalEnvironment,
+) -> Result<LaunchOutcome, LaunchError> {
+    launch_inner(host, root, terminal, environment, None)
+}
+
+pub fn launch_command<W: InteractiveTerminal>(
+    host: &Host,
+    root: impl AsRef<Path>,
+    terminal: &mut W,
+    environment: TerminalEnvironment,
+    command: CommandId,
+    request: Value,
+) -> Result<LaunchOutcome, LaunchError> {
+    launch_inner(host, root, terminal, environment, Some((command, request)))
+}
+
+fn launch_inner<W: InteractiveTerminal>(
+    host: &Host,
+    root: impl AsRef<Path>,
+    terminal: &mut W,
+    environment: TerminalEnvironment,
+    initial_command: Option<(CommandId, Value)>,
 ) -> Result<LaunchOutcome, LaunchError> {
     let root = root.as_ref();
     let prepared = environment.foreground_tty;
@@ -210,13 +255,22 @@ pub fn launch<W: InteractiveTerminal>(
     })?;
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(
-        host, root, width, height, placement, terminal, &probe, theme,
+        host,
+        root,
+        width,
+        height,
+        placement,
+        terminal,
+        &probe,
+        theme,
+        initial_command,
     );
     let launch_result = with_restore_result(launch_result, terminal.restore());
-    launch_result?;
+    let last_response = launch_result?;
 
     Ok(LaunchOutcome {
         event_loop_entered: true,
+        last_response,
     })
 }
 
@@ -240,13 +294,13 @@ fn with_restore_error(source: LaunchError, restore: io::Result<()>) -> LaunchErr
 }
 
 fn with_restore_result(
-    result: Result<(), LaunchError>,
+    result: Result<Option<Value>, LaunchError>,
     restore: io::Result<()>,
-) -> Result<(), LaunchError> {
+) -> Result<Option<Value>, LaunchError> {
     match restore {
-        Ok(()) => result,
+        Ok(_) => result,
         Err(error) => match result {
-            Ok(()) => Err(LaunchError::Runtime(format!(
+            Ok(_) => Err(LaunchError::Runtime(format!(
                 "terminal restore failed: {error}"
             ))),
             Err(source) => Err(LaunchError::Cleanup {
@@ -267,7 +321,8 @@ fn run_session<W: InteractiveTerminal>(
     terminal: &mut W,
     probe: &CapabilityProbeResult,
     theme: ThemeContext,
-) -> Result<(), LaunchError> {
+    initial_command: Option<(CommandId, Value)>,
+) -> Result<Option<Value>, LaunchError> {
     let session_result = TuiViewportSession::from_host_with_probe_and_theme(
         host,
         width,
@@ -276,10 +331,16 @@ fn run_session<W: InteractiveTerminal>(
         probe,
         theme,
     );
-    let launch_result = match session_result {
+    match session_result {
         Ok(mut session) => {
             let result = match catch_unwind(AssertUnwindSafe(|| {
-                run_event_loop(&mut session, host, root, &probe.unrelated_input)
+                run_event_loop(
+                    &mut session,
+                    host,
+                    root,
+                    &probe.unrelated_input,
+                    initial_command,
+                )
             })) {
                 Ok(result) => result,
                 Err(payload) => Err(LaunchError::Runtime(format!(
@@ -290,8 +351,8 @@ fn run_session<W: InteractiveTerminal>(
             let cleanup = session.cleanup();
             drop(session);
             match (result, cleanup) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Ok(()), Err(error)) => Err(LaunchError::Viewport(error)),
+                (Ok(response), Ok(())) => Ok(response),
+                (Ok(_), Err(error)) => Err(LaunchError::Viewport(error)),
                 (Err(error), Ok(())) => Err(error),
                 (Err(error), Err(cleanup)) => Err(LaunchError::Cleanup {
                     source: Box::new(error),
@@ -299,10 +360,8 @@ fn run_session<W: InteractiveTerminal>(
                 }),
             }
         }
-        Err(error) => return Err(LaunchError::Viewport(error)),
-    };
-    launch_result?;
-    Ok(())
+        Err(error) => Err(LaunchError::Viewport(error)),
+    }
 }
 
 fn run_event_loop<W: InteractiveTerminal>(
@@ -310,7 +369,9 @@ fn run_event_loop<W: InteractiveTerminal>(
     host: &Host,
     root: &Path,
     replayed_probe_input: &[u8],
-) -> Result<(), LaunchError> {
+    initial_command: Option<(CommandId, Value)>,
+) -> Result<Option<Value>, LaunchError> {
+    let mut last_response = None;
     let initial = session
         .render_current()
         .map_err(LaunchError::Viewport)?
@@ -324,6 +385,22 @@ fn run_event_loop<W: InteractiveTerminal>(
             ))
         })?;
     acknowledge_frame(session, initial.frame_token)?;
+
+    if let Some((command, request)) = initial_command {
+        let response =
+            crate::execute_domain_command(host, command, request).map_err(LaunchError::Command)?;
+        session
+            .refresh_scene_from_host(host)
+            .map_err(|error| match error {
+                crate::TuiViewportError::Viewport(error) => LaunchError::Viewport(error),
+                crate::TuiViewportError::Tui(error) => LaunchError::Runtime(format!("{error:?}")),
+            })?;
+        let rendered = session.render_current().map_err(LaunchError::Viewport)?;
+        if let Some(frame) = rendered.started {
+            acknowledge_frame(session, frame.frame_token)?;
+        }
+        last_response = Some(response);
+    }
     session
         .coordinator_mut()
         .renderer_mut()
@@ -339,7 +416,7 @@ fn run_event_loop<W: InteractiveTerminal>(
             .cleanup_signal()
         {
             handle_cleanup_signal(session, signal)?;
-            return Ok(());
+            return Ok(last_response);
         }
         let bytes = match session
             .coordinator_mut()
@@ -356,7 +433,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                     .cleanup_signal()
                 {
                     handle_cleanup_signal(session, signal)?;
-                    return Ok(());
+                    return Ok(last_response);
                 }
                 return Err(LaunchError::Runtime(format!(
                     "terminal input failed: {error}"
@@ -372,7 +449,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                 session
                     .handle_close()
                     .map_err(|error| LaunchError::Runtime(format!("{error:?}")))?;
-                return Ok(());
+                return Ok(last_response);
             }
             if let Some((image_id, _)) = acknowledgement(&event) {
                 let Some(active) = session.coordinator().in_flight().cloned() else {
@@ -392,6 +469,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                 continue;
             }
             if let Some(input) = decode_terminal_input(&event) {
+                let mut response = None;
                 let overlays = match input {
                     TerminalInput::FocusLost => vec![
                         session
@@ -558,21 +636,22 @@ fn run_event_loop<W: InteractiveTerminal>(
                                 &revision,
                             )
                             .map_err(LaunchError::Viewport)?;
-                        return Ok(());
+                        return Ok(last_response);
                     }
-                    _ => vec![
-                        session
-                            .process_keyboard_input(&event, host, root)
-                            .map_err(|error| match error {
+                    _ => {
+                        let outcome = session.process_keyboard_input(&event, host, root).map_err(
+                            |error| match error {
                                 crate::TuiViewportError::Viewport(error) => {
                                     LaunchError::Viewport(error)
                                 }
                                 crate::TuiViewportError::Tui(error) => {
                                     LaunchError::Runtime(format!("{error:?}"))
                                 }
-                            })?
-                            .overlay,
-                    ],
+                            },
+                        )?;
+                        response = outcome.response;
+                        vec![outcome.overlay]
+                    }
                 };
                 let revision = session.state().canonical_revision;
                 for overlay in overlays {
@@ -582,6 +661,9 @@ fn run_event_loop<W: InteractiveTerminal>(
                         .renderer_mut()
                         .write_control(overlay.as_bytes(), &revision)
                         .map_err(LaunchError::Viewport)?;
+                }
+                if response.is_some() {
+                    last_response = response;
                 }
             } else {
                 let revision = session.state().canonical_revision;

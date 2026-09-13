@@ -128,6 +128,19 @@ pub fn try_execute(
         events,
         writes: Vec::new(),
     };
+    let mut request = request.clone();
+    if command == "sketch" {
+        let preview = host
+            .preview_domain_command(command_id(command), request.clone())
+            .map_err(|error| Box::new(LaunchError::Command(error)))?;
+        request
+            .as_object_mut()
+            .expect("TUI command request is an object")
+            .insert(
+                "preview_revision".to_string(),
+                Value::String(preview.preview_revision),
+            );
+    }
     launch_command(
         host,
         root,

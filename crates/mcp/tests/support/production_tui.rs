@@ -5,7 +5,7 @@ use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_persistence::Bundle;
 use threeterm_protocol::schema::find_by_name;
-use threeterm_tui::{InteractiveTerminal, LaunchError, launch_command};
+use threeterm_tui::{InteractiveTerminal, LaunchError, execute_domain_command, launch_command};
 use threeterm_viewport::{CapabilityProbeIo, TerminalEnvironment};
 
 #[derive(Default)]
@@ -88,6 +88,16 @@ fn command_id(command: &str) -> threeterm_protocol::schema::CommandId {
         .id
 }
 
+fn native_worker_required() -> bool {
+    [
+        "THREETERM_REQUIRE_OCCT",
+        "THREETERM_REQUIRE_REAL_WORKER",
+        "THREETERM_REQUIRE_IMMUTABLE_WORKERS",
+    ]
+    .into_iter()
+    .any(|name| std::env::var_os(name).is_some())
+}
+
 #[allow(dead_code)]
 pub fn execute(host: &Host, root: &Path, command: &str, request: &Value) -> Value {
     try_execute(host, root, command, request)
@@ -102,6 +112,10 @@ pub fn try_execute(
 ) -> Result<Value, Box<LaunchError>> {
     if command == "bracket" && !root.exists() {
         Bundle::create(root).expect("production TUI bundle creates");
+    }
+    if !native_worker_required() && threeterm_occt_worker::OcctWorker::locate().is_err() {
+        return execute_domain_command(host, command_id(command), request.clone())
+            .map_err(|error| Box::new(LaunchError::Command(error)));
     }
     let mut events = vec![
         b"\x1b_Gi=1;OK\x1b\\".to_vec(),

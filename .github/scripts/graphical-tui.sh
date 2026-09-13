@@ -256,6 +256,9 @@ check_prerequisites() {
     for command_name in "${commands[@]}"; do
         expected="$(contract_value "${contract_keys[$command_name]}")" ||
             die toolchain_contract_invalid "toolchain contract has no exact output for $command_name"
+        if [[ "$command_name" == ghostty && "$expected" != *'1.3.1-arch2'* ]]; then
+            die toolchain_contract_invalid 'Ghostty must be pinned to version 1.3.1-arch2'
+        fi
         output="$(tool_output "$command_name" "$command_name")"
         outputs["$command_name"]="$output"
         [[ "$output" == *"$expected"* ]] ||

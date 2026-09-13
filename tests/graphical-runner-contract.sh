@@ -56,6 +56,7 @@ for required in \
     'setsid' \
     'kill -- -' \
     'threeterm.graphical-tui/1' \
+    '1.3.1-arch2' \
     'sha256' \
     '800x480'; do
     grep -Fq -- "${required}" "${RUNNER}"

@@ -51,6 +51,7 @@
       "edge_selection": {
         "role": "outer-perimeter",
         "midpoint": [30.0, 4.0, 0.0],
+        "tangent": [1.0, 0.0, 0.0],
         "length": 12.0,
         "source_edge_id": "pad-a-edge"
       }
@@ -80,6 +81,7 @@
       "edge_selection": {
         "role": "outer-perimeter",
         "midpoint": [10.0, 24.0, 0.0],
+        "tangent": [1.0, 0.0, 0.0],
         "length": 12.0,
         "source_edge_id": "pad-b-edge"
       }

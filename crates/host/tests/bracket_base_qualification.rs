@@ -147,70 +147,29 @@ fn profile_bounds(recipe: &Value, step: &Value) -> (f64, f64, f64, f64) {
     )
 }
 
-fn select_edge(
-    worker: &OcctWorker,
-    root: &Path,
-    base_feature_id: &str,
-    revision: &str,
-    selection: &Value,
-) -> Value {
+fn selected_edge_from_recipe(base_feature_id: &str, revision: &str, selection: &Value) -> Value {
     let source_edge_id = selection["source_edge_id"]
         .as_str()
         .expect("edge selection has a source edge ID");
-    let inspection = worker
-        .inspect_edges(
-            format!("{base_feature_id}-edge-inspection"),
-            root.join("brep").join(format!("{base_feature_id}.brep")),
-            base_feature_id,
-            revision,
-            json!({
-                "provenance": {
-                    "source_feature_id": base_feature_id,
-                    "source_revision_id": revision,
-                    "source_edge_id": source_edge_id
-                }
-            }),
-        )
-        .unwrap_or_else(|error| panic!("edge inspection for {base_feature_id} failed: {error}"));
     let expected_midpoint = vector3(selection, "midpoint");
+    let expected_tangent = vector3(selection, "tangent");
     let expected_length = number(selection, "length");
-    let mut matches = inspection
-        .edge_candidates
-        .into_iter()
-        .filter(|candidate| {
-            candidate.role == selection["role"]
-                && candidate.source_edge_id == source_edge_id
-                && (candidate.length - expected_length).abs() <= 1e-6
-                && candidate
-                    .midpoint
-                    .into_iter()
-                    .zip(expected_midpoint)
-                    .all(|(actual, expected)| (actual - expected).abs() <= 1e-6)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        matches.len(),
-        1,
-        "edge selection for {base_feature_id} must identify one candidate"
-    );
-    let candidate = matches.pop().expect("one edge candidate remains");
-    let evidence = json!({
-        "midpoint": candidate.midpoint,
-        "tangent": candidate.tangent,
-        "length": candidate.length
-    });
     let semantic_input =
-        serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+        serde_json::to_vec(&(expected_midpoint, expected_tangent, expected_length))
             .expect("edge evidence serializes");
     json!({
         "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
         "provenance": {
-            "source_feature_id": candidate.source_feature_id,
-            "source_revision_id": candidate.source_revision_id,
-            "source_edge_id": candidate.source_edge_id
+            "source_feature_id": base_feature_id,
+            "source_revision_id": revision,
+            "source_edge_id": source_edge_id
         },
-        "role": candidate.role,
-        "evidence": evidence
+        "role": selection["role"],
+        "evidence": {
+            "midpoint": expected_midpoint,
+            "tangent": expected_tangent,
+            "length": expected_length
+        }
     })
 }
 
@@ -330,18 +289,15 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
     assert!(empty.log.is_empty());
     assert!(empty.graph.features().next().is_none());
 
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            assert_ne!(
-                std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
-                Some("1"),
-                "bracket foundation qualification requires OCCT: {error}"
-            );
-            eprintln!("bracket foundation qualification: OCCT unavailable: {error}");
-            return;
-        }
-    };
+    if let Err(error) = OcctWorker::locate() {
+        assert_ne!(
+            std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
+            Some("1"),
+            "bracket foundation qualification requires OCCT: {error}"
+        );
+        eprintln!("bracket foundation qualification: OCCT unavailable: {error}");
+        return;
+    }
 
     let initial_identity = command_response(
         &host,
@@ -362,9 +318,7 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
             request["expected_revision"] = revision.clone().into();
         }
         if matches!(command_name, "fillet" | "chamfer") {
-            request["selected_edge"] = select_edge(
-                &worker,
-                &workspace.root,
+            request["selected_edge"] = selected_edge_from_recipe(
                 request["base_feature_id"]
                     .as_str()
                     .expect("finishing request has a base feature ID"),

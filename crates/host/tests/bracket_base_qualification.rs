@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::OcctWorker;
+use threeterm_occt_worker::{EdgeCandidateEvidence, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema;
@@ -173,6 +173,101 @@ fn selected_edge_from_recipe(base_feature_id: &str, revision: &str, selection: &
     })
 }
 
+fn measure_brep(
+    worker: &OcctWorker,
+    path: &Path,
+    feature_id: &str,
+    revision: &str,
+) -> Vec<EdgeCandidateEvidence> {
+    worker
+        .inspect_edges(
+            format!("{feature_id}-measurement"),
+            path,
+            feature_id,
+            revision,
+            json!({
+                "provenance": {
+                    "source_feature_id": feature_id,
+                    "source_revision_id": revision,
+                    "source_edge_id": "measurement-anchor"
+                }
+            }),
+        )
+        .unwrap_or_else(|error| panic!("geometry measurement for {feature_id} failed: {error}"))
+        .edge_candidates
+}
+
+fn assert_measured_geometry(
+    recipe: &Value,
+    feature_id: &str,
+    measurements: &[EdgeCandidateEvidence],
+    prior_measurements: &std::collections::BTreeMap<String, Vec<EdgeCandidateEvidence>>,
+) {
+    let linear_lengths: Vec<_> = measurements
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .collect();
+    let curved_lengths: Vec<_> = measurements
+        .iter()
+        .filter(|candidate| candidate.role == "fillet-transition")
+        .map(|candidate| candidate.length)
+        .collect();
+    let sum_linear_lengths = |lengths: &[f64]| lengths.iter().sum::<f64>();
+
+    if matches!(
+        feature_id,
+        "arm-x" | "arm-z" | "bracket-l" | "bracket-foundation"
+    ) {
+        let expected_span = number(&recipe["expectations"], "arm_span");
+        assert!(
+            linear_lengths
+                .iter()
+                .any(|length| (*length - expected_span).abs() <= 1e-3),
+            "{feature_id} has no measured edge spanning {expected_span}"
+        );
+    }
+    if feature_id == "pad-a" {
+        let expected_arc = number(&recipe["expectations"], "fillet_transition_arc_length");
+        assert!(
+            curved_lengths
+                .iter()
+                .any(|length| (*length - expected_arc).abs() <= 1e-3),
+            "filleted pad-a has no measured transition arc of {expected_arc}"
+        );
+    }
+    if feature_id == "pad-b" {
+        let seed = prior_measurements
+            .get("pad-b-seed")
+            .expect("pad-b seed has measurements");
+        let seed_linear = seed
+            .iter()
+            .filter(|candidate| candidate.role == "outer-perimeter")
+            .map(|candidate| candidate.length)
+            .collect::<Vec<_>>();
+        assert!(
+            (sum_linear_lengths(&linear_lengths) - sum_linear_lengths(&seed_linear)).abs()
+                > number(&recipe["expectations"], "chamfer_linear_length_delta_min",),
+            "chamfered pad-b has no measured linear-length change"
+        );
+    }
+    if matches!(feature_id, "bracket-hole-1" | "bracket-foundation") {
+        let expected_circumference = number(&recipe["expectations"], "hole_circumference");
+        let circular_edges = curved_lengths
+            .iter()
+            .filter(|length| (*length - expected_circumference).abs() <= 1e-3)
+            .count();
+        assert!(
+            circular_edges
+                >= recipe["expectations"]["minimum_hole_circular_edges"]
+                    .as_u64()
+                    .expect("minimum hole circular edges is an integer")
+                    as usize,
+            "{feature_id} has no measured pair of {expected_circumference} hole edges"
+        );
+    }
+}
+
 fn assert_real_brep(path: &Path) -> Vec<u8> {
     let bytes =
         fs::read(path).unwrap_or_else(|error| panic!("BREP {} reads: {error}", path.display()));
@@ -289,15 +384,18 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
     assert!(empty.log.is_empty());
     assert!(empty.graph.features().next().is_none());
 
-    if let Err(error) = OcctWorker::locate() {
-        assert_ne!(
-            std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
-            Some("1"),
-            "bracket foundation qualification requires OCCT: {error}"
-        );
-        eprintln!("bracket foundation qualification: OCCT unavailable: {error}");
-        return;
-    }
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            assert_ne!(
+                std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
+                Some("1"),
+                "bracket foundation qualification requires OCCT: {error}"
+            );
+            eprintln!("bracket foundation qualification: OCCT unavailable: {error}");
+            return;
+        }
+    };
 
     let initial_identity = command_response(
         &host,
@@ -309,6 +407,8 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
         .expect("initial identity has a revision hash")
         .to_string();
     let mut breps = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    let mut measurements_by_feature =
+        std::collections::BTreeMap::<String, Vec<EdgeCandidateEvidence>>::new();
     for step in recipe_steps(&recipe) {
         let command_name = step["command"].as_str().expect("step has a command");
         let feature_id = step["feature_id"].as_str().expect("step has a feature ID");
@@ -361,6 +461,8 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
         assert_eq!(response["brep_path"].as_str(), path.to_str());
         assert_eq!(response_sha, sha256_hex(&bytes));
         assert_eq!(response["brep_bytes"], bytes.len());
+        let measurements = measure_brep(&worker, &path, feature_id, &next_revision);
+        assert_measured_geometry(&recipe, feature_id, &measurements, &measurements_by_feature);
 
         if matches!(command_name, "boolean-fuse" | "hole") {
             let base_feature_id = request["base_feature_id"]
@@ -382,6 +484,7 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
             assert_hole_clearance(&recipe, step, &request);
         }
         breps.insert(feature_id.to_string(), bytes);
+        measurements_by_feature.insert(feature_id.to_string(), measurements);
         revision = next_revision;
     }
 

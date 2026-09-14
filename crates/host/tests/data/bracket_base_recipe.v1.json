@@ -182,6 +182,11 @@
     "transaction_count": 12,
     "hole_diameter": 4.5,
     "minimum_hole_edge_clearance": 5.0,
+    "arm_span": 60.0,
+    "fillet_transition_arc_length": 0.7853981633974483,
+    "chamfer_linear_length_delta_min": 0.01,
+    "hole_circumference": 14.137166941154069,
+    "minimum_hole_circular_edges": 2,
     "replay_is_byte_identical": true,
     "replay_appends_zero_transactions": true
   }

@@ -433,6 +433,23 @@ check_probe_stimulus() {
     die probe_stimulus_failed "$detail"
 }
 
+wait_for_probe_stimulus() {
+    [[ -n "$STIMULUS_PID" ]] || {
+        check_probe_stimulus
+        return 0
+    }
+    local stimulus_status=0
+    wait_for_pid_exit "$STIMULUS_PID" "$RUNNER_TIMEOUT_SECONDS" ||
+        die probe_stimulus_timeout 'graphical probe stimulus did not complete within its bounded window'
+    wait "$STIMULUS_PID" 2>/dev/null || stimulus_status=$?
+    STIMULUS_PID=''
+    check_probe_stimulus
+    ((stimulus_status == 0)) || {
+        probe_status='failed'
+        die probe_stimulus_failed "graphical probe stimulus exited with status ${stimulus_status}"
+    }
+}
+
 start_ghostty() {
     mkdir -p "$EVIDENCE_ROOT/home" "$EVIDENCE_ROOT/config" "$EVIDENCE_ROOT/cache"
     write_child_wrapper
@@ -460,13 +477,14 @@ wait_for_tui_readiness() {
         die capability_or_readiness_failed "${readiness_detail:-production readiness was not observed after the positive capability probe}"
     }
     check_probe_stimulus
-    probe_status='passed'
-    readiness_status='passed'
     capture_screenshot "$STARTUP_SCREENSHOT" || die startup_screenshot_failed 'startup screenshot was not fixed at 800x600'
     local ocr
     ocr="$(tesseract "$STARTUP_SCREENSHOT" stdout 2>/dev/null || true)"
     grep -Fq 'Interactive Modeling ready' <<<"$ocr" || die visible_readiness_failed 'readiness marker was not visible in the startup screenshot'
     rendered_viewport_ready || die viewport_not_rendered 'startup screenshot does not contain a non-flat rendered viewport'
+    wait_for_probe_stimulus
+    probe_status='passed'
+    readiness_status='passed'
 }
 
 run_orbit() {

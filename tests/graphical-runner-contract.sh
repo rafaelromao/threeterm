@@ -59,12 +59,44 @@ for required in \
     '1.3.1-arch2' \
     'sha256' \
     'probe_stimulus_failed' \
+    'probe_stimulus_timeout' \
     'probe-stimulus-error' \
     'fail_stimulus' \
     'check_probe_stimulus' \
+    'wait_for_probe_stimulus' \
     '800x480'; do
     grep -Fq -- "${required}" "${RUNNER}"
 done
+
+readiness_body="$(sed -n '/^wait_for_tui_readiness()/,/^}/p' "${RUNNER}")"
+grep -Fq 'wait_for_probe_stimulus' <<<"${readiness_body}" || {
+    echo "wait_for_tui_readiness must wait for probe stimulus completion before passing" >&2
+    exit 1
+}
+for marker in 'startup_screenshot' 'rendered_viewport_ready' 'wait_for_probe_stimulus'; do
+    grep -Fq "${marker}" <<<"${readiness_body}" || {
+        echo "wait_for_tui_readiness is missing required gate ${marker}" >&2
+        exit 1
+    }
+done
+python3 - "${RUNNER}" <<'PY'
+import re, sys
+path = sys.argv[1]
+body = open(path).read()
+match = re.search(r'^wait_for_tui_readiness\(\) \{(.*?)^\}', body, re.M | re.S)
+if not match:
+    print("wait_for_tui_readiness not found", file=sys.stderr)
+    sys.exit(1)
+block = match.group(1)
+for marker in ("capture_screenshot", "rendered_viewport_ready", "wait_for_probe_stimulus", "probe_status='passed'"):
+    if marker not in block:
+        print(f"readiness gate missing {marker}", file=sys.stderr)
+        sys.exit(1)
+positions = [block.index(marker) for marker in ("rendered_viewport_ready", "wait_for_probe_stimulus", "probe_status='passed'")]
+if positions != sorted(positions):
+    print("probe stimulus completion must gate the passed status after viewport rendering", file=sys.stderr)
+    sys.exit(1)
+PY
 
 if grep -Eq 'ydotool .* \|\| true' "${RUNNER}"; then
     echo "ydotool stimulus must fail closed instead of ignoring failures" >&2

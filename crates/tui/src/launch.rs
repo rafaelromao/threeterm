@@ -12,8 +12,9 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::CommandId;
 use threeterm_theme::{PaletteSources, ThemeContext, resolve_palette};
 use threeterm_viewport::{
-    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement, TerminalEnvironment,
-    ViewportDiagnostic, ViewportDiagnosticCode, parse_ack,
+    CapabilityProbe, CapabilityProbeIo, CapabilityProbeResult, KittyPlacement,
+    TerminalCapabilityVector, TerminalEnvironment, ViewportDiagnostic, ViewportDiagnosticCode,
+    parse_ack,
 };
 
 use crate::{
@@ -338,6 +339,7 @@ fn run_session<W: InteractiveTerminal>(
                     &mut session,
                     host,
                     root,
+                    &probe.capabilities,
                     &probe.unrelated_input,
                     initial_command,
                 )
@@ -368,6 +370,7 @@ fn run_event_loop<W: InteractiveTerminal>(
     session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
     host: &Host,
     root: &Path,
+    capabilities: &TerminalCapabilityVector,
     replayed_probe_input: &[u8],
     initial_command: Option<(CommandId, Value)>,
 ) -> Result<Option<Value>, LaunchError> {
@@ -401,6 +404,20 @@ fn run_event_loop<W: InteractiveTerminal>(
         }
         last_response = Some(response);
     }
+    let capability_evidence =
+        serde_json::to_string(capabilities).expect("capability vector is serializable");
+    let revision = session.state().canonical_revision;
+    session
+        .coordinator_mut()
+        .renderer_mut()
+        .write_control(
+            format!(
+                "\r\n[ready-status] Interactive Modeling ready probe={capability_evidence}\r\n"
+            )
+            .as_bytes(),
+            &revision,
+        )
+        .map_err(LaunchError::Viewport)?;
     session
         .coordinator_mut()
         .renderer_mut()

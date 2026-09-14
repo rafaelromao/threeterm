@@ -142,4 +142,65 @@ run_invalid_path project_root_unavailable \
 run_invalid_path tui_binary_unavailable \
     --tui-binary "${evidence}/missing-bin/tui" --project-root "${ROOT}"
 
+tool_versions_dir="$(mktemp -d "${evidence}/tool-versions.XXXXXX")"
+fake_bin="${tool_versions_dir}/bin"
+mkdir -p "${fake_bin}"
+fake_version() {
+    local tool="$1"
+    local version="$2"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "${version}" >"${fake_bin}/${tool}"
+    chmod +x "${fake_bin}/${tool}"
+}
+fake_version wtype 'wtype 0.4-test'
+fake_version ydotool 'ydotool 1.0-test'
+fake_version wlr-randr 'wlr-randr 0.3-test'
+fake_version grim 'grim 1.4-test'
+fake_version tesseract 'tesseract 5.0-test'
+fake_version magick 'ImageMagick 7.1-test'
+fake_version ghostty 'ghostty 1.3.1-arch2-test'
+cat >"${fake_bin}/weston" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf '%s\n' 'weston 12.0-test'
+else
+    sleep 30
+fi
+EOF
+chmod +x "${fake_bin}/weston"
+contract="${tool_versions_dir}/toolchain.env"
+{
+    printf 'WESTON_VERSION=%s\n' 'weston 12.0-test'
+    printf 'GHOSTTY_VERSION=%s\n' '1.3.1-arch2'
+    printf 'WTYPE_VERSION=%s\n' 'wtype 0.4-test'
+    printf 'YDTOOL_VERSION=%s\n' 'ydotool 1.0-test'
+    printf 'WLR_RANDR_VERSION=%s\n' 'wlr-randr 0.3-test'
+    printf 'GRIM_VERSION=%s\n' 'grim 1.4-test'
+    printf 'TESSERACT_VERSION=%s\n' 'tesseract 5.0-test'
+    printf 'MAGICK_VERSION=%s\n' 'ImageMagick 7.1-test'
+    printf 'JQ_VERSION=%s\n' "$(jq --version 2>&1)"
+    printf 'SHA256SUM_VERSION=%s\n' "$(sha256sum --version 2>&1 | head -1)"
+    printf 'SCRIPT_VERSION=%s\n' "$(script --version 2>&1 | head -1)"
+    printf 'SETSID_VERSION=%s\n' "$(setsid --version 2>&1 | head -1)"
+    printf 'TIMEOUT_VERSION=%s\n' "$(timeout --version 2>&1 | head -1)"
+    printf 'WESTON_HEADLESS_BACKEND=%s\n' 'headless-backend.so'
+} >"${contract}"
+expected_hash="$(sha256sum "${contract}" | cut -d' ' -f1)"
+run_root="${tool_versions_dir}/run"
+set +e
+PATH="${fake_bin}:${PATH}" THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${contract}" \
+    THREETERM_GRAPHICAL_TIMEOUT_SECONDS=2 \
+    bash "${RUNNER}" production_tui_ghostty_session \
+    --tui-binary /bin/true --project-root "${ROOT}" --evidence-root "${run_root}" \
+    >"${tool_versions_dir}/stdout" 2>"${tool_versions_dir}/stderr"
+status=$?
+set -e
+((status != 0))
+jq -e --arg expected_hash "${expected_hash}" '
+    .contract_sha256 == $expected_hash and
+    (.outputs.weston | contains("weston 12.0-test")) and
+    (.outputs.ghostty | contains("1.3.1-arch2"))
+' "${run_root}/tool-versions.json" >/dev/null
+jq -e '.result == "failed" and .failure.code == "compositor_unavailable"' \
+    "${run_root}/manifest.json" >/dev/null
+
 printf '%s\n' 'graphical runner contract satisfied'

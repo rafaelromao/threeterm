@@ -272,7 +272,7 @@ check_prerequisites() {
     [[ "$backend" == 'headless-backend.so' ]] ||
         die toolchain_contract_invalid "unsupported Weston backend: $backend"
 
-    local contract_hash='null'
+    local contract_hash=''
     if [[ -x "$(command -v sha256sum)" ]]; then
         contract_hash="$(sha256sum "$TOOLCHAIN_CONTRACT" | cut -d' ' -f1)"
     fi
@@ -283,9 +283,9 @@ check_prerequisites() {
     done
     jq -n \
         --arg contract "$TOOLCHAIN_CONTRACT" \
-        --argjson contract_sha256 "$contract_hash" \
+        --arg contract_sha256 "$contract_hash" \
         --argjson outputs "$json" \
-        '{contract: $contract, contract_sha256: $contract_sha256, outputs: $outputs}' \
+        '{contract: $contract, contract_sha256: (if $contract_sha256 == "" then null else $contract_sha256 end), outputs: $outputs}' \
         >"$TOOL_VERSIONS"
 }
 

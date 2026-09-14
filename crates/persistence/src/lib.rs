@@ -1947,6 +1947,8 @@ pub struct CanonicalSplitIntent {
     pub operation: String,
     pub base_feature_id: String,
     pub selected_edge: CanonicalEdgeReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_target: Option<CanonicalEdgeReference>,
     pub plane_point: [f64; 3],
     pub plane_normal: [f64; 3],
     pub request_id: String,
@@ -1957,12 +1959,27 @@ pub struct CanonicalSplitIntent {
 
 impl CanonicalSplitIntent {
     pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
-        let evidence = &self.selected_edge.evidence;
-        let tangent_norm = evidence
-            .tangent
-            .iter()
-            .map(|value| value * value)
-            .sum::<f64>();
+        let valid_edge = |edge: &CanonicalEdgeReference| {
+            let evidence = &edge.evidence;
+            let tangent_norm = evidence
+                .tangent
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            edge.provenance.source_feature_id == self.base_feature_id
+                && edge.provenance.source_revision_id == self.source_revision
+                && !edge.semantic_id.is_empty()
+                && !edge.provenance.source_edge_id.is_empty()
+                && !edge.role.is_empty()
+                && evidence.midpoint.iter().all(|value| value.is_finite())
+                && evidence.tangent.iter().all(|value| value.is_finite())
+                && evidence.midpoint.iter().all(|value| value.abs() <= 1e9)
+                && evidence.length.is_finite()
+                && evidence.length > 0.0
+                && evidence.length < 1e9
+                && tangent_norm.is_finite()
+                && tangent_norm > f64::EPSILON
+        };
         if self.schema_version != SPLIT_INTENT_SCHEMA_VERSION
             || self.command != "split"
             || self.operation != "split"
@@ -1970,18 +1987,11 @@ impl CanonicalSplitIntent {
             || self.request_id.is_empty()
             || self.affected_semantic_ids != [feature_id.to_string()]
             || !valid_sha256(&self.source_revision)
-            || self.selected_edge.provenance.source_feature_id != self.base_feature_id
-            || self.selected_edge.provenance.source_revision_id != self.source_revision
-            || self.selected_edge.semantic_id.is_empty()
-            || self.selected_edge.provenance.source_edge_id.is_empty()
-            || self.selected_edge.role.is_empty()
-            || !evidence.midpoint.iter().all(|value| value.is_finite())
-            || !evidence.tangent.iter().all(|value| value.is_finite())
-            || evidence.midpoint.iter().any(|value| value.abs() > 1e9)
-            || !evidence.length.is_finite()
-            || !(evidence.length > 0.0 && evidence.length < 1e9)
-            || !tangent_norm.is_finite()
-            || tangent_norm <= f64::EPSILON
+            || !valid_edge(&self.selected_edge)
+            || self
+                .edit_target
+                .as_ref()
+                .is_some_and(|edge| !valid_edge(edge))
         {
             return Err(BundleError::Invalid(
                 "canonical split intent identity or edge reference is invalid".to_string(),

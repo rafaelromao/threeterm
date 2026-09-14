@@ -2426,6 +2426,8 @@ fn cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments() {
             .expect("split reattachment intent persists");
         assert_eq!(intent.command(), "split");
         assert_eq!(intent.operation(), "split");
+        let intent = serde_json::to_value(intent).expect("split intent serializes");
+        assert!(intent["edit_target"].is_object());
 
         fs::remove_dir_all(path.join("brep")).expect("split reattachment Derived Results remove");
         let after = threeterm_host::Host::new()

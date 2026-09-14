@@ -107,6 +107,7 @@ fn split_intent_round_trips_selected_semantic_edge_and_plane() {
         operation: "split".to_string(),
         base_feature_id: "base".to_string(),
         selected_edge: selected_edge(),
+        edit_target: Some(selected_edge()),
         plane_point: [0.0, 0.0, 0.0],
         plane_normal: [1.0, 0.0, 0.0],
         request_id: "request-split-1".to_string(),

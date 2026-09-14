@@ -1204,6 +1204,8 @@ pub struct SplitRequest {
     pub feature_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_edge: Option<SelectedEdgeContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_target: Option<SelectedEdgeContext>,
 }
 
 impl SplitRequest {
@@ -1224,6 +1226,7 @@ impl SplitRequest {
             output_filename: String::new(),
             feature_id: String::new(),
             selected_edge: None,
+            edit_target: None,
         }
     }
 
@@ -1244,6 +1247,11 @@ impl SplitRequest {
 
     pub fn with_selected_edge(mut self, selected_edge: SelectedEdgeContext) -> Self {
         self.selected_edge = Some(selected_edge);
+        self
+    }
+
+    pub fn with_edit_target(mut self, edit_target: SelectedEdgeContext) -> Self {
+        self.edit_target = Some(edit_target);
         self
     }
 

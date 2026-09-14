@@ -3815,6 +3815,7 @@ impl Host {
                             plane_point,
                             plane_normal,
                             reference,
+                            edit_target,
                             &worker,
                         )?
                     };
@@ -5541,6 +5542,7 @@ impl Host {
         plane_point: [f64; 3],
         plane_normal: [f64; 3],
         reference: SelectedEdgeReference,
+        edit_target: SelectedEdgeReference,
         worker: &OcctWorker,
     ) -> Result<EdgeReattachmentView, HostError> {
         let root = root.as_ref();
@@ -5561,6 +5563,13 @@ impl Host {
             return Err(HostError::Validation {
                 detail: "edge reference source revision does not match current revision"
                     .to_string(),
+            });
+        }
+        if edit_target.provenance.source_feature_id != base_feature_id
+            || edit_target.provenance.source_revision_id != source_snapshot.revision_hash
+        {
+            return Err(HostError::Validation {
+                detail: "edge edit target provenance does not match edit source".to_string(),
             });
         }
         let mut worker_reference = reference.clone();
@@ -5585,6 +5594,16 @@ impl Host {
             midpoint: worker_reference.evidence.midpoint,
             tangent: worker_reference.evidence.tangent,
             length: worker_reference.evidence.length,
+        })
+        .with_edit_target(SelectedEdgeContext {
+            semantic_id: edit_target.semantic_id.clone(),
+            source_feature_id: edit_target.provenance.source_feature_id.clone(),
+            source_revision_id: edit_target.provenance.source_revision_id.clone(),
+            source_edge_id: edit_target.provenance.source_edge_id.clone(),
+            role: edit_target.role.clone(),
+            midpoint: edit_target.evidence.midpoint,
+            tangent: edit_target.evidence.tangent,
+            length: edit_target.evidence.length,
         });
         let derived = self.stage_occt_result::<SplitResult>(
             root,
@@ -7010,7 +7029,7 @@ impl Host {
                         tangent: inner.selected_edge.evidence.tangent,
                         length: inner.selected_edge.evidence.length,
                     };
-                    let request = SplitRequest::new(
+                    let mut request = SplitRequest::new(
                         inner.request_id.clone(),
                         base_path,
                         inner.plane_point,
@@ -7019,6 +7038,18 @@ impl Host {
                     .with_output_path(root.join("stage"), "replay.brep")
                     .with_feature_id(&feature_id)
                     .with_selected_edge(edge);
+                    if let Some(edit_target) = &inner.edit_target {
+                        request = request.with_edit_target(SelectedEdgeContext {
+                            semantic_id: edit_target.semantic_id.clone(),
+                            source_feature_id: edit_target.provenance.source_feature_id.clone(),
+                            source_revision_id: edit_target.provenance.source_revision_id.clone(),
+                            source_edge_id: edit_target.provenance.source_edge_id.clone(),
+                            role: edit_target.role.clone(),
+                            midpoint: edit_target.evidence.midpoint,
+                            tangent: edit_target.evidence.tangent,
+                            length: edit_target.evidence.length,
+                        });
+                    }
                     let derived = self.stage_occt_result_for_revision::<SplitResult>(
                         root,
                         &request,
@@ -15119,6 +15150,10 @@ fn canonical_occt_intent(
             operation: "split".to_string(),
             base_feature_id: base_feature_id()?,
             selected_edge: canonical_edge_reference(request, source_snapshot)?,
+            edit_target: request
+                .get("edit_target")
+                .map(|value| canonical_edge_reference_from_value(value, source_snapshot))
+                .transpose()?,
             plane_point: serde_json::from_value(field("plane_point")?).map_err(|error| {
                 HostError::Validation {
                     detail: format!("canonical split plane_point is invalid: {error}"),

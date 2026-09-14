@@ -105,7 +105,8 @@ jobs:
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
               "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
-              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "registry.command-schemas",
+              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
+              "replay.reattach-edge", "registry.command-schemas",
               "schema.identities", "licensing.libslvs", "release.namespace",
               "documentation.workspace", "performance.claims"]) and
             (if $expected_result == "passed" then

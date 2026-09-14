@@ -1975,6 +1975,42 @@ std::vector<TopoDS_Edge> split_descendants(BRepAlgoAPI_Splitter& splitter,
             if (!already_present) descendants.push_back(edge);
         }
     }
+    // When the split plane misses the selected edge, the edge survives
+    // intact in the result. Return it so the host can resolve rather than
+    // report the reference as lost.
+    if (descendants.empty()) {
+        const gp_Pnt source_midpoint(
+            (first_point.X() + last_point.X()) / 2.0,
+            (first_point.Y() + last_point.Y()) / 2.0,
+            (first_point.Z() + last_point.Z()) / 2.0);
+        for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+            GProp_GProps properties;
+            BRepGProp::LinearProperties(edge, properties);
+            TopoDS_Vertex edge_first;
+            TopoDS_Vertex edge_last;
+            TopExp::Vertices(edge, edge_first, edge_last);
+            const gp_Pnt edge_first_point = BRep_Tool::Pnt(edge_first);
+            const gp_Pnt edge_last_point = BRep_Tool::Pnt(edge_last);
+            const gp_Pnt edge_midpoint(
+                (edge_first_point.X() + edge_last_point.X()) / 2.0,
+                (edge_first_point.Y() + edge_last_point.Y()) / 2.0,
+                (edge_first_point.Z() + edge_last_point.Z()) / 2.0);
+            const gp_Vec edge_direction(edge_first_point, edge_last_point);
+            const double midpoint_distance = edge_midpoint.Distance(source_midpoint);
+            const double tangent_dot =
+                (source_direction.X() * edge_direction.X() +
+                 source_direction.Y() * edge_direction.Y() +
+                 source_direction.Z() * edge_direction.Z()) /
+                (source_direction.Magnitude() * edge_direction.Magnitude());
+            if (midpoint_distance <= 1e-6 &&
+                std::abs(properties.Mass() - source_properties.Mass()) <= 1e-6 &&
+                1.0 - std::abs(tangent_dot) <= 1e-6) {
+                descendants.push_back(edge);
+                break;
+            }
+        }
+    }
     return descendants;
 }
 

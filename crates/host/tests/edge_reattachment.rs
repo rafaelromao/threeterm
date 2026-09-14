@@ -205,7 +205,7 @@ fn production_command_reattaches_one_edge_and_persists_the_reference() {
         .features()
         .find(|feature| feature.id.as_str() == "fillet-after-edge")
         .expect("reattachment feature is durable");
-    assert!(feature.kind.contains("selected_edge_id"));
+    assert_eq!(feature.kind, "brep:fillet-after-edge");
 
     let _ = fs::remove_dir_all(&root);
 }

@@ -38,6 +38,7 @@ FAILURE_SCREENSHOT=''
 DIFF_LOG=''
 TOOL_VERSIONS=''
 MANIFEST=''
+STIMULUS_ERROR=''
 success=0
 failure_code=''
 failure_detail=''
@@ -173,6 +174,7 @@ ORBIT_SCREENSHOT="${EVIDENCE_ROOT}/orbit.png"
 CLEANUP_SCREENSHOT="${EVIDENCE_ROOT}/cleanup.png"
 FAILURE_SCREENSHOT="${EVIDENCE_ROOT}/failure.png"
 DIFF_LOG="${EVIDENCE_ROOT}/orbit-difference.txt"
+STIMULUS_ERROR="${EVIDENCE_ROOT}/probe-stimulus-error.txt"
 XDG_RUNTIME_DIR="${EVIDENCE_ROOT}/runtime"
 WAYLAND_DISPLAY="threeterm-${BASHPID}.wayland"
 export LC_ALL LANG XDG_RUNTIME_DIR WAYLAND_DISPLAY
@@ -397,23 +399,38 @@ find_output() {
 }
 
 start_probe_stimulus() {
+    : >"$STIMULUS_ERROR"
     setsid env -u TERM -u TERM_PROGRAM -u TMUX -u SSH_CONNECTION -u SSH_TTY \
         LC_ALL=C.UTF-8 LANG=C.UTF-8 WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         THREETERM_GRAPHICAL_PROBE_STIMULUS_SECONDS="$PROBE_STIMULUS_SECONDS" \
         THREETERM_GRAPHICAL_OUTPUT="$OUTPUT_NAME" \
+        THREETERM_GRAPHICAL_STIMULUS_ERROR="$STIMULUS_ERROR" \
         bash -c '
+            fail_stimulus() {
+                printf "%s\n" "$1" >"$THREETERM_GRAPHICAL_STIMULUS_ERROR"
+                exit 1
+            }
             deadline=$((SECONDS + ${THREETERM_GRAPHICAL_PROBE_STIMULUS_SECONDS:-2}))
             while ((SECONDS < deadline)); do
-                ydotool mousemove --absolute 100 100 >/dev/null 2>&1 || true
-                ydotool click 0xC0 >/dev/null 2>&1 || true
-                ydotool mousemove --absolute 400 400 >/dev/null 2>&1 || true
-                ydotool click 0xC0 >/dev/null 2>&1 || true
-                wlr-randr --output "$THREETERM_GRAPHICAL_OUTPUT" --custom-mode 640x480 >/dev/null 2>&1 || true
-                wlr-randr --output "$THREETERM_GRAPHICAL_OUTPUT" --custom-mode 800x600 >/dev/null 2>&1 || true
+                ydotool mousemove --absolute 100 100 >/dev/null 2>&1 || fail_stimulus "ydotool mousemove 100,100 failed"
+                ydotool click 0xC0 >/dev/null 2>&1 || fail_stimulus "ydotool click failed"
+                ydotool mousemove --absolute 400 400 >/dev/null 2>&1 || fail_stimulus "ydotool mousemove 400,400 failed"
+                ydotool click 0xC0 >/dev/null 2>&1 || fail_stimulus "ydotool click failed"
+                wlr-randr --output "$THREETERM_GRAPHICAL_OUTPUT" --custom-mode 640x480 >/dev/null 2>&1 || fail_stimulus "wlr-randr resize to 640x480 failed"
+                wlr-randr --output "$THREETERM_GRAPHICAL_OUTPUT" --custom-mode 800x600 >/dev/null 2>&1 || fail_stimulus "wlr-randr restore to 800x600 failed"
                 sleep 0.1
             done
         ' &
     STIMULUS_PID=$!
+}
+
+check_probe_stimulus() {
+    [[ -s "$STIMULUS_ERROR" ]] || return 0
+    local detail
+    detail="$(tr -d '\r\n' <"$STIMULUS_ERROR" 2>/dev/null || true)"
+    [[ -n "$detail" ]] || detail='graphical probe stimulus failed'
+    probe_status='failed'
+    die probe_stimulus_failed "$detail"
 }
 
 start_ghostty() {
@@ -432,11 +449,17 @@ start_ghostty() {
 }
 
 wait_for_tui_readiness() {
-    wait_until "$RUNNER_TIMEOUT_SECONDS" screen_ready || die graphical_capture_failed 'grim could not capture the Ghostty surface at the fixed geometry'
+    check_probe_stimulus
+    wait_until "$RUNNER_TIMEOUT_SECONDS" screen_ready || {
+        check_probe_stimulus
+        die graphical_capture_failed 'grim could not capture the Ghostty surface at the fixed geometry'
+    }
     wait_until "$RUNNER_TIMEOUT_SECONDS" readiness_ready || {
+        check_probe_stimulus
         probe_status='failed'
         die capability_or_readiness_failed "${readiness_detail:-production readiness was not observed after the positive capability probe}"
     }
+    check_probe_stimulus
     probe_status='passed'
     readiness_status='passed'
     capture_screenshot "$STARTUP_SCREENSHOT" || die startup_screenshot_failed 'startup screenshot was not fixed at 800x600'
@@ -513,12 +536,12 @@ write_manifest() {
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
         "$STARTUP_SCREENSHOT" "$ORBIT_SCREENSHOT" "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
-        "$DIFF_LOG" "${EVIDENCE_ROOT}/window-ready.png"
+        "$DIFF_LOG" "${EVIDENCE_ROOT}/window-ready.png" "$STIMULUS_ERROR"
     )
     local -a evidence_kinds=(
         pty_output pty_input tui_stderr compositor_log tool_versions
         startup_screenshot orbit_screenshot cleanup_screenshot failure_screenshot
-        orbit_difference window_screenshot
+        orbit_difference window_screenshot probe_stimulus_error
     )
     if command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
         local index

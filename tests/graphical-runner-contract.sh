@@ -58,9 +58,22 @@ for required in \
     'threeterm.graphical-tui/1' \
     '1.3.1-arch2' \
     'sha256' \
+    'probe_stimulus_failed' \
+    'probe-stimulus-error' \
+    'fail_stimulus' \
+    'check_probe_stimulus' \
     '800x480'; do
     grep -Fq -- "${required}" "${RUNNER}"
 done
+
+if grep -Eq 'ydotool .* \|\| true' "${RUNNER}"; then
+    echo "ydotool stimulus must fail closed instead of ignoring failures" >&2
+    exit 1
+fi
+if grep -Eq 'wlr-randr .* \|\| true' "${RUNNER}"; then
+    echo "wlr-randr stimulus must fail closed instead of ignoring failures" >&2
+    exit 1
+fi
 
 evidence="$(mktemp -d)"
 trap 'rm -rf "${evidence}"' EXIT

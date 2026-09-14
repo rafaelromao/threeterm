@@ -253,9 +253,16 @@ fn assert_measured_geometry(
     }
     if matches!(feature_id, "bracket-hole-1" | "bracket-foundation") {
         let expected_circumference = number(&recipe["expectations"], "hole_circumference");
-        let circular_edges = curved_lengths
+        let expected_midpoints: Vec<[f64; 3]> = serde_json::from_value(
+            recipe["expectations"]["hole_edge_midpoints"][feature_id].clone(),
+        )
+        .expect("hole edge midpoints are 3-vectors");
+        let circular_edges = measurements
             .iter()
-            .filter(|length| (*length - expected_circumference).abs() <= 1e-3)
+            .filter(|candidate| {
+                candidate.role == "fillet-transition"
+                    && (candidate.length - expected_circumference).abs() <= 1e-3
+            })
             .count();
         assert!(
             circular_edges
@@ -265,6 +272,20 @@ fn assert_measured_geometry(
                     as usize,
             "{feature_id} has no measured pair of {expected_circumference} hole edges"
         );
+        for expected_midpoint in expected_midpoints {
+            assert!(
+                measurements.iter().any(|candidate| {
+                    candidate.role == "fillet-transition"
+                        && (candidate.length - expected_circumference).abs() <= 1e-3
+                        && candidate
+                            .midpoint
+                            .into_iter()
+                            .zip(expected_midpoint)
+                            .all(|(actual, expected)| (actual - expected).abs() <= 1e-3)
+                }),
+                "{feature_id} has no measured hole edge at {expected_midpoint:?}"
+            );
+        }
     }
 }
 

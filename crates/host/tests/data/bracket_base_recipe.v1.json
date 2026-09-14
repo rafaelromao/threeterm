@@ -187,6 +187,10 @@
     "chamfer_linear_length_delta_min": 0.01,
     "hole_circumference": 14.137166941154069,
     "minimum_hole_circular_edges": 2,
+    "hole_edge_midpoints": {
+      "bracket-hole-1": [[52.25, 10.0, 0.0], [52.25, 10.0, 8.0]],
+      "bracket-foundation": [[12.25, 50.0, 0.0], [12.25, 50.0, 8.0]]
+    },
     "replay_is_byte_identical": true,
     "replay_appends_zero_transactions": true
   }

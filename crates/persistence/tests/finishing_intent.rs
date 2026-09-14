@@ -5,10 +5,10 @@ use std::{
 use threeterm_persistence::{
     Bundle, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalChamferIntent, CanonicalDraftIntent,
     CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalIntent,
-    CanonicalLoftIntent, CanonicalShellIntent, DRAFT_INTENT_SCHEMA_VERSION,
+    CanonicalLoftIntent, CanonicalShellIntent, CanonicalSplitIntent, DRAFT_INTENT_SCHEMA_VERSION,
     EXTRUDE_INTENT_SCHEMA_VERSION, EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs,
     FILLET_INTENT_SCHEMA_VERSION, LOFT_INTENT_SCHEMA_VERSION, SHELL_INTENT_SCHEMA_VERSION,
-    occt_worker_identity, replay_canonical_state,
+    SPLIT_INTENT_SCHEMA_VERSION, occt_worker_identity, replay_canonical_state,
 };
 use threeterm_protocol::artifact::sha256_hex;
 
@@ -82,6 +82,7 @@ fn fillet_intent_round_trips_selected_semantic_edge() {
         operation: "fillet".to_string(),
         base_feature_id: "base".to_string(),
         selected_edge: selected_edge(),
+        edit_target: None,
         radius: 0.5,
         request_id: "request-fillet-1".to_string(),
         affected_semantic_ids: vec!["fillet-1".to_string()],
@@ -93,6 +94,29 @@ fn fillet_intent_round_trips_selected_semantic_edge() {
         .validate("fillet-1")
         .expect("selected fillet intent validates");
     let canonical = CanonicalIntent::Fillet(intent.clone());
+    let encoded = serde_json::to_string(&canonical).expect("intent serializes");
+    let decoded: CanonicalIntent = serde_json::from_str(&encoded).expect("intent deserializes");
+    assert_eq!(decoded, canonical);
+}
+
+#[test]
+fn split_intent_round_trips_selected_semantic_edge_and_plane() {
+    let intent = CanonicalSplitIntent {
+        schema_version: SPLIT_INTENT_SCHEMA_VERSION.to_string(),
+        command: "split".to_string(),
+        operation: "split".to_string(),
+        base_feature_id: "base".to_string(),
+        selected_edge: selected_edge(),
+        plane_point: [0.0, 0.0, 0.0],
+        plane_normal: [1.0, 0.0, 0.0],
+        request_id: "request-split-1".to_string(),
+        affected_semantic_ids: vec!["split-1".to_string()],
+        source_revision: "a".repeat(64),
+        worker_requirements: occt_worker_identity(),
+    };
+
+    intent.validate("split-1").expect("split intent validates");
+    let canonical = CanonicalIntent::Split(intent);
     let encoded = serde_json::to_string(&canonical).expect("intent serializes");
     let decoded: CanonicalIntent = serde_json::from_str(&encoded).expect("intent deserializes");
     assert_eq!(decoded, canonical);
@@ -143,6 +167,7 @@ fn fillet_intent_is_sealed_in_the_transaction_log_and_replays() {
         operation: "fillet".to_string(),
         base_feature_id: "base".to_string(),
         selected_edge: edge,
+        edit_target: None,
         radius: 0.5,
         request_id: "request-fillet-1".to_string(),
         affected_semantic_ids: vec!["fillet-1".to_string()],
@@ -219,6 +244,7 @@ fn replay_batch_authenticates_every_result_before_promotion() {
         operation: "fillet".to_string(),
         base_feature_id: "base".to_string(),
         selected_edge: edge,
+        edit_target: None,
         radius: 0.5,
         request_id: "request-fillet-batch".to_string(),
         affected_semantic_ids: vec!["fillet-1".to_string()],

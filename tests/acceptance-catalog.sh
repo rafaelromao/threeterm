@@ -9,8 +9,8 @@ bash -n "${ROOT}/tests/acceptance-runner.sh"
 bash "${ROOT}/tests/acceptance-runner.sh"
 
 gate_count="$(grep -Ec '^run_gate ' "${SCRIPT}")"
-[[ "${gate_count}" -eq 17 ]] || {
-    printf 'expected 17 canonical gates, got %s\n' "${gate_count}" >&2
+[[ "${gate_count}" -eq 19 ]] || {
+    printf 'expected 19 canonical gates, got %s\n' "${gate_count}" >&2
     exit 1
 }
 
@@ -24,7 +24,10 @@ for gate in \
     object_timeline_adapter_parity_matches_registered_cli_mcp_and_tui_payloads \
     production_launch_completes_keyboard_first_modeling_workflow_end_to_end \
     historical_recovery_adapter_parity \
-    canonical_extrude_replay; do
+    canonical_extrude_replay \
+    cli_mcp_and_tui_commit_and_replay_equivalent_boolean_patterns \
+    cli_mcp_and_tui_commit_and_replay_equivalent_fillet_reattachments \
+    cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments; do
     count="$(grep -Fc "${gate}" "${SCRIPT}")"
     [[ "${count}" -eq 2 ]] || {
         printf 'expected one declared command and one executed command for %s, got %s\n' "${gate}" "${count}" >&2

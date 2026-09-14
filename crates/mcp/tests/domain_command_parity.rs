@@ -11,10 +11,10 @@ use threeterm_mcp::server::{JsonRpcRequest, McpServer};
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID, CommandSchema,
-    EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID,
-    IDENTITY_COMMAND_ID, LOAD_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID,
-    iter,
+    APPLY_COMMAND_ID, BOOLEAN_COMMON_COMMAND_ID, BOOLEAN_CUT_COMMAND_ID,
+    BOOLEAN_PATTERN_COMMAND_ID, CommandSchema, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    HISTORICAL_EDIT_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LOAD_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 use threeterm_slvs_worker::SlvsWorker;
@@ -1832,7 +1832,7 @@ fn extrude_adapter_failure_parity_reports_the_same_invalid_subtractive_target_di
 }
 
 #[test]
-fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
+fn cli_mcp_and_tui_commit_and_replay_equivalent_fillet_reattachments() {
     let cli_root = root("edge-cli");
     let mcp_root = root("edge-mcp");
     let tui_root = root("edge-tui");
@@ -1882,6 +1882,47 @@ fn cli_mcp_and_tui_route_edge_reattachment_through_the_shared_executor() {
                 .starts_with("edge-")
         );
         assert_eq!(result["committed"], true);
+    }
+
+    for (path, result) in [(&cli_root, &cli), (&mcp_root, &mcp), (&tui_root, &tui)] {
+        let before = threeterm_host::Host::new()
+            .identity(path)
+            .expect("fillet reattachment identity reads");
+        let brep_before = fs::read(path.join("brep/fillet-after-edge.brep"))
+            .expect("fillet reattachment BREP reads before replay");
+        let loaded = Bundle::at(path)
+            .open()
+            .expect("fillet reattachment bundle opens");
+        let intent = loaded
+            .log
+            .entries()
+            .last()
+            .and_then(|entry| entry.intent.as_ref())
+            .expect("fillet reattachment intent persists");
+        assert_eq!(intent.command(), "fillet");
+        assert_eq!(intent.operation(), "fillet");
+        let intent = serde_json::to_value(intent).expect("fillet intent serializes");
+        assert!(intent["edit_target"].is_object());
+
+        fs::remove_dir_all(path.join("brep")).expect("fillet reattachment Derived Results remove");
+        let after = threeterm_host::Host::new()
+            .load_with_geometry_replay(path)
+            .expect("fillet reattachment replays after Derived Results deletion");
+        let after_identity = threeterm_host::Host::new()
+            .identity(path)
+            .expect("replayed fillet reattachment identity reads");
+        assert_eq!(after.feature_graph_hash, before.feature_graph_hash);
+        assert_eq!(after.revision_hash, before.revision_hash);
+        assert_eq!(after_identity, before);
+        assert_eq!(
+            fs::read(path.join("brep/fillet-after-edge.brep"))
+                .expect("replayed fillet reattachment BREP reads"),
+            brep_before
+        );
+        assert_eq!(
+            result["revision_hash"].as_str(),
+            Some(after_identity.revision_hash.as_str())
+        );
     }
     let _ = fs::remove_dir_all(cli_root);
     let _ = fs::remove_dir_all(mcp_root);
@@ -2159,6 +2200,228 @@ fn mcp_boolean(
         }),
     });
     response.result.expect("MCP boolean executes")["structuredContent"].clone()
+}
+
+fn boolean_pattern_request(root: &std::path::Path, feature_id: &str) -> Value {
+    json!({
+        "bundle_path": root.to_string_lossy(),
+        "feature_id": feature_id,
+        "base_feature_id": "bool-base",
+        "origin": [1.0, 1.0, -1.0],
+        "spacing": [2.0, 2.0],
+        "columns": 2,
+        "rows": 2,
+        "diameter": 0.75
+    })
+}
+
+fn mcp_boolean_pattern(root: &std::path::Path, feature_id: &str) -> Value {
+    let response = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.boolean-pattern/1",
+            "arguments": boolean_pattern_request(root, feature_id)
+        }),
+    });
+    response.result.expect("MCP Boolean Pattern executes")["structuredContent"].clone()
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_and_replay_equivalent_boolean_patterns() {
+    let cli_root = root("boolean-pattern-cli");
+    let mcp_root = root("boolean-pattern-mcp");
+    let tui_root = root("boolean-pattern-tui");
+    let Some(worker) =
+        required_worker("cli_mcp_and_tui_commit_and_replay_equivalent_boolean_patterns")
+    else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    for path in [&cli_root, &mcp_root, &tui_root] {
+        setup_boolean_operands(path, &worker);
+    }
+
+    let cli = dispatch_registered_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_PATTERN_COMMAND_ID,
+        boolean_pattern_request(&cli_root, "pattern-1"),
+    )
+    .expect("CLI Boolean Pattern executes");
+    let tui = threeterm_tui::execute_domain_command(
+        &threeterm_host::Host::new(),
+        BOOLEAN_PATTERN_COMMAND_ID,
+        boolean_pattern_request(&tui_root, "pattern-1"),
+    )
+    .expect("TUI Boolean Pattern executes");
+    let mcp = mcp_boolean_pattern(&mcp_root, "pattern-1");
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["operation"], "boolean_pattern");
+        assert_eq!(result["feature_id"], "pattern-1");
+        assert_eq!(result["cut_count"], 4);
+        assert_eq!(
+            result["schema_version"],
+            "threeterm.command.boolean-pattern.response/1"
+        );
+    }
+    assert_eq!(cli["brep_sha256"], tui["brep_sha256"]);
+    assert_eq!(cli["brep_sha256"], mcp["brep_sha256"]);
+
+    for (path, result) in [(&cli_root, &cli), (&mcp_root, &mcp), (&tui_root, &tui)] {
+        let before = threeterm_host::Host::new()
+            .identity(path)
+            .expect("Boolean Pattern identity reads");
+        let brep_before = fs::read(path.join("brep/pattern-1.brep"))
+            .expect("Boolean Pattern BREP reads before replay");
+        let loaded = Bundle::at(path)
+            .open()
+            .expect("Boolean Pattern bundle opens");
+        let entry = loaded
+            .log
+            .entries()
+            .last()
+            .expect("Boolean Pattern transaction exists");
+        let intent = entry
+            .intent
+            .as_ref()
+            .expect("Boolean Pattern intent persists");
+        let intent = serde_json::to_value(intent).expect("Boolean Pattern intent serializes");
+        assert_eq!(intent["command"], "boolean-pattern");
+        assert_eq!(intent["base_feature_id"], "bool-base");
+        assert_eq!(intent["deterministic_inputs"]["columns"], 2);
+        assert_eq!(intent["deterministic_inputs"]["rows"], 2);
+        assert_eq!(intent["deterministic_inputs"]["diameter"], 0.75);
+
+        fs::remove_dir_all(path.join("brep")).expect("Boolean Pattern Derived Results remove");
+        let after = threeterm_host::Host::new()
+            .load_with_geometry_replay(path)
+            .expect("Boolean Pattern replays after Derived Results deletion");
+        let after_identity = threeterm_host::Host::new()
+            .identity(path)
+            .expect("replayed Boolean Pattern identity reads");
+        assert_eq!(after.feature_graph_hash, before.feature_graph_hash);
+        assert_eq!(after.revision_hash, before.revision_hash);
+        assert_eq!(after_identity, before);
+        assert_eq!(
+            fs::read(path.join("brep/pattern-1.brep")).expect("replayed BREP reads"),
+            brep_before
+        );
+        assert_eq!(
+            result["revision_hash"].as_str(),
+            Some(after_identity.revision_hash.as_str())
+        );
+    }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
+}
+
+#[test]
+fn cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments() {
+    let cli_root = root("split-reattachment-cli");
+    let mcp_root = root("split-reattachment-mcp");
+    let tui_root = root("split-reattachment-tui");
+    let Some(_worker) =
+        required_worker("cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments")
+    else {
+        for path in [&cli_root, &mcp_root, &tui_root] {
+            let _ = fs::remove_dir_all(path);
+        }
+        return;
+    };
+    let cli_revision = setup_edge_root(&cli_root, "split-cli").expect("CLI setup succeeds");
+    let mcp_revision = setup_edge_root(&mcp_root, "split-mcp").expect("MCP setup succeeds");
+    let tui_revision = setup_edge_root(&tui_root, "split-tui").expect("TUI setup succeeds");
+
+    let cli = cli_reattach_edge_split(
+        &cli_root,
+        &cli_revision,
+        edge_reference(&cli_revision),
+        edge_edit_target(&cli_revision),
+    );
+    let tui = threeterm_tui::execute_selected_edge_split(
+        &threeterm_host::Host::new(),
+        &tui_root,
+        &tui_revision,
+        "fillet-after-edge",
+        "base",
+        0.25,
+        [2.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        edge_reference(&tui_revision),
+        edge_edit_target(&tui_revision),
+    )
+    .expect("TUI split reattachment executes");
+    let mcp = McpServer::new().handle_request(&JsonRpcRequest {
+        id: json!(1),
+        is_notification: false,
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "threeterm.command.reattach-edge/2",
+            "arguments": edge_split_request(
+                &mcp_root,
+                &mcp_revision,
+                edge_reference(&mcp_revision),
+                edge_edit_target(&mcp_revision),
+            )
+        }),
+    });
+    let mcp = mcp.result.expect("MCP split reattachment executes")["structuredContent"].clone();
+
+    for result in [&cli, &tui, &mcp] {
+        assert_eq!(result["outcome"], "resolved");
+        assert!(result["selected_edge_id"].as_str().is_some());
+        assert_eq!(result["committed"], true);
+    }
+
+    for (path, result) in [(&cli_root, &cli), (&mcp_root, &mcp), (&tui_root, &tui)] {
+        let before = threeterm_host::Host::new()
+            .identity(path)
+            .expect("split reattachment identity reads");
+        let brep_before = fs::read(path.join("brep/fillet-after-edge.brep"))
+            .expect("split reattachment BREP reads before replay");
+        let loaded = Bundle::at(path)
+            .open()
+            .expect("split reattachment bundle opens");
+        let intent = loaded
+            .log
+            .entries()
+            .last()
+            .and_then(|entry| entry.intent.as_ref())
+            .expect("split reattachment intent persists");
+        assert_eq!(intent.command(), "split");
+        assert_eq!(intent.operation(), "split");
+
+        fs::remove_dir_all(path.join("brep")).expect("split reattachment Derived Results remove");
+        let after = threeterm_host::Host::new()
+            .load_with_geometry_replay(path)
+            .expect("split reattachment replays after Derived Results deletion");
+        let after_identity = threeterm_host::Host::new()
+            .identity(path)
+            .expect("replayed split reattachment identity reads");
+        assert_eq!(after.feature_graph_hash, before.feature_graph_hash);
+        assert_eq!(after.revision_hash, before.revision_hash);
+        assert_eq!(after_identity, before);
+        assert_eq!(
+            fs::read(path.join("brep/fillet-after-edge.brep"))
+                .expect("replayed split reattachment BREP reads"),
+            brep_before
+        );
+        assert_eq!(
+            result["revision_hash"].as_str(),
+            Some(after_identity.revision_hash.as_str())
+        );
+    }
+
+    let _ = fs::remove_dir_all(cli_root);
+    let _ = fs::remove_dir_all(mcp_root);
+    let _ = fs::remove_dir_all(tui_root);
 }
 
 #[test]

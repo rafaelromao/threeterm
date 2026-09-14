@@ -344,6 +344,29 @@ run_gate replay.canonical-extrude \
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
+run_gate replay.boolean-pattern \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test domain_command_parity cli_mcp_and_tui_commit_and_replay_equivalent_boolean_patterns --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    bash -e -u -o pipefail -c '
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test domain_command_parity \
+            cli_mcp_and_tui_commit_and_replay_equivalent_boolean_patterns \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+    '
+
+run_gate replay.reattach-edge \
+    'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test domain_command_parity cli_mcp_and_tui_commit_and_replay_equivalent_fillet_reattachments --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test domain_command_parity cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments --jobs 1 -- --include-ignored --exact --test-threads=1' \
+    bash -e -u -o pipefail -c '
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test domain_command_parity \
+            cli_mcp_and_tui_commit_and_replay_equivalent_fillet_reattachments \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test domain_command_parity \
+            cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+    '
+
 run_gate registry.command-schemas \
     'cargo test -p threeterm-protocol --test registry_shape --test registry_hash --test registry_bracket --jobs 1 -- --test-threads=1
 cargo test -p threeterm-mcp --test mcp_bracket tools_list_advertises_every_registered_command_with_populated_schemas --jobs 1 -- --exact --test-threads=1' \

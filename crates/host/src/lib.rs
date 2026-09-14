@@ -35,18 +35,21 @@ use threeterm_occt_worker::{
     WorkerError, new_request_id,
 };
 use threeterm_persistence::{
-    BOOLEAN_INTENT_SCHEMA_VERSION, BRACKET_INTENT_SCHEMA_VERSION, BracketDeterministicInputs,
+    BOOLEAN_INTENT_SCHEMA_VERSION, BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION,
+    BRACKET_INTENT_SCHEMA_VERSION, BooleanPatternDeterministicInputs, BracketDeterministicInputs,
     Bundle, BundleError, CHAMFER_INTENT_SCHEMA_VERSION, CanonicalBooleanIntent,
-    CanonicalBracketIntent, CanonicalChamferIntent, CanonicalCircularPatternIntent,
-    CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent, CanonicalFilletIntent,
-    CanonicalHoleIntent, CanonicalIntent, CanonicalLinearPatternIntent, CanonicalLoftIntent,
-    CanonicalMirrorIntent, CanonicalRevolveIntent, CanonicalShellIntent,
+    CanonicalBooleanPatternIntent, CanonicalBracketIntent, CanonicalChamferIntent,
+    CanonicalCircularPatternIntent, CanonicalDraftIntent, CanonicalEdgeReference,
+    CanonicalExtrudeIntent, CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent,
+    CanonicalLinearPatternIntent, CanonicalLoftIntent, CanonicalMirrorIntent,
+    CanonicalRevolveIntent, CanonicalShellIntent, CanonicalSplitIntent,
     CircularPatternDeterministicInputs, DRAFT_INTENT_SCHEMA_VERSION, EXTRUDE_INTENT_SCHEMA_VERSION,
     EdgeEvidence, EdgeProvenance, ExtrudeDeterministicInputs, FILLET_INTENT_SCHEMA_VERSION,
     HOLE_INTENT_SCHEMA_VERSION, HistoryBrepReplacement, HoleDeterministicInputs,
     LOFT_INTENT_SCHEMA_VERSION, LinearPatternDeterministicInputs, LoadPolicy, LoadedBundle,
-    MirrorDeterministicInputs, RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION, load,
-    load_with_policy, previous_generation_path, replay_canonical_state,
+    MirrorDeterministicInputs, RevolveDeterministicInputs, SHELL_INTENT_SCHEMA_VERSION,
+    SPLIT_INTENT_SCHEMA_VERSION, load, load_with_policy, previous_generation_path,
+    replay_canonical_state,
 };
 use threeterm_protocol::artifact::{
     ArtifactError, Layer1ArtifactRequest, Layer1CacheKey, Stage, WorkerFingerprint, sha256_hex,
@@ -5498,28 +5501,20 @@ impl Host {
                 committed: false,
             });
         }
-        let selected_edge_id = match &outcome {
-            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
-            _ => unreachable!(),
-        };
-        let reference_payload = format!(
-            "edge-reattachment:{}",
-            serde_json::json!({
-                "schema": "threeterm.reattach-edge/1",
-                "selected_edge_id": selected_edge_id,
-                "reference": reference,
-            })
-        );
         let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
             root,
             derived,
-            |bundle, _current, _derived, artifact, bytes, provenance| {
-                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+            |bundle, _current, derived, artifact, bytes, provenance| {
+                let intent =
+                    canonical_fillet_intent(&derived.request, &derived.source_snapshot, artifact)
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                bundle.append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
                     &artifact.feature_id,
-                    &reference_payload,
+                    &format!("brep:{}", artifact.feature_id),
                     expected_revision,
                     &artifact.request_id,
                     provenance,
+                    &CanonicalIntent::Fillet(intent),
                     bytes,
                 )
             },
@@ -5611,28 +5606,20 @@ impl Host {
                 committed: false,
             });
         }
-        let selected_edge_id = match &outcome {
-            EdgeReattachmentOutcome::Resolved { semantic_id } => semantic_id.clone(),
-            _ => unreachable!(),
-        };
-        let reference_payload = format!(
-            "edge-reattachment:{}",
-            serde_json::json!({
-                "schema": "threeterm.reattach-edge/1",
-                "selected_edge_id": selected_edge_id,
-                "reference": reference,
-            })
-        );
         let (snapshot, _result, _artifact) = self.promote_occt_result_with_append(
             root,
             derived,
-            |bundle, _current, _derived, artifact, bytes, provenance| {
-                bundle.append_new_feature_with_brep_if_revision_and_provenance(
+            |bundle, _current, derived, artifact, bytes, provenance| {
+                let intent =
+                    canonical_occt_intent(&derived.request, &derived.source_snapshot, artifact)
+                        .map_err(|error| BundleError::Invalid(error.to_string()))?;
+                bundle.append_new_feature_with_brep_if_revision_and_provenance_and_canonical_intent(
                     &artifact.feature_id,
-                    &reference_payload,
+                    &format!("brep:{}", artifact.feature_id),
                     expected_revision,
                     &artifact.request_id,
                     provenance,
+                    &intent,
                     bytes,
                 )
             },
@@ -6981,6 +6968,71 @@ impl Host {
                             });
                         }
                     }
+                }
+                CanonicalIntent::BooleanPattern(inner) => {
+                    let request = BooleanPatternRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.deterministic_inputs.origin,
+                        inner.deterministic_inputs.spacing,
+                        inner.deterministic_inputs.columns,
+                        inner.deterministic_inputs.rows,
+                        inner.deterministic_inputs.diameter,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id);
+                    let derived = self.stage_occt_result::<BooleanPatternResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::BooleanPattern,
+                        worker,
+                    )?;
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
+                }
+                CanonicalIntent::Split(inner) => {
+                    let edge = SelectedEdgeContext {
+                        semantic_id: inner.selected_edge.semantic_id.clone(),
+                        source_feature_id: inner.selected_edge.provenance.source_feature_id.clone(),
+                        source_revision_id: inner
+                            .selected_edge
+                            .provenance
+                            .source_revision_id
+                            .clone(),
+                        source_edge_id: inner.selected_edge.provenance.source_edge_id.clone(),
+                        role: inner.selected_edge.role.clone(),
+                        midpoint: inner.selected_edge.evidence.midpoint,
+                        tangent: inner.selected_edge.evidence.tangent,
+                        length: inner.selected_edge.evidence.length,
+                    };
+                    let request = SplitRequest::new(
+                        inner.request_id.clone(),
+                        base_path,
+                        inner.plane_point,
+                        inner.plane_normal,
+                    )
+                    .with_output_path(root.join("stage"), "replay.brep")
+                    .with_feature_id(&feature_id)
+                    .with_selected_edge(edge);
+                    let derived = self.stage_occt_result_for_revision::<SplitResult>(
+                        root,
+                        &request,
+                        threeterm_occt_worker::Operation::Split,
+                        worker,
+                        &inner.source_revision,
+                    )?;
+                    self.stage_replayed_occt_result(
+                        root,
+                        replay_stage_root,
+                        &loaded,
+                        &feature_id,
+                        derived,
+                    )?
                 }
                 CanonicalIntent::Hole(inner) => {
                     let mut request = HoleRequest::new(
@@ -10259,7 +10311,8 @@ impl Host {
                         )
                         .map_err(|error| BundleError::Invalid(error.to_string()))?,
                     ),
-                    "revolve" | "mirror" | "linear_pattern" | "circular_pattern" => {
+                    "revolve" | "mirror" | "linear_pattern" | "circular_pattern"
+                    | "boolean_pattern" | "split" => {
                         canonical_occt_intent(&derived.request, &derived.source_snapshot, artifact)
                             .map_err(|error| BundleError::Invalid(error.to_string()))?
                     }
@@ -13362,7 +13415,20 @@ fn replay_finishing_geometry(
                 tangent: edge_reference.evidence.tangent,
                 length: edge_reference.evidence.length,
             };
-            let request = FilletRequest::new(value.request_id, base_path, value.radius)
+            let edit_target = value
+                .edit_target
+                .clone()
+                .map(|edge_reference| SelectedEdgeContext {
+                    semantic_id: edge_reference.semantic_id,
+                    source_feature_id: edge_reference.provenance.source_feature_id,
+                    source_revision_id: edge_reference.provenance.source_revision_id,
+                    source_edge_id: edge_reference.provenance.source_edge_id,
+                    role: edge_reference.role,
+                    midpoint: edge_reference.evidence.midpoint,
+                    tangent: edge_reference.evidence.tangent,
+                    length: edge_reference.evidence.length,
+                });
+            let mut request = FilletRequest::new(value.request_id, base_path, value.radius)
                 .with_output_path(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
@@ -13370,6 +13436,9 @@ fn replay_finishing_geometry(
                 .with_feature_id(&feature_id)
                 .with_base_feature_id(&value.base_feature_id)
                 .with_selected_edge(edge);
+            if let Some(edit_target) = edit_target {
+                request = request.with_edit_target(edit_target);
+            }
             read_result!(
                 worker
                     .clone()
@@ -15007,6 +15076,64 @@ fn canonical_occt_intent(
             source_revision,
             worker_requirements,
         }),
+        "boolean_pattern" => CanonicalIntent::BooleanPattern(CanonicalBooleanPatternIntent {
+            schema_version: BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION.to_string(),
+            command: "boolean-pattern".to_string(),
+            operation: "boolean-pattern".to_string(),
+            base_feature_id: base_feature_id()?,
+            request_id,
+            deterministic_inputs: BooleanPatternDeterministicInputs {
+                origin: serde_json::from_value(field("origin")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical Boolean Pattern origin is invalid: {error}"),
+                    }
+                })?,
+                spacing: serde_json::from_value(field("spacing")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical Boolean Pattern spacing is invalid: {error}"),
+                    }
+                })?,
+                columns: serde_json::from_value(field("columns")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical Boolean Pattern columns are invalid: {error}"),
+                    }
+                })?,
+                rows: serde_json::from_value(field("rows")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical Boolean Pattern rows are invalid: {error}"),
+                    }
+                })?,
+                diameter: serde_json::from_value(field("diameter")?).map_err(|error| {
+                    HostError::Validation {
+                        detail: format!("canonical Boolean Pattern diameter is invalid: {error}"),
+                    }
+                })?,
+            },
+            affected_semantic_ids: vec![feature_id],
+            source_revision,
+            worker_requirements,
+        }),
+        "split" => CanonicalIntent::Split(CanonicalSplitIntent {
+            schema_version: SPLIT_INTENT_SCHEMA_VERSION.to_string(),
+            command: "split".to_string(),
+            operation: "split".to_string(),
+            base_feature_id: base_feature_id()?,
+            selected_edge: canonical_edge_reference(request, source_snapshot)?,
+            plane_point: serde_json::from_value(field("plane_point")?).map_err(|error| {
+                HostError::Validation {
+                    detail: format!("canonical split plane_point is invalid: {error}"),
+                }
+            })?,
+            plane_normal: serde_json::from_value(field("plane_normal")?).map_err(|error| {
+                HostError::Validation {
+                    detail: format!("canonical split plane_normal is invalid: {error}"),
+                }
+            })?,
+            request_id,
+            affected_semantic_ids: vec![feature_id],
+            source_revision,
+            worker_requirements,
+        }),
         operation => {
             return Err(HostError::Validation {
                 detail: format!("unsupported canonical OCCT operation: {operation}"),
@@ -15204,6 +15331,13 @@ fn canonical_edge_reference(
         .ok_or_else(|| HostError::Validation {
             detail: "canonical edge operation requires selected_edge".to_string(),
         })?;
+    canonical_edge_reference_from_value(selected, source_snapshot)
+}
+
+fn canonical_edge_reference_from_value(
+    selected: &serde_json::Value,
+    source_snapshot: &SnapshotView,
+) -> Result<CanonicalEdgeReference, HostError> {
     let context = selected_edge_context_from_request(selected.clone())?;
     Ok(CanonicalEdgeReference {
         semantic_id: context.semantic_id,
@@ -15521,12 +15655,17 @@ fn canonical_fillet_intent(
             detail: "canonical fillet radius is missing or invalid".to_string(),
         })?;
     let base_feature_id = canonical_base_feature_id(request)?;
+    let edit_target = request
+        .get("edit_target")
+        .map(|value| canonical_edge_reference_from_value(value, source_snapshot))
+        .transpose()?;
     let intent = CanonicalFilletIntent {
         schema_version: FILLET_INTENT_SCHEMA_VERSION.to_string(),
         command: "fillet".to_string(),
         operation: "fillet".to_string(),
         base_feature_id,
         selected_edge: canonical_edge_reference(request, source_snapshot)?,
+        edit_target,
         radius,
         request_id: artifact.request_id.clone(),
         affected_semantic_ids: vec![artifact.feature_id.clone()],

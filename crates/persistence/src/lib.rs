@@ -71,17 +71,19 @@ pub struct V0Bundle {
 
 pub mod bundle {
     pub use super::{
-        BOOLEAN_INTENT_SCHEMA_VERSION, BracketDeterministicInputs, Bundle, BundleError,
-        CanonicalBooleanIntent, CanonicalBracketIntent, CanonicalChamferIntent,
+        BOOLEAN_INTENT_SCHEMA_VERSION, BooleanPatternDeterministicInputs,
+        BracketDeterministicInputs, Bundle, BundleError, CanonicalBooleanIntent,
+        CanonicalBooleanPatternIntent, CanonicalBracketIntent, CanonicalChamferIntent,
         CanonicalDraftIntent, CanonicalEdgeReference, CanonicalExtrudeIntent,
         CanonicalFilletIntent, CanonicalHoleIntent, CanonicalIntent, CanonicalLoftIntent,
-        CanonicalShellIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX, EdgeEvidence, EdgeProvenance,
-        HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION, HoleDeterministicInputs, LoadPolicy,
-        LoadedBundle, LogEntry, MANIFEST_FILENAME, MANIFEST_SCHEMA_GENERATION, Manifest,
-        PRE_MIGRATION_BACKUP_SUFFIX, PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint,
-        PublicationKillPoint, SchemaStatus, TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle,
-        V0Manifest, detect_schema, fail_next_publication_at, load, load_with_policy,
-        migrate_v0_to_v1, prior_schema_epoch, read_v0, schema_epoch, write_fresh, write_v0_fixture,
+        CanonicalShellIntent, CanonicalSplitIntent, CanonicalState, EMPTY_LOG_DIGEST_HEX,
+        EdgeEvidence, EdgeProvenance, HISTORY_EVENT_KIND_PREFIX, HOLE_INTENT_SCHEMA_VERSION,
+        HoleDeterministicInputs, LoadPolicy, LoadedBundle, LogEntry, MANIFEST_FILENAME,
+        MANIFEST_SCHEMA_GENERATION, Manifest, PRE_MIGRATION_BACKUP_SUFFIX,
+        PUBLICATION_KILL_POINT_ENV, PublicationFailurePoint, PublicationKillPoint, SchemaStatus,
+        TRANSACTIONS_LOG_FILENAME, TransactionLog, V0Bundle, V0Manifest, detect_schema,
+        fail_next_publication_at, load, load_with_policy, migrate_v0_to_v1, prior_schema_epoch,
+        read_v0, schema_epoch, write_fresh, write_v0_fixture,
     };
 }
 
@@ -110,6 +112,8 @@ pub const LINEAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.linear-
 pub const CIRCULAR_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.circular-pattern/1";
 pub const HOLE_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.hole/1";
 pub const BOOLEAN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean/1";
+pub const BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.boolean-pattern/1";
+pub const SPLIT_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.split/1";
 pub const BRACKET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.bracket/1";
 pub const FILLET_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.fillet/1";
 pub const CHAMFER_INTENT_SCHEMA_VERSION: &str = "threeterm.intent.chamfer/1";
@@ -404,6 +408,8 @@ pub struct CanonicalFilletIntent {
     pub operation: String,
     pub base_feature_id: String,
     pub selected_edge: CanonicalEdgeReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_target: Option<CanonicalEdgeReference>,
     pub radius: f64,
     pub request_id: String,
     pub affected_semantic_ids: Vec<String>,
@@ -434,22 +440,32 @@ impl CanonicalFilletIntent {
                 "canonical fillet semantic impact or dependency is invalid".to_string(),
             ));
         }
-        let evidence = &self.selected_edge.evidence;
-        let tangent_norm = evidence
-            .tangent
-            .iter()
-            .map(|value| value * value)
-            .sum::<f64>();
-        if self.selected_edge.semantic_id.is_empty()
-            || self.selected_edge.provenance.source_edge_id.is_empty()
-            || self.selected_edge.role.is_empty()
-            || !evidence.midpoint.iter().all(|value| value.is_finite())
-            || !evidence.tangent.iter().all(|value| value.is_finite())
-            || evidence.midpoint.iter().any(|value| value.abs() > 1e9)
-            || !evidence.length.is_finite()
-            || !(evidence.length > 0.0 && evidence.length < 1e9)
-            || !tangent_norm.is_finite()
-            || tangent_norm <= f64::EPSILON
+        let valid_edge = |edge: &CanonicalEdgeReference| {
+            let evidence = &edge.evidence;
+            let tangent_norm = evidence
+                .tangent
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            edge.provenance.source_feature_id == self.base_feature_id
+                && edge.provenance.source_revision_id == self.source_revision
+                && !edge.semantic_id.is_empty()
+                && !edge.provenance.source_edge_id.is_empty()
+                && !edge.role.is_empty()
+                && evidence.midpoint.iter().all(|value| value.is_finite())
+                && evidence.tangent.iter().all(|value| value.is_finite())
+                && evidence.midpoint.iter().all(|value| value.abs() <= 1e9)
+                && evidence.length.is_finite()
+                && evidence.length > 0.0
+                && evidence.length < 1e9
+                && tangent_norm.is_finite()
+                && tangent_norm > f64::EPSILON
+        };
+        if !valid_edge(&self.selected_edge)
+            || self
+                .edit_target
+                .as_ref()
+                .is_some_and(|edge| !valid_edge(edge))
         {
             return Err(BundleError::Invalid(
                 "canonical fillet selected edge evidence is invalid".to_string(),
@@ -1352,6 +1368,8 @@ pub enum CanonicalIntent {
     CircularPattern(CanonicalCircularPatternIntent),
     Bracket(CanonicalBracketIntent),
     Boolean(CanonicalBooleanIntent),
+    BooleanPattern(CanonicalBooleanPatternIntent),
+    Split(CanonicalSplitIntent),
     Hole(CanonicalHoleIntent),
     Fillet(CanonicalFilletIntent),
     Chamfer(CanonicalChamferIntent),
@@ -1394,6 +1412,12 @@ impl<'de> Deserialize<'de> for CanonicalIntent {
             "boolean" => serde_json::from_value(value)
                 .map(Self::Boolean)
                 .map_err(D::Error::custom),
+            "boolean-pattern" => serde_json::from_value(value)
+                .map(Self::BooleanPattern)
+                .map_err(D::Error::custom),
+            "split" => serde_json::from_value(value)
+                .map(Self::Split)
+                .map_err(D::Error::custom),
             "hole" => serde_json::from_value(value)
                 .map(Self::Hole)
                 .map_err(D::Error::custom),
@@ -1429,6 +1453,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.command,
             Self::Bracket(intent) => &intent.command,
             Self::Boolean(intent) => &intent.command,
+            Self::BooleanPattern(intent) => &intent.command,
+            Self::Split(intent) => &intent.command,
             Self::Hole(intent) => &intent.command,
             Self::Fillet(intent) => &intent.command,
             Self::Chamfer(intent) => &intent.command,
@@ -1447,6 +1473,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.operation,
             Self::Bracket(intent) => &intent.operation,
             Self::Boolean(intent) => &intent.operation,
+            Self::BooleanPattern(intent) => &intent.operation,
+            Self::Split(intent) => &intent.operation,
             Self::Hole(intent) => &intent.hole_kind,
             Self::Fillet(intent) => &intent.operation,
             Self::Chamfer(intent) => &intent.operation,
@@ -1465,6 +1493,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.schema_version,
             Self::Bracket(intent) => &intent.schema_version,
             Self::Boolean(intent) => &intent.schema_version,
+            Self::BooleanPattern(intent) => &intent.schema_version,
+            Self::Split(intent) => &intent.schema_version,
             Self::Hole(intent) => &intent.schema_version,
             Self::Fillet(intent) => &intent.schema_version,
             Self::Chamfer(intent) => &intent.schema_version,
@@ -1483,6 +1513,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.request_id,
             Self::Bracket(intent) => &intent.request_id,
             Self::Boolean(intent) => &intent.request_id,
+            Self::BooleanPattern(intent) => &intent.request_id,
+            Self::Split(intent) => &intent.request_id,
             Self::Hole(intent) => &intent.request_id,
             Self::Fillet(intent) => &intent.request_id,
             Self::Chamfer(intent) => &intent.request_id,
@@ -1501,6 +1533,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.affected_semantic_ids,
             Self::Bracket(intent) => &intent.affected_semantic_ids,
             Self::Boolean(intent) => &intent.affected_semantic_ids,
+            Self::BooleanPattern(intent) => &intent.affected_semantic_ids,
+            Self::Split(intent) => &intent.affected_semantic_ids,
             Self::Hole(intent) => &intent.affected_semantic_ids,
             Self::Fillet(intent) => &intent.affected_semantic_ids,
             Self::Chamfer(intent) => &intent.affected_semantic_ids,
@@ -1519,6 +1553,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.source_revision,
             Self::Bracket(intent) => &intent.source_revision,
             Self::Boolean(intent) => &intent.source_revision,
+            Self::BooleanPattern(intent) => &intent.source_revision,
+            Self::Split(intent) => &intent.source_revision,
             Self::Hole(intent) => &intent.source_revision,
             Self::Fillet(intent) => &intent.source_revision,
             Self::Chamfer(intent) => &intent.source_revision,
@@ -1537,6 +1573,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => &intent.worker_requirements,
             Self::Bracket(intent) => &intent.worker_requirements,
             Self::Boolean(intent) => &intent.worker_requirements,
+            Self::BooleanPattern(intent) => &intent.worker_requirements,
+            Self::Split(intent) => &intent.worker_requirements,
             Self::Hole(intent) => &intent.worker_requirements,
             Self::Fillet(intent) => &intent.worker_requirements,
             Self::Chamfer(intent) => &intent.worker_requirements,
@@ -1563,6 +1601,8 @@ impl CanonicalIntent {
             }
             Self::Bracket(_) => None,
             Self::Boolean(intent) => Some(intent.base_feature_id.as_str()),
+            Self::BooleanPattern(intent) => Some(intent.base_feature_id.as_str()),
+            Self::Split(intent) => Some(intent.base_feature_id.as_str()),
             Self::Hole(intent) => Some(intent.base_feature_id.as_str()),
             Self::Fillet(intent) => Some(intent.base_feature_id.as_str()),
             Self::Chamfer(intent) => Some(intent.base_feature_id.as_str()),
@@ -1588,6 +1628,10 @@ impl CanonicalIntent {
             }
             Self::Bracket(intent) => intent.schema_version == BRACKET_INTENT_SCHEMA_VERSION,
             Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
+            Self::BooleanPattern(intent) => {
+                intent.schema_version == BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION
+            }
+            Self::Split(intent) => intent.schema_version == SPLIT_INTENT_SCHEMA_VERSION,
             Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
             Self::Fillet(intent) => intent.schema_version == FILLET_INTENT_SCHEMA_VERSION,
             Self::Chamfer(intent) => intent.schema_version == CHAMFER_INTENT_SCHEMA_VERSION,
@@ -1615,6 +1659,10 @@ impl CanonicalIntent {
             }
             Self::Bracket(intent) => intent.schema_version == BRACKET_INTENT_SCHEMA_VERSION,
             Self::Boolean(intent) => intent.schema_version == BOOLEAN_INTENT_SCHEMA_VERSION,
+            Self::BooleanPattern(intent) => {
+                intent.schema_version == BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION
+            }
+            Self::Split(intent) => intent.schema_version == SPLIT_INTENT_SCHEMA_VERSION,
             Self::Hole(intent) => intent.schema_version == HOLE_INTENT_SCHEMA_VERSION,
             Self::Fillet(intent) => intent.schema_version == FILLET_INTENT_SCHEMA_VERSION,
             Self::Chamfer(intent) => intent.schema_version == CHAMFER_INTENT_SCHEMA_VERSION,
@@ -1633,6 +1681,8 @@ impl CanonicalIntent {
             Self::CircularPattern(intent) => intent.validate(feature_id),
             Self::Bracket(intent) => intent.validate(feature_id),
             Self::Boolean(intent) => intent.validate(feature_id),
+            Self::BooleanPattern(intent) => intent.validate(feature_id),
+            Self::Split(intent) => intent.validate(feature_id),
             Self::Hole(intent) => intent.validate(feature_id),
             Self::Fillet(intent) => intent.validate(feature_id),
             Self::Chamfer(intent) => intent.validate(feature_id),
@@ -1810,6 +1860,156 @@ impl CanonicalBooleanIntent {
         {
             return Err(BundleError::Invalid(
                 "canonical boolean worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BooleanPatternDeterministicInputs {
+    pub origin: [f64; 3],
+    pub spacing: [f64; 2],
+    pub columns: u32,
+    pub rows: u32,
+    pub diameter: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalBooleanPatternIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub request_id: String,
+    pub deterministic_inputs: BooleanPatternDeterministicInputs,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalBooleanPatternIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        let origin_valid = self
+            .deterministic_inputs
+            .origin
+            .iter()
+            .all(|value| value.is_finite() && value.abs() < 1e9);
+        let spacing_valid = self
+            .deterministic_inputs
+            .spacing
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0 && *value < 1e9);
+        if self.schema_version != BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION
+            || self.command != "boolean-pattern"
+            || self.operation != "boolean-pattern"
+            || self.base_feature_id.is_empty()
+            || self.request_id.is_empty()
+            || !origin_valid
+            || !spacing_valid
+            || !(1..=1000).contains(&self.deterministic_inputs.columns)
+            || !(1..=1000).contains(&self.deterministic_inputs.rows)
+            || !self.deterministic_inputs.diameter.is_finite()
+            || !(0.0 < self.deterministic_inputs.diameter
+                && self.deterministic_inputs.diameter < 1e9)
+        {
+            return Err(BundleError::Invalid(
+                "canonical Boolean Pattern intent identity or parameters are invalid".to_string(),
+            ));
+        }
+        if self.affected_semantic_ids != [feature_id.to_string()]
+            || !valid_sha256(&self.source_revision)
+        {
+            return Err(BundleError::Invalid(
+                "canonical Boolean Pattern semantic impact or source revision is invalid"
+                    .to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical Boolean Pattern worker requirements are invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalSplitIntent {
+    pub schema_version: String,
+    pub command: String,
+    pub operation: String,
+    pub base_feature_id: String,
+    pub selected_edge: CanonicalEdgeReference,
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+    pub request_id: String,
+    pub affected_semantic_ids: Vec<String>,
+    pub source_revision: String,
+    pub worker_requirements: threeterm_protocol::artifact::WorkerFingerprint,
+}
+
+impl CanonicalSplitIntent {
+    pub fn validate(&self, feature_id: &str) -> Result<(), BundleError> {
+        let evidence = &self.selected_edge.evidence;
+        let tangent_norm = evidence
+            .tangent
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        if self.schema_version != SPLIT_INTENT_SCHEMA_VERSION
+            || self.command != "split"
+            || self.operation != "split"
+            || self.base_feature_id.is_empty()
+            || self.request_id.is_empty()
+            || self.affected_semantic_ids != [feature_id.to_string()]
+            || !valid_sha256(&self.source_revision)
+            || self.selected_edge.provenance.source_feature_id != self.base_feature_id
+            || self.selected_edge.provenance.source_revision_id != self.source_revision
+            || self.selected_edge.semantic_id.is_empty()
+            || self.selected_edge.provenance.source_edge_id.is_empty()
+            || self.selected_edge.role.is_empty()
+            || !evidence.midpoint.iter().all(|value| value.is_finite())
+            || !evidence.tangent.iter().all(|value| value.is_finite())
+            || evidence.midpoint.iter().any(|value| value.abs() > 1e9)
+            || !evidence.length.is_finite()
+            || !(evidence.length > 0.0 && evidence.length < 1e9)
+            || !tangent_norm.is_finite()
+            || tangent_norm <= f64::EPSILON
+        {
+            return Err(BundleError::Invalid(
+                "canonical split intent identity or edge reference is invalid".to_string(),
+            ));
+        }
+        let normal_norm = self
+            .plane_normal
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        if !self
+            .plane_point
+            .iter()
+            .chain(self.plane_normal.iter())
+            .all(|value| value.is_finite() && value.abs() < 1e9)
+            || !normal_norm.is_finite()
+            || normal_norm <= f64::EPSILON
+        {
+            return Err(BundleError::Invalid(
+                "canonical split plane is invalid".to_string(),
+            ));
+        }
+        if self.worker_requirements.worker_kind != "occt"
+            || self.worker_requirements.worker_schema_version.is_empty()
+            || self.worker_requirements.protocol_schema_version.is_empty()
+        {
+            return Err(BundleError::Invalid(
+                "canonical split worker requirements are invalid".to_string(),
             ));
         }
         Ok(())
@@ -4081,6 +4281,8 @@ impl Bundle {
                 CanonicalIntent::Boolean(_) => {
                     matches!(intent.operation(), "fuse" | "cut" | "common")
                 }
+                CanonicalIntent::BooleanPattern(_) => intent.operation() == "boolean-pattern",
+                CanonicalIntent::Split(_) => intent.operation() == "split",
                 CanonicalIntent::Hole(_) => matches!(intent.operation(), "drilled" | "tapped"),
                 CanonicalIntent::Fillet(_)
                 | CanonicalIntent::Chamfer(_)
@@ -4159,6 +4361,8 @@ impl Bundle {
                         CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
                         CanonicalIntent::Bracket(_) => "canonical_bracket_worker",
                         CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
+                        CanonicalIntent::BooleanPattern(_) => "canonical_boolean_pattern_worker",
+                        CanonicalIntent::Split(_) => "canonical_split_worker",
                         CanonicalIntent::Hole(_) => "canonical_hole_worker",
                         CanonicalIntent::Fillet(_) => "canonical_fillet_worker",
                         CanonicalIntent::Chamfer(_) => "canonical_chamfer_worker",
@@ -4279,6 +4483,43 @@ impl Bundle {
                         return Err(BundleError::Invalid(
                             "canonical boolean intent source revision does not match the transaction source"
                                 .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::BooleanPattern(pattern) => {
+                    if !loaded.graph.contains_feature(&pattern.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &pattern.base_feature_id,
+                        )
+                        || entries.len() != 1
+                        || pattern.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(pattern.request_id.as_str())
+                        || pattern.worker_requirements != occt_worker_identity()
+                        || pattern.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical Boolean Pattern intent does not match its transaction"
+                                .to_string(),
+                        ));
+                    }
+                }
+                CanonicalIntent::Split(split) => {
+                    if !loaded.graph.contains_feature(&split.base_feature_id)
+                        || !canonical_geometry_feature_exists(
+                            &loaded.graph,
+                            &loaded.log,
+                            &split.base_feature_id,
+                        )
+                        || entries.len() != 1
+                        || split.validate(entries[0].0).is_err()
+                        || idempotency_key != Some(split.request_id.as_str())
+                        || split.worker_requirements != occt_worker_identity()
+                        || split.source_revision != loaded.revision_hash_hex()
+                    {
+                        return Err(BundleError::Invalid(
+                            "canonical split intent does not match its transaction".to_string(),
                         ));
                     }
                 }
@@ -5017,6 +5258,30 @@ pub fn replay_canonical_state(log: &TransactionLog) -> Result<CanonicalState, Bu
                         });
                     }
                 }
+                CanonicalIntent::BooleanPattern(pattern) => {
+                    if !graph.contains_feature(&pattern.base_feature_id) {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical Boolean Pattern base feature is missing: {}",
+                                pattern.base_feature_id
+                            ),
+                        });
+                    }
+                }
+                CanonicalIntent::Split(split) => {
+                    if !graph.contains_feature(&split.base_feature_id)
+                        || !canonical_geometry_features.contains(&split.base_feature_id)
+                    {
+                        return Err(BundleError::LogBrokenLink {
+                            log_index: entry.log_index,
+                            detail: format!(
+                                "canonical split base feature is missing: {}",
+                                split.base_feature_id
+                            ),
+                        });
+                    }
+                }
                 CanonicalIntent::Hole(hole) => {
                     if !graph.contains_feature(&hole.base_feature_id) {
                         return Err(BundleError::LogBrokenLink {
@@ -5355,6 +5620,8 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                     CanonicalIntent::CircularPattern(_) => "canonical_circular_pattern_worker",
                     CanonicalIntent::Bracket(_) => "canonical_bracket_worker",
                     CanonicalIntent::Boolean(_) => "canonical_boolean_worker",
+                    CanonicalIntent::BooleanPattern(_) => "canonical_boolean_pattern_worker",
+                    CanonicalIntent::Split(_) => "canonical_split_worker",
                     CanonicalIntent::Hole(_) => "canonical_hole_worker",
                     CanonicalIntent::Fillet(_) => "canonical_fillet_worker",
                     CanonicalIntent::Chamfer(_) => "canonical_chamfer_worker",
@@ -5421,6 +5688,39 @@ fn validate_canonical_entry(entry: &LogEntry) -> Result<(), BundleError> {
                             .expect("worker identity serializes"),
                     });
                 }
+            }
+            CanonicalIntent::BooleanPattern(pattern) => {
+                if pattern.schema_version != BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION
+                    || pattern.command != "boolean-pattern"
+                    || pattern.operation != "boolean-pattern"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", pattern.command, pattern.operation),
+                    });
+                }
+                pattern.validate(&entry.feature_id)?;
+                if pattern.worker_requirements != occt_worker_identity() {
+                    return Err(BundleError::CompatibilityIdentityMismatch {
+                        identity: "canonical_boolean_pattern_worker",
+                        expected: serde_json::to_string(&occt_worker_identity())
+                            .expect("worker identity serializes"),
+                        found: serde_json::to_string(&pattern.worker_requirements)
+                            .expect("worker identity serializes"),
+                    });
+                }
+            }
+            CanonicalIntent::Split(split) => {
+                if split.schema_version != SPLIT_INTENT_SCHEMA_VERSION
+                    || split.command != "split"
+                    || split.operation != "split"
+                {
+                    return Err(BundleError::CanonicalOperationUnknown {
+                        log_index: Some(entry.log_index),
+                        operation: format!("{}:{}", split.command, split.operation),
+                    });
+                }
+                split.validate(&entry.feature_id)?;
             }
             CanonicalIntent::Hole(hole) => {
                 if hole.schema_version != HOLE_INTENT_SCHEMA_VERSION {

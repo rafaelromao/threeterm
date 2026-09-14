@@ -18,25 +18,36 @@ const RECIPE_SCHEMA_VERSION: &str = "threeterm.recipe.bracket-base/1";
 
 struct QualificationWorkspace {
     root: PathBuf,
+    parent: PathBuf,
 }
 
 impl QualificationWorkspace {
     fn new() -> Self {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "threeterm-bracket-base-qualification-{}-{suffix}",
-            std::process::id()
-        ));
-        Self { root }
+        let parent = loop {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos();
+            let candidate = std::env::temp_dir().join(format!(
+                "threeterm-bracket-base-qualification-{}-{suffix}",
+                std::process::id()
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("qualification workspace creates: {error}"),
+            }
+        };
+        Self {
+            root: parent.join("project"),
+            parent,
+        }
     }
 }
 
 impl Drop for QualificationWorkspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = fs::remove_dir_all(&self.parent);
         let _ = fs::remove_dir_all(format!("{}.previous-generation", self.root.display()));
     }
 }
@@ -115,7 +126,15 @@ fn vector3(value: &Value, field: &str) -> [f64; 3] {
         .unwrap_or_else(|error| panic!("recipe field {field} is a 3-vector: {error}"))
 }
 
-fn profile_bounds(step: &Value) -> (f64, f64, f64, f64) {
+fn profile_bounds(recipe: &Value, step: &Value) -> (f64, f64, f64, f64) {
+    let step = if step["request"]["profile"].is_array() {
+        step
+    } else {
+        let base_feature_id = step["request"]["base_feature_id"]
+            .as_str()
+            .expect("derived profile step has a base feature ID");
+        return profile_bounds(recipe, step_for_feature(recipe, base_feature_id));
+    };
     let profile: Vec<[f64; 2]> = serde_json::from_value(step["request"]["profile"].clone())
         .expect("recipe profile is a list of 2-vectors");
     let xs = profile.iter().map(|point| point[0]);
@@ -160,6 +179,7 @@ fn select_edge(
         .into_iter()
         .filter(|candidate| {
             candidate.role == selection["role"]
+                && candidate.source_edge_id == source_edge_id
                 && (candidate.length - expected_length).abs() <= 1e-6
                 && candidate
                     .midpoint
@@ -208,12 +228,17 @@ fn assert_real_brep(path: &Path) -> Vec<u8> {
 
 fn assert_hole_clearance(recipe: &Value, step: &Value, request: &Value) {
     let position = vector3(request, "position");
-    let diameter = number(&recipe["expectations"], "hole_diameter");
+    let diameter = number(request, "diameter");
+    assert_eq!(
+        diameter,
+        number(&recipe["expectations"], "hole_diameter"),
+        "hole diameter is frozen in the recipe expectations"
+    );
     let pad_feature_id = step["pad_feature_id"]
         .as_str()
         .expect("hole step has a pad feature ID");
     let pad = step_for_feature(recipe, pad_feature_id);
-    let (min_x, max_x, min_y, max_y) = profile_bounds(pad);
+    let (min_x, max_x, min_y, max_y) = profile_bounds(recipe, pad);
     let radius = diameter / 2.0;
     assert!(
         position[0] < min_x - radius
@@ -229,7 +254,7 @@ fn assert_hole_clearance(recipe: &Value, step: &Value, request: &Value) {
         .as_str()
         .expect("hole step has an edge reference feature ID");
     let edge_reference = step_for_feature(recipe, edge_reference_id);
-    let (min_x, max_x, min_y, max_y) = profile_bounds(edge_reference);
+    let (min_x, max_x, min_y, max_y) = profile_bounds(recipe, edge_reference);
     let clearance = [
         position[0] - min_x,
         max_x - position[0],

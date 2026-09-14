@@ -14,6 +14,7 @@ case "${1:-}" in
             --skip supervised_occt_extrude \
             --skip supervised_occt_replay \
             --skip canonical_extrude_replay \
+            --skip real_occt_geometry_smoke \
             --skip adapter_command_parity \
             --skip required_occt_worker \
             --skip historical_named_revision_restore \

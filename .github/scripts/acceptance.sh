@@ -24,6 +24,11 @@ LIBSLVS_ARTIFACT="${CARGO_TARGET_DIR}/libslvs-artifact"
 ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
+OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
+EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
+EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
+EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
+EXPECTED_PROTOCOL_SCHEMA='threeterm.protocol/1'
 GATE_TIMEOUT_SECONDS="${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS:-900}"
 GATE_KILL_GRACE_SECONDS="${THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS:-10}"
 if [[ ! "${GATE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${GATE_KILL_GRACE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -43,7 +48,7 @@ if ! mkdir -p "${LOG_ROOT}"; then
     exit 1
 fi
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
@@ -179,6 +184,9 @@ run_gate worker.native \
             --jobs 1 -- --test-threads=1
         THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-occt-worker --test bracket_integration \
             --jobs 1 -- --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-host --test occt_geometry_smoke real_occt_geometry_smoke \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
         THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_worker \
             --jobs 1 -- --test-threads=1
         finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}" true
@@ -470,6 +478,7 @@ for log in "${GATE_LOGS[@]}"; do
     add_artifact "${log}"
 done
 add_artifact "${NATIVE_MANIFEST}"
+add_artifact "${OCCT_SMOKE_EVIDENCE}"
 add_artifact "${LIBSLVS_ARTIFACT}/${ARTIFACT_MANIFEST_RELATIVE##*/}"
 add_artifact "${SCHEMA_RESPONSE}"
 add_artifact "${SCHEMA_PROJECT}/manifest.json"
@@ -579,6 +588,27 @@ if [[ ! -f "${NATIVE_MANIFEST}" ]] || ! jq -e '
     ' "${NATIVE_MANIFEST}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
+if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
+    .worker.source_repository == $source_repository and
+    .worker.source_commit == $source_commit and
+    .worker.worker_schema_version == $worker_schema and
+    .worker.protocol_schema_version == $protocol_schema and
+    .schema_version == "threeterm.smoke.real-occt/1" and
+    .test == "real_occt_geometry_smoke" and
+    (.worker.path | type == "string" and length > 0) and
+    (.worker.sha256 | test("^[0-9a-f]{64}$")) and
+    (.worker.source_commit | type == "string" and length == 40) and
+    (.kernel.linked_libraries | type == "array" and length > 0) and
+    (.kernel.occt_libraries | type == "array" and length > 0) and
+    all(.kernel.linked_libraries[]; (.path | type == "string" and startswith("/")) and (.sha256 | test("^[0-9a-f]{64}$"))) and
+    all(.kernel.occt_libraries[]; (.path | type == "string" and startswith("/")) and (.sha256 | test("^[0-9a-f]{64}$")))
+    ' --arg source_repository "${EXPECTED_OCCT_SOURCE_REPOSITORY}" \
+      --arg source_commit "${EXPECTED_OCCT_SOURCE_COMMIT}" \
+      --arg worker_schema "${EXPECTED_OCCT_WORKER_SCHEMA}" \
+      --arg protocol_schema "${EXPECTED_PROTOCOL_SCHEMA}" \
+      "${OCCT_SMOKE_EVIDENCE}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
 if [[ "${NATIVE_MANIFEST_VERIFIED}" != true ]]; then
     EVIDENCE_VALID=false
 fi
@@ -616,7 +646,7 @@ if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
     ' <<<"${WORKERS}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
-for evidence_path in "${NATIVE_MANIFEST}" "${LIBSLVS_ARTIFACT}/manifest.json" \
+for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
     "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json"; do
     evidence_relative="$(relative_artifact_path "${evidence_path}" || true)"
     if [[ -z "${evidence_relative}" ]] || ! jq -e --arg path "${evidence_relative}" '

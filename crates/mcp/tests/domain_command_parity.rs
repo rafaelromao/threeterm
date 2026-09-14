@@ -474,6 +474,19 @@ fn edge_split_request(
     request
 }
 
+fn edge_split_request_resolved(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+) -> Value {
+    let mut request = edge_request_with_target(root, revision, reference, edit_target);
+    request["edit_kind"] = json!("split");
+    request["plane_point"] = json!([0.0, 0.0, 1.0]);
+    request["plane_normal"] = json!([0.0, 0.0, 1.0]);
+    request
+}
+
 fn setup_edge_root(root: &std::path::Path, label: &str) -> Option<String> {
     let worker = OcctWorker::locate().ok()?;
     Bundle::create(root).expect("bundle creates");
@@ -744,6 +757,22 @@ fn cli_reattach_edge_split(
         edit_target,
         "split",
         Some(([2.0, 0.0, 0.0], [1.0, 0.0, 0.0])),
+    )
+}
+
+fn cli_reattach_edge_split_resolved(
+    root: &std::path::Path,
+    revision: &str,
+    reference: Value,
+    edit_target: Value,
+) -> Value {
+    cli_reattach_edge_with_kind(
+        root,
+        revision,
+        reference,
+        edit_target,
+        "split",
+        Some(([0.0, 0.0, 1.0], [0.0, 0.0, 1.0])),
     )
 }
 
@@ -2339,7 +2368,7 @@ fn cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments() {
     let mcp_revision = setup_edge_root(&mcp_root, "split-mcp").expect("MCP setup succeeds");
     let tui_revision = setup_edge_root(&tui_root, "split-tui").expect("TUI setup succeeds");
 
-    let cli = cli_reattach_edge_split(
+    let cli = cli_reattach_edge_split_resolved(
         &cli_root,
         &cli_revision,
         edge_reference(&cli_revision),
@@ -2352,8 +2381,8 @@ fn cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments() {
         "fillet-after-edge",
         "base",
         0.25,
-        [2.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
         edge_reference(&tui_revision),
         edge_edit_target(&tui_revision),
     )
@@ -2364,7 +2393,7 @@ fn cli_mcp_and_tui_commit_and_replay_equivalent_split_reattachments() {
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.reattach-edge/2",
-            "arguments": edge_split_request(
+            "arguments": edge_split_request_resolved(
                 &mcp_root,
                 &mcp_revision,
                 edge_reference(&mcp_revision),

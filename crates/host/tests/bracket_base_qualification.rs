@@ -405,18 +405,8 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
     assert!(empty.log.is_empty());
     assert!(empty.graph.features().next().is_none());
 
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            assert_ne!(
-                std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref(),
-                Some("1"),
-                "bracket foundation qualification requires OCCT: {error}"
-            );
-            eprintln!("bracket foundation qualification: OCCT unavailable: {error}");
-            return;
-        }
-    };
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("bracket foundation qualification requires OCCT: {error}"));
 
     let initial_identity = command_response(
         &host,

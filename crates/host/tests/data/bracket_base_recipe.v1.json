@@ -191,6 +191,23 @@
       "bracket-hole-1": [[52.25, 10.0, 0.0], [52.25, 10.0, 8.0]],
       "bracket-foundation": [[12.25, 50.0, 0.0], [12.25, 50.0, 8.0]]
     },
+    "retained_pad_landmarks": {
+      "bracket-lp1": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0}
+      ],
+      "bracket-base": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ],
+      "bracket-hole-1": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ],
+      "bracket-foundation": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ]
+    },
     "replay_is_byte_identical": true,
     "replay_appends_zero_transactions": true
   }

@@ -287,6 +287,29 @@ fn assert_measured_geometry(
             );
         }
     }
+    if let Some(landmarks) = recipe["expectations"]["retained_pad_landmarks"].get(feature_id)
+        && let Some(landmarks) = landmarks.as_array()
+    {
+        for landmark in landmarks {
+            let expected_role = landmark["role"]
+                .as_str()
+                .expect("retained pad landmark has a role");
+            let expected_midpoint = vector3(landmark, "midpoint");
+            let expected_length = number(landmark, "length");
+            assert!(
+                measurements.iter().any(|candidate| {
+                    candidate.role == expected_role
+                        && (candidate.length - expected_length).abs() <= 1e-3
+                        && candidate
+                            .midpoint
+                            .into_iter()
+                            .zip(expected_midpoint)
+                            .all(|(actual, expected)| (actual - expected).abs() <= 1e-3)
+                }),
+                "{feature_id} has no retained pad landmark {expected_role} at {expected_midpoint:?} with length {expected_length}"
+            );
+        }
+    }
 }
 
 fn assert_real_brep(path: &Path) -> Vec<u8> {

@@ -344,6 +344,7 @@ fn assert_hole_clearance(recipe: &Value, step: &Value, request: &Value) {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn bracket_base_foundation_qualifies_through_public_commands() {
     let recipe = recipe();
     assert_recipe_matches_registry(&recipe);

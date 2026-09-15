@@ -554,6 +554,9 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         validate(&schema.request_schema, &request).unwrap_or_else(|error| {
             panic!("baseline fixture for {} is invalid: {error}", command.0)
         });
+        let before_entries = directory_snapshot(&command_root);
+        let before_manifest = fs::read(command_root.join("manifest.json")).ok();
+        let before_log = fs::read(command_root.join("transactions.log")).ok();
         let before = Bundle::at(&command_root).open().ok();
         let result = Host::new().execute_domain_command(command, request);
         match result {
@@ -561,6 +564,12 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 validate(&schema.response_schema, &response).unwrap_or_else(|error| {
                     panic!("response for {} fails its schema: {error}", command.0)
                 });
+                if matches!(
+                    command,
+                    EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
+                ) {
+                    assert!(response.get("brep_path").is_some());
+                }
                 if response.get("brep_path").is_some() {
                     let brep_path = response["brep_path"]
                         .as_str()
@@ -597,6 +606,15 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 }
             }
             Err(ExecutionError::Handler(error)) => {
+                if matches!(
+                    command,
+                    EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
+                ) {
+                    assert!(matches!(
+                        error,
+                        HostError::WorkerUnavailable { .. } | HostError::UnsupportedGeometry { .. }
+                    ));
+                }
                 let diagnostic = domain_command_diagnostic(&error);
                 assert_eq!(
                     diagnostic.schema_version,
@@ -610,16 +628,15 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                         | threeterm_protocol::diagnostic::DiagnosticCode::UnsupportedGeometry
                         | threeterm_protocol::diagnostic::DiagnosticCode::BrepInvalid
                 ));
-                if command_root.exists() {
-                    assert_eq!(
-                        Bundle::at(&command_root)
-                            .open()
-                            .expect("rejected fixture bundle opens")
-                            .log
-                            .len(),
-                        0
-                    );
-                }
+                assert_eq!(directory_snapshot(&command_root), before_entries);
+                assert_eq!(
+                    fs::read(command_root.join("manifest.json")).ok(),
+                    before_manifest
+                );
+                assert_eq!(
+                    fs::read(command_root.join("transactions.log")).ok(),
+                    before_log
+                );
             }
             Err(error) => panic!(
                 "baseline command {} bypassed the host handler: {error:?}",

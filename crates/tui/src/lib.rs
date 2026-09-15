@@ -4383,6 +4383,7 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn presentation_evidence(&self) -> Option<ViewportPresentationEvidence> {
         let identity = self.visible_frame_identity.as_ref()?;
+        let camera = self.camera;
         let frame = self.coordinator.visible_frame()?;
         if frame.frame_token != Some(identity.frame_token)
             || frame.generation != identity.generation
@@ -4427,7 +4428,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 name: self.tui.theme.palette.name,
                 colors: self.viewport_colors,
             },
-            camera: self.camera,
+            camera,
         })
     }
 

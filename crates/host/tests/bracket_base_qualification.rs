@@ -659,15 +659,24 @@ fn assert_taper_retained(recipe: &Value, measurements: &[EdgeCandidateEvidence])
     let top = recipe["frozen"]["landmarks"]["draft"]["top"]
         .as_array()
         .expect("draft top landmarks are an array");
-    assert!(
-        top.iter().any(|section| {
+    for section in top {
+        assert!(
             measurements.iter().any(|candidate| {
                 candidate.role == "outer-perimeter"
                     && (candidate.length - number(section, "length")).abs() <= tolerance
                     && (candidate.midpoint[2] - number(section, "z")).abs() <= tolerance
-            })
-        }),
-        "fused bracket lost every tapered top section"
+            }),
+            "fused bracket lost tapered top section of length {}",
+            number(section, "length")
+        );
+    }
+    assert!(
+        (number(&top[0], "length") - number(&top[1], "length")).abs()
+            >= number(
+                &recipe["frozen"]["landmarks"]["draft"],
+                "minimum_section_delta",
+            ),
+        "frozen tapered top sections are not distinct"
     );
     assert!(
         measurements.iter().any(|candidate| {
@@ -682,7 +691,16 @@ fn assert_taper_retained(recipe: &Value, measurements: &[EdgeCandidateEvidence])
 
 fn assert_loft_retained(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
     let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    let lower = &recipe["frozen"]["landmarks"]["loft"]["lower"];
     let upper = &recipe["frozen"]["landmarks"]["loft"]["upper"];
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - number(lower, "length")).abs() <= tolerance
+                && (candidate.midpoint[2] - number(lower, "z")).abs() <= tolerance
+        }),
+        "final bracket lost the loft lower section"
+    );
     assert!(
         measurements.iter().any(|candidate| {
             candidate.role == "outer-perimeter"

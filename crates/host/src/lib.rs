@@ -2127,33 +2127,6 @@ fn canonical_edge_value(candidate: &EdgeCandidateEvidence) -> serde_json::Value 
     })
 }
 
-#[allow(dead_code)]
-fn validate_replayed_edge_reference(
-    reference: &CanonicalEdgeReference,
-    candidates: &[EdgeCandidateEvidence],
-) -> Result<(), HostError> {
-    let selected = SelectedEdgeReference {
-        semantic_id: reference.semantic_id.clone(),
-        provenance: threeterm_domain::EdgeProvenance {
-            source_feature_id: reference.provenance.source_feature_id.clone(),
-            source_revision_id: reference.provenance.source_revision_id.clone(),
-            source_edge_id: reference.provenance.source_edge_id.clone(),
-        },
-        role: reference.role.clone(),
-        evidence: threeterm_domain::EdgeGeometricEvidence {
-            midpoint: reference.evidence.midpoint,
-            tangent: reference.evidence.tangent,
-            length: reference.evidence.length,
-        },
-    };
-    match resolve_edge_reference(&selected, canonical_finishing_edge_candidates(candidates)) {
-        EdgeReattachmentOutcome::Resolved { .. } => Ok(()),
-        outcome => Err(HostError::Validation {
-            detail: format!("replayed semantic edge selection failed: {outcome:?}"),
-        }),
-    }
-}
-
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn export(
@@ -4022,6 +3995,7 @@ impl Host {
                                     | "draft"
                                     | "loft"
                             )
+                            || matches!(kind, "hole:drilled" | "hole:tapped")
                     };
                     if !is_solid_kind(&base_kind) || !is_solid_kind(&tool_kind) {
                         return Err(HostError::Validation {
@@ -13618,18 +13592,20 @@ fn replay_finishing_geometry(
     let bytes = match intent {
         FinishingReplayIntent::Fillet(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;
-            let edge_reference = value.selected_edge.clone();
-            let replay_reference = edge_reference.clone();
-            let edge = SelectedEdgeContext {
-                semantic_id: edge_reference.semantic_id,
-                source_feature_id: edge_reference.provenance.source_feature_id,
-                source_revision_id: edge_reference.provenance.source_revision_id,
-                source_edge_id: edge_reference.provenance.source_edge_id,
-                role: edge_reference.role,
-                midpoint: edge_reference.evidence.midpoint,
-                tangent: edge_reference.evidence.tangent,
-                length: edge_reference.evidence.length,
-            };
+            let selected_edge = serde_json::to_value(&value.selected_edge).map_err(|error| {
+                HostError::Validation {
+                    detail: format!(
+                        "finishing replay edge reference serialization failed: {error}"
+                    ),
+                }
+            })?;
+            let edge = selected_edge_context_from_request(resolve_selected_edge_with_worker(
+                worker,
+                base_path.clone(),
+                &value.base_feature_id,
+                &source_revision,
+                selected_edge,
+            )?)?;
             let edit_target = value
                 .edit_target
                 .clone()
@@ -13659,25 +13635,25 @@ fn replay_finishing_geometry(
                     .clone()
                     .with_revision_id(source_revision)
                     .fillet(&request),
-                |result: &FilletResult| {
-                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
-                }
+                |_result: &FilletResult| Ok::<(), HostError>(())
             )
         }
         FinishingReplayIntent::Chamfer(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;
-            let edge_reference = value.selected_edge.clone();
-            let replay_reference = edge_reference.clone();
-            let edge = SelectedEdgeContext {
-                semantic_id: edge_reference.semantic_id,
-                source_feature_id: edge_reference.provenance.source_feature_id,
-                source_revision_id: edge_reference.provenance.source_revision_id,
-                source_edge_id: edge_reference.provenance.source_edge_id,
-                role: edge_reference.role,
-                midpoint: edge_reference.evidence.midpoint,
-                tangent: edge_reference.evidence.tangent,
-                length: edge_reference.evidence.length,
-            };
+            let selected_edge = serde_json::to_value(&value.selected_edge).map_err(|error| {
+                HostError::Validation {
+                    detail: format!(
+                        "finishing replay edge reference serialization failed: {error}"
+                    ),
+                }
+            })?;
+            let edge = selected_edge_context_from_request(resolve_selected_edge_with_worker(
+                worker,
+                base_path.clone(),
+                &value.base_feature_id,
+                &source_revision,
+                selected_edge,
+            )?)?;
             let request = ChamferRequest::new(value.request_id, base_path, value.distance)
                 .with_output_path(
                     replay_stage_root,
@@ -13691,9 +13667,7 @@ fn replay_finishing_geometry(
                     .clone()
                     .with_revision_id(source_revision)
                     .chamfer(&request),
-                |result: &ChamferResult| {
-                    validate_replayed_edge_reference(&replay_reference, &result.edge_candidates)
-                }
+                |_result: &ChamferResult| Ok::<(), HostError>(())
             )
         }
         FinishingReplayIntent::Shell(value) => {

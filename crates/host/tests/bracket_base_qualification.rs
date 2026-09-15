@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{EdgeCandidateEvidence, OcctWorker};
+use threeterm_occt_worker::{EdgeCandidateEvidence, EdgeInspectionResult, OcctWorker};
 use threeterm_persistence::{Bundle, LoadedBundle};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema;
@@ -15,8 +15,10 @@ use threeterm_protocol::schema_validator::validate;
 
 const RECIPE: &str = include_str!("data/bracket_base_recipe.v1.json");
 const REINFORCEMENT_RECIPE: &str = include_str!("data/bracket_reinforcement_recipe.v1.json");
+const COMPLETE_RECIPE: &str = include_str!("data/bracket_complete_recipe.v1.json");
 const BASE_RECIPE_SCHEMA_VERSION: &str = "threeterm.recipe.bracket-base/1";
 const REINFORCEMENT_RECIPE_SCHEMA_VERSION: &str = "threeterm.recipe.bracket-reinforcement/1";
+const COMPLETE_RECIPE_SCHEMA_VERSION: &str = "threeterm.recipe.bracket-complete/1";
 
 struct QualificationWorkspace {
     root: PathBuf,
@@ -141,6 +143,309 @@ fn assert_recipe_extends_frozen_base(reinforcement_recipe: &Value) {
     }
 }
 
+#[allow(clippy::excessive_precision)]
+fn assert_complete_recipe_structure(complete: &Value) {
+    assert_recipe_matches_registry(complete, COMPLETE_RECIPE_SCHEMA_VERSION);
+    let steps = recipe_steps(complete);
+    let expected_ids = [
+        "mirrored-collar",
+        "foundation-with-mirrored-collar",
+        "linear-pad-seed",
+        "linear-pads",
+        "foundation-with-linear-pads",
+        "circular-lug-seed",
+        "circular-lugs",
+        "foundation-with-circular-lugs",
+        "taper-seed",
+        "tapered-reinforcement",
+        "foundation-with-taper",
+        "lofted-gusset",
+        "complete-bracket",
+        "complete-recipe-snapshot",
+    ];
+    assert_eq!(
+        steps[19..]
+            .iter()
+            .map(|step| step["feature_id"].as_str().expect("feature ID"))
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert_eq!(
+        steps[19..]
+            .iter()
+            .map(|step| step["request_schema_version"]
+                .as_str()
+                .expect("schema version"))
+            .collect::<Vec<_>>(),
+        [
+            "threeterm.command.mirror.request/1",
+            "threeterm.command.boolean-fuse.request/1",
+            "threeterm.command.extrude.request/2",
+            "threeterm.command.linear-pattern.request/1",
+            "threeterm.command.boolean-fuse.request/1",
+            "threeterm.command.extrude.request/2",
+            "threeterm.command.circular-pattern.request/1",
+            "threeterm.command.boolean-fuse.request/1",
+            "threeterm.command.extrude.request/2",
+            "threeterm.command.draft.request/1",
+            "threeterm.command.boolean-fuse.request/1",
+            "threeterm.command.loft.request/1",
+            "threeterm.command.boolean-fuse.request/1",
+            "threeterm.command.save.request/1",
+        ]
+    );
+    let dependencies = complete["frozen"]["dependencies"]
+        .as_array()
+        .expect("complete dependencies are an array");
+    assert_eq!(
+        dependencies,
+        json!([
+            {"feature_id": "mirrored-collar", "base_feature_id": "revolved-collar"},
+            {"feature_id": "foundation-with-mirrored-collar", "base_feature_id": "reinforced-foundation", "tool_feature_id": "mirrored-collar"},
+            {"feature_id": "linear-pads", "base_feature_id": "linear-pad-seed"},
+            {"feature_id": "foundation-with-linear-pads", "base_feature_id": "foundation-with-mirrored-collar", "tool_feature_id": "linear-pads"},
+            {"feature_id": "circular-lugs", "base_feature_id": "circular-lug-seed"},
+            {"feature_id": "foundation-with-circular-lugs", "base_feature_id": "foundation-with-linear-pads", "tool_feature_id": "circular-lugs"},
+            {"feature_id": "tapered-reinforcement", "base_feature_id": "taper-seed"},
+            {"feature_id": "foundation-with-taper", "base_feature_id": "foundation-with-circular-lugs", "tool_feature_id": "tapered-reinforcement"},
+            {"feature_id": "lofted-gusset", "base_feature_id": null},
+            {"feature_id": "complete-bracket", "base_feature_id": "foundation-with-taper", "tool_feature_id": "lofted-gusset"}
+        ])
+        .as_array()
+        .expect("expected dependencies are an array")
+    );
+    for dependency in dependencies {
+        let feature_id = dependency["feature_id"]
+            .as_str()
+            .expect("dependency has feature ID");
+        let step = step_for_feature(complete, feature_id);
+        assert_eq!(
+            dependency["base_feature_id"], step["request"]["base_feature_id"],
+            "dependency base for {feature_id}"
+        );
+        if dependency.get("tool_feature_id").is_some() {
+            assert_eq!(
+                dependency["tool_feature_id"], step["request"]["tool_feature_id"],
+                "dependency tool for {feature_id}"
+            );
+        }
+    }
+    assert_eq!(
+        complete["expectations"]["transaction_count"], 33,
+        "complete recipe has one transaction per step"
+    );
+    assert_eq!(
+        complete["expectations"]["final_feature_ids"]
+            .as_array()
+            .expect("final IDs are an array")
+            .len(),
+        33
+    );
+    assert!(complete["expectations"]["measurements_are_commit_time_only"].as_bool() == Some(true));
+    assert_eq!(
+        complete["frozen"]["volume_band_mm3"],
+        json!({"minimum": 16000.0, "maximum": 24000.0})
+    );
+    assert_eq!(
+        complete["frozen"]["tolerances"],
+        json!({
+            "linear_mm": 0.05,
+            "placement_mm": 0.10,
+            "angular_rad": 0.000001,
+            "volume_fraction": 0.05
+        })
+    );
+    assert_eq!(
+        complete["frozen"]["placements"]["collar_regions"],
+        json!([
+            {"feature_id": "revolved-collar", "x": [10.0, 22.0], "y": [28.0, 32.0]},
+            {"feature_id": "mirrored-collar", "x": [28.0, 32.0], "y": [10.0, 22.0]}
+        ])
+    );
+    assert_eq!(
+        complete["frozen"]["placements"]["linear_pad_centers"],
+        json!([[8.0, 44.0], [8.0, 56.0]])
+    );
+    assert_eq!(
+        complete["frozen"]["placements"]["circular_lug_centers"],
+        json!([
+            [45.0, 18.0],
+            [41.07179676972449, 4.267949192431123],
+            [54.92820323027551, 7.732050807568877]
+        ])
+    );
+    assert_eq!(
+        complete["frozen"]["landmarks"]["collars"],
+        json!([
+            {"feature_id": "revolved-collar", "role": "fillet-transition", "x": [10.0, 22.0], "y": [28.0, 32.0], "min_length": 0.05},
+            {"feature_id": "mirrored-collar", "role": "fillet-transition", "x": [28.0, 32.0], "y": [10.0, 22.0], "min_length": 0.05}
+        ])
+    );
+    assert_eq!(
+        complete["frozen"]["landmarks"]["linear_pads"],
+        json!([
+            {"role": "outer-perimeter", "midpoint": [8.0, 40.0, 12.0], "length": 8.0},
+            {"role": "outer-perimeter", "midpoint": [8.0, 52.0, 12.0], "length": 8.0}
+        ])
+    );
+    assert_eq!(
+        complete["frozen"]["landmarks"]["circular_lugs"],
+        json!([
+            {"role": "outer-perimeter", "center": [45.0, 18.0], "length": 4.0, "z": 12.0, "max_distance": 2.1},
+            {"role": "outer-perimeter", "center": [41.07179676972449, 4.267949192431123], "length": 4.0, "z": 12.0, "max_distance": 2.1},
+            {"role": "outer-perimeter", "center": [54.92820323027551, 7.732050807568877], "length": 4.0, "z": 12.0, "max_distance": 2.1}
+        ])
+    );
+    assert_eq!(
+        complete["frozen"]["landmarks"]["draft"],
+        json!({
+            "bottom": [
+                {"role": "outer-perimeter", "length": 10.0, "z": 0.0},
+                {"role": "outer-perimeter", "length": 4.0, "z": 0.0}
+            ],
+            "top": [
+                {"role": "outer-perimeter", "length": 8.742213297207011, "z": 12.0},
+                {"role": "outer-perimeter", "length": 2.742213297207011, "z": 12.0}
+            ],
+            "minimum_section_delta": 0.5
+        })
+    );
+    assert_eq!(
+        complete["frozen"]["landmarks"]["loft"],
+        json!({
+            "lower": {"role": "outer-perimeter", "length": 8.0, "z": 8.0},
+            "upper": {"role": "outer-perimeter", "length": 4.0, "z": 18.0},
+            "transition_z": [8.0, 18.0]
+        })
+    );
+
+    assert_eq!(
+        steps[19]["request"],
+        json!({
+            "feature_id": "mirrored-collar",
+            "base_feature_id": "revolved-collar",
+            "plane_point": [0.0, 0.0, 0.0],
+            "plane_normal": [1.0, -1.0, 0.0]
+        })
+    );
+    assert_eq!(
+        steps[20]["request"],
+        json!({
+            "feature_id": "foundation-with-mirrored-collar",
+            "base_feature_id": "reinforced-foundation",
+            "tool_feature_id": "mirrored-collar"
+        })
+    );
+    assert_eq!(
+        steps[21]["request"],
+        json!({
+            "feature_id": "linear-pad-seed",
+            "profile": [[4.0, 40.0], [12.0, 40.0], [12.0, 48.0], [4.0, 48.0]],
+            "height": 12.0,
+            "mode": "additive"
+        })
+    );
+    assert_eq!(
+        steps[22]["request"],
+        json!({
+            "feature_id": "linear-pads",
+            "base_feature_id": "linear-pad-seed",
+            "direction": [0.0, 1.0, 0.0],
+            "count": 2,
+            "spacing": 12.0
+        })
+    );
+    assert_eq!(
+        steps[23]["request"],
+        json!({
+            "feature_id": "foundation-with-linear-pads",
+            "base_feature_id": "foundation-with-mirrored-collar",
+            "tool_feature_id": "linear-pads"
+        })
+    );
+    assert_eq!(
+        steps[24]["request"],
+        json!({
+            "feature_id": "circular-lug-seed",
+            "profile": [[43.0, 16.0], [47.0, 16.0], [47.0, 20.0], [43.0, 20.0]],
+            "height": 12.0,
+            "mode": "additive"
+        })
+    );
+    assert_eq!(
+        steps[25]["request"],
+        json!({
+            "feature_id": "circular-lugs",
+            "base_feature_id": "circular-lug-seed",
+            "axis_point": [47.0, 10.0, 0.0],
+            "axis_normal": [0.0, 0.0, 1.0],
+            "angle_step": 2.0943951023931953,
+            "count": 3
+        })
+    );
+    assert_eq!(
+        steps[26]["request"],
+        json!({
+            "feature_id": "foundation-with-circular-lugs",
+            "base_feature_id": "foundation-with-linear-pads",
+            "tool_feature_id": "circular-lugs"
+        })
+    );
+    assert_eq!(
+        steps[27]["request"],
+        json!({
+            "feature_id": "taper-seed",
+            "profile": [[24.0, 0.0], [34.0, 0.0], [34.0, 4.0], [24.0, 4.0]],
+            "height": 12.0,
+            "mode": "additive"
+        })
+    );
+    assert_eq!(
+        steps[28]["request"],
+        json!({
+            "feature_id": "tapered-reinforcement",
+            "base_feature_id": "taper-seed",
+            "angle": 0.05235987755982989,
+            "pull_direction": [0.0, 0.0, 1.0]
+        })
+    );
+    assert_eq!(
+        steps[29]["request"],
+        json!({
+            "feature_id": "foundation-with-taper",
+            "base_feature_id": "foundation-with-circular-lugs",
+            "tool_feature_id": "tapered-reinforcement"
+        })
+    );
+    assert_eq!(
+        steps[30]["request"],
+        json!({
+            "feature_id": "lofted-gusset",
+            "profiles": [
+                [[8.0, 8.0, 8.0], [16.0, 8.0, 8.0], [16.0, 16.0, 8.0], [8.0, 16.0, 8.0]],
+                [[10.0, 10.0, 18.0], [14.0, 10.0, 18.0], [14.0, 14.0, 18.0], [10.0, 14.0, 18.0]]
+            ],
+            "is_solid": true,
+            "ruled": false
+        })
+    );
+    assert_eq!(
+        steps[31]["request"],
+        json!({
+            "feature_id": "complete-bracket",
+            "base_feature_id": "foundation-with-taper",
+            "tool_feature_id": "lofted-gusset"
+        })
+    );
+    assert_eq!(
+        steps[32]["request"],
+        json!({
+            "feature_id": "complete-recipe-snapshot",
+            "kind": "checkpoint"
+        })
+    );
+}
+
 fn step_for_feature<'a>(recipe: &'a Value, feature_id: &str) -> &'a Value {
     recipe_steps(recipe)
         .iter()
@@ -212,6 +517,15 @@ fn measure_brep(
     feature_id: &str,
     revision: &str,
 ) -> Vec<EdgeCandidateEvidence> {
+    inspect_brep(worker, path, feature_id, revision).edge_candidates
+}
+
+fn inspect_brep(
+    worker: &OcctWorker,
+    path: &Path,
+    feature_id: &str,
+    revision: &str,
+) -> EdgeInspectionResult {
     worker
         .inspect_edges(
             format!("{feature_id}-measurement"),
@@ -227,7 +541,403 @@ fn measure_brep(
             }),
         )
         .unwrap_or_else(|error| panic!("geometry measurement for {feature_id} failed: {error}"))
-        .edge_candidates
+}
+
+fn assert_curved_landmark_in_region(
+    measurements: &[EdgeCandidateEvidence],
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+    label: &str,
+) {
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && candidate.length > 0.05
+                && (x_bounds[0]..=x_bounds[1]).contains(&candidate.midpoint[0])
+                && (y_bounds[0]..=y_bounds[1]).contains(&candidate.midpoint[1])
+        }),
+        "{label} has no retained curved landmark"
+    );
+}
+
+fn assert_linear_landmark(
+    measurements: &[EdgeCandidateEvidence],
+    midpoint: [f64; 3],
+    length: f64,
+    tolerance: f64,
+    label: &str,
+) {
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - length).abs() <= tolerance
+                && candidate
+                    .midpoint
+                    .into_iter()
+                    .zip(midpoint)
+                    .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+        }),
+        "{label} has no retained linear landmark at {midpoint:?}"
+    );
+}
+
+fn assert_circular_landmarks(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "placement_mm");
+    let centers = recipe["frozen"]["landmarks"]["circular_lugs"]
+        .as_array()
+        .expect("circular lug landmarks are an array");
+    let mut matched = Vec::new();
+    for landmark in centers {
+        let center: [f64; 2] = serde_json::from_value(landmark["center"].clone())
+            .expect("circular lug center is a 2-vector");
+        let length = number(landmark, "length");
+        let z = number(landmark, "z");
+        let max_distance = number(landmark, "max_distance");
+        let candidate = measurements
+            .iter()
+            .find(|candidate| {
+                candidate.role == "outer-perimeter"
+                    && (candidate.length - length).abs() <= tolerance
+                    && ((candidate.midpoint[0] - center[0]).powi(2)
+                        + (candidate.midpoint[1] - center[1]).powi(2))
+                    .sqrt()
+                        <= max_distance + tolerance
+                    && (candidate.midpoint[2] - z).abs() <= tolerance
+            })
+            .unwrap_or_else(|| panic!("no circular lug landmark near {center:?}"));
+        matched.push(candidate.midpoint);
+    }
+    for (index, left) in matched.iter().enumerate() {
+        for right in matched.iter().skip(index + 1) {
+            let distance = ((left[0] - right[0]).powi(2) + (left[1] - right[1]).powi(2)).sqrt();
+            assert!(
+                distance > tolerance,
+                "circular pattern landmarks must be noncoincident: {left:?} and {right:?}"
+            );
+        }
+    }
+}
+
+fn assert_linear_pattern_landmarks(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    for landmark in recipe["frozen"]["landmarks"]["linear_pads"]
+        .as_array()
+        .expect("linear pad landmarks are an array")
+    {
+        assert_linear_landmark(
+            measurements,
+            vector3(landmark, "midpoint"),
+            number(landmark, "length"),
+            tolerance,
+            "linear pattern",
+        );
+    }
+}
+
+fn assert_collar_landmark(
+    recipe: &Value,
+    feature_id: &str,
+    measurements: &[EdgeCandidateEvidence],
+    label: &str,
+) {
+    let placement = recipe["frozen"]["placements"]["collar_regions"]
+        .as_array()
+        .expect("collar regions are an array")
+        .iter()
+        .find(|placement| placement["feature_id"] == feature_id)
+        .unwrap_or_else(|| panic!("missing collar placement for {feature_id}"));
+    assert_curved_landmark_in_region(
+        measurements,
+        serde_json::from_value(placement["x"].clone()).expect("collar x bounds are a 2-vector"),
+        serde_json::from_value(placement["y"].clone()).expect("collar y bounds are a 2-vector"),
+        label,
+    );
+}
+
+fn assert_taper_retained(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    let top = recipe["frozen"]["landmarks"]["draft"]["top"]
+        .as_array()
+        .expect("draft top landmarks are an array");
+    for section in top {
+        assert!(
+            measurements.iter().any(|candidate| {
+                candidate.role == "outer-perimeter"
+                    && (candidate.length - number(section, "length")).abs() <= tolerance
+                    && (candidate.midpoint[2] - number(section, "z")).abs() <= tolerance
+            }),
+            "fused bracket lost tapered top section of length {}",
+            number(section, "length")
+        );
+    }
+    assert!(
+        (number(&top[0], "length") - number(&top[1], "length")).abs()
+            >= number(
+                &recipe["frozen"]["landmarks"]["draft"],
+                "minimum_section_delta",
+            ),
+        "frozen tapered top sections are not distinct"
+    );
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.length > tolerance
+                && (24.0..=34.0).contains(&candidate.midpoint[0])
+                && (0.0..=4.0).contains(&candidate.midpoint[1])
+                && (0.0..=12.0).contains(&candidate.midpoint[2])
+        }),
+        "fused bracket lost the tapered side section"
+    );
+}
+
+fn assert_loft_retained(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    let lower = &recipe["frozen"]["landmarks"]["loft"]["lower"];
+    let upper = &recipe["frozen"]["landmarks"]["loft"]["upper"];
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - number(lower, "length")).abs() <= tolerance
+                && (candidate.midpoint[2] - number(lower, "z")).abs() <= tolerance
+        }),
+        "final bracket lost the loft lower section"
+    );
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - number(upper, "length")).abs() <= tolerance
+                && (candidate.midpoint[2] - number(upper, "z")).abs() <= tolerance
+        }),
+        "final bracket lost the loft upper section"
+    );
+    let transition = recipe["frozen"]["landmarks"]["loft"]["transition_z"]
+        .as_array()
+        .expect("loft transition range is an array");
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.length > tolerance
+                && (8.0..=16.0).contains(&candidate.midpoint[0])
+                && (8.0..=16.0).contains(&candidate.midpoint[1])
+                && transition[0]
+                    .as_f64()
+                    .expect("transition lower bound is numeric")
+                    < candidate.midpoint[2]
+                && candidate.midpoint[2]
+                    < transition[1]
+                        .as_f64()
+                        .expect("transition upper bound is numeric")
+        }),
+        "final bracket lost the loft transition edge"
+    );
+}
+
+fn assert_draft_sections(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    for section in recipe["frozen"]["landmarks"]["draft"]["bottom"]
+        .as_array()
+        .expect("draft bottom landmarks are an array")
+    {
+        let length = number(section, "length");
+        let z = number(section, "z");
+        assert!(
+            measurements.iter().any(|candidate| {
+                candidate.role == "outer-perimeter"
+                    && (candidate.length - length).abs() <= tolerance
+                    && (candidate.midpoint[2] - z).abs() <= tolerance
+            }),
+            "draft bottom section of length {length} is missing"
+        );
+    }
+    for section in recipe["frozen"]["landmarks"]["draft"]["top"]
+        .as_array()
+        .expect("draft top landmarks are an array")
+    {
+        let length = number(section, "length");
+        assert!(
+            measurements.iter().any(|candidate| {
+                candidate.role == "outer-perimeter"
+                    && (candidate.length - length).abs() <= tolerance
+                    && (candidate.midpoint[2] - number(section, "z")).abs() <= tolerance
+            }),
+            "draft top section of length {length} is missing"
+        );
+    }
+    let bottom_lengths: Vec<_> = measurements
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "outer-perimeter" && candidate.midpoint[2].abs() <= tolerance
+        })
+        .map(|candidate| candidate.length)
+        .collect();
+    let top_lengths: Vec<_> = measurements
+        .iter()
+        .filter(|candidate| {
+            candidate.role == "outer-perimeter" && (candidate.midpoint[2] - 12.0).abs() <= tolerance
+        })
+        .map(|candidate| candidate.length)
+        .collect();
+    assert!(
+        bottom_lengths.iter().any(|bottom| {
+            top_lengths.iter().any(|top| {
+                (bottom - top).abs()
+                    >= number(
+                        &recipe["frozen"]["landmarks"]["draft"],
+                        "minimum_section_delta",
+                    )
+            })
+        }),
+        "draft does not retain distinct bottom and top sections"
+    );
+}
+
+fn assert_loft_sections(recipe: &Value, measurements: &[EdgeCandidateEvidence]) {
+    let tolerance = number(&recipe["frozen"]["tolerances"], "linear_mm");
+    let lower = &recipe["frozen"]["landmarks"]["loft"]["lower"];
+    let upper = &recipe["frozen"]["landmarks"]["loft"]["upper"];
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - number(lower, "length")).abs() <= tolerance
+                && (candidate.midpoint[2] - number(lower, "z")).abs() <= tolerance
+        }),
+        "loft lower section is missing"
+    );
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - number(upper, "length")).abs() <= tolerance
+                && (candidate.midpoint[2] - number(upper, "z")).abs() <= tolerance
+        }),
+        "loft upper section is missing"
+    );
+    let transition = recipe["frozen"]["landmarks"]["loft"]["transition_z"]
+        .as_array()
+        .expect("loft transition range is an array");
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.length > tolerance
+                && transition[0]
+                    .as_f64()
+                    .expect("transition lower bound is numeric")
+                    < candidate.midpoint[2]
+                && candidate.midpoint[2]
+                    < transition[1]
+                        .as_f64()
+                        .expect("transition upper bound is numeric")
+        }),
+        "loft has no measurable transition edge"
+    );
+}
+
+fn assert_complete_intents(recipe: &Value, saved: &LoadedBundle) {
+    for (entry, step) in saved.log.entries()[19..32]
+        .iter()
+        .zip(recipe_steps(recipe)[19..32].iter())
+    {
+        let intent = entry
+            .intent
+            .as_ref()
+            .expect("complete geometry has an intent");
+        let encoded = serde_json::to_value(intent).expect("complete intent serializes");
+        let command = step["command"].as_str().expect("complete step command");
+        assert!(
+            encoded.get("material_volume").is_none(),
+            "canonical intent must not contain measurements"
+        );
+        assert_eq!(encoded["affected_semantic_ids"][0], step["feature_id"]);
+        match command {
+            "extrude" => {
+                assert_eq!(encoded["command"], "extrude");
+                assert_eq!(encoded["operation"], "additive");
+                assert_eq!(encoded["mode"], "additive");
+                assert!(encoded.get("target_feature_id").is_none());
+                assert_eq!(
+                    encoded["deterministic_inputs"],
+                    json!({
+                        "profile": step["request"]["profile"],
+                        "height": step["request"]["height"]
+                    })
+                );
+                assert_eq!(
+                    encoded["affected_semantic_ids"],
+                    json!([step["feature_id"]])
+                );
+            }
+            "mirror" | "linear-pattern" | "circular-pattern" => {
+                let operation = if command == "linear-pattern" {
+                    "linear_pattern"
+                } else if command == "circular-pattern" {
+                    "circular_pattern"
+                } else {
+                    "mirror"
+                };
+                assert_eq!(encoded["command"], command);
+                assert_eq!(encoded["operation"], command);
+                assert_eq!(
+                    encoded["affected_semantic_ids"],
+                    json!([step["feature_id"], step["request"]["base_feature_id"]])
+                );
+                assert_eq!(
+                    encoded["deterministic_inputs"]["base_feature_id"],
+                    step["request"]["base_feature_id"]
+                );
+                assert_eq!(
+                    intent.operation(),
+                    if operation == "linear_pattern" {
+                        "linear-pattern"
+                    } else if operation == "circular_pattern" {
+                        "circular-pattern"
+                    } else {
+                        "mirror"
+                    }
+                );
+                for field in [
+                    "direction",
+                    "count",
+                    "spacing",
+                    "axis_point",
+                    "axis_normal",
+                    "angle_step",
+                    "plane_point",
+                    "plane_normal",
+                ] {
+                    if step["request"].get(field).is_some() {
+                        assert_eq!(
+                            encoded["deterministic_inputs"][field], step["request"][field],
+                            "intent input {field}"
+                        );
+                    }
+                }
+            }
+            "draft" => {
+                assert_eq!(encoded["command"], "draft");
+                assert_eq!(
+                    encoded["base_feature_id"],
+                    step["request"]["base_feature_id"]
+                );
+                assert_eq!(encoded["angle"], step["request"]["angle"]);
+                assert_eq!(encoded["pull_direction"], step["request"]["pull_direction"]);
+            }
+            "loft" => {
+                assert_eq!(encoded["command"], "loft");
+                assert_eq!(encoded["profiles"], step["request"]["profiles"]);
+                assert_eq!(encoded["is_solid"], step["request"]["is_solid"]);
+                assert_eq!(encoded["ruled"], step["request"]["ruled"]);
+            }
+            "boolean-fuse" => {
+                assert_eq!(encoded["command"], "boolean");
+                assert_eq!(encoded["operation"], "fuse");
+                assert_eq!(
+                    encoded["base_feature_id"],
+                    step["request"]["base_feature_id"]
+                );
+                assert_eq!(
+                    encoded["tool_feature_id"],
+                    step["request"]["tool_feature_id"]
+                );
+            }
+            other => panic!("unexpected complete intent command {other}"),
+        }
+    }
 }
 
 fn assert_measured_geometry(
@@ -248,10 +958,7 @@ fn assert_measured_geometry(
         .collect();
     let sum_linear_lengths = |lengths: &[f64]| lengths.iter().sum::<f64>();
 
-    if matches!(
-        feature_id,
-        "arm-x" | "arm-z" | "bracket-l" | "bracket-foundation"
-    ) {
+    if matches!(feature_id, "arm-x" | "arm-z") {
         let expected_span = number(&recipe["expectations"], "arm_span");
         assert!(
             linear_lengths
@@ -424,11 +1131,19 @@ fn assert_post_fusion_landmarks(
 }
 
 fn assert_reinforcement_intents(recipe: &Value, saved: &LoadedBundle) {
-    let expected_steps = &recipe_steps(recipe)[..18];
-    let actual: Vec<_> = saved.log.entries()[..18]
+    let expected_steps = &recipe_steps(recipe)[..19];
+    let actual: Vec<_> = saved.log.entries()[..19]
         .iter()
         .zip(expected_steps)
-        .map(|(entry, step)| {
+        .filter_map(|(entry, step)| {
+            if step["command"] == "save" {
+                assert!(
+                    entry.intent.is_none(),
+                    "checkpoint {} must not have a canonical intent",
+                    step["feature_id"]
+                );
+                return None;
+            }
             let intent = entry.intent.as_ref().expect("geometry step has an intent");
             let encoded = serde_json::to_value(intent).expect("canonical intent serializes");
             assert_eq!(
@@ -493,11 +1208,12 @@ fn assert_reinforcement_intents(recipe: &Value, saved: &LoadedBundle) {
                 }
                 _ => {}
             }
-            format!("{}:{}", intent.command(), intent.operation())
+            Some(format!("{}:{}", intent.command(), intent.operation()))
         })
         .collect();
     let expected: Vec<_> = expected_steps
         .iter()
+        .filter(|step| step["command"] != "save")
         .map(|step| {
             let command = step["command"].as_str().expect("step command");
             let operation = match command {
@@ -518,6 +1234,41 @@ fn assert_reinforcement_intents(recipe: &Value, saved: &LoadedBundle) {
         })
         .collect();
     assert_eq!(actual, expected, "canonical intent command order");
+}
+
+#[test]
+fn complete_recipe_record_is_versioned_and_extends_reinforcement() {
+    let complete: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    let reinforcement: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+    assert_eq!(complete["schema_version"], COMPLETE_RECIPE_SCHEMA_VERSION);
+    assert_eq!(complete["fixture"], "bracket-complete");
+    assert_eq!(complete["units"], "mm");
+    assert_eq!(recipe_steps(&complete).len(), 33);
+    assert_eq!(
+        serde_json::to_vec(&recipe_steps(&complete)[..19]).expect("complete prefix serializes"),
+        serde_json::to_vec(recipe_steps(&reinforcement)).expect("reinforcement steps serialize")
+    );
+    assert_eq!(complete["frozen"]["volume_band_mm3"]["minimum"], 16000.0);
+    assert_eq!(complete["frozen"]["volume_band_mm3"]["maximum"], 24000.0);
+    assert_eq!(complete["frozen"]["tolerances"]["linear_mm"], 0.05);
+    assert_eq!(complete["frozen"]["tolerances"]["placement_mm"], 0.10);
+    assert_eq!(complete["frozen"]["tolerances"]["angular_rad"], 0.000001);
+    assert_eq!(complete["frozen"]["tolerances"]["volume_fraction"], 0.05);
+    for (key, value) in reinforcement["expectations"]
+        .as_object()
+        .expect("reinforcement expectations are an object")
+    {
+        if matches!(key.as_str(), "final_feature_ids" | "transaction_count") {
+            continue;
+        }
+        assert_eq!(
+            complete["expectations"][key], *value,
+            "complete recipe changes frozen expectation {key}"
+        );
+    }
+    assert_complete_recipe_structure(&complete);
 }
 
 fn assert_real_brep(path: &Path) -> Vec<u8> {
@@ -989,12 +1740,6 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
             .collect::<Vec<_>>(),
         expected_feature_ids
     );
-    assert!(
-        saved.log.entries()[..18]
-            .iter()
-            .all(|entry| entry.intent.is_some())
-    );
-    assert!(saved.log.entries()[18].intent.is_none());
     assert_reinforcement_intents(&recipe, &saved);
     assert_eq!(saved.graph.features().count(), expected_feature_ids.len());
 
@@ -1036,6 +1781,277 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
         "canonical replay appends no transaction"
     );
     for (feature_id, original) in breps {
+        assert_eq!(
+            fs::read(
+                workspace
+                    .root
+                    .join("brep")
+                    .join(format!("{feature_id}.brep"))
+            )
+            .expect("replayed BREP reads"),
+            original,
+            "replayed geometry for {feature_id}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn bracket_complete_recipe_qualifies_through_public_commands() {
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    let reinforcement: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+    assert_complete_recipe_structure(&recipe);
+    assert_eq!(
+        serde_json::to_vec(&recipe_steps(&recipe)[..19]).expect("complete prefix serializes"),
+        serde_json::to_vec(recipe_steps(&reinforcement)).expect("reinforcement steps serialize")
+    );
+
+    let workspace = QualificationWorkspace::new();
+    let host = Host::new();
+    command_response(
+        &host,
+        "new-project",
+        json!({"destination": workspace.root.to_string_lossy()}),
+    );
+    let empty = Bundle::at(&workspace.root)
+        .open()
+        .expect("complete project opens");
+    assert!(empty.log.is_empty(), "complete qualification starts empty");
+    assert!(empty.graph.features().next().is_none());
+
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("complete bracket requires OCCT: {error}"));
+    let initial_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    let mut revision = initial_identity["revision_hash"]
+        .as_str()
+        .expect("complete identity has a revision hash")
+        .to_string();
+    let mut breps = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    let mut measurements_by_feature =
+        std::collections::BTreeMap::<String, Vec<EdgeCandidateEvidence>>::new();
+
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("complete step command");
+        let feature_id = step["feature_id"].as_str().expect("complete feature ID");
+        let mut request = step["request"].clone();
+        request["bundle_path"] = workspace.root.to_string_lossy().into_owned().into();
+        if matches!(
+            command_name,
+            "extrude"
+                | "revolve"
+                | "fillet"
+                | "chamfer"
+                | "hole"
+                | "shell"
+                | "mirror"
+                | "linear-pattern"
+                | "circular-pattern"
+                | "draft"
+                | "loft"
+        ) {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_from_recipe(
+                request["base_feature_id"]
+                    .as_str()
+                    .expect("finishing request has a base feature ID"),
+                &revision,
+                &step["edge_selection"],
+            );
+        }
+
+        let response = command_response(&host, command_name, request.clone());
+        let next_revision = response["revision_hash"]
+            .as_str()
+            .expect("complete response has a revision hash")
+            .to_string();
+        assert_ne!(
+            next_revision, revision,
+            "step {feature_id} advances revision"
+        );
+        if command_name == "save" {
+            assert!(response["feature_graph_hash"].as_str().is_some());
+            assert!(response["revision_hash"].as_str().is_some());
+            assert_eq!(
+                response["schema_version"],
+                "threeterm.command.save.response/1"
+            );
+            revision = next_revision;
+            continue;
+        }
+
+        assert_eq!(response["status"], "ok", "step {feature_id} succeeds");
+        assert_eq!(response["operation"], command_name);
+        assert_eq!(response["feature_id"], feature_id);
+        let response_sha = response["brep_sha256"]
+            .as_str()
+            .expect("complete response has a BREP hash")
+            .to_string();
+        let path = PathBuf::from(
+            response["brep_path"]
+                .as_str()
+                .expect("complete response has a BREP path"),
+        );
+        let bytes = assert_real_brep(&path);
+        assert_eq!(response_sha, sha256_hex(&bytes));
+        assert_eq!(response["brep_bytes"], bytes.len());
+        let measurements = measure_brep(&worker, &path, feature_id, &next_revision);
+        if step["index"].as_u64().expect("complete step index") >= 20 {
+            assert_measured_geometry(&recipe, feature_id, &measurements, &measurements_by_feature);
+        }
+
+        match feature_id {
+            "mirrored-collar" => {
+                assert_collar_landmark(&recipe, feature_id, &measurements, feature_id)
+            }
+            "foundation-with-mirrored-collar" => {
+                assert_collar_landmark(
+                    &recipe,
+                    "revolved-collar",
+                    &measurements,
+                    "original collar after mirror fuse",
+                );
+                assert_collar_landmark(
+                    &recipe,
+                    "mirrored-collar",
+                    &measurements,
+                    "mirrored collar after mirror fuse",
+                );
+            }
+            "linear-pads" | "foundation-with-linear-pads" => {
+                assert_linear_pattern_landmarks(&recipe, &measurements);
+            }
+            "circular-lugs" | "foundation-with-circular-lugs" => {
+                assert_circular_landmarks(&recipe, &measurements);
+            }
+            "tapered-reinforcement" => assert_draft_sections(&recipe, &measurements),
+            "foundation-with-taper" => assert_taper_retained(&recipe, &measurements),
+            "lofted-gusset" => assert_loft_sections(&recipe, &measurements),
+            "complete-bracket" => {
+                assert_collar_landmark(
+                    &recipe,
+                    "revolved-collar",
+                    &measurements,
+                    "final original collar",
+                );
+                assert_collar_landmark(
+                    &recipe,
+                    "mirrored-collar",
+                    &measurements,
+                    "final mirrored collar",
+                );
+                assert_linear_pattern_landmarks(&recipe, &measurements);
+                assert_circular_landmarks(&recipe, &measurements);
+                assert_taper_retained(&recipe, &measurements);
+                assert_loft_retained(&recipe, &measurements);
+                let volume = inspect_brep(&worker, &path, feature_id, &next_revision)
+                    .material_volume
+                    .expect("pinned worker reports final material volume");
+                assert!(volume.is_finite() && volume > 0.0);
+                let band = &recipe["frozen"]["volume_band_mm3"];
+                assert!((number(band, "minimum")..=number(band, "maximum")).contains(&volume));
+            }
+            _ => {}
+        }
+
+        if let Some(base_feature_id) = request["base_feature_id"].as_str() {
+            assert_ne!(
+                response_sha,
+                sha256_hex(
+                    breps
+                        .get(base_feature_id)
+                        .unwrap_or_else(|| panic!("base BREP missing for {feature_id}"))
+                ),
+                "step {feature_id} changes its base geometry"
+            );
+        }
+        breps.insert(feature_id.to_string(), bytes);
+        measurements_by_feature.insert(feature_id.to_string(), measurements);
+        revision = next_revision;
+    }
+
+    let expected_feature_ids: Vec<_> = recipe_steps(&recipe)
+        .iter()
+        .map(|step| step["feature_id"].as_str().expect("complete feature ID"))
+        .collect();
+    let saved = Bundle::at(&workspace.root)
+        .open()
+        .expect("complete bundle opens after qualification");
+    assert_eq!(saved.log.len(), 33);
+    assert_eq!(
+        saved
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_feature_ids
+    );
+    assert_reinforcement_intents(&recipe, &saved);
+    assert!(
+        saved.log.entries()[19..32]
+            .iter()
+            .all(|entry| entry.intent.is_some())
+    );
+    assert!(saved.log.entries()[32].intent.is_none());
+    assert_reinforcement_intents(&recipe, &saved);
+    assert_complete_intents(&recipe, &saved);
+    assert_eq!(saved.graph.features().count(), expected_feature_ids.len());
+    assert_eq!(breps.len(), 30);
+
+    let baseline_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    assert_eq!(baseline_identity["revision_hash"], revision);
+    assert_eq!(baseline_identity["transaction_count"], 33);
+    let baseline_log = fs::read(workspace.root.join("transactions.log")).expect("log reads");
+    let baseline_breps = breps.clone();
+    fs::remove_dir_all(workspace.root.join("brep")).expect("derived BREPs remove");
+
+    let replayed = command_response(
+        &Host::new(),
+        "load",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    assert_eq!(
+        replayed["revision_hash"],
+        baseline_identity["revision_hash"]
+    );
+    assert_eq!(
+        replayed["feature_graph_hash"],
+        baseline_identity["feature_graph_hash"]
+    );
+    assert_eq!(
+        fs::read(workspace.root.join("transactions.log")).expect("replayed log reads"),
+        baseline_log,
+        "replay appends zero transactions"
+    );
+    let replayed_identity = command_response(
+        &Host::new(),
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    for field in [
+        "feature_graph_hash",
+        "revision_hash",
+        "transaction_count",
+        "terminal_log_digest",
+    ] {
+        assert_eq!(
+            replayed_identity[field], baseline_identity[field],
+            "replay preserves identity field {field}"
+        );
+    }
+    for (feature_id, original) in baseline_breps {
         assert_eq!(
             fs::read(
                 workspace

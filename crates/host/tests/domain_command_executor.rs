@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -450,6 +451,15 @@ fn rehearsal_response_fixture() -> Value {
 #[test]
 fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_contract() {
     let registry = threeterm_protocol::schema::iter().collect::<Vec<_>>();
+    let baseline_ids = BASELINE_COMMANDS.iter().collect::<HashSet<_>>();
+    assert_eq!(baseline_ids.len(), BASELINE_COMMANDS.len());
+    assert_eq!(
+        registry
+            .iter()
+            .filter(|entry| baseline_ids.contains(&entry.id))
+            .count(),
+        BASELINE_COMMANDS.len()
+    );
     for command in BASELINE_COMMANDS {
         let schema = threeterm_protocol::schema::find(command)
             .unwrap_or_else(|| panic!("baseline command {} is not registered", command.0));
@@ -460,6 +470,8 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         );
         assert!(!schema.request_schema.is_null());
         assert!(!schema.response_schema.is_null());
+        assert!(!schema.request_schema_version.is_empty());
+        assert!(!schema.response_schema_version.is_empty());
     }
 
     let lifecycle_root = root("public-dispatcher-lifecycle");
@@ -542,6 +554,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         validate(&schema.request_schema, &request).unwrap_or_else(|error| {
             panic!("baseline fixture for {} is invalid: {error}", command.0)
         });
+        let before = Bundle::at(&command_root).open().ok();
         let result = Host::new().execute_domain_command(command, request);
         match result {
             Ok(response) => {
@@ -569,7 +582,17 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                             .expect("successful geometry bundle opens")
                             .log
                             .len()
-                            > 0
+                            > before.as_ref().map_or(0, |bundle| bundle.log.len())
+                    );
+                    let after = Bundle::at(&command_root)
+                        .open()
+                        .expect("successful geometry bundle reopens");
+                    assert_ne!(
+                        after.revision_hash_hex(),
+                        before
+                            .as_ref()
+                            .expect("successful geometry starts from a bundle")
+                            .revision_hash_hex()
                     );
                 }
             }

@@ -2375,6 +2375,8 @@ pub struct ShellResult {
     pub brep_sha256: String,
     pub brep_bytes: usize,
     pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_volume: Option<f64>,
 }
 
 impl ShellResult {
@@ -4074,6 +4076,7 @@ mod tests {
             brep_sha256: "deadbeef".to_string(),
             brep_bytes: 42,
             feature_id: "shell-1".to_string(),
+            material_volume: Some(1.0),
         };
         assert!(result.is_success());
 

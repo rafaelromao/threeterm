@@ -4109,6 +4109,10 @@ impl Host {
                             });
                         }
                     }
+                    let measure_removed_volume = request
+                        .get("measure_removed_volume")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
                     let position: [f64; 3] =
                         serde_json::from_value(request.get("position").cloned().ok_or_else(
                             || HostError::Validation {
@@ -4171,6 +4175,9 @@ impl Host {
                             thread_depth.unwrap_or_default(),
                         );
                     }
+                    if measure_removed_volume {
+                        hole_request = hole_request.with_removed_volume_measurement();
+                    }
                     // Fail closed before touching the worker so invalid hole
                     // geometry preserves the prior Revision Snapshot without
                     // requiring a worker binary.
@@ -4186,7 +4193,7 @@ impl Host {
                     let view = self.hole(bundle_path, hole_request, &worker)?;
                     let snapshot = self.load(bundle_path)?;
                     let brep_path = bundle_root.join("brep").join(format!("{feature_id}.brep"));
-                    Ok(serde_json::json!({
+                    let mut response = serde_json::json!({
                         "status": view.result.status,
                         "operation": "hole",
                         "feature_id": view.result.feature_id,
@@ -4197,7 +4204,11 @@ impl Host {
                         "brep_bytes": view.artifact.byte_count,
                         "derived_result": boolean_derived_result_json(&view.artifact),
                         "schema_version": find(command).expect("hole is registered").response_schema_version,
-                    }))
+                    });
+                    if let Some(removed_volume) = view.result.removed_volume {
+                        response["removed_volume"] = serde_json::json!(removed_volume);
+                    }
+                    Ok(response)
                 }
                 FILLET_COMMAND_ID | CHAMFER_COMMAND_ID | SHELL_COMMAND_ID | DRAFT_COMMAND_ID
                 | LOFT_COMMAND_ID => {
@@ -4361,7 +4372,7 @@ impl Host {
                                 base_feature_id.as_deref().expect("validated base feature"),
                             );
                             let view = self.shell(&bundle_path, request, &worker)?;
-                            Ok(finishing_response_value(
+                            let mut response = finishing_response_value(
                                 &view.result.status,
                                 "shell",
                                 &view.result.feature_id,
@@ -4373,7 +4384,11 @@ impl Host {
                                 &view.artifact,
                                 None,
                                 schema_version,
-                            ))
+                            );
+                            if let Some(material_volume) = view.result.material_volume {
+                                response["material_volume"] = serde_json::json!(material_volume);
+                            }
+                            Ok(response)
                         }
                         DRAFT_COMMAND_ID => {
                             let base_path = base_path.ok_or_else(|| HostError::Validation {

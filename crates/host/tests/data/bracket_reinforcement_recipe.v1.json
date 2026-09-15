@@ -1,0 +1,316 @@
+{
+  "schema_version": "threeterm.recipe.bracket-reinforcement/1",
+  "fixture": "bracket-reinforcement",
+  "steps": [
+    {
+      "index": 1,
+      "command": "extrude",
+      "request_schema_version": "threeterm.command.extrude.request/2",
+      "feature_id": "arm-x",
+      "request": {
+        "feature_id": "arm-x",
+        "profile": [[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]],
+        "height": 8.0,
+        "mode": "additive"
+      }
+    },
+    {
+      "index": 2,
+      "command": "extrude",
+      "request_schema_version": "threeterm.command.extrude.request/2",
+      "feature_id": "arm-z",
+      "request": {
+        "feature_id": "arm-z",
+        "profile": [[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]],
+        "height": 8.0,
+        "mode": "additive"
+      }
+    },
+    {
+      "index": 3,
+      "command": "extrude",
+      "request_schema_version": "threeterm.command.extrude.request/2",
+      "feature_id": "pad-a-seed",
+      "request": {
+        "feature_id": "pad-a-seed",
+        "profile": [[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]],
+        "height": 12.0,
+        "mode": "additive"
+      }
+    },
+    {
+      "index": 4,
+      "command": "fillet",
+      "request_schema_version": "threeterm.command.fillet.request/1",
+      "feature_id": "pad-a",
+      "request": {
+        "feature_id": "pad-a",
+        "base_feature_id": "pad-a-seed",
+        "radius": 0.5
+      },
+      "edge_selection": {
+        "role": "outer-perimeter",
+        "midpoint": [30.0, 4.0, 0.0],
+        "tangent": [1.0, 0.0, 0.0],
+        "length": 12.0,
+        "source_edge_id": "pad-a-edge"
+      }
+    },
+    {
+      "index": 5,
+      "command": "extrude",
+      "request_schema_version": "threeterm.command.extrude.request/2",
+      "feature_id": "pad-b-seed",
+      "request": {
+        "feature_id": "pad-b-seed",
+        "profile": [[4.0, 24.0], [16.0, 24.0], [16.0, 36.0], [4.0, 36.0]],
+        "height": 12.0,
+        "mode": "additive"
+      }
+    },
+    {
+      "index": 6,
+      "command": "chamfer",
+      "request_schema_version": "threeterm.command.chamfer.request/1",
+      "feature_id": "pad-b",
+      "request": {
+        "feature_id": "pad-b",
+        "base_feature_id": "pad-b-seed",
+        "distance": 0.25
+      },
+      "edge_selection": {
+        "role": "outer-perimeter",
+        "midpoint": [10.0, 24.0, 0.0],
+        "tangent": [1.0, 0.0, 0.0],
+        "length": 12.0,
+        "source_edge_id": "pad-b-edge"
+      }
+    },
+    {
+      "index": 7,
+      "command": "boolean-fuse",
+      "request_schema_version": "threeterm.command.boolean-fuse.request/1",
+      "feature_id": "bracket-l",
+      "request": {
+        "feature_id": "bracket-l",
+        "base_feature_id": "arm-x",
+        "tool_feature_id": "arm-z"
+      }
+    },
+    {
+      "index": 8,
+      "command": "boolean-fuse",
+      "request_schema_version": "threeterm.command.boolean-fuse.request/1",
+      "feature_id": "bracket-lp1",
+      "request": {
+        "feature_id": "bracket-lp1",
+        "base_feature_id": "bracket-l",
+        "tool_feature_id": "pad-a"
+      }
+    },
+    {
+      "index": 9,
+      "command": "boolean-fuse",
+      "request_schema_version": "threeterm.command.boolean-fuse.request/1",
+      "feature_id": "bracket-base",
+      "request": {
+        "feature_id": "bracket-base",
+        "base_feature_id": "bracket-lp1",
+        "tool_feature_id": "pad-b"
+      }
+    },
+    {
+      "index": 10,
+      "command": "hole",
+      "request_schema_version": "threeterm.command.hole.request/1",
+      "feature_id": "bracket-hole-1",
+      "request": {
+        "feature_id": "bracket-hole-1",
+        "base_feature_id": "bracket-base",
+        "position": [50.0, 10.0, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 4.5,
+        "hole_kind": "drilled"
+      },
+      "edge_clearance": 7.75,
+      "edge_reference_feature_id": "arm-x",
+      "pad_feature_id": "pad-a"
+    },
+    {
+      "index": 11,
+      "command": "hole",
+      "request_schema_version": "threeterm.command.hole.request/1",
+      "feature_id": "bracket-foundation",
+      "request": {
+        "feature_id": "bracket-foundation",
+        "base_feature_id": "bracket-hole-1",
+        "position": [10.0, 50.0, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 4.5,
+        "hole_kind": "drilled"
+      },
+      "edge_clearance": 7.75,
+      "edge_reference_feature_id": "arm-z",
+      "pad_feature_id": "pad-b"
+    },
+    {
+      "index": 12,
+      "command": "save",
+      "request_schema_version": "threeterm.command.save.request/1",
+      "feature_id": "foundation-snapshot",
+      "request": {
+        "feature_id": "foundation-snapshot",
+        "kind": "checkpoint"
+      }
+    },
+    {
+      "index": 13,
+      "command": "revolve",
+      "request_schema_version": "threeterm.command.revolve.request/1",
+      "feature_id": "revolved-collar",
+      "request": {
+        "feature_id": "revolved-collar",
+        "profile": [[20.0, 28.0], [22.0, 28.0], [22.0, 32.0], [20.0, 32.0]],
+        "axis_point": [10.0, 0.0, 0.0],
+        "axis_direction": [0.0, -1.0, 0.0],
+        "angle": 1.5707963267948966
+      }
+    },
+    {
+      "index": 14,
+      "command": "extrude",
+      "request_schema_version": "threeterm.command.extrude.request/2",
+      "feature_id": "hollow-detail-seed",
+      "request": {
+        "feature_id": "hollow-detail-seed",
+        "profile": [[42.0, 5.0], [52.0, 5.0], [52.0, 15.0], [42.0, 15.0]],
+        "height": 20.0,
+        "mode": "additive"
+      }
+    },
+    {
+      "index": 15,
+      "command": "shell",
+      "request_schema_version": "threeterm.command.shell.request/1",
+      "feature_id": "hollow-detail",
+      "request": {
+        "feature_id": "hollow-detail",
+        "base_feature_id": "hollow-detail-seed",
+        "thickness": 1.5
+      }
+    },
+    {
+      "index": 16,
+      "command": "hole",
+      "request_schema_version": "threeterm.command.hole.request/1",
+      "feature_id": "hollow-detail-open",
+      "request": {
+        "feature_id": "hollow-detail-open",
+        "base_feature_id": "hollow-detail",
+        "position": [47.0, 10.0, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "diameter": 5.0,
+        "hole_kind": "drilled",
+        "measure_removed_volume": true
+      }
+    },
+    {
+      "index": 17,
+      "command": "boolean-fuse",
+      "request_schema_version": "threeterm.command.boolean-fuse.request/1",
+      "feature_id": "foundation-with-collar",
+      "request": {
+        "feature_id": "foundation-with-collar",
+        "base_feature_id": "bracket-foundation",
+        "tool_feature_id": "revolved-collar"
+      }
+    },
+    {
+      "index": 18,
+      "command": "boolean-fuse",
+      "request_schema_version": "threeterm.command.boolean-fuse.request/1",
+      "feature_id": "reinforced-foundation",
+      "request": {
+        "feature_id": "reinforced-foundation",
+        "base_feature_id": "foundation-with-collar",
+        "tool_feature_id": "hollow-detail-open"
+      }
+    },
+    {
+      "index": 19,
+      "command": "save",
+      "request_schema_version": "threeterm.command.save.request/1",
+      "feature_id": "reinforcement-snapshot",
+      "request": {
+        "feature_id": "reinforcement-snapshot",
+        "kind": "checkpoint"
+      }
+    }
+  ],
+  "expectations": {
+    "final_feature_ids": [
+      "arm-x",
+      "arm-z",
+      "pad-a-seed",
+      "pad-a",
+      "pad-b-seed",
+      "pad-b",
+      "bracket-l",
+      "bracket-lp1",
+      "bracket-base",
+      "bracket-hole-1",
+      "bracket-foundation",
+      "foundation-snapshot",
+      "revolved-collar",
+      "hollow-detail-seed",
+      "hollow-detail",
+      "hollow-detail-open",
+      "foundation-with-collar",
+      "reinforced-foundation",
+      "reinforcement-snapshot"
+    ],
+    "transaction_count": 19,
+    "hole_diameter": 4.5,
+    "minimum_hole_edge_clearance": 5.0,
+    "arm_span": 60.0,
+    "fillet_transition_arc_length": 0.7853981633974483,
+    "chamfer_linear_length_delta_min": 0.01,
+    "hole_circumference": 14.137166941154069,
+    "minimum_hole_circular_edges": 2,
+    "hole_edge_midpoints": {
+      "bracket-hole-1": [[52.25, 10.0, 0.0], [52.25, 10.0, 8.0]],
+      "bracket-foundation": [[12.25, 50.0, 0.0], [12.25, 50.0, 8.0]]
+    },
+    "retained_pad_landmarks": {
+      "bracket-lp1": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0}
+      ],
+      "bracket-base": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ],
+      "bracket-hole-1": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ],
+      "bracket-foundation": [
+        {"role": "outer-perimeter", "midpoint": [30.0, 4.0, 12.0], "length": 12.0},
+        {"role": "outer-perimeter", "midpoint": [10.0, 24.0, 12.0], "length": 12.0}
+      ]
+    },
+    "collar_arc_lengths": [15.707963267948966, 18.84955592153876],
+    "shell_seed_volume": 2000.0,
+    "shell_material_volume": 1167.0,
+    "shell_volume_tolerance": 0.001,
+    "shell_outer_wall_length": 10.0,
+    "shell_inner_wall_length": 7.0,
+    "opening_diameter": 5.0,
+    "opening_circumference": 15.707963267948966,
+    "opening_midpoint": [49.5, 10.0, 20.0],
+    "opening_removed_volume": 58.90486225480863,
+    "measurement_tolerance": 0.001,
+    "replay_is_byte_identical": true,
+    "replay_appends_zero_transactions": true,
+    "measurements_are_commit_time_only": true
+  }
+}

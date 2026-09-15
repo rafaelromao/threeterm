@@ -126,8 +126,8 @@ const BASELINE_SCHEMA_CONTRACTS: [(&str, &str, &str, &str, &str, &str); 16] = [
         "threeterm.command.hole/1",
         "threeterm.command.hole.request/1",
         "threeterm.command.hole.response/1",
-        "e334102473422ff7d774eceb8b5b5c82f51f8b965430c36bee4c3f3f0b8cb803",
-        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+        "ab4d4178bebf104895ef0fd9df479b285da716e6f1dd1e6f251a4b20ea1da26a",
+        "d3a76303301cf3425b54699dc0dfd1964368583983e02d9aa5d786aa5f6229da",
     ),
     (
         "revolve",
@@ -167,7 +167,7 @@ const BASELINE_SCHEMA_CONTRACTS: [(&str, &str, &str, &str, &str, &str); 16] = [
         "threeterm.command.shell.request/1",
         "threeterm.command.shell.response/1",
         "4705622ec38b335bb8f6140b0e7d7f2d489ec9fb4449c7a733ad3882997042f3",
-        "0d4ed1be13a185f455b70b71802bf142373d58f34c53a775292a32744abc07f6",
+        "b308732b0f7db736bc7a8f05eba02459ca02fa2df2f6d1dfe86519a56e971bc0",
     ),
     (
         "draft",

@@ -3,7 +3,7 @@
 //! L-bracket end-to-end slice (issue #242).
 
 use serde_json::Value;
-use threeterm_protocol::schema::{BRACKET_COMMAND_ID, find};
+use threeterm_protocol::schema::{BRACKET_COMMAND_ID, find, find_by_name};
 
 #[test]
 fn bracket_command_is_registered() {
@@ -110,4 +110,23 @@ fn bracket_response_schema_requires_derived_result_keys() {
         );
     }
     assert_eq!(properties["schema_version"]["type"], "string");
+}
+
+#[test]
+fn finishing_command_schemas_expose_optional_volume_measurements() {
+    let hole = find_by_name("hole").expect("hole is registered");
+    assert_eq!(
+        hole.request_schema["properties"]["measure_removed_volume"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        hole.response_schema["properties"]["removed_volume"]["type"],
+        "number"
+    );
+
+    let shell = find_by_name("shell").expect("shell is registered");
+    assert_eq!(
+        shell.response_schema["properties"]["material_volume"]["type"],
+        "number"
+    );
 }

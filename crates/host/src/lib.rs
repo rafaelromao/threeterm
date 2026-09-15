@@ -4022,6 +4022,7 @@ impl Host {
                                     | "draft"
                                     | "loft"
                             )
+                            || matches!(kind, "hole:drilled" | "hole:tapped")
                     };
                     if !is_solid_kind(&base_kind) || !is_solid_kind(&tool_kind) {
                         return Err(HostError::Validation {

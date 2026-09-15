@@ -62,7 +62,7 @@ fn wait_until(deadline: Instant, mut predicate: impl FnMut() -> bool) -> bool {
 #[test]
 fn crashed_worker_surfaces_the_actual_signal() {
     let fixture = format!(
-        "printf '%s\\n' '{worker}'; kill -SEGV $$",
+        "ulimit -c 0; printf '%s\\n' '{worker}'; kill -SEGV $$",
         worker = worker_ready_line()
     );
     let child = spawn_in_group(&fixture);

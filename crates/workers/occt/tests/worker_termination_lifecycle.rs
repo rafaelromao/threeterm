@@ -359,6 +359,7 @@ fn sigsegv_exposes_actual_signal() {
     let worker = dir.worker_script(
         "worker.sh",
         "#!/bin/sh\n\
+         ulimit -c 0\n\
          printf '%s\\n' '{\"kind\":\"worker_ready\",\"schema_version\":\"threeterm.protocol/1\",\"worker_id\":\"fixture\"}'\n\
          read line\n\
          kill -SEGV $$\n",

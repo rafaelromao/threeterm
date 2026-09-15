@@ -327,6 +327,7 @@ fn production_launch_binds_orbit_evidence_to_the_new_acknowledged_frame() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b[C".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
@@ -357,9 +358,13 @@ fn production_launch_binds_orbit_evidence_to_the_new_acknowledged_frame() {
     let startup = &evidence[0];
     let orbit = evidence.last().expect("orbit evidence exists");
     assert_eq!(startup["frame"]["image_id"], 1);
-    assert_eq!(orbit["frame"]["image_id"], 2);
+    assert_eq!(orbit["frame"]["image_id"], 3);
     assert_eq!(startup["frame"]["revision"], orbit["frame"]["revision"]);
-    assert_eq!(startup["scene"], orbit["scene"]);
+    assert_eq!(startup["scene"]["solids"], orbit["scene"]["solids"]);
+    assert_eq!(
+        startup["scene"]["triangle_count"],
+        orbit["scene"]["triangle_count"]
+    );
     assert_eq!(orbit["camera"]["yaw_degrees"], 5);
     assert_eq!(orbit["camera"]["pitch_degrees"], 20);
 

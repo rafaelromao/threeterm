@@ -117,12 +117,18 @@ validate_viewport_evidence() {
         (.frame.generation | type == "number") and
         (.frame.revision | type == "string" and length > 0) and
         .frame.width == 800 and .frame.height == 480 and
-        (.scene.solids | any(.[]; .feature_id == "l-bracket" and .triangle_count > 0)) and
+        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == "l-bracket" and .[0].triangle_count > 0) and
+        (.scene.triangle_count == (.scene.solids | map(.triangle_count) | add)) and
         (.scene.triangle_count | type == "number" and . > 0) and
         (.scene.body_pixels | type == "number" and . > 0) and
         (.scene.edge_pixels | type == "number" and . > 0) and
         (.scene.non_background_pixels | type == "number" and . > 0) and
         .palette.name == "catppuccin" and
+        (.camera.yaw_degrees | type == "number") and
+        (.camera.pitch_degrees | type == "number") and
+        (.camera.zoom_percent | type == "number") and
+        (.camera.pan_x | type == "number") and
+        (.camera.pan_y | type == "number") and
         .palette.colors == {
             "background": [29,29,45],
             "body": [125,125,152],
@@ -463,6 +469,10 @@ orbit_ready() {
     [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$startup_revision" ]] || return 1
     [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$startup_image_id" ]] || return 1
     [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" != 0 ]] || return 1
+    [[ "$(jq -r '.camera.pitch_degrees' <<<"$viewport_evidence")" == "$(jq -r '.camera.pitch_degrees' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.zoom_percent' <<<"$viewport_evidence")" == "$(jq -r '.camera.zoom_percent' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.pan_x' <<<"$viewport_evidence")" == "$(jq -r '.camera.pan_x' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.pan_y' <<<"$viewport_evidence")" == "$(jq -r '.camera.pan_y' <<<"$viewport_startup_evidence")" ]] || return 1
     local image_id
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     evidence_wire_ready "$image_id" || return 1
@@ -659,7 +669,16 @@ verify_cleanup() {
     for marker in '?1049l' '?1002l' '?1004l' '?1006l' '?1016l' '?2026l'; do
         grep -aFq "$marker" "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing "production output did not contain cleanup marker $marker"
     done
+    grep -aFq '?25h' "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing 'production output did not restore the cursor'
+    grep -aFq '[0m' "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing 'production output did not reset terminal attributes'
     cleanup_status='passed'
+}
+
+cleanup_screenshot_clear() {
+    local body_pixels edge_pixels
+    body_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 125 125 152)" || return 1
+    edge_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 198 165 162)" || return 1
+    [[ "$body_pixels" == 0 && "$edge_pixels" == 0 ]]
 }
 
 wait_for_pid_exit() {
@@ -800,6 +819,7 @@ wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'pr
 tui_status='passed'
 verify_cleanup
 capture_screenshot "$CLEANUP_SCREENSHOT" || die cleanup_screenshot_failed 'cleanup screenshot was not captured before Ghostty teardown'
+cleanup_screenshot_clear || die cleanup_screenshot_not_clear 'cleanup screenshot still contains viewport geometry pixels'
 cleanup_screenshot_taken=1
 release_child_wrapper || die wrapper_release_failed 'Ghostty child wrapper did not accept its release event'
 wait_for_pid_exit "$GHOSTTY_PID" "$RUNNER_TIMEOUT_SECONDS" || die ghostty_exit_timeout 'Ghostty did not exit after the production TUI wrapper was released'

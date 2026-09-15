@@ -658,6 +658,55 @@ fn production_keyboard_orbit_has_a_non_color_motion_acknowledgement() {
 }
 
 #[test]
+fn viewport_evidence_keeps_the_acknowledged_camera_during_frame_coalescing() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("feature is persisted");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let initial = session
+        .render_current()
+        .expect("initial frame is submitted")
+        .started
+        .expect("initial frame starts");
+    session
+        .acknowledge(FrameAcknowledgement::from(&initial))
+        .expect("initial frame is acknowledged");
+
+    let orbit = session
+        .process_terminal_input(b"\x1b[C")
+        .expect("orbit frame is submitted")
+        .submission
+        .started
+        .expect("orbit frame starts");
+    assert_eq!(
+        session
+            .presentation_evidence()
+            .expect("initial evidence remains visible")
+            .camera
+            .yaw_degrees,
+        0
+    );
+
+    session
+        .acknowledge(FrameAcknowledgement::from(&orbit))
+        .expect("orbit frame is acknowledged");
+    assert_eq!(
+        session
+            .presentation_evidence()
+            .expect("orbit evidence is visible")
+            .camera
+            .yaw_degrees,
+        5
+    );
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn production_pick_validates_semantic_candidates_before_selection() {
     let root = temporary_bundle_root();
     let host = Host::new();

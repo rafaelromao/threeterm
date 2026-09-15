@@ -30,9 +30,9 @@ use threeterm_occt_worker::{
     EdgeCandidateEvidence, ExportRequest, ExtrudeMode, ExtrudeRequest, ExtrudeResult,
     FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult, SelectedEdgeContext,
-    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, TranslateResult,
-    WorkerError, new_request_id,
+    OcctWorker, Operation, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult,
+    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest,
+    TranslateResult, WorkerError, new_request_id,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION,
@@ -1366,6 +1366,19 @@ impl From<BundleError> for HostError {
     }
 }
 
+fn host_error_from_execution(error: ExecutionError<HostError>) -> HostError {
+    match error {
+        ExecutionError::UnknownCommand(command) => HostError::Validation {
+            detail: format!("unknown domain command: {}", command.0),
+        },
+        ExecutionError::InvalidRequest(detail) => HostError::Validation { detail },
+        ExecutionError::Handler(error) => error,
+        ExecutionError::InvalidResponse(detail) => HostError::Validation {
+            detail: format!("response violates registered schema: {detail}"),
+        },
+    }
+}
+
 pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
     match error {
         HostError::InvalidEdit {
@@ -1414,6 +1427,20 @@ pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
         HostError::Validation { detail } => Diagnostic::invalid_request(detail),
         _ => Diagnostic::integrity_failure(&error.to_string()),
+    }
+}
+
+/// Project every failure from the public domain-command boundary into the
+/// protocol's shared diagnostic taxonomy. Transport adapters may add their
+/// own framing around this value, but not a second domain error vocabulary.
+pub fn domain_execution_diagnostic(error: &ExecutionError<HostError>) -> Diagnostic {
+    match error {
+        ExecutionError::UnknownCommand(command) => Diagnostic::unknown_command(command.0),
+        ExecutionError::InvalidRequest(detail) => Diagnostic::invalid_request(detail),
+        ExecutionError::Handler(error) => domain_command_diagnostic(error),
+        ExecutionError::InvalidResponse(detail) => {
+            Diagnostic::integrity_failure(&format!("response violates registered schema: {detail}"))
+        }
     }
 }
 
@@ -2976,6 +3003,98 @@ impl Host {
             &cancel,
             &mut ignore_progress,
         )
+    }
+
+    /// Preserve the typed bracket convenience API while routing its mutation
+    /// through the registered public dispatcher.
+    pub fn execute_bracket_command(
+        &self,
+        bundle: impl AsRef<Path>,
+        bracket_id: &str,
+        length: f64,
+        width: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Result<BracketCommitView, HostError> {
+        let bundle = bundle.as_ref();
+        let source_snapshot = if bundle.exists() {
+            Some(self.load(bundle)?)
+        } else {
+            None
+        };
+        let response = self
+            .execute_domain_command(
+                BRACKET_COMMAND_ID,
+                serde_json::json!({
+                    "bundle_path": bundle.to_string_lossy(),
+                    "bracket_id": bracket_id,
+                    "length": length,
+                    "width": width,
+                    "height": height,
+                    "thickness": thickness,
+                }),
+            )
+            .map_err(host_error_from_execution)?;
+        let snapshot = self.load(bundle)?;
+        let source_snapshot = match source_snapshot {
+            Some(source_snapshot) => source_snapshot,
+            None => SnapshotView {
+                generation_id: snapshot.generation_id.clone(),
+                feature_graph_hash: response["source_snapshot"]["feature_graph_hash"]
+                    .as_str()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "bracket response omitted source feature graph hash".to_string(),
+                    })?
+                    .to_string(),
+                revision_hash: response["source_snapshot"]["revision_hash"]
+                    .as_str()
+                    .ok_or_else(|| HostError::Validation {
+                        detail: "bracket response omitted source revision hash".to_string(),
+                    })?
+                    .to_string(),
+                recovered_from_previous: false,
+            },
+        };
+        let request_id = response
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| HostError::Validation {
+                detail: "bracket response omitted request_id".to_string(),
+            })?;
+        let artifact = self
+            .layer1_results
+            .borrow()
+            .values()
+            .find(|artifact| artifact.request_id == request_id)
+            .cloned()
+            .ok_or_else(|| HostError::Validation {
+                detail: "bracket response has no promoted artifact".to_string(),
+            })?;
+        let result = BracketResult {
+            schema_version: threeterm_occt_worker::SCHEMA_VERSION.to_string(),
+            request_id: request_id.to_string(),
+            operation: Operation::Bracket,
+            status: response["status"].as_str().unwrap_or_default().to_string(),
+            brep_path: PathBuf::from(response["brep_path"].as_str().unwrap_or_default()),
+            brep_sha256: response["brep_sha256"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            brep_bytes: response["brep_bytes"]
+                .as_u64()
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .unwrap_or_default(),
+            feature_id: response["feature_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        };
+        Ok(BracketCommitView {
+            source_snapshot,
+            snapshot,
+            result,
+            artifact,
+        })
     }
 
     /// Apply the registered command contract to an adapter-owned orchestration

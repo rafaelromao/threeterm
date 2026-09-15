@@ -134,9 +134,20 @@ fn required_worker(test_name: &str) -> Option<OcctWorker> {
     }
 }
 
-fn required_native_worker(test_name: &str) -> OcctWorker {
-    OcctWorker::locate()
-        .unwrap_or_else(|error| panic!("{test_name}: OCCT worker is required: {error}"))
+fn required_native_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
+        {
+            panic!("{test_name}: OCCT worker is required: {error}")
+        }
+        Err(error) => {
+            eprintln!("{test_name}: OCCT worker unavailable; skipping: {error}");
+            None
+        }
+    }
 }
 
 fn setup_captured_component(root: &PathBuf) {
@@ -1577,7 +1588,9 @@ fn reusable_component_geometry_survives_a_mixed_adapter_handoff() {
 
 #[test]
 fn reusable_geometry_artifact_discard_replay() {
-    let _worker = required_native_worker("reusable_geometry_artifact_discard_replay");
+    let Some(_worker) = required_native_worker("reusable_geometry_artifact_discard_replay") else {
+        return;
+    };
 
     for adapter in [
         ComponentAdapter::Cli,
@@ -1702,7 +1715,9 @@ fn assert_replayed_component_snapshot(before: &ComponentSnapshot, after: &Compon
 
 #[test]
 fn reusable_geometry_adapter_parity() {
-    let _worker = required_native_worker("reusable_geometry_adapter_parity");
+    let Some(_worker) = required_native_worker("reusable_geometry_adapter_parity") else {
+        return;
+    };
 
     let mut outcomes = Vec::new();
     for (adapter, label) in [
@@ -1778,7 +1793,9 @@ fn reusable_geometry_adapter_parity() {
 
 #[test]
 fn reusable_geometry_divergence() {
-    let _worker = required_native_worker("reusable_geometry_divergence");
+    let Some(_worker) = required_native_worker("reusable_geometry_divergence") else {
+        return;
+    };
 
     let session = ComponentSession::new(ComponentAdapter::Cli, bundle());
     session.bracket();

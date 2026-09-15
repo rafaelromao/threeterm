@@ -1,18 +1,40 @@
 use std::fs;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::{Host, HostError};
+use threeterm_host::{Host, HostError, domain_command_diagnostic};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    APPLY_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID,
-    EXTRUDE_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
-    MIRROR_COMMAND_ID, REHEARSE_COMMAND_ID, REVOLVE_COMMAND_ID,
+    APPLY_COMMAND_ID, BOOLEAN_FUSE_COMMAND_ID, BOOLEAN_PATTERN_COMMAND_ID, BRACKET_COMMAND_ID,
+    CHAMFER_COMMAND_ID, CIRCULAR_PATTERN_COMMAND_ID, DRAFT_COMMAND_ID, EXTRUDE_COMMAND_ID,
+    FILLET_COMMAND_ID, HOLE_COMMAND_ID, IDENTITY_COMMAND_ID, LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID, LOAD_COMMAND_ID, LOFT_COMMAND_ID, MIRROR_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
+    REHEARSE_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID,
 };
 use threeterm_protocol::schema_validator::validate;
+
+const BASELINE_COMMANDS: [threeterm_protocol::schema::CommandId; 16] = [
+    LIST_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID,
+    SAVE_COMMAND_ID,
+    LOAD_COMMAND_ID,
+    EXTRUDE_COMMAND_ID,
+    BOOLEAN_FUSE_COMMAND_ID,
+    FILLET_COMMAND_ID,
+    CHAMFER_COMMAND_ID,
+    HOLE_COMMAND_ID,
+    REVOLVE_COMMAND_ID,
+    MIRROR_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID,
+    CIRCULAR_PATTERN_COMMAND_ID,
+    SHELL_COMMAND_ID,
+    DRAFT_COMMAND_ID,
+    LOFT_COMMAND_ID,
+];
 
 fn root(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -20,6 +42,25 @@ fn root(label: &str) -> std::path::PathBuf {
         .expect("system clock is after the unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("threeterm-domain-executor-{label}-{suffix}"))
+}
+
+fn directory_snapshot(path: &std::path::Path) -> Vec<String> {
+    let mut entries = if path.is_dir() {
+        fs::read_dir(path)
+            .expect("directory reads")
+            .map(|entry| {
+                entry
+                    .expect("directory entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    entries.sort();
+    entries
 }
 
 fn identity_request(path: &std::path::Path) -> Value {
@@ -407,6 +448,305 @@ fn rehearsal_response_fixture() -> Value {
 }
 
 #[test]
+fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_contract() {
+    let registry = threeterm_protocol::schema::iter().collect::<Vec<_>>();
+    for command in BASELINE_COMMANDS {
+        let schema = threeterm_protocol::schema::find(command)
+            .unwrap_or_else(|| panic!("baseline command {} is not registered", command.0));
+        assert!(
+            registry.iter().any(|entry| entry.id == command),
+            "baseline command {} is missing from the enumerated registry",
+            command.0
+        );
+        assert!(!schema.request_schema.is_null());
+        assert!(!schema.response_schema.is_null());
+    }
+
+    let lifecycle_root = root("public-dispatcher-lifecycle");
+    let project = lifecycle_root.join("project");
+    let host = Host::new();
+    let created = host
+        .execute_domain_command(
+            NEW_PROJECT_COMMAND_ID,
+            json!({"destination": project.to_string_lossy()}),
+        )
+        .expect("new-project executes through the public dispatcher");
+    validate(
+        &threeterm_protocol::schema::find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project schema")
+            .response_schema,
+        &created,
+    )
+    .expect("new-project response validates");
+    let initial = Bundle::at(&project).open().expect("new project opens");
+    assert!(initial.graph.features().next().is_none());
+    assert_eq!(initial.log.len(), 0);
+
+    let saved = host
+        .execute_domain_command(
+            SAVE_COMMAND_ID,
+            json!({
+                "bundle_path": project.to_string_lossy(),
+                "feature_id": "lifecycle-checkpoint",
+                "kind": "cube"
+            }),
+        )
+        .expect("save executes through the public dispatcher");
+    validate(
+        &threeterm_protocol::schema::find(SAVE_COMMAND_ID)
+            .expect("save schema")
+            .response_schema,
+        &saved,
+    )
+    .expect("save response validates");
+    let saved_bundle = Bundle::at(&project).open().expect("saved project opens");
+    assert_eq!(saved_bundle.log.len(), 1);
+
+    let reloaded = Host::new()
+        .execute_domain_command(
+            LOAD_COMMAND_ID,
+            json!({"bundle_path": project.to_string_lossy()}),
+        )
+        .expect("load executes through the public dispatcher");
+    validate(
+        &threeterm_protocol::schema::find(LOAD_COMMAND_ID)
+            .expect("load schema")
+            .response_schema,
+        &reloaded,
+    )
+    .expect("load response validates");
+    let identity = Host::new()
+        .execute_domain_command(
+            IDENTITY_COMMAND_ID,
+            json!({"bundle_path": project.to_string_lossy()}),
+        )
+        .expect("identity executes through the public dispatcher");
+    assert_eq!(reloaded["feature_graph_hash"], saved["feature_graph_hash"]);
+    assert_eq!(reloaded["revision_hash"], saved["revision_hash"]);
+    assert_eq!(identity["transaction_count"], json!(1));
+
+    for command in BASELINE_COMMANDS {
+        let command_root = root(&format!("public-dispatcher-{}", command.0));
+        let revision = if matches!(command, LIST_COMMAND_ID | NEW_PROJECT_COMMAND_ID) {
+            String::new()
+        } else {
+            Bundle::create(&command_root)
+                .expect("isolated baseline fixture creates")
+                .open()
+                .expect("isolated baseline fixture opens")
+                .revision_hash_hex()
+                .to_string()
+        };
+        let request = registry_request(command.0, &command_root, &revision);
+        let schema = threeterm_protocol::schema::find(command).expect("baseline schema exists");
+        validate(&schema.request_schema, &request).unwrap_or_else(|error| {
+            panic!("baseline fixture for {} is invalid: {error}", command.0)
+        });
+        let result = Host::new().execute_domain_command(command, request);
+        match result {
+            Ok(response) => {
+                validate(&schema.response_schema, &response).unwrap_or_else(|error| {
+                    panic!("response for {} fails its schema: {error}", command.0)
+                });
+                if response.get("brep_path").is_some() {
+                    let brep_path = response["brep_path"]
+                        .as_str()
+                        .expect("geometry response has a string BREP path");
+                    assert!(std::path::Path::new(brep_path).is_file());
+                    assert!(
+                        response["brep_sha256"]
+                            .as_str()
+                            .is_some_and(|hash| !hash.is_empty())
+                    );
+                    assert!(
+                        response["brep_bytes"]
+                            .as_u64()
+                            .is_some_and(|bytes| bytes > 0)
+                    );
+                    assert!(
+                        Bundle::at(&command_root)
+                            .open()
+                            .expect("successful geometry bundle opens")
+                            .log
+                            .len()
+                            > 0
+                    );
+                }
+            }
+            Err(ExecutionError::Handler(error)) => {
+                let diagnostic = domain_command_diagnostic(&error);
+                assert_eq!(
+                    diagnostic.schema_version,
+                    threeterm_protocol::schema_version()
+                );
+                assert!(matches!(
+                    diagnostic.code,
+                    threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest
+                        | threeterm_protocol::diagnostic::DiagnosticCode::IntegrityFailure
+                        | threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure
+                        | threeterm_protocol::diagnostic::DiagnosticCode::UnsupportedGeometry
+                        | threeterm_protocol::diagnostic::DiagnosticCode::BrepInvalid
+                ));
+                if command_root.exists() {
+                    assert_eq!(
+                        Bundle::at(&command_root)
+                            .open()
+                            .expect("rejected fixture bundle opens")
+                            .log
+                            .len(),
+                        0
+                    );
+                }
+            }
+            Err(error) => panic!(
+                "baseline command {} bypassed the host handler: {error:?}",
+                command.0
+            ),
+        }
+        let _ = fs::remove_dir_all(&command_root);
+    }
+
+    let _ = fs::remove_dir_all(&lifecycle_root);
+}
+
+#[test]
+fn baseline_invalid_requests_preserve_canonical_state() {
+    for command in BASELINE_COMMANDS {
+        let command_root = root(&format!("invalid-{}", command.0));
+        let request = if command == LIST_COMMAND_ID {
+            assert!(!command_root.exists());
+            json!({"unexpected": true})
+        } else if command == NEW_PROJECT_COMMAND_ID {
+            json!({"destination": ""})
+        } else {
+            Bundle::create(&command_root).expect("invalid-request fixture creates");
+            json!({})
+        };
+        let before_entries = directory_snapshot(&command_root);
+        let before_manifest = fs::read(command_root.join("manifest.json")).ok();
+        let before_log = fs::read(command_root.join("transactions.log")).ok();
+
+        let result = Host::new().execute_domain_command(command, request);
+        assert!(
+            matches!(result, Err(ExecutionError::InvalidRequest(_))),
+            "{} must be rejected by the shared request validator: {result:?}",
+            command.0
+        );
+
+        assert_eq!(directory_snapshot(&command_root), before_entries);
+        assert_eq!(
+            fs::read(command_root.join("manifest.json")).ok(),
+            before_manifest
+        );
+        assert_eq!(
+            fs::read(command_root.join("transactions.log")).ok(),
+            before_log
+        );
+        let _ = fs::remove_dir_all(&command_root);
+    }
+}
+
+#[test]
+fn domain_execution_diagnostic_maps_all_shared_failures() {
+    let cases = [
+        (
+            ExecutionError::UnknownCommand(threeterm_protocol::schema::CommandId("missing")),
+            "unknown_command",
+        ),
+        (
+            ExecutionError::InvalidRequest("request is invalid".to_string()),
+            "invalid_request",
+        ),
+        (
+            ExecutionError::InvalidResponse("response is invalid".to_string()),
+            "integrity_failure",
+        ),
+        (
+            ExecutionError::Handler(HostError::Validation {
+                detail: "handler rejected request".to_string(),
+            }),
+            "invalid_request",
+        ),
+    ];
+
+    for (error, expected_code) in cases {
+        let diagnostic = threeterm_host::domain_execution_diagnostic(&error);
+        let value = serde_json::to_value(diagnostic).expect("diagnostic serializes");
+        assert_eq!(value["code"], expected_code);
+        assert_eq!(
+            value["schema_version"],
+            threeterm_protocol::schema_version()
+        );
+    }
+}
+
+#[test]
+fn public_dispatcher_propagates_cancellation_without_persistence() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("OCCT cancellation integration skipped: {error}");
+            return;
+        }
+    };
+    let root = root("public-dispatcher-cancel");
+    let host = Host::new();
+    host.execute_domain_command(
+        BRACKET_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "bracket_id": "base",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0
+        }),
+    )
+    .expect("public dispatcher creates the cancellation fixture");
+    let before = Bundle::at(&root).open().expect("cancellation bundle opens");
+    let cancel = AtomicBool::new(true);
+    let mut progress = Vec::new();
+    let result = host.execute_domain_command_with_worker_and_cancel_and_progress(
+        BOOLEAN_PATTERN_COMMAND_ID,
+        json!({
+            "bundle_path": root.to_string_lossy(),
+            "feature_id": "cancelled-pattern",
+            "base_feature_id": "base",
+            "origin": [0.0, 0.0, 0.0],
+            "spacing": [1.0, 1.0],
+            "columns": 1,
+            "rows": 1,
+            "diameter": 1.0
+        }),
+        Some(&worker),
+        &cancel,
+        &mut |event| progress.push(event.stage.clone()),
+    );
+    let Err(ExecutionError::Handler(HostError::WorkerTerminated { record })) = result else {
+        panic!("cancelled command must return a structured termination: {result:?}");
+    };
+    assert_eq!(record.cancel_reason.as_deref(), Some("cancelled by host"));
+    assert_eq!(
+        record.exit_kind,
+        threeterm_protocol::supervisor::ExitKind::Cooperative
+    );
+    assert_eq!(
+        threeterm_host::domain_execution_diagnostic(&ExecutionError::Handler(
+            HostError::WorkerTerminated { record },
+        ))
+        .code,
+        threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure
+    );
+    assert_eq!(
+        Bundle::at(&root).open().expect("bundle reopens").log.len(),
+        before.log.len()
+    );
+    assert!(!root.join("brep/cancelled-pattern.brep").exists());
+    let _ = progress;
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn shared_executor_preserves_identity_and_durable_apply_transaction() {
     let root = root("accepted");
     Bundle::create(&root).expect("bundle creates");
@@ -681,8 +1021,13 @@ fn derived_geometry_commands_reject_unproven_base_breps_before_worker_execution(
 
 #[test]
 fn interactive_shared_command_semantics() {
-    let worker = OcctWorker::locate()
-        .unwrap_or_else(|error| panic!("interactive bracket semantics require OCCT: {error}"));
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("OCCT interactive command semantics skipped: {error}");
+            return;
+        }
+    };
     let root = root("interactive-bracket-semantics");
     Bundle::create(&root).expect("bundle creates");
     let host = Host::new();

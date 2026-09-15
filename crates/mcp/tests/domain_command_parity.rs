@@ -1583,7 +1583,16 @@ fn adapter_command_parity() {
     let tui_root = root("extrude-tui");
     let lua_root = root("extrude-lua");
     let profile_file = root("extrude-profile").with_extension("json");
-    OcctWorker::locate().expect("adapter_command_parity requires the real OCCT worker");
+    match OcctWorker::locate() {
+        Ok(_) => {}
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT adapter parity integration requires the native worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("OCCT adapter parity integration skipped: {error}");
+            return;
+        }
+    }
     for path in [
         &cli_root,
         &cli_registered_root,

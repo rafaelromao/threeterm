@@ -1373,8 +1373,10 @@ fn host_error_from_execution(error: ExecutionError<HostError>) -> HostError {
         },
         ExecutionError::InvalidRequest(detail) => HostError::Validation { detail },
         ExecutionError::Handler(error) => error,
-        ExecutionError::InvalidResponse(detail) => HostError::Validation {
-            detail: format!("response violates registered schema: {detail}"),
+        ExecutionError::InvalidResponse(detail) => HostError::DerivedResult {
+            diagnostic: Diagnostic::integrity_failure(&format!(
+                "response violates registered schema: {detail}"
+            )),
         },
     }
 }

@@ -24,41 +24,41 @@ use threeterm_protocol::schema::{
 use threeterm_protocol::schema_validator::validate;
 
 const BASELINE_COMMANDS: [threeterm_protocol::schema::CommandId; 16] = [
-    BOOLEAN_FUSE_COMMAND_ID,
-    CHAMFER_COMMAND_ID,
-    CIRCULAR_PATTERN_COMMAND_ID,
-    DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID,
-    FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID,
     LIST_COMMAND_ID,
-    LOAD_COMMAND_ID,
-    LOFT_COMMAND_ID,
-    MIRROR_COMMAND_ID,
     NEW_PROJECT_COMMAND_ID,
-    REVOLVE_COMMAND_ID,
     SAVE_COMMAND_ID,
+    LOAD_COMMAND_ID,
+    EXTRUDE_COMMAND_ID,
+    BOOLEAN_FUSE_COMMAND_ID,
+    FILLET_COMMAND_ID,
+    CHAMFER_COMMAND_ID,
+    HOLE_COMMAND_ID,
+    REVOLVE_COMMAND_ID,
+    MIRROR_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID,
+    CIRCULAR_PATTERN_COMMAND_ID,
     SHELL_COMMAND_ID,
+    DRAFT_COMMAND_ID,
+    LOFT_COMMAND_ID,
 ];
 
-const BASELINE_EXECUTION_ORDER: [threeterm_protocol::schema::CommandId; 16] = [
-    LIST_COMMAND_ID,
-    NEW_PROJECT_COMMAND_ID,
-    SAVE_COMMAND_ID,
-    LOAD_COMMAND_ID,
-    EXTRUDE_COMMAND_ID,
+const BASELINE_REGISTRY_ORDER: [threeterm_protocol::schema::CommandId; 16] = [
     BOOLEAN_FUSE_COMMAND_ID,
-    FILLET_COMMAND_ID,
     CHAMFER_COMMAND_ID,
-    HOLE_COMMAND_ID,
-    REVOLVE_COMMAND_ID,
-    MIRROR_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID,
     CIRCULAR_PATTERN_COMMAND_ID,
-    SHELL_COMMAND_ID,
     DRAFT_COMMAND_ID,
+    EXTRUDE_COMMAND_ID,
+    FILLET_COMMAND_ID,
+    HOLE_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID,
+    LOAD_COMMAND_ID,
     LOFT_COMMAND_ID,
+    MIRROR_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID,
+    REVOLVE_COMMAND_ID,
+    SAVE_COMMAND_ID,
+    SHELL_COMMAND_ID,
 ];
 
 #[derive(Debug)]
@@ -771,7 +771,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
     assert_eq!(
-        baseline_projection, BASELINE_COMMANDS,
+        baseline_projection, BASELINE_REGISTRY_ORDER,
         "the registry must contain the qualified baseline in order"
     );
     let extras = registry
@@ -801,7 +801,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
     let mut saved_hashes = None;
     let native_worker_required = std::env::var_os("THREETERM_REQUIRE_OCCT").is_some();
     let mut rows = Vec::new();
-    for command in BASELINE_EXECUTION_ORDER {
+    for command in BASELINE_COMMANDS {
         let command_root = match command {
             NEW_PROJECT_COMMAND_ID => lifecycle_parent.clone(),
             SAVE_COMMAND_ID | LOAD_COMMAND_ID => lifecycle_root.clone(),
@@ -1100,13 +1100,29 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         }
     }
 
+    let identity_schema =
+        threeterm_protocol::schema::find(IDENTITY_COMMAND_ID).expect("identity schema exists");
+    let identity = Host::new()
+        .execute_domain_command(IDENTITY_COMMAND_ID, identity_request(&lifecycle_root))
+        .expect("fresh host identity executes after load");
+    validate(&identity_schema.response_schema, &identity)
+        .expect("identity response satisfies its registered schema");
+    let saved = Bundle::at(&lifecycle_root)
+        .open()
+        .expect("saved lifecycle bundle reopens for identity");
+    assert_eq!(
+        identity["transaction_count"],
+        saved.log.len(),
+        "identity reports the saved canonical transaction count"
+    );
+
     let _ = fs::remove_dir_all(&lifecycle_parent);
     assert_eq!(rows.len(), BASELINE_COMMANDS.len());
     assert_eq!(
         rows.iter()
             .map(|row| row.command_id.as_str())
             .collect::<Vec<_>>(),
-        BASELINE_EXECUTION_ORDER
+        BASELINE_COMMANDS
             .iter()
             .map(|command| command.0)
             .collect::<Vec<_>>()

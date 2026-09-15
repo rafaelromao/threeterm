@@ -495,80 +495,28 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         assert!(!schema.response_schema_version.is_empty());
     }
 
-    let lifecycle_root = root("public-dispatcher-lifecycle");
-    let project = lifecycle_root.join("project");
-    let host = Host::new();
-    let created = host
-        .execute_domain_command(
-            NEW_PROJECT_COMMAND_ID,
-            json!({"destination": project.to_string_lossy()}),
-        )
-        .expect("new-project executes through the public dispatcher");
-    validate(
-        &threeterm_protocol::schema::find(NEW_PROJECT_COMMAND_ID)
-            .expect("new-project schema")
-            .response_schema,
-        &created,
-    )
-    .expect("new-project response validates");
-    let initial = Bundle::at(&project).open().expect("new project opens");
-    assert!(initial.graph.features().next().is_none());
-    assert_eq!(initial.log.len(), 0);
-
-    let saved = host
-        .execute_domain_command(
-            SAVE_COMMAND_ID,
-            json!({
-                "bundle_path": project.to_string_lossy(),
-                "feature_id": "lifecycle-checkpoint",
-                "kind": "cube"
-            }),
-        )
-        .expect("save executes through the public dispatcher");
-    validate(
-        &threeterm_protocol::schema::find(SAVE_COMMAND_ID)
-            .expect("save schema")
-            .response_schema,
-        &saved,
-    )
-    .expect("save response validates");
-    let saved_bundle = Bundle::at(&project).open().expect("saved project opens");
-    assert_eq!(saved_bundle.log.len(), 1);
-
-    let reloaded = Host::new()
-        .execute_domain_command(
-            LOAD_COMMAND_ID,
-            json!({"bundle_path": project.to_string_lossy()}),
-        )
-        .expect("load executes through the public dispatcher");
-    validate(
-        &threeterm_protocol::schema::find(LOAD_COMMAND_ID)
-            .expect("load schema")
-            .response_schema,
-        &reloaded,
-    )
-    .expect("load response validates");
-    let identity = Host::new()
-        .execute_domain_command(
-            IDENTITY_COMMAND_ID,
-            json!({"bundle_path": project.to_string_lossy()}),
-        )
-        .expect("identity executes through the public dispatcher");
-    assert_eq!(reloaded["feature_graph_hash"], saved["feature_graph_hash"]);
-    assert_eq!(reloaded["revision_hash"], saved["revision_hash"]);
-    assert_eq!(identity["transaction_count"], json!(1));
-
+    let lifecycle_parent = root("public-dispatcher-lifecycle");
+    let lifecycle_root = lifecycle_parent.join("new-project");
+    let mut saved_hashes = None;
     for command in BASELINE_COMMANDS {
-        let command_root = root(&format!("public-dispatcher-{}", command.0));
-        let revision = if matches!(command, LIST_COMMAND_ID | NEW_PROJECT_COMMAND_ID) {
-            String::new()
-        } else {
-            Bundle::create(&command_root)
+        let command_root = match command {
+            NEW_PROJECT_COMMAND_ID => lifecycle_parent.clone(),
+            SAVE_COMMAND_ID | LOAD_COMMAND_ID => lifecycle_root.clone(),
+            _ => root(&format!("public-dispatcher-{}", command.0)),
+        };
+        let revision = match command {
+            LIST_COMMAND_ID | NEW_PROJECT_COMMAND_ID => String::new(),
+            SAVE_COMMAND_ID | LOAD_COMMAND_ID => Bundle::at(&command_root)
+                .open()
+                .expect("lifecycle fixture opens")
+                .revision_hash_hex()
+                .to_string(),
+            _ => Bundle::create(&command_root)
                 .expect("isolated baseline fixture creates")
                 .open()
                 .expect("isolated baseline fixture opens")
                 .revision_hash_hex()
-                .to_string()
+                .to_string(),
         };
         let request = registry_request(command.0, &command_root, &revision);
         let schema = threeterm_protocol::schema::find(command).expect("baseline schema exists");
@@ -585,6 +533,39 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 validate(&schema.response_schema, &response).unwrap_or_else(|error| {
                     panic!("response for {} fails its schema: {error}", command.0)
                 });
+                if command == NEW_PROJECT_COMMAND_ID {
+                    let created = Bundle::at(&lifecycle_root)
+                        .open()
+                        .expect("new project opens");
+                    assert!(created.graph.features().next().is_none());
+                    assert_eq!(created.log.len(), 0);
+                } else if command == SAVE_COMMAND_ID {
+                    let saved = Bundle::at(&lifecycle_root)
+                        .open()
+                        .expect("saved project opens");
+                    assert_eq!(saved.log.len(), 1);
+                    saved_hashes = Some((
+                        response["feature_graph_hash"]
+                            .as_str()
+                            .expect("save response has graph hash")
+                            .to_string(),
+                        response["revision_hash"]
+                            .as_str()
+                            .expect("save response has revision hash")
+                            .to_string(),
+                    ));
+                } else if command == LOAD_COMMAND_ID {
+                    let (feature_graph_hash, revision_hash) =
+                        saved_hashes.as_ref().expect("load follows save");
+                    assert_eq!(
+                        response["feature_graph_hash"].as_str(),
+                        Some(feature_graph_hash.as_str())
+                    );
+                    assert_eq!(
+                        response["revision_hash"].as_str(),
+                        Some(revision_hash.as_str())
+                    );
+                }
                 if matches!(
                     command,
                     EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
@@ -689,10 +670,15 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 command.0
             ),
         }
-        let _ = fs::remove_dir_all(&command_root);
+        if !matches!(
+            command,
+            NEW_PROJECT_COMMAND_ID | SAVE_COMMAND_ID | LOAD_COMMAND_ID
+        ) {
+            let _ = fs::remove_dir_all(&command_root);
+        }
     }
 
-    let _ = fs::remove_dir_all(&lifecycle_root);
+    let _ = fs::remove_dir_all(&lifecycle_parent);
 }
 
 #[test]

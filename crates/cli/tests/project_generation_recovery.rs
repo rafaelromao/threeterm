@@ -150,13 +150,40 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 
 #[test]
 fn generation_interruption_recovery() {
-    let worker = OcctWorker::locate().unwrap_or_else(|error| {
-        panic!(
-            "generation_interruption_recovery requires the OCCT worker; set \
-             THREETERM_OCCT_DIR, THREETERM_OCCT_VENDOR=1, or THREETERM_OCCTBUILD_WORKER: \
-             {error:?}"
-        )
-    });
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT generation recovery integration requires the native worker: {error:?}");
+        }
+        Err(error) => {
+            eprintln!("OCCT generation recovery integration skipped: {error:?}");
+            let deterministic_scenario = unique_scenario("deterministic-fallback");
+            let deterministic_root = deterministic_scenario.join("project");
+            response(
+                &run_save(&deterministic_root, "before", None),
+                "deterministic initial save",
+            );
+            let before = GenerationHashes::from_response(
+                &response(
+                    &run_save(&deterministic_root, "current", None),
+                    "deterministic current save",
+                ),
+                "deterministic pre-save generation",
+            );
+            let interrupted = run_save(&deterministic_root, "interrupted", Some("staged-files"));
+            assert_eq!(interrupted.status.code(), Some(137));
+            let recovered = response(
+                &run_load(&deterministic_root),
+                "deterministic recovery load",
+            );
+            assert_eq!(
+                GenerationHashes::from_response(&recovered, "deterministic recovered generation"),
+                before
+            );
+            let _ = fs::remove_dir_all(deterministic_scenario);
+            return;
+        }
+    };
     let control_scenario = unique_scenario("control");
     let control_root = control_scenario.join("project");
     response(&run_save(&control_root, "seed", None), "control seed save");

@@ -4236,6 +4236,7 @@ impl Host {
                             base,
                             &current.revision_hash,
                             selected,
+                            true,
                         )?;
                     }
                     let schema_version = find(command)
@@ -5328,6 +5329,7 @@ impl Host {
                 base,
                 expected_revision,
                 selected,
+                true,
             )
             .map_err(ExecutionError::Handler)?;
         }
@@ -8005,7 +8007,7 @@ impl Host {
     }
 
     fn authenticated_replay_bytes(
-        _root: &Path,
+        root: &Path,
         loaded: &LoadedBundle,
         feature_id: &str,
         request_id: &str,
@@ -8042,6 +8044,17 @@ impl Host {
             })?;
         if replayed.len() == expected_bytes && sha256_hex(replayed) == expected_sha {
             return Ok(replayed.to_vec());
+        }
+
+        // OCCT finishing serialization can vary while retaining the same
+        // authenticated feature bytes in the previous generation.
+        let previous = previous_generation_path(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{feature_id}.brep"));
+        if previous.is_file()
+            && let Ok(bytes) = read_brep_verified(&previous, Some((expected_bytes, expected_sha)))
+        {
+            return Ok(bytes);
         }
 
         Err(HostError::BrepIo {
@@ -13560,6 +13573,7 @@ fn replay_finishing_geometry(
                 &value.base_feature_id,
                 &source_revision,
                 selected_edge,
+                false,
             )?)?;
             let edit_target = value
                 .edit_target
@@ -13608,6 +13622,7 @@ fn replay_finishing_geometry(
                 &value.base_feature_id,
                 &source_revision,
                 selected_edge,
+                false,
             )?)?;
             let request = ChamferRequest::new(value.request_id, base_path, value.distance)
                 .with_output_path(
@@ -15565,9 +15580,12 @@ fn resolve_selected_edge_with_worker(
     base_feature_id: &str,
     source_revision: &str,
     selected: serde_json::Value,
+    require_canonical_semantic_id: bool,
 ) -> Result<serde_json::Value, HostError> {
     let reference = selected_edge_reference_from_value(selected.clone())?;
-    if reference.semantic_id != canonical_edge_semantic_id_from_reference(&reference) {
+    if require_canonical_semantic_id
+        && reference.semantic_id != canonical_edge_semantic_id_from_reference(&reference)
+    {
         return Err(HostError::Validation {
             detail:
                 "reference is incompatible: selected edge semantic ID does not match its evidence"

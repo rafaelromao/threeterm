@@ -1880,6 +1880,12 @@ fn bracket_complete_recipe_qualifies_through_public_commands() {
             "step {feature_id} advances revision"
         );
         if command_name == "save" {
+            assert!(response["feature_graph_hash"].as_str().is_some());
+            assert!(response["revision_hash"].as_str().is_some());
+            assert_eq!(
+                response["schema_version"],
+                "threeterm.command.save.response/1"
+            );
             revision = next_revision;
             continue;
         }
@@ -2030,6 +2036,22 @@ fn bracket_complete_recipe_qualifies_through_public_commands() {
         baseline_log,
         "replay appends zero transactions"
     );
+    let replayed_identity = command_response(
+        &Host::new(),
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    for field in [
+        "feature_graph_hash",
+        "revision_hash",
+        "transaction_count",
+        "terminal_log_digest",
+    ] {
+        assert_eq!(
+            replayed_identity[field], baseline_identity[field],
+            "replay preserves identity field {field}"
+        );
+    }
     for (feature_id, original) in baseline_breps {
         assert_eq!(
             fs::read(

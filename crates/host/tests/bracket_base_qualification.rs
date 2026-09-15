@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{EdgeCandidateEvidence, OcctWorker};
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, LoadedBundle};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema;
 use threeterm_protocol::schema_validator::validate;
@@ -127,6 +127,15 @@ fn assert_recipe_extends_frozen_base(reinforcement_recipe: &Value) {
             .collect::<Vec<_>>()[..],
         "reinforcement recipe preserves the frozen feature order"
     );
+    for (key, value) in base["expectations"]
+        .as_object()
+        .expect("base recipe expectations are an object")
+    {
+        assert_eq!(
+            &reinforcement_recipe["expectations"][key], value,
+            "reinforcement recipe changes frozen expectation {key}"
+        );
+    }
 }
 
 fn step_for_feature<'a>(recipe: &'a Value, feature_id: &str) -> &'a Value {
@@ -378,6 +387,134 @@ fn assert_measured_geometry(
             "{feature_id} has no retained top opening path"
         );
     }
+}
+
+fn assert_post_fusion_landmarks(
+    recipe: &Value,
+    feature_id: &str,
+    measurements: &[EdgeCandidateEvidence],
+    include_walls: bool,
+) {
+    assert!(
+        measurements.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && candidate.length > 1e-3
+                && (28.0..=32.0).contains(&candidate.midpoint[1])
+                && candidate.midpoint[0] >= 20.0
+        }),
+        "{feature_id} lost the retained collar landmark"
+    );
+    if include_walls {
+        for expected_length in [
+            number(&recipe["expectations"], "shell_outer_wall_length"),
+            number(&recipe["expectations"], "shell_inner_wall_length"),
+        ] {
+            assert!(
+                measurements.iter().any(|candidate| {
+                    candidate.role == "outer-perimeter"
+                        && (candidate.length - expected_length).abs() <= 1e-3
+                }),
+                "{feature_id} lost the retained wall edge of {expected_length}"
+            );
+        }
+    }
+}
+
+fn assert_reinforcement_intents(recipe: &Value, saved: &LoadedBundle) {
+    let expected_steps = &recipe_steps(recipe)[..18];
+    let actual: Vec<_> = saved.log.entries()[..18]
+        .iter()
+        .zip(expected_steps)
+        .map(|(entry, step)| {
+            let intent = entry.intent.as_ref().expect("geometry step has an intent");
+            let encoded = serde_json::to_value(intent).expect("canonical intent serializes");
+            assert_eq!(
+                encoded["affected_semantic_ids"],
+                json!([step["feature_id"]]),
+                "canonical intent impact for {}",
+                step["feature_id"]
+            );
+            match step["command"].as_str().expect("step command") {
+                "revolve" => {
+                    assert_eq!(encoded["command"], "revolve");
+                    assert_eq!(encoded["operation"], "revolve");
+                    assert_eq!(
+                        encoded["deterministic_inputs"],
+                        json!({
+                            "profile": step["request"]["profile"],
+                            "axis_point": step["request"]["axis_point"],
+                            "axis_direction": step["request"]["axis_direction"],
+                            "angle": step["request"]["angle"]
+                        })
+                    );
+                }
+                "shell" => {
+                    assert_eq!(encoded["command"], "shell");
+                    assert_eq!(encoded["operation"], "shell");
+                    assert_eq!(
+                        encoded["base_feature_id"],
+                        step["request"]["base_feature_id"]
+                    );
+                    assert_eq!(encoded["thickness"], step["request"]["thickness"]);
+                }
+                "hole" if step["feature_id"] == "hollow-detail-open" => {
+                    assert_eq!(encoded["command"], "hole");
+                    assert_eq!(encoded["hole_kind"], "drilled");
+                    assert_eq!(
+                        encoded["base_feature_id"],
+                        step["request"]["base_feature_id"]
+                    );
+                    assert_eq!(
+                        encoded["deterministic_inputs"],
+                        json!({
+                            "position": step["request"]["position"],
+                            "direction": step["request"]["direction"],
+                            "diameter": step["request"]["diameter"]
+                        })
+                    );
+                }
+                "boolean-fuse"
+                    if step["feature_id"] == "foundation-with-collar"
+                        || step["feature_id"] == "reinforced-foundation" =>
+                {
+                    assert_eq!(encoded["command"], "boolean");
+                    assert_eq!(encoded["operation"], "fuse");
+                    assert_eq!(
+                        encoded["base_feature_id"],
+                        step["request"]["base_feature_id"]
+                    );
+                    assert_eq!(
+                        encoded["tool_feature_id"],
+                        step["request"]["tool_feature_id"]
+                    );
+                }
+                _ => {}
+            }
+            format!("{}:{}", intent.command(), intent.operation())
+        })
+        .collect();
+    let expected: Vec<_> = expected_steps
+        .iter()
+        .map(|step| {
+            let command = step["command"].as_str().expect("step command");
+            let operation = match command {
+                "extrude" => step["request"]["mode"].as_str().expect("extrude mode"),
+                "boolean-fuse" => "fuse",
+                "hole" => step["request"]["hole_kind"].as_str().expect("hole kind"),
+                other => other,
+            };
+            format!(
+                "{}:{}",
+                if command == "boolean-fuse" {
+                    "boolean"
+                } else {
+                    command
+                },
+                operation
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected, "canonical intent command order");
 }
 
 fn assert_real_brep(path: &Path) -> Vec<u8> {
@@ -786,6 +923,12 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
         assert_eq!(response["brep_bytes"], bytes.len());
         let measurements = measure_brep(&worker, &path, feature_id, &next_revision);
         assert_measured_geometry(&recipe, feature_id, &measurements, &measurements_by_feature);
+        if feature_id == "foundation-with-collar" {
+            assert_post_fusion_landmarks(&recipe, feature_id, &measurements, false);
+        }
+        if feature_id == "reinforced-foundation" {
+            assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
+        }
 
         if matches!(command_name, "boolean-fuse" | "hole" | "shell") {
             let base_feature_id = request["base_feature_id"]
@@ -849,6 +992,7 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
             .all(|entry| entry.intent.is_some())
     );
     assert!(saved.log.entries()[18].intent.is_none());
+    assert_reinforcement_intents(&recipe, &saved);
     assert_eq!(saved.graph.features().count(), expected_feature_ids.len());
 
     let baseline_identity = command_response(

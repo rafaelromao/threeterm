@@ -45,21 +45,42 @@ fn root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("threeterm-domain-executor-{label}-{suffix}"))
 }
 
-fn directory_snapshot(path: &std::path::Path) -> Vec<String> {
-    let mut entries = if path.is_dir() {
-        fs::read_dir(path)
-            .expect("directory reads")
-            .map(|entry| {
-                entry
-                    .expect("directory entry reads")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+fn filesystem_snapshot(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(path: &std::path::Path, root: &std::path::Path, entries: &mut Vec<(String, Vec<u8>)>) {
+        let metadata = fs::symlink_metadata(path).expect("filesystem metadata");
+        let relative = path
+            .strip_prefix(root)
+            .expect("snapshot path is under root")
+            .to_string_lossy()
+            .into_owned();
+        if metadata.file_type().is_symlink() {
+            entries.push((
+                relative,
+                format!(
+                    "symlink:{}",
+                    fs::read_link(path).expect("symlink target").display()
+                )
+                .into_bytes(),
+            ));
+        } else if metadata.is_dir() {
+            entries.push((relative.clone(), b"directory".to_vec()));
+            let mut children = fs::read_dir(path)
+                .expect("directory reads")
+                .map(|entry| entry.expect("directory entry reads").path())
+                .collect::<Vec<_>>();
+            children.sort();
+            for child in children {
+                visit(&child, root, entries);
+            }
+        } else {
+            entries.push((relative, fs::read(path).expect("file contents")));
+        }
+    }
+
+    let mut entries = Vec::new();
+    if path.exists() {
+        visit(path, path, &mut entries);
+    }
     entries.sort();
     entries
 }
@@ -554,7 +575,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         validate(&schema.request_schema, &request).unwrap_or_else(|error| {
             panic!("baseline fixture for {} is invalid: {error}", command.0)
         });
-        let before_entries = directory_snapshot(&command_root);
+        let before_entries = filesystem_snapshot(&command_root);
         let before_manifest = fs::read(command_root.join("manifest.json")).ok();
         let before_log = fs::read(command_root.join("transactions.log")).ok();
         let before = Bundle::at(&command_root).open().ok();
@@ -593,17 +614,18 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                             .as_u64()
                             .is_some_and(|bytes| bytes > 0)
                     );
-                    assert!(
-                        Bundle::at(&command_root)
-                            .open()
-                            .expect("successful geometry bundle opens")
-                            .log
-                            .len()
-                            > before.as_ref().map_or(0, |bundle| bundle.log.len())
-                    );
                     let after = Bundle::at(&command_root)
                         .open()
                         .expect("successful geometry bundle reopens");
+                    assert_eq!(
+                        after.log.len(),
+                        before
+                            .as_ref()
+                            .expect("successful geometry starts from a bundle")
+                            .log
+                            .len()
+                            + 1
+                    );
                     assert_ne!(
                         after.revision_hash_hex(),
                         before
@@ -622,21 +644,37 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                         error,
                         HostError::WorkerUnavailable { .. } | HostError::UnsupportedGeometry { .. }
                     ));
+                } else {
+                    assert!(
+                        matches!(
+                            error,
+                            HostError::Validation { ref detail }
+                                if detail.contains("missing") && detail.contains("base")
+                        ),
+                        "expected missing-base validation for {}: {error:?}",
+                        command.0
+                    );
                 }
                 let diagnostic = domain_command_diagnostic(&error);
                 assert_eq!(
                     diagnostic.schema_version,
                     threeterm_protocol::schema_version()
                 );
-                assert!(matches!(
-                    diagnostic.code,
-                    threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest
-                        | threeterm_protocol::diagnostic::DiagnosticCode::IntegrityFailure
-                        | threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure
-                        | threeterm_protocol::diagnostic::DiagnosticCode::UnsupportedGeometry
-                        | threeterm_protocol::diagnostic::DiagnosticCode::BrepInvalid
-                ));
-                assert_eq!(directory_snapshot(&command_root), before_entries);
+                let expected_code = if matches!(
+                    command,
+                    EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
+                ) {
+                    matches!(
+                        diagnostic.code,
+                        threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure
+                            | threeterm_protocol::diagnostic::DiagnosticCode::UnsupportedGeometry
+                    )
+                } else {
+                    diagnostic.code
+                        == threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest
+                };
+                assert!(expected_code, "unexpected diagnostic for {}", command.0);
+                assert_eq!(filesystem_snapshot(&command_root), before_entries);
                 assert_eq!(
                     fs::read(command_root.join("manifest.json")).ok(),
                     before_manifest
@@ -670,7 +708,7 @@ fn baseline_invalid_requests_preserve_canonical_state() {
             Bundle::create(&command_root).expect("invalid-request fixture creates");
             json!({})
         };
-        let before_entries = directory_snapshot(&command_root);
+        let before_entries = filesystem_snapshot(&command_root);
         let before_manifest = fs::read(command_root.join("manifest.json")).ok();
         let before_log = fs::read(command_root.join("transactions.log")).ok();
 
@@ -681,7 +719,7 @@ fn baseline_invalid_requests_preserve_canonical_state() {
             command.0
         );
 
-        assert_eq!(directory_snapshot(&command_root), before_entries);
+        assert_eq!(filesystem_snapshot(&command_root), before_entries);
         assert_eq!(
             fs::read(command_root.join("manifest.json")).ok(),
             before_manifest
@@ -752,6 +790,7 @@ fn public_dispatcher_propagates_cancellation_without_persistence() {
     )
     .expect("public dispatcher creates the cancellation fixture");
     let before = Bundle::at(&root).open().expect("cancellation bundle opens");
+    let before_files = filesystem_snapshot(&root);
     let cancel = AtomicBool::new(true);
     let mut progress = Vec::new();
     let result = host.execute_domain_command_with_worker_and_cancel_and_progress(
@@ -789,7 +828,7 @@ fn public_dispatcher_propagates_cancellation_without_persistence() {
         Bundle::at(&root).open().expect("bundle reopens").log.len(),
         before.log.len()
     );
-    assert!(!root.join("brep/cancelled-pattern.brep").exists());
+    assert_eq!(filesystem_snapshot(&root), before_files);
     let _ = progress;
     let _ = fs::remove_dir_all(&root);
 }

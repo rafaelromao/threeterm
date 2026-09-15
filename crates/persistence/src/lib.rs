@@ -6039,6 +6039,7 @@ fn is_supported_feature_kind(kind: &str) -> bool {
             | "draft"
             | "loft"
             | "history-feature"
+            | "checkpoint"
     ) || is_supported_brep_kind(kind)
         || is_supported_hole_kind(kind)
         || is_supported_edge_reattachment_kind(kind)

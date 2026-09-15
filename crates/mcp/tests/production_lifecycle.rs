@@ -183,21 +183,7 @@ impl McpProcess {
 
     fn finish(mut self) -> McpEvidence {
         self.stdin.take();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let status = loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                Ok(None) => {
-                    let _ = self.child.kill();
-                    break self
-                        .child
-                        .wait()
-                        .expect("MCP process waits after termination");
-                }
-                Err(error) => panic!("MCP process wait failed: {error}"),
-            }
-        };
+        let status = wait_for_exit(&mut self.child, Duration::from_secs(10));
         let stdout_thread = self
             .stdout_thread
             .take()
@@ -242,7 +228,37 @@ impl Drop for McpProcess {
         self.stdin.take();
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+}
+
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let kill_deadline = Instant::now() + Duration::from_secs(1);
+                while Instant::now() < kill_deadline {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return status,
+                        Ok(None) => thread::sleep(Duration::from_millis(10)),
+                        Err(error) => panic!("MCP process wait after termination failed: {error}"),
+                    }
+                }
+                panic!("MCP process did not exit after forced termination");
+            }
+            Err(error) => panic!("MCP process wait failed: {error}"),
         }
     }
 }
@@ -366,10 +382,10 @@ fn assert_fresh_project(root: &Path, generation_id: &str) -> String {
     assert_eq!(bundle.manifest.transaction_count, 0);
     assert!(bundle.log.entries().is_empty());
     assert!(bundle.graph.features().next().is_none());
-    generation_revision(root)
+    revision_hash(root)
 }
 
-fn generation_revision(root: &Path) -> String {
+fn revision_hash(root: &Path) -> String {
     Bundle::at(root)
         .open()
         .expect("MCP-created project has a revision")
@@ -464,6 +480,7 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
     assert!(root.join("manifest.json").is_file());
     assert!(root.join("transactions.log").is_file());
     let initial_revision = assert_fresh_project(&root, generation_id);
+    let extrusion_profile = vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]];
 
     let extrusion = client.call_tool(
         "extrude",
@@ -472,7 +489,7 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
             "bundle_path": root.to_string_lossy(),
             "expected_revision": initial_revision,
             "feature_id": "mcp-extrude",
-            "profile": [[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
+            "profile": extrusion_profile.clone(),
             "height": 2.0,
             "mode": "additive"
         }),
@@ -525,6 +542,11 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
         entry.intent.as_ref(),
         Some(CanonicalIntent::Extrude(intent))
             if intent.command == "extrude"
+                && intent.operation == "additive"
+                && intent.mode == "additive"
+                && intent.target_feature_id.is_none()
+                && intent.deterministic_inputs.profile == extrusion_profile
+                && intent.deterministic_inputs.height == 2.0
                 && intent.source_revision == initial_revision
                 && intent.affected_semantic_ids == ["mcp-extrude"]
     ));

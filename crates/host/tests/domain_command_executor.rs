@@ -990,6 +990,19 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                     );
                 }
                 let diagnostic = domain_command_diagnostic(&error);
+                let serialized_diagnostic =
+                    serde_json::to_value(&diagnostic).expect("diagnostic serializes");
+                assert_eq!(
+                    serialized_diagnostic["schema_version"],
+                    threeterm_protocol::schema_version()
+                );
+                if let HostError::Validation { detail } = &error {
+                    assert_eq!(
+                        serialized_diagnostic["arg"].as_str(),
+                        Some(detail.as_str()),
+                        "validation diagnostic preserves the operation detail"
+                    );
+                }
                 diagnostic_code = Some(
                     serde_json::to_value(diagnostic.code)
                         .expect("diagnostic code serializes")

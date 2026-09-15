@@ -10,6 +10,7 @@ bash -n "${RUNNER}"
 help="$(bash "${RUNNER}" --help)"
 for expected in \
     'production_tui_ghostty_session' \
+    'production_tui_create_project_extrude' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -45,6 +46,13 @@ jq -e '
     (.requirements | index("timeout"))
 ' <<<"${plan}" >/dev/null
 
+fresh_plan="$(bash "${RUNNER}" production_tui_create_project_extrude --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.create-project-extrude/1" and
+    .result == "not_run" and
+    .test == "production_tui_create_project_extrude"
+' <<<"${fresh_plan}" >/dev/null
+
 for required in \
     'LC_ALL=C.UTF-8' \
     'LANG=C.UTF-8' \
@@ -58,6 +66,27 @@ for required in \
     'setsid' \
     'kill -- -' \
     'threeterm.graphical-tui/1' \
+    'threeterm.graphical-tui.create-project-extrude/1' \
+    'empty-startup.png' \
+    'project-created.png' \
+    'extrusion-committed.png' \
+    'project-identity.json' \
+    'occt_worker_unavailable' \
+    'capability_or_readiness_failed' \
+    'prerequisite_missing' \
+    'toolchain_contract_missing' \
+    'THREETERM_GRAPHICAL_FORCE_CAPABILITY_DENIAL' \
+    'selected feature keyboard-extrude' \
+    'empty-session-source' \
+    'project_state_fingerprint' \
+    'cancellation_changed_routing' \
+    'brep_sha256' \
+    'transaction_count' \
+    'intent' \
+    'final_image_id' \
+    'final_delete_image_id' \
+    'created_project_manifest' \
+    'derived_brep' \
     '1.3.1-arch2' \
     'THREETERM_PALETTE=catppuccin' \
     'threeterm.viewport-evidence/1' \
@@ -126,7 +155,7 @@ THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${evidence}/missing-contract" \
     >"${evidence}/stdout" 2>"${evidence}/stderr"
 status=$?
 set -e
-((status != 0))
+((status == 1))
 jq -e '
     .schema_version == "threeterm.graphical-tui/1" and
     .result == "failed" and
@@ -245,5 +274,53 @@ jq -e --arg expected_hash "${expected_hash}" '
 ' "${run_root}/tool-versions.json" >/dev/null
 jq -e '.result == "failed" and .failure.code == "compositor_unavailable"' \
     "${run_root}/manifest.json" >/dev/null
+
+fresh_worker_run_root="${tool_versions_dir}/fresh-worker-run"
+set +e
+PATH="${fake_bin}:${PATH}" THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${contract}" \
+    THREETERM_OCCTBUILD_WORKER="${tool_versions_dir}/missing-worker" \
+    THREETERM_GRAPHICAL_TIMEOUT_SECONDS=2 \
+    bash "${RUNNER}" production_tui_create_project_extrude \
+    --tui-binary /bin/true --project-root "${tool_versions_dir}/fresh-launch" \
+    --evidence-root "${fresh_worker_run_root}" \
+    >"${tool_versions_dir}/fresh-worker-stdout" 2>"${tool_versions_dir}/fresh-worker-stderr"
+fresh_worker_status=$?
+set -e
+((fresh_worker_status == 1))
+jq -e '
+    .schema_version == "threeterm.graphical-tui.create-project-extrude/1" and
+    .result == "failed" and .failure.code == "occt_worker_unavailable"
+' "${fresh_worker_run_root}/manifest.json" >/dev/null
+
+missing_toolchain_run_root="${tool_versions_dir}/missing-toolchain-run"
+set +e
+PATH="${fake_bin}:${PATH}" THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${evidence}/missing-toolchain-contract" \
+    bash "${RUNNER}" production_tui_create_project_extrude \
+    --tui-binary /bin/true --project-root "${tool_versions_dir}/missing-toolchain-launch" \
+    --evidence-root "${missing_toolchain_run_root}" \
+    >"${tool_versions_dir}/missing-toolchain-stdout" 2>"${tool_versions_dir}/missing-toolchain-stderr"
+missing_toolchain_status=$?
+set -e
+((missing_toolchain_status == 1))
+jq -e '
+    .schema_version == "threeterm.graphical-tui.create-project-extrude/1" and
+    .result == "failed" and .failure.code == "toolchain_contract_missing"
+' "${missing_toolchain_run_root}/manifest.json" >/dev/null
+
+capability_run_root="${tool_versions_dir}/capability-run"
+set +e
+PATH="${fake_bin}:${PATH}" THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${contract}" \
+    THREETERM_OCCTBUILD_WORKER=/bin/true THREETERM_GRAPHICAL_FORCE_CAPABILITY_DENIAL=1 \
+    bash "${RUNNER}" production_tui_create_project_extrude \
+    --tui-binary /bin/true --project-root "${tool_versions_dir}/capability-launch" \
+    --evidence-root "${capability_run_root}" \
+    >"${tool_versions_dir}/capability-stdout" 2>"${tool_versions_dir}/capability-stderr"
+capability_status=$?
+set -e
+((capability_status == 1))
+jq -e '
+    .schema_version == "threeterm.graphical-tui.create-project-extrude/1" and
+    .result == "failed" and .failure.code == "capability_or_readiness_failed"
+' "${capability_run_root}/manifest.json" >/dev/null
 
 printf '%s\n' 'graphical runner contract satisfied'

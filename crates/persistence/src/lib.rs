@@ -2865,6 +2865,12 @@ impl Bundle {
         with_bundle_write_lock(&self.root, || self.open_locked())
     }
 
+    /// Read the selected sealed generation without reconciling or migrating
+    /// any rotation slots. This is the inspection boundary for evidence code.
+    pub fn open_read_only(&self) -> Result<LoadedBundle, BundleError> {
+        self.open_sealed(false)
+    }
+
     /// Restore a validated worker result as a Derived Result without changing
     /// the Canonical Transaction Log or manifest revision.
     pub fn restore_derived_brep_if_revision(

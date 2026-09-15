@@ -3,7 +3,7 @@
 mod launch;
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -18,8 +18,8 @@ use threeterm_host::{
 };
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    CommandId, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    CommandId, NEW_PROJECT_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID,
+    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
 };
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
@@ -38,6 +38,10 @@ pub use launch::{
 pub fn schema_version() -> &'static str {
     "threeterm.tui/1"
 }
+
+/// A transient source identity used before the first Project Generation is
+/// created through the interactive lifecycle. It is never a Project Identity.
+pub const EMPTY_PROJECT_SOURCE_REVISION: &str = "empty-project";
 
 /// Thin TUI-harness adapter for the shared semantic command boundary.
 /// Interactive state remains presentation-only; canonical commands execute
@@ -222,10 +226,14 @@ struct HostCommandGateway<'a> {
 
 impl CommandGateway for HostCommandGateway<'_> {
     fn current_revision(&self, root: &Path) -> Result<String, String> {
-        self.host
-            .identity(root)
-            .map(|identity| identity.revision_hash)
-            .map_err(|error| error.to_string())
+        if root.exists() {
+            return self
+                .host
+                .identity(root)
+                .map(|identity| identity.revision_hash)
+                .map_err(|error| error.to_string());
+        }
+        Ok(EMPTY_PROJECT_SOURCE_REVISION.to_string())
     }
 
     fn preview(&self, command: CommandId, request: Value) -> Result<DomainCommandPreview, String> {
@@ -1548,6 +1556,35 @@ impl TuiSession {
             last_acknowledgement: self.last_acknowledgement.clone(),
             last_transition_acknowledgement: self.last_transition_acknowledgement.clone(),
         }
+    }
+
+    pub fn targets(&self) -> &[FeatureTarget] {
+        &self.targets
+    }
+
+    fn refresh_canonical_presentation(&mut self, graph: &FeatureGraph, revision: String) {
+        let prior_selection = self.selected_ids();
+        self.targets = feature_targets(graph);
+        self.canonical_revision = revision;
+        self.presentation_generation = self.presentation_generation.saturating_add(1);
+        self.selection = match prior_selection {
+            Some(stable_ids)
+                if stable_ids
+                    .iter()
+                    .all(|stable_id| self.targets.iter().any(|target| target.id == *stable_id)) =>
+            {
+                self.selected_index = stable_ids.first().and_then(|stable_id| {
+                    self.targets
+                        .iter()
+                        .position(|target| target.id == *stable_id)
+                });
+                SelectionState::Selected { stable_ids }
+            }
+            _ => {
+                self.selected_index = None;
+                SelectionState::None
+            }
+        };
     }
 
     pub fn show_feature_timeline(
@@ -3211,6 +3248,7 @@ pub struct KeyboardInputOutcome {
     pub submission: Option<SubmitOutcome>,
     pub overlay: String,
     pub response: Option<Value>,
+    pub active_project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3323,14 +3361,6 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "complete a direct-Ghostty capability probe before starting Interactive Modeling",
             ));
         }
-        let presentation = host.presentation_snapshot().ok_or_else(|| {
-            ViewportDiagnostic::new(
-                ViewportDiagnosticCode::InvalidScene,
-                "host has no canonical presentation snapshot",
-                "unknown",
-                "load or create a canonical project before starting the viewport",
-            )
-        })?;
         let viewport_colors = ViewportColors::from_palette(theme.palette).map_err(|error| {
             ViewportDiagnostic::new(
                 ViewportDiagnosticCode::PaletteInvalid,
@@ -3343,20 +3373,31 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "select an embedded palette with a valid viewport semantic token set",
             )
         })?;
-        let revision = presentation.snapshot.revision_hash.clone();
-        let mut scene = host.presentation_viewport_scene().map_err(|error| {
-            ViewportDiagnostic::new(
-                ViewportDiagnosticCode::InvalidScene,
-                format!("committed viewport geometry could not be loaded: {error}"),
-                &revision,
-                "repair or recompute the committed BREP before starting the viewport",
-            )
-        })?;
-        for result in presentation.layer1_results {
-            scene = scene.with_layer1_reference(result.request_id);
-        }
+        let (graph, revision, scene) = match host.presentation_snapshot() {
+            Some(presentation) => {
+                let revision = presentation.snapshot.revision_hash.clone();
+                let mut scene = host.presentation_viewport_scene().map_err(|error| {
+                    ViewportDiagnostic::new(
+                        ViewportDiagnosticCode::InvalidScene,
+                        format!("committed viewport geometry could not be loaded: {error}"),
+                        &revision,
+                        "repair or recompute the committed BREP before starting the viewport",
+                    )
+                })?;
+                for result in presentation.layer1_results {
+                    scene = scene.with_layer1_reference(result.request_id);
+                }
+                (presentation.graph, revision, scene)
+            }
+            None => {
+                let graph = FeatureGraph::empty();
+                let revision = EMPTY_PROJECT_SOURCE_REVISION.to_string();
+                let scene = ViewportScene::from_feature_graph(revision.clone(), &graph, None);
+                (graph, revision, scene)
+            }
+        };
         renderer.initialize()?;
-        let tui = TuiSession::from_feature_graph_with_theme(&presentation.graph, revision, theme);
+        let tui = TuiSession::from_feature_graph_with_theme(&graph, revision, theme);
         Ok(Self {
             tui,
             palette: CommandPalette::new(),
@@ -3682,6 +3723,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 rendered: Some(outcome.rendered),
                 submission: Some(outcome.submission),
                 response: None,
+                active_project_root: None,
             });
         }
 
@@ -3749,6 +3791,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             submission: Some(submission),
             overlay: format!("[motion-trail] {text}"),
             response: None,
+            active_project_root: None,
         }))
     }
 
@@ -3793,7 +3836,8 @@ impl<R: Renderer> TuiViewportSession<R> {
                 };
                 if !matches!(
                     command,
-                    threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                    NEW_PROJECT_COMMAND_ID
+                        | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
                         | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
@@ -3822,7 +3866,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                     })
                     .map_err(TuiViewportError::Tui)?;
                 Ok(self.keyboard_overlay(format!(
-                    "[outline] Draft: {} source_revision={revision} input={{}}",
+                    "[outline] Draft: {} (Command Draft) source_revision={revision} input={{}}",
                     command.0
                 )))
             }
@@ -3875,7 +3919,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 self.draft.push_input_char(character);
                 self.transition_draft_update()?;
                 Ok(self.keyboard_overlay(format!(
-                    "[outline] Draft: {} input={}",
+                    "[outline] Draft: {} (Command Draft) input={}",
                     self.draft.draft().expect("draft remains").command.0,
                     self.draft.input_text()
                 )))
@@ -3884,7 +3928,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                 self.draft.pop_input_char();
                 self.transition_draft_update()?;
                 Ok(self.keyboard_overlay(format!(
-                    "[outline] Draft: {} input={}",
+                    "[outline] Draft: {} (Command Draft) input={}",
                     self.draft.draft().expect("draft remains").command.0,
                     self.draft.input_text()
                 )))
@@ -3896,7 +3940,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             )),
             TerminalInput::Arrow(_) | TerminalInput::Enter | TerminalInput::OpenPalette => Ok(self
                 .keyboard_overlay(format!(
-                    "[outline] Draft: {} input={}",
+                    "[outline] Draft: {} (Command Draft) input={}",
                     self.draft.draft().expect("draft remains").command.0,
                     self.draft.input_text()
                 ))),
@@ -3994,6 +4038,17 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(request) => request,
             Err(detail) => return self.reject_commit(detail),
         };
+        let active_project_root = if command == NEW_PROJECT_COMMAND_ID {
+            match request.get("destination").and_then(Value::as_str) {
+                Some(destination) => Some(PathBuf::from(destination)),
+                None => {
+                    return self
+                        .reject_commit("new-project request has no destination".to_string());
+                }
+            }
+        } else {
+            None
+        };
         let response = match gateway.commit(command, request) {
             Ok(response) => response,
             Err(error) => return self.reject_commit(format!("{error:?}")),
@@ -4010,9 +4065,20 @@ impl<R: Renderer> TuiViewportSession<R> {
                 ));
             }
         }
-        let revision = match response.get("revision_hash").and_then(Value::as_str) {
-            Some(revision) => revision.to_string(),
-            None => return self.reject_commit("commit response has no revision_hash".to_string()),
+        let revision = if let Some(project_root) = active_project_root.as_ref() {
+            match host.load_with_geometry_replay(project_root) {
+                Ok(snapshot) => snapshot.revision_hash,
+                Err(error) => {
+                    return self.reject_commit(format!("created project could not load: {error}"));
+                }
+            }
+        } else {
+            match response.get("revision_hash").and_then(Value::as_str) {
+                Some(revision) => revision.to_string(),
+                None => {
+                    return self.reject_commit("commit response has no revision_hash".to_string());
+                }
+            }
         };
         self.tui
             .transition_command(CommandEvent::CommitAccepted {
@@ -4024,14 +4090,34 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.draft.cancel();
         self.refresh_scene_from_host(host)?;
         let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        let overlay = if command == NEW_PROJECT_COMMAND_ID {
+            let project_root = active_project_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            format!(
+                "[selection-glyph] Project created: {} generation_id={} transaction_count={} revision={revision}",
+                project_root,
+                response
+                    .get("generation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                response["manifest"]["transaction_count"]
+                    .as_u64()
+                    .unwrap_or_default()
+            )
+        } else {
+            format!(
+                "[selection-glyph] Commit: {} revision={revision}",
+                command.0
+            )
+        };
         Ok(KeyboardInputOutcome {
             rendered: None,
             submission: Some(submission),
-            overlay: format!(
-                "[selection-glyph] Commit: {} revision={revision}",
-                command.0
-            ),
+            overlay,
             response: Some(response),
+            active_project_root,
         })
     }
 
@@ -4057,11 +4143,13 @@ impl<R: Renderer> TuiViewportSession<R> {
         let object = request
             .as_object_mut()
             .ok_or_else(|| "draft input must be a JSON object".to_string())?;
-        object.insert(
-            "bundle_path".to_string(),
-            Value::String(root.to_string_lossy().into_owned()),
-        );
-        if include_expected {
+        if draft.command != NEW_PROJECT_COMMAND_ID {
+            object.insert(
+                "bundle_path".to_string(),
+                Value::String(root.to_string_lossy().into_owned()),
+            );
+        }
+        if include_expected && draft.command != NEW_PROJECT_COMMAND_ID {
             object.insert(
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),
@@ -4082,12 +4170,15 @@ impl<R: Renderer> TuiViewportSession<R> {
         let presentation = host.presentation_snapshot().ok_or_else(|| {
             TuiViewportError::Tui(self.command_diagnostic("host has no canonical presentation"))
         })?;
+        let graph = presentation.graph.clone();
         let mut scene = host
             .presentation_viewport_scene()
             .map_err(|error| TuiViewportError::Tui(self.command_diagnostic(&error.to_string())))?;
         for result in presentation.layer1_results {
             scene = scene.with_layer1_reference(result.request_id);
         }
+        self.tui
+            .refresh_canonical_presentation(&graph, scene.revision.clone());
         self.scene = scene;
         Ok(())
     }
@@ -4098,6 +4189,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             submission: None,
             overlay,
             response: None,
+            active_project_root: None,
         }
     }
 
@@ -4331,6 +4423,10 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn state(&self) -> TuiState {
         self.tui.state()
+    }
+
+    pub fn targets(&self) -> &[FeatureTarget] {
+        self.tui.targets()
     }
 
     pub fn open_feature_timeline(
@@ -4729,7 +4825,7 @@ fn decode_resize(bytes: &[u8]) -> Option<(u32, u32)> {
 
 fn format_preview(preview: &DomainCommandPreview) -> String {
     format!(
-        "[dashed-outline] Preview: {} source_revision={} preview_revision={} geometry={}",
+        "[dashed-outline] Preview: {} (Command Preview) source_revision={} preview_revision={} geometry={}",
         preview.command.0,
         preview.source_revision,
         preview.preview_revision,

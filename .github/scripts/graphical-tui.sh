@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCHEMA_VERSION='threeterm.graphical-tui/1'
+TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION='empty-project'
+PERSISTED_TRANSIENT_SOURCE_REVISION='empty-session-source'
 TEST_ID='production_tui_ghostty_session'
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOOLCHAIN_CONTRACT="${THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT:-${ROOT}/.github/graphical-toolchain.env}"
@@ -34,6 +36,9 @@ TUI_STDERR=''
 WESTON_LOG=''
 STARTUP_SCREENSHOT=''
 ORBIT_SCREENSHOT=''
+PROJECT_CREATED_SCREENSHOT=''
+EXTRUSION_COMMITTED_SCREENSHOT=''
+PROJECT_IDENTITY=''
 CLEANUP_SCREENSHOT=''
 FAILURE_SCREENSHOT=''
 DIFF_LOG=''
@@ -47,6 +52,7 @@ readiness_detail=''
 viewport_evidence='null'
 viewport_startup_evidence='null'
 viewport_orbit_evidence='null'
+viewport_workflow_evidence='null'
 startup_image_id=''
 startup_revision=''
 final_image_id=''
@@ -57,6 +63,7 @@ cleanup_deletions='[]'
 probe_status='not_run'
 readiness_status='not_run'
 orbit_status='not_run'
+workflow_status='not_run'
 cleanup_status='not_run'
 ghostty_status='not_run'
 tui_status='not_run'
@@ -67,11 +74,15 @@ source_commit='unknown'
 source_dirty=false
 path_failure_code=''
 path_failure_detail=''
+EXPECTED_FEATURE_ID='l-bracket'
+CREATED_PROJECT_ROOT=''
+OCCT_WORKER=''
 
 usage() {
     cat <<'EOF'
 Usage:
   graphical-tui.sh production_tui_ghostty_session --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_create_project_extrude --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
   graphical-tui.sh --validate-viewport-evidence PATH
 
@@ -81,11 +92,11 @@ EOF
 }
 
 print_plan() {
-    cat <<'EOF'
+    cat <<EOF
 {
-  "schema_version": "threeterm.graphical-tui/1",
+  "schema_version": "$SCHEMA_VERSION",
   "result": "not_run",
-  "test": "production_tui_ghostty_session",
+  "test": "$TEST_ID",
   "configuration": {
     "locale": "C.UTF-8",
     "palette": "catppuccin",
@@ -109,7 +120,7 @@ die() {
 
 validate_viewport_evidence() {
     local payload="$1"
-    jq -e '
+    jq -e --arg expected_feature "$EXPECTED_FEATURE_ID" '
         .schema_version == "threeterm.viewport-evidence/1" and
         .acknowledgement == "viewport-presented" and
         (.frame.frame_token | type == "number" and . > 0) and
@@ -117,7 +128,7 @@ validate_viewport_evidence() {
         (.frame.generation | type == "number") and
         (.frame.revision | type == "string" and length > 0) and
         .frame.width == 800 and .frame.height == 480 and
-        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == "l-bracket" and .[0].triangle_count > 0) and
+        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == $expected_feature and .[0].triangle_count > 0) and
         (.scene.triangle_count == (.scene.solids | map(.triangle_count) | add)) and
         (.scene.triangle_count | type == "number" and . > 0) and
         (.scene.body_pixels | type == "number" and . > 0) and
@@ -143,6 +154,25 @@ validate_viewport_evidence() {
             "warning": [235,220,193],
             "error": [208,174,171]
         }
+    ' <<<"$payload" >/dev/null 2>&1
+}
+
+validate_empty_viewport_evidence() {
+    local payload="$1"
+    jq -e --arg expected_revision "$TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION" '
+        .schema_version == "threeterm.viewport-evidence/1" and
+        .acknowledgement == "viewport-presented" and
+        (.frame.frame_token | type == "number" and . > 0) and
+        (.frame.image_id | type == "number" and . > 0) and
+        (.frame.generation | type == "number") and
+        .frame.revision == $expected_revision and
+        .frame.width == 800 and .frame.height == 480 and
+        (.scene.solids | type == "array" and length == 0) and
+        (.scene.triangle_count | type == "number" and . == 0) and
+        .scene.body_pixels == 0 and
+        .scene.edge_pixels == 0 and
+        .scene.non_background_pixels == 0 and
+        .palette.name == "catppuccin"
     ' <<<"$payload" >/dev/null 2>&1
 }
 
@@ -176,9 +206,13 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session)
+        production_tui_ghostty_session|production_tui_create_project_extrude)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
+            if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.create-project-extrude/1'
+            fi
             shift
             ;;
         *)
@@ -207,11 +241,21 @@ fi
 }
 
 mkdir -p "$EVIDENCE_ROOT" || {
-    printf '%s\n' '{"schema_version":"threeterm.graphical-tui/1","result":"failed","integrity":"unavailable","failure":{"code":"evidence_root_unavailable"}}' >&2
+    printf '{"schema_version":"%s","result":"failed","integrity":"unavailable","failure":{"code":"evidence_root_unavailable"}}\n' "$SCHEMA_VERSION" >&2
     exit 1
 }
 EVIDENCE_ROOT="$(cd "$EVIDENCE_ROOT" && pwd)"
-if PROJECT_ROOT="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd)"; then
+if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    project_parent=''
+    if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
+        PROJECT_ROOT="${project_parent}/$(basename "$PROJECT_ROOT")"
+        CREATED_PROJECT_ROOT="${PROJECT_ROOT}-created"
+    else
+        path_failure_code='project_root_unavailable'
+        path_failure_detail='fresh project launch root parent is not a directory'
+        PROJECT_ROOT=''
+    fi
+elif PROJECT_ROOT="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd)"; then
     :
 else
     path_failure_code='project_root_unavailable'
@@ -232,8 +276,21 @@ PTY_INPUT="${EVIDENCE_ROOT}/pty-input.log"
 TUI_STDERR="${EVIDENCE_ROOT}/tui-stderr.log"
 WESTON_LOG="${EVIDENCE_ROOT}/weston.log"
 TOOL_VERSIONS="${EVIDENCE_ROOT}/tool-versions.json"
-STARTUP_SCREENSHOT="${EVIDENCE_ROOT}/startup.png"
+if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    STARTUP_SCREENSHOT="${EVIDENCE_ROOT}/empty-startup.png"
+    PROJECT_CREATED_SCREENSHOT="${EVIDENCE_ROOT}/project-created.png"
+    EXTRUSION_COMMITTED_SCREENSHOT="${EVIDENCE_ROOT}/extrusion-committed.png"
+else
+    STARTUP_SCREENSHOT="${EVIDENCE_ROOT}/startup.png"
+    PROJECT_CREATED_SCREENSHOT=''
+    EXTRUSION_COMMITTED_SCREENSHOT=''
+fi
 ORBIT_SCREENSHOT="${EVIDENCE_ROOT}/orbit.png"
+if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    PROJECT_IDENTITY="${EVIDENCE_ROOT}/project-identity.json"
+else
+    PROJECT_IDENTITY=''
+fi
 CLEANUP_SCREENSHOT="${EVIDENCE_ROOT}/cleanup.png"
 FAILURE_SCREENSHOT="${EVIDENCE_ROOT}/failure.png"
 DIFF_LOG="${EVIDENCE_ROOT}/orbit-difference.txt"
@@ -335,6 +392,24 @@ check_prerequisites() {
     [[ "$backend" == 'headless-backend.so' ]] ||
         die toolchain_contract_invalid "unsupported Weston backend: $backend"
 
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+        OCCT_WORKER="${THREETERM_OCCTBUILD_WORKER:-}"
+        if [[ -z "$OCCT_WORKER" ]]; then
+            local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"
+            local candidate
+            for candidate in \
+                "$target_root/debug/bin/threeterm-occt-worker" \
+                "$target_root"/debug/build/threeterm-occt-*/out/bin/threeterm-occt-worker; do
+                if [[ -f "$candidate" ]]; then
+                    OCCT_WORKER="$candidate"
+                    break
+                fi
+            done
+        fi
+        [[ -x "$OCCT_WORKER" ]] ||
+            die occt_worker_unavailable 'qualified fresh workflow requires an executable OCCT worker'
+    fi
+
     local contract_hash=''
     if [[ -x "$(command -v sha256sum)" ]]; then
         contract_hash="$(sha256sum "$TOOLCHAIN_CONTRACT" | cut -d' ' -f1)"
@@ -425,10 +500,15 @@ evidence_wire_ready() {
 
 readiness_viewport_ready() {
     extract_viewport_evidence || return 1
-    validate_viewport_evidence "$viewport_evidence" || {
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+        validate_empty_viewport_evidence "$viewport_evidence" || {
+            readiness_detail="viewport evidence did not satisfy the empty-project contract: ${viewport_evidence}"
+            return 1
+        }
+    elif ! validate_viewport_evidence "$viewport_evidence"; then
         readiness_detail="viewport evidence did not satisfy the versioned saved-solid contract: ${viewport_evidence}"
         return 1
-    }
+    fi
     [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" == 0 ]] || return 1
     [[ "$(jq -r '.camera.pitch_degrees' <<<"$viewport_evidence")" == 20 ]] || return 1
     [[ "$(jq -r '.camera.zoom_percent' <<<"$viewport_evidence")" == 100 ]] || return 1
@@ -461,13 +541,36 @@ rendered_viewport_ready() {
     [[ "$body_pixels" -ge 100 && "$edge_pixels" -ge 10 ]]
 }
 
+project_state_fingerprint() {
+    local root="$1" path
+    [[ -d "$root" ]] || return 1
+    (
+        cd "$root" || exit 1
+        while IFS= read -r -d '' path; do
+            if [[ -d "$path" ]]; then
+                printf 'directory:%s\n' "$path"
+            elif [[ -f "$path" ]]; then
+                printf 'file:%s:' "$path"
+                sha256sum -- "$path"
+            else
+                printf 'other:%s\n' "$path"
+            fi
+        done < <(find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+    ) | sha256sum | cut -d' ' -f1
+}
+
 orbit_ready() {
     grep -aFq '[motion-trail] Orbit right' "$PTY_OUTPUT" 2>/dev/null || return 1
     grep -aFq 'a=T,t=d' "$PTY_OUTPUT" 2>/dev/null || return 1
     extract_viewport_evidence || return 1
     validate_viewport_evidence "$viewport_evidence" || return 1
-    [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$startup_revision" ]] || return 1
-    [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$startup_image_id" ]] || return 1
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+        [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$(jq -r '.frame.revision' <<<"$viewport_workflow_evidence")" ]] || return 1
+        [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$(jq -r '.frame.image_id' <<<"$viewport_workflow_evidence")" ]] || return 1
+    else
+        [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$startup_revision" ]] || return 1
+        [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$startup_image_id" ]] || return 1
+    fi
     [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" != 0 ]] || return 1
     [[ "$(jq -r '.camera.pitch_degrees' <<<"$viewport_evidence")" == "$(jq -r '.camera.pitch_degrees' <<<"$viewport_startup_evidence")" ]] || return 1
     [[ "$(jq -r '.camera.zoom_percent' <<<"$viewport_evidence")" == "$(jq -r '.camera.zoom_percent' <<<"$viewport_startup_evidence")" ]] || return 1
@@ -610,7 +713,9 @@ wait_for_tui_readiness() {
     ocr="$(tesseract "$STARTUP_SCREENSHOT" stdout 2>/dev/null || true)"
     grep -Fq 'Interactive Modeling ready' <<<"$ocr" || die visible_readiness_failed 'readiness marker was not visible in the startup screenshot'
     grep -Fq 'Viewport presented' <<<"$ocr" || die viewport_marker_not_visible 'viewport evidence marker was not visible in the startup screenshot'
-    rendered_viewport_ready "$STARTUP_SCREENSHOT" || die viewport_not_rendered 'startup screenshot does not contain palette-bound rendered geometry'
+    if [[ "$TEST_ID" != 'production_tui_create_project_extrude' ]]; then
+        rendered_viewport_ready "$STARTUP_SCREENSHOT" || die viewport_not_rendered 'startup screenshot does not contain palette-bound rendered geometry'
+    fi
     wait_for_probe_stimulus
     probe_status='passed'
     readiness_status='passed'
@@ -629,7 +734,11 @@ run_orbit() {
     grep -Fq 'Orbit right' <<<"$ocr" || die orbit_marker_not_visible 'orbit acknowledgement was not visible in the orbit screenshot'
     grep -Fq 'Viewport presented' <<<"$ocr" || die orbit_viewport_marker_not_visible 'orbit viewport evidence was not visible in the orbit screenshot'
     rendered_viewport_ready "$ORBIT_SCREENSHOT" || die orbit_not_rendered 'orbit screenshot does not contain palette-bound rendered geometry'
-    magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 "${EVIDENCE_ROOT}/startup-viewport.png"
+    local before_screenshot="$STARTUP_SCREENSHOT"
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+        before_screenshot="$EXTRUSION_COMMITTED_SCREENSHOT"
+    fi
+    magick "$before_screenshot" -crop 800x480+0+0 "${EVIDENCE_ROOT}/startup-viewport.png"
     magick "$ORBIT_SCREENSHOT" -crop 800x480+0+0 "${EVIDENCE_ROOT}/orbit-viewport.png"
     magick compare -metric AE "${EVIDENCE_ROOT}/startup-viewport.png" \
         "${EVIDENCE_ROOT}/orbit-viewport.png" null: 2>"$DIFF_LOG" || true
@@ -637,6 +746,123 @@ run_orbit() {
     difference="$(tr -d '[:space:]' <"$DIFF_LOG" 2>/dev/null || true)"
     [[ "$difference" =~ ^[0-9]+$ && "$difference" -gt 0 ]] || die orbit_not_rendered 'orbit did not change the fixed viewport crop'
     orbit_status='passed'
+}
+
+wait_for_output_marker() {
+    local marker="$1"
+    wait_for_output_marker_count "$marker" 1
+}
+
+wait_for_output_marker_count() {
+    local marker="$1"
+    local expected_count="$2"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" bash -c \
+        '[[ "$(grep -aFc "$1" "$2" 2>/dev/null || true)" -ge "$3" ]]' \
+        bash "$marker" "$PTY_OUTPUT" "$expected_count" ||
+        die workflow_marker_missing "production TUI did not emit ${marker} ${expected_count} time(s)"
+}
+
+create_project_extrude_viewport_ready() {
+    extract_viewport_evidence || return 1
+    validate_viewport_evidence "$viewport_evidence" || return 1
+    [[ "$(jq -r '.scene.solids[0].feature_id' <<<"$viewport_evidence")" == 'keyboard-extrude' ]]
+}
+
+run_create_project_extrude() {
+    [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]] || return 0
+    [[ ! -e "$CREATED_PROJECT_ROOT" ]] ||
+        die fresh_destination_exists "fresh workflow destination already exists: $CREATED_PROJECT_ROOT"
+
+    local project_request
+    project_request="$(jq -n --arg destination "$CREATED_PROJECT_ROOT" '{destination:$destination}')" ||
+        die project_request_failed 'fresh project destination request could not be encoded'
+    EXPECTED_FEATURE_ID='keyboard-extrude'
+
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the command palette'
+    wtype new-project || die input_injection_failed 'compositor keyboard input could not type new-project'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select new-project'
+    wtype "$project_request" || die input_injection_failed 'compositor keyboard input could not type the project destination'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not request project preview'
+    wait_for_output_marker '[dashed-outline] Preview: new-project'
+    wtype -k Escape || die input_injection_failed 'compositor keyboard input could not cancel the project draft'
+    wait_for_output_marker '[cancellation-glyph] Cancellation: command draft discarded'
+    [[ ! -e "$CREATED_PROJECT_ROOT" ]] || die cancellation_mutated_project 'cancelled project draft created a destination'
+
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not reopen the command palette'
+    wtype new-project || die input_injection_failed 'compositor keyboard input could not retype new-project'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not reselect new-project'
+    wtype "$project_request" || die input_injection_failed 'compositor keyboard input could not retype the project destination'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not request the second project preview'
+    wait_for_output_marker_count '[dashed-outline] Preview: new-project' 2
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit the project'
+    wait_for_output_marker 'Project created:'
+    wait_for_output_marker 'transaction_count=0'
+    [[ -f "$CREATED_PROJECT_ROOT/manifest.json" ]] || die project_not_created 'new-project commit did not create a manifest'
+    capture_screenshot "$PROJECT_CREATED_SCREENSHOT" || die project_created_screenshot_failed 'project-created screenshot was not fixed at 800x600'
+    local project_ocr
+    project_ocr="$(tesseract "$PROJECT_CREATED_SCREENSHOT" stdout 2>/dev/null || true)"
+    grep -Fq 'Project created' <<<"$project_ocr" || die project_marker_not_visible 'project creation acknowledgement was not visible in the project-created screenshot'
+    grep -Fq 'transaction_count=0' <<<"$project_ocr" || die project_transaction_marker_not_visible 'zero-transaction checkpoint was not visible in the project-created screenshot'
+    grep -Fq 'Viewport presented' <<<"$project_ocr" || die project_viewport_marker_not_visible 'empty viewport evidence was not visible in the project-created screenshot'
+    local project_state_before_extrusion
+    project_state_before_extrusion="$(project_state_fingerprint "$CREATED_PROJECT_ROOT")" ||
+        die project_state_snapshot_failed 'project state could not be snapshotted before extrusion cancellation'
+
+    local extrude_request
+    extrude_request='{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the extrusion palette'
+    wtype extrude || die input_injection_failed 'compositor keyboard input could not type extrude'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select extrude'
+    wtype "$extrude_request" || die input_injection_failed 'compositor keyboard input could not type the extrusion request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not request extrusion preview'
+    wait_for_output_marker '[dashed-outline] Preview: extrude'
+    wtype -k Escape || die input_injection_failed 'compositor keyboard input could not cancel the extrusion draft'
+    wait_for_output_marker_count '[cancellation-glyph] Cancellation: command draft discarded' 2
+    [[ "$(project_state_fingerprint "$CREATED_PROJECT_ROOT")" == "$project_state_before_extrusion" ]] ||
+        die cancellation_mutated_project 'cancelled extrusion draft changed the created project state'
+    [[ ! -e "$PROJECT_ROOT" && -f "$CREATED_PROJECT_ROOT/manifest.json" ]] ||
+        die cancellation_changed_routing 'cancelled extrusion draft changed the active project routing'
+    [[ ! -f "$CREATED_PROJECT_ROOT/brep/keyboard-extrude.brep" ]] ||
+        die cancellation_mutated_project 'cancelled extrusion draft created a BREP'
+
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not reopen the extrusion palette'
+    wtype extrude || die input_injection_failed 'compositor keyboard input could not retype extrude'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not reselect extrude'
+    wtype "$extrude_request" || die input_injection_failed 'compositor keyboard input could not retype the extrusion request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not request the second extrusion preview'
+    wait_for_output_marker_count '[dashed-outline] Preview: extrude' 2
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit the extrusion'
+    wait_for_output_marker '[selection-glyph] Commit: extrude'
+    wtype -k Down || die input_injection_failed 'compositor keyboard input could not select the committed extrusion'
+    wait_for_output_marker 'selected feature keyboard-extrude'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" create_project_extrude_viewport_ready ||
+        die workflow_viewport_invalid "fresh extrusion viewport evidence was invalid: $viewport_evidence"
+    local brep_path="$CREATED_PROJECT_ROOT/brep/keyboard-extrude.brep"
+    [[ -f "$brep_path" ]] || die project_brep_missing 'fresh extrusion did not create the committed BREP'
+    local brep_sha256
+    brep_sha256="$(sha256sum "$brep_path" | cut -d' ' -f1)"
+    jq -s -e --arg bundle_path "$CREATED_PROJECT_ROOT" \
+        --arg brep_path "$brep_path" \
+        --arg brep_sha256 "$brep_sha256" \
+        --arg feature_id 'keyboard-extrude' \
+        --argjson profile '[[0,0],[10,0],[10,5],[0,5]]' \
+        --argjson height 3 \
+        --arg mode 'additive' \
+        '.[0] as $manifest | (.[1:] | map(select(.feature_id == $feature_id and .intent.command == "extrude")) | last) as $entry | select(($manifest.generation_id | type == "string" and length > 0) and ($manifest.revision_id | type == "string" and length > 0) and ($manifest.revision_hash | type == "string" and length > 0) and ($manifest.transaction_count | type == "number" and . == 1) and ($entry.intent.deterministic_inputs.profile == $profile) and ($entry.intent.deterministic_inputs.height == $height) and ($entry.intent.mode == $mode)) | {project_identity:{bundle_path:$bundle_path,generation_id:$manifest.generation_id,revision_id:$manifest.revision_id,revision_hash:$manifest.revision_hash,transaction_count:$manifest.transaction_count},intent:{feature_id:$entry.feature_id,profile:$entry.intent.deterministic_inputs.profile,height:$entry.intent.deterministic_inputs.height,mode:$entry.intent.mode},derived_result:{brep_path:$brep_path,brep_sha256:$brep_sha256}}' \
+        "$CREATED_PROJECT_ROOT/manifest.json" "$CREATED_PROJECT_ROOT/transactions.log" >"$PROJECT_IDENTITY" ||
+        die project_identity_failed 'project identity evidence could not be written'
+    capture_screenshot "$EXTRUSION_COMMITTED_SCREENSHOT" || die extrusion_screenshot_failed 'extrusion-committed screenshot was not fixed at 800x600'
+    local ocr
+    ocr="$(tesseract "$EXTRUSION_COMMITTED_SCREENSHOT" stdout 2>/dev/null || true)"
+    grep -Fq 'Project created' <<<"$ocr" || die project_marker_not_visible 'project creation acknowledgement was not visible in the extrusion screenshot'
+    grep -Fq 'keyboard-extrude' <<<"$ocr" || die extrusion_marker_not_visible 'extrusion acknowledgement was not visible in the extrusion screenshot'
+    grep -Fq 'Viewport presented' <<<"$ocr" || die workflow_viewport_marker_not_visible 'final viewport evidence was not visible in the extrusion screenshot'
+    rendered_viewport_ready "$EXTRUSION_COMMITTED_SCREENSHOT" || die workflow_not_rendered 'fresh extrusion screenshot does not contain palette-bound rendered geometry'
+    local image_id
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    evidence_wire_ready "$image_id" || die workflow_not_acknowledged 'final fresh workflow frame did not receive a Kitty acknowledgement'
+    viewport_workflow_evidence="$viewport_evidence"
+    workflow_status='passed'
 }
 
 read_tui_status() {
@@ -681,6 +907,16 @@ cleanup_screenshot_clear() {
     [[ "$body_pixels" == 0 && "$edge_pixels" == 0 ]]
 }
 
+redact_transient_source_revision() {
+    [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]] || return 0
+    local path
+    for path in "$PTY_OUTPUT" "$TUI_STDERR" "$WESTON_LOG"; do
+        [[ -f "$path" ]] || continue
+        sed -i "s/${TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION}/${PERSISTED_TRANSIENT_SOURCE_REVISION}/g" "$path" || return 1
+    done
+    failure_detail="${failure_detail//${TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION}/$PERSISTED_TRANSIENT_SOURCE_REVISION}"
+}
+
 wait_for_pid_exit() {
     local pid="$1"
     local seconds="$2"
@@ -709,14 +945,24 @@ write_manifest() {
     local kind path bytes digest record
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
-        "$STARTUP_SCREENSHOT" "$ORBIT_SCREENSHOT" "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
+        "$STARTUP_SCREENSHOT" "$PROJECT_CREATED_SCREENSHOT" "$EXTRUSION_COMMITTED_SCREENSHOT"
+        "$ORBIT_SCREENSHOT" "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
         "$DIFF_LOG" "${EVIDENCE_ROOT}/window-ready.png" "$STIMULUS_ERROR"
     )
     local -a evidence_kinds=(
         pty_output pty_input tui_stderr compositor_log tool_versions
-        startup_screenshot orbit_screenshot cleanup_screenshot failure_screenshot
+        startup_screenshot project_created_screenshot extrusion_committed_screenshot
+        orbit_screenshot cleanup_screenshot failure_screenshot
         orbit_difference window_screenshot probe_stimulus_error
     )
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+        evidence_files+=(
+            "$PROJECT_IDENTITY"
+            "$CREATED_PROJECT_ROOT/manifest.json"
+            "$CREATED_PROJECT_ROOT/brep/keyboard-extrude.brep"
+        )
+        evidence_kinds+=(project_identity created_project_manifest derived_brep)
+    fi
     if command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
         local index
         for index in "${!evidence_files[@]}"; do
@@ -741,6 +987,14 @@ write_manifest() {
         else
             failure_json='null'
         fi
+        local persisted_viewport_startup="$viewport_startup_evidence"
+        if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+            persisted_viewport_startup="$(jq \
+                --arg expected "$TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION" \
+                --arg replacement "$PERSISTED_TRANSIENT_SOURCE_REVISION" \
+                'if . == null then null elif .frame.revision == $expected then .frame.revision = $replacement else . end' \
+                <<<"$viewport_startup_evidence")"
+        fi
         jq -n \
             --arg schema_version "$SCHEMA_VERSION" \
             --arg result "$result" \
@@ -764,14 +1018,16 @@ write_manifest() {
             --arg ghostty_status "$ghostty_status" \
             --arg weston_status "$weston_status" \
             --arg owned_processes_status "$owned_processes_status" \
-            --argjson viewport_startup "$viewport_startup_evidence" \
+            --argjson viewport_startup "$persisted_viewport_startup" \
             --argjson viewport_orbit "$viewport_orbit_evidence" \
+            --argjson viewport_workflow "$viewport_workflow_evidence" \
             --argjson final_image_id "$final_image_id_json" \
             --argjson final_delete_image_id "$final_delete_image_id_json" \
             --argjson cleanup_deletions "$cleanup_deletions" \
+            --arg workflow_status "$workflow_status" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-            '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,orbit:$viewport_orbit},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+            '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,orbit:$viewport_orbit,workflow:$viewport_workflow},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -797,6 +1053,12 @@ on_exit() {
         failure_code='runner_failed'
         failure_detail='graphical runner exited before completing its evidence contract'
     fi
+    if ! redact_transient_source_revision; then
+        success=0
+        final_status=1
+        failure_code='transient_identity_redaction_failed'
+        failure_detail='transient source revision could not be removed from retained evidence'
+    fi
     write_manifest "$final_status"
     exit "$final_status"
 }
@@ -808,11 +1070,17 @@ trap on_exit EXIT INT TERM
 mkdir -p "$XDG_RUNTIME_DIR" || die runtime_root_unavailable 'private XDG_RUNTIME_DIR could not be created'
 chmod 700 "$XDG_RUNTIME_DIR" || die runtime_root_unavailable 'private XDG_RUNTIME_DIR could not be secured'
 check_prerequisites
+if [[ "${THREETERM_GRAPHICAL_FORCE_CAPABILITY_DENIAL:-0}" == 1 ]]; then
+    die capability_or_readiness_failed 'capability denial fixture requested'
+fi
 start_compositor
 find_output
 start_ghostty
 start_probe_stimulus
 wait_for_tui_readiness
+if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    run_create_project_extrude
+fi
 run_orbit
 wtype q || die input_injection_failed 'compositor keyboard input could not send q'
 wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'

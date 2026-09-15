@@ -192,7 +192,7 @@ fn launch_inner<W: InteractiveTerminal>(
     environment: TerminalEnvironment,
     initial_command: Option<(CommandId, Value)>,
 ) -> Result<LaunchOutcome, LaunchError> {
-    let root = root.as_ref();
+    let mut root = root.as_ref().to_path_buf();
     let prepared = environment.foreground_tty;
     if prepared && let Err(error) = terminal.prepare() {
         return Err(with_restore_error(
@@ -231,7 +231,9 @@ fn launch_inner<W: InteractiveTerminal>(
         ));
     }
 
-    if let Err(error) = host.load_with_geometry_replay(root) {
+    if root.exists()
+        && let Err(error) = host.load_with_geometry_replay(&root)
+    {
         return Err(with_restore_error(
             LaunchError::Project(error.to_string()),
             terminal.restore(),
@@ -257,7 +259,7 @@ fn launch_inner<W: InteractiveTerminal>(
     let (width, height) = terminal.viewport_size();
     let launch_result = run_session(
         host,
-        root,
+        &mut root,
         width,
         height,
         placement,
@@ -315,7 +317,7 @@ fn with_restore_result(
 #[allow(clippy::too_many_arguments)]
 fn run_session<W: InteractiveTerminal>(
     host: &Host,
-    root: &Path,
+    root: &mut std::path::PathBuf,
     width: u32,
     height: u32,
     placement: KittyPlacement,
@@ -369,7 +371,7 @@ fn run_session<W: InteractiveTerminal>(
 fn run_event_loop<W: InteractiveTerminal>(
     session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
     host: &Host,
-    root: &Path,
+    root: &mut std::path::PathBuf,
     capabilities: &TerminalCapabilityVector,
     replayed_probe_input: &[u8],
     initial_command: Option<(CommandId, Value)>,
@@ -391,8 +393,22 @@ fn run_event_loop<W: InteractiveTerminal>(
     write_viewport_evidence(session)?;
 
     if let Some((command, request)) = initial_command {
+        let destination = (command == threeterm_protocol::schema::NEW_PROJECT_COMMAND_ID)
+            .then(|| {
+                request
+                    .get("destination")
+                    .and_then(Value::as_str)
+                    .map(std::path::PathBuf::from)
+            })
+            .flatten();
         let response =
             crate::execute_domain_command(host, command, request).map_err(LaunchError::Command)?;
+        if let Some(destination) = destination {
+            *root = destination;
+            host.load_with_geometry_replay(&*root).map_err(|error| {
+                LaunchError::Project(format!("created project could not load: {error}"))
+            })?;
+        }
         session
             .refresh_scene_from_host(host)
             .map_err(|error| match error {
@@ -658,17 +674,20 @@ fn run_event_loop<W: InteractiveTerminal>(
                         return Ok(last_response);
                     }
                     _ => {
-                        let outcome = session.process_keyboard_input(&event, host, root).map_err(
-                            |error| match error {
+                        let outcome = session
+                            .process_keyboard_input(&event, host, &mut *root)
+                            .map_err(|error| match error {
                                 crate::TuiViewportError::Viewport(error) => {
                                     LaunchError::Viewport(error)
                                 }
                                 crate::TuiViewportError::Tui(error) => {
                                     LaunchError::Runtime(format!("{error:?}"))
                                 }
-                            },
-                        )?;
+                            })?;
                         response = outcome.response;
+                        if let Some(active_project_root) = outcome.active_project_root {
+                            *root = active_project_root;
+                        }
                         vec![outcome.overlay]
                     }
                 };

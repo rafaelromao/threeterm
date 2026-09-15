@@ -1735,6 +1735,12 @@ bool handle_inspect_edges(const JsonParser::Value& request, std::string& error) 
             << "\",\"request_id\":\"" << json_escape(request_id)
             << "\",\"operation\":\"inspect_edges\",\"status\":\"ok\",\"feature_id\":\""
             << json_escape(feature_id) << "\"";
+        GProp_GProps volume_properties;
+        BRepGProp::VolumeProperties(shape, volume_properties);
+        if (std::isfinite(volume_properties.Mass()) && volume_properties.Mass() > 0.0) {
+            out << ",\"material_volume\":" << std::setprecision(17)
+                << volume_properties.Mass();
+        }
         append_edge_candidates(out, edges, request);
         out << '}';
         g_result_json = out.str();

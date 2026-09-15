@@ -24,6 +24,25 @@ use threeterm_protocol::schema::{
 use threeterm_protocol::schema_validator::validate;
 
 const BASELINE_COMMANDS: [threeterm_protocol::schema::CommandId; 16] = [
+    BOOLEAN_FUSE_COMMAND_ID,
+    CHAMFER_COMMAND_ID,
+    CIRCULAR_PATTERN_COMMAND_ID,
+    DRAFT_COMMAND_ID,
+    EXTRUDE_COMMAND_ID,
+    FILLET_COMMAND_ID,
+    HOLE_COMMAND_ID,
+    LINEAR_PATTERN_COMMAND_ID,
+    LIST_COMMAND_ID,
+    LOAD_COMMAND_ID,
+    LOFT_COMMAND_ID,
+    MIRROR_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID,
+    REVOLVE_COMMAND_ID,
+    SAVE_COMMAND_ID,
+    SHELL_COMMAND_ID,
+];
+
+const BASELINE_EXECUTION_ORDER: [threeterm_protocol::schema::CommandId; 16] = [
     LIST_COMMAND_ID,
     NEW_PROJECT_COMMAND_ID,
     SAVE_COMMAND_ID,
@@ -751,11 +770,9 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         .filter(|entry| baseline_ids.contains(&entry.id))
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
-    let mut expected_baseline_projection = BASELINE_COMMANDS.to_vec();
-    expected_baseline_projection.sort_unstable();
     assert_eq!(
-        baseline_projection, expected_baseline_projection,
-        "the registry must contain exactly the qualified baseline IDs"
+        baseline_projection, BASELINE_COMMANDS,
+        "the registry must contain the qualified baseline in order"
     );
     let extras = registry
         .iter()
@@ -784,7 +801,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
     let mut saved_hashes = None;
     let native_worker_required = std::env::var_os("THREETERM_REQUIRE_OCCT").is_some();
     let mut rows = Vec::new();
-    for command in BASELINE_COMMANDS {
+    for command in BASELINE_EXECUTION_ORDER {
         let command_root = match command {
             NEW_PROJECT_COMMAND_ID => lifecycle_parent.clone(),
             SAVE_COMMAND_ID | LOAD_COMMAND_ID => lifecycle_root.clone(),
@@ -1089,7 +1106,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         rows.iter()
             .map(|row| row.command_id.as_str())
             .collect::<Vec<_>>(),
-        BASELINE_COMMANDS
+        BASELINE_EXECUTION_ORDER
             .iter()
             .map(|command| command.0)
             .collect::<Vec<_>>()

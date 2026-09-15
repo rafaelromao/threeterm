@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
 use threeterm_domain::{FeatureGraph, FitDimension, SketchEntity, SketchPlacement};
 use threeterm_theme::{Palette, SemanticToken};
 
@@ -7,7 +8,7 @@ use crate::diagnostic::{ViewportDiagnostic, ViewportDiagnosticCode};
 
 pub const MAX_PIXELS: u64 = 16_777_216;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ViewportColors {
     pub background: [u8; 3],
     pub body: [u8; 3],
@@ -64,7 +65,7 @@ impl Default for ViewportColors {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CameraState {
     pub yaw_degrees: i16,
     pub pitch_degrees: i16,

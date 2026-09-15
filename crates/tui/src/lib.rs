@@ -5,6 +5,7 @@ mod launch;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use threeterm_domain::{
     FeatureGraph,
@@ -24,9 +25,9 @@ use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
 use threeterm_viewport::{
-    CameraState, CapabilityProbeResult, FrameAcknowledgement, PickResult, ProtocolNeutralViewport,
-    RenderCoordinator, Renderer, SubmitOutcome, ViewportColors, ViewportDiagnostic,
-    ViewportDiagnosticCode, ViewportRequest, ViewportScene,
+    CameraState, CapabilityProbeResult, FrameAcknowledgement, FrameIdentity, PickResult,
+    ProtocolNeutralViewport, RenderCoordinator, Renderer, SubmitOutcome, ViewportColors,
+    ViewportDiagnostic, ViewportDiagnosticCode, ViewportRequest, ViewportScene,
 };
 
 pub use launch::{
@@ -251,6 +252,49 @@ pub struct CommandDraftSession {
     draft: Option<CommandDraft>,
     preview: Option<CommandPreview>,
     input_text: String,
+}
+
+pub const VIEWPORT_EVIDENCE_SCHEMA_VERSION: &str = "threeterm.viewport-evidence/1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewportFrameEvidence {
+    pub frame_token: u64,
+    pub image_id: u64,
+    pub generation: u64,
+    pub revision: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewportSolidEvidence {
+    pub feature_id: String,
+    pub triangle_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewportSceneEvidence {
+    pub solids: Vec<ViewportSolidEvidence>,
+    pub triangle_count: usize,
+    pub body_pixels: usize,
+    pub edge_pixels: usize,
+    pub non_background_pixels: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewportPaletteEvidence {
+    pub name: &'static str,
+    pub colors: ViewportColors,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewportPresentationEvidence {
+    pub schema_version: &'static str,
+    pub acknowledgement: &'static str,
+    pub frame: ViewportFrameEvidence,
+    pub scene: ViewportSceneEvidence,
+    pub palette: ViewportPaletteEvidence,
+    pub camera: CameraState,
 }
 
 impl CommandDraftSession {
@@ -3189,6 +3233,7 @@ pub struct TuiViewportSession<R: Renderer> {
     viewport_colors: ViewportColors,
     coordinator: RenderCoordinator<R>,
     visible_presentation: Option<(u64, CameraState)>,
+    visible_frame_identity: Option<FrameIdentity>,
     in_flight_presentation: Option<(u64, CameraState)>,
     pending_presentation: Option<(u64, CameraState)>,
 }
@@ -3323,6 +3368,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             viewport_colors,
             coordinator: RenderCoordinator::new(renderer),
             visible_presentation: None,
+            visible_frame_identity: None,
             in_flight_presentation: None,
             pending_presentation: None,
         })
@@ -4100,6 +4146,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             && identity.generation == presentation.0
         {
             self.visible_presentation = Some(presentation);
+            self.visible_frame_identity = Some(identity);
         }
         if let Some(identity) = self.coordinator.in_flight() {
             if self
@@ -4182,6 +4229,7 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.visible_frame_identity = None;
         self.coordinator.cleanup()
     }
 
@@ -4333,6 +4381,56 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.camera
     }
 
+    pub fn presentation_evidence(&self) -> Option<ViewportPresentationEvidence> {
+        let identity = self.visible_frame_identity.as_ref()?;
+        let frame = self.coordinator.visible_frame()?;
+        if frame.frame_token != Some(identity.frame_token)
+            || frame.generation != identity.generation
+            || frame.revision != identity.revision
+        {
+            return None;
+        }
+
+        let solids = self
+            .scene
+            .solids
+            .iter()
+            .map(|solid| ViewportSolidEvidence {
+                feature_id: solid.feature_id.clone(),
+                triangle_count: solid.triangles.len(),
+            })
+            .collect::<Vec<_>>();
+        let triangle_count = solids.iter().map(|solid| solid.triangle_count).sum();
+        Some(ViewportPresentationEvidence {
+            schema_version: VIEWPORT_EVIDENCE_SCHEMA_VERSION,
+            acknowledgement: "viewport-presented",
+            frame: ViewportFrameEvidence {
+                frame_token: identity.frame_token,
+                image_id: identity.image_id,
+                generation: identity.generation,
+                revision: identity.revision.clone(),
+                width: frame.width,
+                height: frame.height,
+            },
+            scene: ViewportSceneEvidence {
+                solids,
+                triangle_count,
+                body_pixels: count_rgb_pixels(&frame.rgb, self.viewport_colors.body),
+                edge_pixels: count_rgb_pixels(&frame.rgb, self.viewport_colors.edge),
+                non_background_pixels: frame
+                    .rgb
+                    .chunks_exact(3)
+                    .filter(|pixel| *pixel != self.viewport_colors.background)
+                    .count(),
+            },
+            palette: ViewportPaletteEvidence {
+                name: self.tui.theme.palette.name,
+                colors: self.viewport_colors,
+            },
+            camera: self.camera,
+        })
+    }
+
     pub fn coordinator(&self) -> &RenderCoordinator<R> {
         &self.coordinator
     }
@@ -4340,6 +4438,10 @@ impl<R: Renderer> TuiViewportSession<R> {
     pub fn coordinator_mut(&mut self) -> &mut RenderCoordinator<R> {
         &mut self.coordinator
     }
+}
+
+fn count_rgb_pixels(rgb: &[u8], target: [u8; 3]) -> usize {
+    rgb.chunks_exact(3).filter(|pixel| *pixel == target).count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

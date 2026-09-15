@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use threeterm_host::Host;
-use threeterm_occt_worker::{LoftRequest, OcctWorker};
+use threeterm_occt_worker::{BracketRequest, LoftRequest, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_theme::{PaletteSources, SemanticToken, ThemeContext, resolve_palette};
 use threeterm_tui::{TuiViewportError, TuiViewportSession};
@@ -218,6 +218,72 @@ fn production_viewport_renders_a_committed_loft_tessellation() {
         "the selected committed loft must contribute solid pixels"
     );
 
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
+#[ignore = "requires the native OCCT worker"]
+fn production_viewport_evidence_binds_saved_bracket_frame_after_replay() {
+    let worker = OcctWorker::locate().expect("saved-solid evidence requires the OCCT worker");
+    let root = temporary_bundle_root();
+    let creator = Host::new();
+    creator
+        .create_bracket(
+            &root,
+            BracketRequest::new("viewport-bracket", 60.0, 30.0, 40.0, 3.0)
+                .with_feature_id("l-bracket"),
+            &worker,
+        )
+        .expect("the saved bracket commits through the production host");
+    let before = creator
+        .identity(&root)
+        .expect("saved project identity reads");
+
+    std::fs::remove_dir_all(root.join("brep")).expect("committed BREP artifacts remove");
+    let host = Host::new();
+    host.load_with_geometry_replay(&root)
+        .expect("a fresh host replays the saved bracket geometry");
+    let after = host
+        .identity(&root)
+        .expect("replayed project identity reads");
+    assert_eq!(after, before, "geometry replay preserves Project Identity");
+
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("the saved bracket enters the production viewport");
+    let submitted = session
+        .render_current()
+        .expect("the saved bracket projects into a Viewport Frame");
+    let identity = submitted.started.expect("the initial frame is submitted");
+    let visible = session
+        .acknowledge(FrameAcknowledgement::from(&identity))
+        .expect("the Kitty image is acknowledged")
+        .visible
+        .expect("the acknowledged frame is visible");
+    let evidence = session
+        .presentation_evidence()
+        .expect("acknowledged saved-bracket evidence is available");
+
+    assert_eq!(evidence.frame.frame_token, identity.frame_token);
+    assert_eq!(evidence.frame.image_id, identity.image_id);
+    assert_eq!(evidence.frame.generation, identity.generation);
+    assert_eq!(evidence.frame.revision, identity.revision);
+    assert_eq!((evidence.frame.width, evidence.frame.height), (64, 48));
+    assert_eq!(evidence.scene.solids.len(), 1);
+    assert_eq!(evidence.scene.solids[0].feature_id, "l-bracket");
+    assert!(evidence.scene.solids[0].triangle_count > 0);
+    assert!(evidence.scene.body_pixels > 0);
+    assert!(evidence.scene.edge_pixels > 0);
+    assert_eq!(evidence.camera, threeterm_viewport::CameraState::default());
+    assert_eq!(evidence.palette.name, "catppuccin");
+    assert_eq!(visible.rgb.len(), 64 * 48 * 3);
+    assert_eq!(
+        host.identity(&root)
+            .expect("Project Identity remains readable"),
+        before
+    );
+
+    session.cleanup().expect("saved-bracket viewport cleans up");
     std::fs::remove_dir_all(root).expect("test bundle is removed");
 }
 

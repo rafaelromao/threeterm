@@ -182,7 +182,7 @@ impl McpProcess {
     }
 
     fn finish(mut self) -> McpEvidence {
-        self.stdin.take();
+        drop(self.stdin.take());
         let status = wait_for_exit(&mut self.child, Duration::from_secs(10));
         let stdout_reader = self
             .stdout_thread
@@ -227,7 +227,7 @@ impl McpProcess {
 
 impl Drop for McpProcess {
     fn drop(&mut self) {
-        self.stdin.take();
+        drop(self.stdin.take());
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
             let deadline = Instant::now() + Duration::from_secs(1);

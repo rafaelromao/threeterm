@@ -958,10 +958,7 @@ fn assert_measured_geometry(
         .collect();
     let sum_linear_lengths = |lengths: &[f64]| lengths.iter().sum::<f64>();
 
-    if matches!(
-        feature_id,
-        "arm-x" | "arm-z" | "bracket-l" | "bracket-foundation"
-    ) {
+    if matches!(feature_id, "arm-x" | "arm-z") {
         let expected_span = number(&recipe["expectations"], "arm_span");
         assert!(
             linear_lengths

@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::{Host, HostError, domain_command_diagnostic, domain_execution_diagnostic};
+use threeterm_host::{
+    Host, HostError, canonical_bracket_request_id, domain_command_diagnostic,
+    domain_execution_diagnostic,
+};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
@@ -217,6 +220,86 @@ fn canonical_json(value: &Value) -> String {
 
 fn schema_hash(schema: &Value) -> String {
     sha256_hex(canonical_json(schema).as_bytes())
+}
+
+fn valid_schema_fixture(schema: &Value) -> Value {
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return value.clone();
+    }
+    if let Some(value) = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+        .and_then(|schemas| schemas.first())
+    {
+        return valid_schema_fixture(value);
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            let mut object = serde_json::Map::new();
+            for name in required {
+                let value = properties
+                    .and_then(|properties| properties.get(name))
+                    .map(valid_schema_fixture)
+                    .unwrap_or(Value::Null);
+                object.insert(name.to_string(), value);
+            }
+            Value::Object(object)
+        }
+        Some("array") => {
+            let count = schema.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let item_schema = schema.get("items").unwrap_or(&Value::Null);
+            Value::Array(
+                (0..count)
+                    .map(|index| {
+                        let mut value = valid_schema_fixture(item_schema);
+                        if schema.get("uniqueItems") == Some(&Value::Bool(true))
+                            && let Value::String(text) = &mut value
+                        {
+                            text.push_str(&format!("-{index}"));
+                        }
+                        value
+                    })
+                    .collect(),
+            )
+        }
+        Some("string") => {
+            if schema.get("pattern").and_then(Value::as_str) == Some("^[0-9a-f]{64}$") {
+                Value::String("0".repeat(64))
+            } else {
+                Value::String("fixture-value".to_string())
+            }
+        }
+        Some("integer") => {
+            let minimum = schema
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .ceil() as i64;
+            json!(minimum.max(1))
+        }
+        Some("number") => {
+            let minimum = schema.get("minimum").and_then(Value::as_f64).unwrap_or(1.0);
+            json!(minimum.max(1.0))
+        }
+        Some("boolean") => Value::Bool(false),
+        Some("null") => Value::Null,
+        Some(_) | None => Value::Null,
+    }
 }
 
 fn root(label: &str) -> std::path::PathBuf {
@@ -747,7 +830,16 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 validate(&schema.response_schema, &response).unwrap_or_else(|error| {
                     panic!("response for {} fails its schema: {error}", command.0)
                 });
-                if command == NEW_PROJECT_COMMAND_ID {
+                if command == LIST_COMMAND_ID {
+                    let expected = registry
+                        .iter()
+                        .map(|entry| {
+                            serde_json::to_value(entry).expect("registry entry serializes")
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(response, Value::Array(expected));
+                    assert_eq!(filesystem_snapshot(&command_root), before_entries);
+                } else if command == NEW_PROJECT_COMMAND_ID {
                     let created = Bundle::at(&lifecycle_root)
                         .open()
                         .expect("new project opens");
@@ -991,6 +1083,59 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
 }
 
 #[test]
+fn public_dispatcher_preserves_the_canonical_bracket_request_identity() {
+    match OcctWorker::locate() {
+        Ok(_) => {}
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("bracket identity integration requires the native worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("bracket identity integration skipped: {error}");
+            return;
+        }
+    };
+    let root = root("bracket-identity");
+    let bracket_id = "identity-bracket";
+    let dimensions = (60.0, 30.0, 40.0, 3.0);
+    let expected_request_id = canonical_bracket_request_id(
+        bracket_id,
+        dimensions.0,
+        dimensions.1,
+        dimensions.2,
+        dimensions.3,
+    );
+    let view = Host::new()
+        .execute_bracket_command(
+            &root,
+            bracket_id,
+            dimensions.0,
+            dimensions.1,
+            dimensions.2,
+            dimensions.3,
+        )
+        .expect("bracket command executes");
+    assert_eq!(view.result.request_id, expected_request_id);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn public_dispatcher_rejects_unknown_commands_at_the_public_boundary() {
+    let error = Host::new()
+        .execute_domain_command(threeterm_protocol::schema::CommandId("missing"), json!({}))
+        .expect_err("unknown command must be rejected");
+    assert!(matches!(
+        error,
+        ExecutionError::UnknownCommand(threeterm_protocol::schema::CommandId("missing"))
+    ));
+    let diagnostic = domain_execution_diagnostic(&error);
+    assert_eq!(
+        diagnostic.code,
+        threeterm_protocol::diagnostic::DiagnosticCode::UnknownCommand
+    );
+    assert_eq!(diagnostic.arg, "missing");
+}
+
+#[test]
 fn baseline_schema_contracts_match_the_immutable_snapshot() {
     for (
         name,
@@ -1061,6 +1206,42 @@ fn baseline_invalid_requests_preserve_canonical_state() {
             fs::read(command_root.join("transactions.log")).ok(),
             before_log
         );
+        let _ = fs::remove_dir_all(&command_root);
+    }
+}
+
+#[test]
+fn every_baseline_id_reaches_the_injected_handler_with_a_valid_response() {
+    let host = Host::new();
+    for command in BASELINE_COMMANDS {
+        let command_root = root(&format!("handler-{}", command.0));
+        let revision = if matches!(command, LIST_COMMAND_ID | NEW_PROJECT_COMMAND_ID) {
+            String::new()
+        } else {
+            Bundle::create(&command_root)
+                .expect("handler fixture bundle creates")
+                .open()
+                .expect("handler fixture bundle opens")
+                .revision_hash_hex()
+                .to_string()
+        };
+        let request = registry_request(command.0, &command_root, &revision);
+        let schema = threeterm_protocol::schema::find(command).expect("baseline schema exists");
+        validate(&schema.request_schema, &request).unwrap_or_else(|error| {
+            panic!("handler fixture for {} is invalid: {error}", command.0)
+        });
+        let called = Cell::new(false);
+        let response = valid_schema_fixture(&schema.response_schema);
+        let result = host.execute_domain_command_with_handler(command, request, |_| {
+            called.set(true);
+            Ok::<Value, ()>(response)
+        });
+        assert!(
+            result.is_ok(),
+            "handler fixture for {} failed: {result:?}",
+            command.0
+        );
+        assert!(called.get(), "handler was not called for {}", command.0);
         let _ = fs::remove_dir_all(&command_root);
     }
 }

@@ -152,6 +152,9 @@ fn interrupted_save_at_staged_files_reopens_the_pre_save_generation() {
 fn generation_interruption_recovery() {
     let worker = match OcctWorker::locate() {
         Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT generation recovery integration requires the native worker: {error:?}");
+        }
         Err(error) => {
             eprintln!("OCCT generation recovery integration skipped: {error:?}");
             return;

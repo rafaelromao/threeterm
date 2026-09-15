@@ -24,8 +24,9 @@ run_selector() {
 }
 
 run_selector fast "test --workspace -- --skip supervised_occt_extrude --skip supervised_occt_replay --skip canonical_extrude_replay --skip real_occt_geometry_smoke --skip adapter_command_parity --skip required_occt_worker --skip historical_named_revision_restore --skip historical_recovery_adapter_parity --skip generation_identity --skip generation_publication --skip generation_interruption_recovery --skip reusable_geometry_artifact_discard_replay --skip reusable_geometry_adapter_parity --skip reusable_geometry_divergence --skip interactive_shared_command_semantics --skip interactive_production_event_loop"
-run_selector slow "test --workspace --jobs 1 -- --ignored --skip production_tui_ghostty_session --test-threads=1"
-run_selector e2e "test --workspace --jobs 1 -- --include-ignored --skip production_tui_ghostty_session --test-threads=1"
+run_selector slow "test --workspace --jobs 1 -- --ignored --skip production_tui_ghostty_session --skip production_tui_create_project_extrude --test-threads=1"
+run_selector e2e "test --workspace --jobs 1 -- --include-ignored --skip production_tui_ghostty_session --skip production_tui_create_project_extrude --test-threads=1"
+run_selector graphical "test -p threeterm-tui --test graphical_launch --jobs 1 -- --ignored --test-threads=1"
 
 if PATH="${TEMP_DIR}:${PATH}" bash "${TEST_SUITE}" unsupported >/dev/null 2>&1; then
     echo "unsupported suite unexpectedly succeeded" >&2

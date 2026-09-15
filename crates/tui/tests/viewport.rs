@@ -1,11 +1,15 @@
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use threeterm_domain::ProjectGeneration;
 use threeterm_host::Host;
 use threeterm_occt_worker::{BracketRequest, LoftRequest, OcctWorker};
-use threeterm_persistence::Bundle;
+use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_theme::{PaletteSources, SemanticToken, ThemeContext, resolve_palette};
-use threeterm_tui::{TuiViewportError, TuiViewportSession};
+use threeterm_tui::{EMPTY_PROJECT_SOURCE_REVISION, TuiViewportError, TuiViewportSession};
 use threeterm_viewport::{
     CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer, PickCandidate,
     PickResult, TerminalCapabilityVector, ViewportDiagnosticCode,
@@ -84,6 +88,190 @@ fn probe_result() -> CapabilityProbeResult {
         unrelated_input: Vec::new(),
         response_evidence: "test".to_string(),
     }
+}
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let relative = current
+            .strip_prefix(root)
+            .expect("snapshot path stays below its root")
+            .to_path_buf();
+        snapshot.insert(relative, None);
+        for entry in fs::read_dir(current).expect("snapshot directory reads") {
+            let path = entry.expect("snapshot entry reads").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot entry stays below its root")
+                .to_path_buf();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(relative, Some(fs::read(path).expect("snapshot file reads")));
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
+#[test]
+fn empty_host_session_can_create_a_project_from_the_command_palette() {
+    let workspace = temporary_bundle_root();
+    fs::create_dir_all(&workspace).expect("empty workflow workspace creates");
+    let root = workspace.join("created-project");
+    let before_workspace = snapshot_tree(&workspace);
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+    assert_eq!(
+        session.state().canonical_revision,
+        EMPTY_PROJECT_SOURCE_REVISION
+    );
+    let initial_generation = session.state().presentation_generation;
+    assert!(!root.exists());
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "new-project".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts command query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("new-project draft opens");
+    let request = format!("{{\"destination\":\"{}\"}}", root.to_string_lossy());
+    for character in request.chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("new-project draft accepts JSON");
+    }
+    let preview = session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("new-project preview succeeds without a worker");
+    assert!(
+        preview
+            .overlay
+            .contains("[dashed-outline] Preview: new-project")
+    );
+    assert!(!root.exists());
+    assert_eq!(snapshot_tree(&workspace), before_workspace);
+    assert!(host.current().is_none());
+
+    let cancelled = session
+        .process_keyboard_input(b"\x1b", &host, &root)
+        .expect("new-project cancellation succeeds");
+    assert!(
+        cancelled
+            .overlay
+            .contains("[cancellation-glyph] Cancellation: command draft discarded")
+    );
+    assert!(!root.exists());
+    assert_eq!(snapshot_tree(&workspace), before_workspace);
+    assert!(host.current().is_none());
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette reopens");
+    for character in "new-project".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the retried command");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("retried new-project draft opens");
+    for character in request.chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("retried destination input accepts JSON");
+    }
+    session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("retried new-project preview succeeds");
+
+    let committed = session
+        .process_keyboard_input(b"\x1b[13;5u", &host, &root)
+        .expect("new-project commit succeeds");
+    assert!(committed.overlay.contains("Project created:"));
+    assert_eq!(committed.active_project_root, Some(root.clone()));
+    let inspected = Bundle::at(&root)
+        .open_read_only()
+        .expect("created identity reads");
+    assert_eq!(inspected.manifest.transaction_count, 0);
+    let state = session.state();
+    assert_eq!(state.canonical_revision, inspected.manifest.revision_hash);
+    assert!(session.targets().is_empty());
+    assert!(state.selected_target.is_none());
+    assert!(matches!(
+        state.selection,
+        threeterm_tui::SelectionState::None
+    ));
+    assert!(state.presentation_generation > initial_generation);
+    let started = committed
+        .submission
+        .expect("project commit submits a frame")
+        .started
+        .expect("project commit frame starts");
+    session
+        .acknowledge(FrameAcknowledgement::from(&started))
+        .expect("project commit frame acknowledgement succeeds");
+    let evidence = session
+        .presentation_evidence()
+        .expect("project commit frame evidence is visible");
+    assert_eq!(evidence.frame.revision, inspected.manifest.revision_hash);
+    assert!(evidence.scene.solids.is_empty());
+    let before_inspection = snapshot_tree(&root);
+    assert_ne!(
+        inspected.manifest.revision_hash,
+        EMPTY_PROJECT_SOURCE_REVISION
+    );
+    assert_eq!(snapshot_tree(&root), before_inspection);
+
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn existing_new_project_destination_is_rejected_without_mutation() {
+    let root = temporary_bundle_root();
+    write_fresh(&root, ProjectGeneration::fresh()).expect("existing empty project creates");
+    let host = Host::new();
+    host.load(&root).expect("existing project loads");
+    let before_host = host.current().expect("existing host state exists");
+    let before_tree = snapshot_tree(&root);
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("existing project creates a viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "new-project".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts new-project");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("new-project draft opens");
+    let request = format!("{{\"destination\":\"{}\"}}", root.to_string_lossy());
+    for character in request.chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("destination input accepts JSON");
+    }
+    let rejected = session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("existing destination preview returns a visible rejection");
+    assert!(rejected.overlay.contains("preview rejected"));
+    assert_eq!(host.current(), Some(before_host));
+    assert_eq!(snapshot_tree(&root), before_tree);
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

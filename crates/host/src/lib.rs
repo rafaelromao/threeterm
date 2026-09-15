@@ -4662,6 +4662,34 @@ impl Host {
                 ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => unreachable!(),
             });
         }
+        if command == NEW_PROJECT_COMMAND_ID {
+            let destination = request
+                .get("destination")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing destination".to_string()))?;
+            if Path::new(destination).exists() {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!("new-project destination already exists: {destination}"),
+                }));
+            }
+            let input_fingerprint = sha256_hex(
+                serde_json::to_string(&request)
+                    .expect("new-project preview request serializes")
+                    .as_bytes(),
+            );
+            let geometry_fingerprint = sha256_hex(format!("new-project:{destination}").as_bytes());
+            let source_revision = "empty-project".to_string();
+            return Ok(DomainCommandPreview {
+                command,
+                preview_revision: sha256_hex(
+                    format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                        .as_bytes(),
+                ),
+                source_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+            });
+        }
         if command == BRACKET_COMMAND_ID {
             let bundle_path = request
                 .get("bundle_path")
@@ -9748,6 +9776,23 @@ impl Host {
             .ok_or_else(|| HostError::Validation {
                 detail: "host has no canonical presentation snapshot".to_string(),
             })?;
+        self.viewport_scene_from_loaded(current)
+    }
+
+    /// Build a viewport scene from a sealed generation without changing Host
+    /// state or reconciling, migrating, or replaying any project files.
+    pub fn read_only_viewport_scene(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<ViewportScene, HostError> {
+        let root = root.as_ref();
+        self.viewport_scene_from_loaded(Bundle::at(root.to_path_buf()).open_read_only()?)
+    }
+
+    fn viewport_scene_from_loaded(
+        &self,
+        current: LoadedBundle,
+    ) -> Result<ViewportScene, HostError> {
         let revision = current.revision_hash_hex().to_string();
         let root = current.canonical_root.clone();
         let mut scene = ViewportScene::from_feature_graph(revision.clone(), &current.graph, None);
@@ -16340,6 +16385,40 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.get("id").and_then(serde_json::Value::as_str) == Some(LIST_COMMAND_ID.0)
         }));
+    }
+
+    #[test]
+    fn new_project_preview_is_pure_and_commit_creates_empty_generation() {
+        let root = temp_root("new-project-preview");
+        let host = Host::new();
+        let request = serde_json::json!({
+            "destination": root.to_string_lossy(),
+        });
+
+        let preview = host
+            .preview_domain_command(NEW_PROJECT_COMMAND_ID, request.clone())
+            .expect("new-project preview succeeds without mutation");
+        assert_eq!(preview.source_revision, "empty-project");
+        assert!(!root.exists());
+
+        let response = host
+            .execute_domain_command(NEW_PROJECT_COMMAND_ID, request)
+            .expect("new-project commit creates the bundle");
+        assert_eq!(
+            response["generation_id"],
+            response["manifest"]["generation_id"]
+        );
+        assert!(root.join(MANIFEST_FILENAME).is_file());
+        assert_eq!(
+            Bundle::at(&root)
+                .open_read_only()
+                .expect("fresh bundle opens")
+                .log
+                .len(),
+            0
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,10 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
+use threeterm_persistence::{Bundle, CanonicalIntent};
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
@@ -31,6 +34,32 @@ struct ScriptedTerminal {
     write_failures_remaining: usize,
     prepare_calls: usize,
     restore_calls: usize,
+}
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let relative = current
+            .strip_prefix(root)
+            .expect("snapshot path stays below its root")
+            .to_path_buf();
+        snapshot.insert(relative, None);
+        for entry in fs::read_dir(current).expect("snapshot directory reads") {
+            let path = entry.expect("snapshot entry reads").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot entry stays below its root")
+                .to_path_buf();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(relative, Some(fs::read(path).expect("snapshot file reads")));
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
 }
 
 impl Write for ScriptedTerminal {
@@ -1206,4 +1235,262 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     assert!(output.contains("[selection-glyph]"));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_cancels_typed_extrusion_without_mutation() {
+    OcctWorker::locate().expect("extrusion cancellation requires the OCCT worker");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-extrude-cancel-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("cancellation fixture persists");
+    let before_identity = host.identity(&root).expect("cancellation identity reads");
+    let before_tree = snapshot_tree(&root);
+    let request =
+        br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("extrusion cancellation workflow succeeds");
+
+    assert_eq!(
+        host.identity(&root).expect("identity remains readable"),
+        before_identity
+    );
+    assert_eq!(snapshot_tree(&root), before_tree);
+    assert!(!root.join("brep/keyboard-extrude.brep").exists());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("[dashed-outline] Preview: extrude"));
+    assert!(output.contains("[cancellation-glyph] Cancellation: command draft discarded"));
+
+    fs::remove_dir_all(root).expect("cancellation fixture removes");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_creates_project_and_extrudes_typed_profile() {
+    OcctWorker::locate().expect("fresh keyboard workflow requires the OCCT worker");
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "threeterm-fresh-keyboard-workflow-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&workspace).expect("workflow workspace creates");
+    let launch_root = workspace.join("launch-placeholder");
+    let project_root = workspace.join("created-project");
+    assert!(!launch_root.exists());
+    assert!(!project_root.exists());
+
+    let host = Host::new();
+    let request =
+        br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+    let project_request = format!("{{\"destination\":\"{}\"}}", project_root.to_string_lossy());
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
+    let append_text = |events: &mut Vec<Vec<u8>>, text: &[u8]| {
+        events.extend(text.iter().map(|byte| vec![*byte]));
+    };
+    let append_project_draft = |events: &mut Vec<Vec<u8>>, cancel: bool| {
+        events.push(b"\x10".to_vec());
+        append_text(events, b"new-project");
+        events.push(b"\r".to_vec());
+        append_text(events, project_request.as_bytes());
+        events.push(b"\x16".to_vec());
+        if cancel {
+            events.push(b"\x1b".to_vec());
+        } else {
+            events.push(b"\x1b[13;5u".to_vec());
+            events.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
+        }
+    };
+    append_project_draft(&mut events, true);
+    append_project_draft(&mut events, false);
+
+    let append_extrude_draft = |events: &mut Vec<Vec<u8>>, cancel: bool, image_id: u8| {
+        events.push(b"\x10".to_vec());
+        append_text(events, b"extrude");
+        events.push(b"\r".to_vec());
+        append_text(events, request);
+        events.push(b"\x16".to_vec());
+        if cancel {
+            events.push(b"\x1b".to_vec());
+        } else {
+            events.push(b"\x1b[13;5u".to_vec());
+            events.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
+        }
+    };
+    append_extrude_draft(&mut events, true, 0);
+    append_extrude_draft(&mut events, false, 3);
+    events.push(b"\x1b[B".to_vec());
+    events.push(b"\x1b_Gi=4;OK\x1b\\".to_vec());
+    events.push(b"q".to_vec());
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    launch(&host, &launch_root, &mut terminal, official_environment())
+        .expect("fresh project keyboard workflow succeeds");
+
+    assert!(
+        !launch_root.exists(),
+        "the launch placeholder remains absent"
+    );
+    let bundle = Bundle::at(&project_root)
+        .open_read_only()
+        .expect("created project identity reads");
+    assert_eq!(bundle.manifest.transaction_count, 1);
+    assert_ne!(bundle.manifest.revision_hash, "empty-project");
+    assert!(
+        !serde_json::to_string(bundle.log.entries())
+            .expect("log entries serialize")
+            .contains("empty-project")
+    );
+    assert_eq!(
+        host.current()
+            .expect("created project is active")
+            .revision_hash,
+        bundle.revision_hash_hex()
+    );
+    assert!(project_root.join("brep/keyboard-extrude.brep").is_file());
+    let entry = bundle
+        .log
+        .entries()
+        .last()
+        .expect("extrusion transaction is retained");
+    let CanonicalIntent::Extrude(intent) = entry.intent.as_ref().expect("extrusion intent exists")
+    else {
+        panic!("fresh workflow retained a non-extrusion intent");
+    };
+    assert_eq!(intent.affected_semantic_ids, ["keyboard-extrude"]);
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+
+    let scene = host
+        .presentation_viewport_scene()
+        .expect("committed extrusion scene reads");
+    assert_eq!(scene.solids.len(), 1);
+    let solid = &scene.solids[0];
+    assert_eq!(solid.feature_id, "keyboard-extrude");
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    let mut signed_volume = 0.0;
+    let mut edges = BTreeMap::<([i64; 3], [i64; 3]), usize>::new();
+    let mut adjacency = BTreeMap::<[i64; 3], BTreeSet<[i64; 3]>>::new();
+    let vertex_key = |vertex: [f64; 3]| {
+        [
+            (vertex[0] * 1000.0).round() as i64,
+            (vertex[1] * 1000.0).round() as i64,
+            (vertex[2] * 1000.0).round() as i64,
+        ]
+    };
+    for triangle in &solid.triangles {
+        let [a, b, c] = triangle.vertices;
+        for vertex in [a, b, c] {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+        let cross = [
+            b[1] * c[2] - b[2] * c[1],
+            b[2] * c[0] - b[0] * c[2],
+            b[0] * c[1] - b[1] * c[0],
+        ];
+        signed_volume += (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+        let keys = [vertex_key(a), vertex_key(b), vertex_key(c)];
+        for [left, right] in [[keys[0], keys[1]], [keys[1], keys[2]], [keys[2], keys[0]]] {
+            let edge = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *edges.entry(edge).or_default() += 1;
+            adjacency.entry(left).or_default().insert(right);
+            adjacency.entry(right).or_default().insert(left);
+        }
+    }
+    for (axis, expected) in [(0, 10.0), (1, 5.0), (2, 3.0)] {
+        assert!(minimum[axis].abs() < 0.1);
+        assert!((maximum[axis] - expected).abs() < 0.1);
+    }
+    assert!((signed_volume.abs() - 150.0).abs() < 1.0);
+    assert!(edges.values().all(|count| *count == 2));
+    let first_vertex = *adjacency.keys().next().expect("solid has vertices");
+    let mut connected = BTreeSet::from([first_vertex]);
+    let mut pending = VecDeque::from([first_vertex]);
+    while let Some(vertex) = pending.pop_front() {
+        for neighbor in &adjacency[&vertex] {
+            if connected.insert(*neighbor) {
+                pending.push_back(*neighbor);
+            }
+        }
+    }
+    assert_eq!(connected.len(), adjacency.len());
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains(
+        r#""feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive""#
+    ));
+    for acknowledgement in [
+        "[outline] Draft: new-project",
+        "[dashed-outline] Preview: new-project",
+        "[cancellation-glyph] Cancellation: command draft discarded",
+        "Project created:",
+        "transaction_count=0",
+        "[outline] Draft: extrude",
+        "[dashed-outline] Preview: extrude",
+        "[selection-glyph] Commit: extrude",
+        "keyboard-extrude",
+        "selected feature keyboard-extrude",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(acknowledgement),
+            "missing acknowledgement: {acknowledgement}"
+        );
+    }
+    assert!(
+        output
+            .matches("[cancellation-glyph] Cancellation: command draft discarded")
+            .count()
+            >= 2
+    );
+    assert!(
+        output.contains("\"triangle_count\":") && !output.contains("\"triangle_count\":0"),
+        "committed viewport evidence contains tessellated geometry"
+    );
+
+    let before_inspection = snapshot_tree(&project_root);
+    let _ = Bundle::at(&project_root)
+        .open_read_only()
+        .expect("second read-only inspection succeeds");
+    assert_eq!(snapshot_tree(&project_root), before_inspection);
+
+    fs::remove_dir_all(workspace).expect("workflow workspace removes");
 }

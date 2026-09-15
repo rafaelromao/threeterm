@@ -1,11 +1,103 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use threeterm_host::Host;
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
+use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_tui::TuiSession;
+use threeterm_viewport::ViewportScene;
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let relative = current
+            .strip_prefix(root)
+            .expect("snapshot path stays below its root")
+            .to_path_buf();
+        snapshot.insert(relative, None);
+        for entry in fs::read_dir(current).expect("snapshot directory reads") {
+            let path = entry.expect("snapshot entry reads").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot entry stays below its root")
+                .to_path_buf();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(relative, Some(fs::read(path).expect("snapshot file reads")));
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
+fn assert_prism_geometry(scene: &ViewportScene) {
+    assert_eq!(scene.solids.len(), 1);
+    let solid = &scene.solids[0];
+    assert_eq!(solid.feature_id, "keyboard-extrude");
+    assert!(!solid.triangles.is_empty());
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    let mut signed_volume = 0.0;
+    let mut edges = BTreeMap::<([i64; 3], [i64; 3]), usize>::new();
+    let mut adjacency = BTreeMap::<[i64; 3], BTreeSet<[i64; 3]>>::new();
+    let vertex_key = |vertex: [f64; 3]| {
+        [
+            (vertex[0] * 1000.0).round() as i64,
+            (vertex[1] * 1000.0).round() as i64,
+            (vertex[2] * 1000.0).round() as i64,
+        ]
+    };
+    for triangle in &solid.triangles {
+        let [a, b, c] = triangle.vertices;
+        for vertex in [a, b, c] {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+        let cross = [
+            b[1] * c[2] - b[2] * c[1],
+            b[2] * c[0] - b[0] * c[2],
+            b[0] * c[1] - b[1] * c[0],
+        ];
+        signed_volume += (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+        let keys = [vertex_key(a), vertex_key(b), vertex_key(c)];
+        for [left, right] in [[keys[0], keys[1]], [keys[1], keys[2]], [keys[2], keys[0]]] {
+            let edge = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *edges.entry(edge).or_default() += 1;
+            adjacency.entry(left).or_default().insert(right);
+            adjacency.entry(right).or_default().insert(left);
+        }
+    }
+    for (axis, expected) in [(0, 10.0), (1, 5.0), (2, 3.0)] {
+        assert!(minimum[axis].abs() < 0.1);
+        assert!((maximum[axis] - expected).abs() < 0.1);
+    }
+    assert!((signed_volume.abs() - 150.0).abs() < 1.0);
+    assert!(edges.values().all(|count| *count == 2));
+    let first_vertex = *adjacency.keys().next().expect("solid has vertices");
+    let mut connected = BTreeSet::from([first_vertex]);
+    let mut pending = VecDeque::from([first_vertex]);
+    while let Some(vertex) = pending.pop_front() {
+        for neighbor in &adjacency[&vertex] {
+            if connected.insert(*neighbor) {
+                pending.push_back(*neighbor);
+            }
+        }
+    }
+    assert_eq!(connected.len(), adjacency.len());
+}
 
 #[test]
 #[ignore = "requires the qualified graphical Ghostty toolchain"]
@@ -104,4 +196,183 @@ fn production_tui_ghostty_session() {
                 .any(|item| item["kind"] == "cleanup_screenshot")
             && items.iter().all(|item| item["sha256"].as_str().is_some())
     }));
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_create_project_extrude() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "threeterm-graphical-fresh-launch-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&workspace).expect("graphical fresh workspace creates");
+    let root = workspace.join("launch-placeholder");
+    let created = workspace.join("launch-placeholder-created");
+    let evidence = workspace.join("evidence");
+    assert!(!root.exists());
+    assert!(!created.exists());
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_create_project_extrude")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("fresh graphical runner starts");
+    assert!(
+        output.status.success(),
+        "fresh graphical runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("fresh graphical evidence exists"),
+    )
+    .expect("fresh graphical evidence is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.create-project-extrude/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["test"], "production_tui_create_project_extrude");
+    assert_eq!(manifest["events"]["probe"], "passed");
+    assert_eq!(manifest["events"]["readiness"], "passed");
+    assert_eq!(manifest["events"]["workflow"], "passed");
+    assert_eq!(manifest["events"]["orbit"], "passed");
+    assert_eq!(manifest["events"]["cleanup"], "passed");
+    assert_eq!(
+        manifest["viewport"]["startup"]["frame"]["revision"],
+        "empty-session-source"
+    );
+    assert!(
+        !serde_json::to_string(&manifest)
+            .expect("fresh graphical manifest serializes")
+            .contains("empty-project")
+    );
+    assert_eq!(
+        manifest["viewport"]["startup"]["scene"]["solids"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        manifest["viewport"]["workflow"]["scene"]["solids"][0]["feature_id"],
+        "keyboard-extrude"
+    );
+    assert!(
+        manifest["viewport"]["workflow"]["scene"]["triangle_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert_eq!(
+        manifest["viewport"]["workflow"]["frame"]["revision"],
+        manifest["viewport"]["orbit"]["frame"]["revision"]
+    );
+    assert_ne!(
+        manifest["viewport"]["workflow"]["frame"]["image_id"],
+        manifest["viewport"]["orbit"]["frame"]["image_id"]
+    );
+    assert_ne!(
+        manifest["viewport"]["workflow"]["camera"]["yaw_degrees"],
+        manifest["viewport"]["orbit"]["camera"]["yaw_degrees"]
+    );
+    assert_eq!(
+        manifest["cleanup_evidence"]["final_image_id"],
+        manifest["cleanup_evidence"]["final_delete_image_id"]
+    );
+
+    let identity: Value = serde_json::from_slice(
+        &fs::read(evidence.join("project-identity.json")).expect("project identity exists"),
+    )
+    .expect("project identity is JSON");
+    assert_eq!(
+        identity["project_identity"]["bundle_path"],
+        created.to_string_lossy().as_ref()
+    );
+    assert_eq!(identity["project_identity"]["transaction_count"], 1);
+    assert_eq!(identity["intent"]["feature_id"], "keyboard-extrude");
+    assert_eq!(
+        identity["intent"]["profile"],
+        serde_json::json!([[0, 0], [10, 0], [10, 5], [0, 5]])
+    );
+    assert_eq!(identity["intent"]["height"], 3);
+    assert_eq!(identity["intent"]["mode"], "additive");
+
+    assert!(!root.exists());
+    let pty_output =
+        fs::read_to_string(evidence.join("pty-output.log")).expect("PTY output exists");
+    assert!(pty_output.contains("selected feature keyboard-extrude"));
+    assert!(!pty_output.contains("empty-project"));
+    for kind in [
+        "pty_output",
+        "pty_input",
+        "startup_screenshot",
+        "project_created_screenshot",
+        "extrusion_committed_screenshot",
+        "orbit_screenshot",
+        "cleanup_screenshot",
+        "project_identity",
+        "created_project_manifest",
+        "derived_brep",
+    ] {
+        assert!(
+            manifest["artifacts"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|item| item["kind"] == kind && item["sha256"].as_str().is_some())),
+            "fresh graphical evidence is missing artifact {kind}"
+        );
+    }
+    let before_inspection = snapshot_tree(&created);
+    let bundle = Bundle::at(&created)
+        .open_read_only()
+        .expect("fresh graphical project opens read-only");
+    assert_eq!(snapshot_tree(&created), before_inspection);
+    let verifier = Host::new();
+    let scene = verifier
+        .read_only_viewport_scene(&created)
+        .expect("fresh graphical project loads read-only");
+    assert_prism_geometry(&scene);
+    let mut selector = TuiSession::from_feature_graph(&bundle.graph, bundle.revision_hash_hex());
+    let selected = selector
+        .process_terminal_input(b"\x1b[B")
+        .expect("committed feature is keyboard-selectable");
+    assert_eq!(
+        selected.frame.selected_target.as_deref(),
+        Some("keyboard-extrude")
+    );
+    assert_eq!(snapshot_tree(&created), before_inspection);
+    assert_eq!(bundle.log.len(), 1);
+    let intent = bundle.log.entries()[0]
+        .intent
+        .as_ref()
+        .expect("fresh graphical extrusion retains intent");
+    let CanonicalIntent::Extrude(intent) = intent else {
+        panic!("fresh graphical workflow retained a non-extrusion intent");
+    };
+    assert_eq!(intent.affected_semantic_ids, ["keyboard-extrude"]);
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+    assert_ne!(bundle.manifest.revision_hash, "empty-project");
+    assert!(
+        !serde_json::to_string(bundle.log.entries())
+            .expect("log entries serialize")
+            .contains("empty-project")
+    );
+
+    fs::remove_dir_all(workspace).expect("fresh graphical workspace removes");
 }

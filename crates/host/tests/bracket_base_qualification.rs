@@ -827,6 +827,23 @@ fn assert_complete_intents(recipe: &Value, saved: &LoadedBundle) {
         );
         assert_eq!(encoded["affected_semantic_ids"][0], step["feature_id"]);
         match command {
+            "extrude" => {
+                assert_eq!(encoded["command"], "extrude");
+                assert_eq!(encoded["operation"], "additive");
+                assert_eq!(encoded["mode"], "additive");
+                assert!(encoded.get("target_feature_id").is_none());
+                assert_eq!(
+                    encoded["deterministic_inputs"],
+                    json!({
+                        "profile": step["request"]["profile"],
+                        "height": step["request"]["height"]
+                    })
+                );
+                assert_eq!(
+                    encoded["affected_semantic_ids"],
+                    json!([step["feature_id"]])
+                );
+            }
             "mirror" | "linear-pattern" | "circular-pattern" => {
                 let operation = if command == "linear-pattern" {
                     "linear_pattern"

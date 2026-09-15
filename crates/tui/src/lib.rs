@@ -4383,7 +4383,7 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn presentation_evidence(&self) -> Option<ViewportPresentationEvidence> {
         let identity = self.visible_frame_identity.as_ref()?;
-        let (_, camera) = self.visible_presentation.as_ref()?.clone();
+        let (_, camera) = *self.visible_presentation.as_ref()?;
         let frame = self.coordinator.visible_frame()?;
         if frame.frame_token != Some(identity.frame_token)
             || frame.generation != identity.generation

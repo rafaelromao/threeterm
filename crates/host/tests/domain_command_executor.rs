@@ -746,14 +746,16 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
             .count(),
         BASELINE_COMMANDS.len()
     );
-    let baseline_projection = BASELINE_COMMANDS
+    let baseline_projection = registry
         .iter()
-        .copied()
-        .filter(|command| registry.iter().any(|entry| entry.id == *command))
+        .filter(|entry| baseline_ids.contains(&entry.id))
+        .map(|entry| entry.id)
         .collect::<Vec<_>>();
+    let mut expected_baseline_projection = BASELINE_COMMANDS.to_vec();
+    expected_baseline_projection.sort_unstable();
     assert_eq!(
-        baseline_projection, BASELINE_COMMANDS,
-        "the registry must contain the qualified baseline in order"
+        baseline_projection, expected_baseline_projection,
+        "the registry must contain exactly the qualified baseline IDs"
     );
     let extras = registry
         .iter()
@@ -826,6 +828,22 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         let result = Host::new().execute_domain_command(command, request);
         match result {
             Ok(response) => {
+                assert!(
+                    !matches!(
+                        command,
+                        BOOLEAN_FUSE_COMMAND_ID
+                            | FILLET_COMMAND_ID
+                            | CHAMFER_COMMAND_ID
+                            | HOLE_COMMAND_ID
+                            | MIRROR_COMMAND_ID
+                            | LINEAR_PATTERN_COMMAND_ID
+                            | CIRCULAR_PATTERN_COMMAND_ID
+                            | SHELL_COMMAND_ID
+                            | DRAFT_COMMAND_ID
+                    ),
+                    "base-dependent command {} unexpectedly succeeded: {response:?}",
+                    command.0
+                );
                 result_kind = "success".to_string();
                 validate(&schema.response_schema, &response).unwrap_or_else(|error| {
                     panic!("response for {} fails its schema: {error}", command.0)
@@ -935,6 +953,33 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                         error,
                         HostError::WorkerUnavailable { .. } | HostError::UnsupportedGeometry { .. }
                     ));
+                } else if matches!(
+                    command,
+                    BOOLEAN_FUSE_COMMAND_ID
+                        | FILLET_COMMAND_ID
+                        | CHAMFER_COMMAND_ID
+                        | HOLE_COMMAND_ID
+                        | MIRROR_COMMAND_ID
+                        | LINEAR_PATTERN_COMMAND_ID
+                        | CIRCULAR_PATTERN_COMMAND_ID
+                        | SHELL_COMMAND_ID
+                        | DRAFT_COMMAND_ID
+                ) {
+                    let expected_detail = match command {
+                        BOOLEAN_FUSE_COMMAND_ID => "boolean operand feature is missing: base",
+                        FILLET_COMMAND_ID | CHAMFER_COMMAND_ID | SHELL_COMMAND_ID
+                        | DRAFT_COMMAND_ID => "finishing base feature is missing: base",
+                        HOLE_COMMAND_ID => "hole base feature is missing: base",
+                        MIRROR_COMMAND_ID
+                        | LINEAR_PATTERN_COMMAND_ID
+                        | CIRCULAR_PATTERN_COMMAND_ID => "base feature is missing: base",
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        matches!(&error, HostError::Validation { detail } if detail == expected_detail),
+                        "expected {expected_detail:?} for {}: {error:?}",
+                        command.0
+                    );
                 } else {
                     assert!(
                         matches!(
@@ -1864,6 +1909,9 @@ fn derived_geometry_commands_reject_unproven_base_breps_before_worker_execution(
 fn interactive_shared_command_semantics() {
     let worker = match OcctWorker::locate() {
         Ok(worker) => worker,
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT interactive command semantics require the native worker: {error}");
+        }
         Err(error) => {
             eprintln!("OCCT interactive command semantics skipped: {error}");
             return;

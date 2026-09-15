@@ -62,6 +62,38 @@ fn production_tui_ghostty_session() {
     assert_eq!(manifest["events"]["readiness"], "passed");
     assert_eq!(manifest["events"]["orbit"], "passed");
     assert_eq!(manifest["events"]["cleanup"], "passed");
+    assert_eq!(manifest["configuration"]["palette"], "catppuccin");
+    let startup = &manifest["viewport"]["startup"];
+    let orbit = &manifest["viewport"]["orbit"];
+    assert_eq!(startup["schema_version"], "threeterm.viewport-evidence/1");
+    assert_eq!(startup["frame"]["width"], 800);
+    assert_eq!(startup["frame"]["height"], 480);
+    assert_eq!(startup["palette"]["name"], "catppuccin");
+    assert_eq!(
+        startup["palette"]["colors"]["body"],
+        serde_json::json!([125, 125, 152])
+    );
+    assert!(startup["scene"]["solids"].as_array().is_some_and(|solids| {
+        solids.iter().any(|solid| {
+            solid["feature_id"] == "l-bracket" && solid["triangle_count"].as_u64().unwrap_or(0) > 0
+        })
+    }));
+    assert!(startup["scene"]["body_pixels"].as_u64().unwrap_or(0) > 0);
+    assert_ne!(startup["frame"]["image_id"], orbit["frame"]["image_id"]);
+    assert_ne!(
+        startup["camera"]["yaw_degrees"],
+        orbit["camera"]["yaw_degrees"]
+    );
+    assert_eq!(startup["frame"]["revision"], orbit["frame"]["revision"]);
+    assert_eq!(
+        manifest["cleanup_evidence"]["final_image_id"],
+        manifest["cleanup_evidence"]["final_delete_image_id"]
+    );
+    assert!(
+        manifest["cleanup_evidence"]["deletions"]
+            .as_array()
+            .is_some_and(|deletions| deletions.len() >= 2)
+    );
     assert_eq!(manifest["processes"]["owned"], "stopped");
     assert!(manifest["artifacts"].as_array().is_some_and(|items| {
         items

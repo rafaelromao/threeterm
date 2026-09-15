@@ -388,6 +388,7 @@ fn run_event_loop<W: InteractiveTerminal>(
             ))
         })?;
     acknowledge_frame(session, initial.frame_token)?;
+    write_viewport_evidence(session)?;
 
     if let Some((command, request)) = initial_command {
         let response =
@@ -483,6 +484,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                         image_id,
                     })
                     .map_err(LaunchError::Viewport)?;
+                write_viewport_evidence(session)?;
                 continue;
             }
             if let Some(input) = decode_terminal_input(&event) {
@@ -726,6 +728,30 @@ fn acknowledge_frame<W: InteractiveTerminal>(
         })
         .map_err(LaunchError::Viewport)?;
     Ok(())
+}
+
+fn write_viewport_evidence<W: InteractiveTerminal>(
+    session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
+) -> Result<(), LaunchError> {
+    let evidence = session.presentation_evidence().ok_or_else(|| {
+        LaunchError::Viewport(ViewportDiagnostic::new(
+            ViewportDiagnosticCode::ProjectionFailed,
+            "acknowledged viewport frame has no matching presentation evidence",
+            &session.state().canonical_revision,
+            "discard the frame and rebuild the presentation from the current scene",
+        ))
+    })?;
+    let payload =
+        serde_json::to_string(&evidence).expect("viewport presentation evidence is serializable");
+    let revision = session.state().canonical_revision;
+    session
+        .coordinator_mut()
+        .renderer_mut()
+        .write_control(
+            format!("\r\n[viewport-status] Viewport presented {payload}\r\n").as_bytes(),
+            &revision,
+        )
+        .map_err(LaunchError::Viewport)
 }
 
 fn handle_cleanup_signal<W: InteractiveTerminal>(

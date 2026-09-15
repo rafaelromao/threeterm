@@ -18,6 +18,7 @@ TUI_BINARY=''
 PROJECT_ROOT=''
 EVIDENCE_ROOT=''
 PRINT_PLAN=0
+VALIDATE_EVIDENCE=''
 
 WESTON_PID=''
 GHOSTTY_PID=''
@@ -43,6 +44,16 @@ success=0
 failure_code=''
 failure_detail=''
 readiness_detail=''
+viewport_evidence='null'
+viewport_startup_evidence='null'
+viewport_orbit_evidence='null'
+startup_image_id=''
+startup_revision=''
+final_image_id=''
+final_image_id_json='null'
+final_delete_image_id=''
+final_delete_image_id_json='null'
+cleanup_deletions='[]'
 probe_status='not_run'
 readiness_status='not_run'
 orbit_status='not_run'
@@ -62,6 +73,7 @@ usage() {
 Usage:
   graphical-tui.sh production_tui_ghostty_session --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
+  graphical-tui.sh --validate-viewport-evidence PATH
 
 The named test requires a qualified direct-Ghostty graphical environment. It
 never spoofs TERM or TERM_PROGRAM and never passes when prerequisites are absent.
@@ -76,6 +88,7 @@ print_plan() {
   "test": "production_tui_ghostty_session",
   "configuration": {
     "locale": "C.UTF-8",
+    "palette": "catppuccin",
     "compositor": {"width": 800, "height": 600},
     "terminal": {"columns": 80, "rows": 24},
     "viewport_crop": "0,0,800x480"
@@ -94,6 +107,45 @@ die() {
     exit 1
 }
 
+validate_viewport_evidence() {
+    local payload="$1"
+    jq -e '
+        .schema_version == "threeterm.viewport-evidence/1" and
+        .acknowledgement == "viewport-presented" and
+        (.frame.frame_token | type == "number" and . > 0) and
+        (.frame.image_id | type == "number" and . > 0) and
+        (.frame.generation | type == "number") and
+        (.frame.revision | type == "string" and length > 0) and
+        .frame.width == 800 and .frame.height == 480 and
+        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == "l-bracket" and .[0].triangle_count > 0) and
+        (.scene.triangle_count == (.scene.solids | map(.triangle_count) | add)) and
+        (.scene.triangle_count | type == "number" and . > 0) and
+        (.scene.body_pixels | type == "number" and . > 0) and
+        (.scene.edge_pixels | type == "number" and . > 0) and
+        (.scene.non_background_pixels | type == "number" and . > 0) and
+        .palette.name == "catppuccin" and
+        (.camera.yaw_degrees | type == "number") and
+        (.camera.pitch_degrees | type == "number") and
+        (.camera.zoom_percent | type == "number") and
+        (.camera.pan_x | type == "number") and
+        (.camera.pan_y | type == "number") and
+        .palette.colors == {
+            "background": [29,29,45],
+            "body": [125,125,152],
+            "edge": [198,165,162],
+            "grid": [119,155,149],
+            "selected_body": [192,193,222],
+            "selected_edge": [121,111,136],
+            "candidate_body": [164,153,179],
+            "candidate_edge": [221,207,180],
+            "drag_feedback": [146,167,189],
+            "overlay": [155,132,152],
+            "warning": [235,220,193],
+            "error": [208,174,171]
+        }
+    ' <<<"$payload" >/dev/null 2>&1
+}
+
 while (($# > 0)); do
     case "$1" in
         --help|-h)
@@ -103,6 +155,11 @@ while (($# > 0)); do
         --print-plan)
             PRINT_PLAN=1
             shift
+            ;;
+        --validate-viewport-evidence)
+            (($# >= 2)) || { usage >&2; exit 2; }
+            VALIDATE_EVIDENCE="$2"
+            shift 2
             ;;
         --tui-binary)
             (($# >= 2)) || { usage >&2; exit 2; }
@@ -135,6 +192,12 @@ if ((PRINT_PLAN)); then
     (($# == 0)) || { usage >&2; exit 2; }
     print_plan
     exit 0
+fi
+
+if [[ -n "$VALIDATE_EVIDENCE" ]]; then
+    [[ -f "$VALIDATE_EVIDENCE" ]] || exit 2
+    validate_viewport_evidence "$(<"$VALIDATE_EVIDENCE")"
+    exit $?
 fi
 
 [[ "${TEST_NAME:-}" == "$TEST_ID" ]] || { usage >&2; exit 2; }
@@ -340,18 +403,82 @@ readiness_ready() {
         readiness_detail="capability evidence did not establish a valid direct interactive Ghostty attachment: ${capability_evidence}"
         return 1
     fi
+    readiness_viewport_ready || return 1
     return 0
 }
 
+extract_viewport_evidence() {
+    local line
+    viewport_evidence=''
+    while IFS= read -r line; do
+        [[ "$line" == *'[viewport-status] Viewport presented '* ]] || continue
+        viewport_evidence="${line#* Viewport presented }"
+    done < <(tr '\r' '\n' <"$PTY_OUTPUT" 2>/dev/null || true)
+    [[ -n "$viewport_evidence" ]]
+}
+
+evidence_wire_ready() {
+    local image_id="$1"
+    grep -aFq "i=${image_id},o=z" "$PTY_OUTPUT" 2>/dev/null || return 1
+    grep -aFq "i=${image_id};OK" "$PTY_INPUT" 2>/dev/null
+}
+
+readiness_viewport_ready() {
+    extract_viewport_evidence || return 1
+    validate_viewport_evidence "$viewport_evidence" || {
+        readiness_detail="viewport evidence did not satisfy the versioned saved-solid contract: ${viewport_evidence}"
+        return 1
+    }
+    [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" == 0 ]] || return 1
+    [[ "$(jq -r '.camera.pitch_degrees' <<<"$viewport_evidence")" == 20 ]] || return 1
+    [[ "$(jq -r '.camera.zoom_percent' <<<"$viewport_evidence")" == 100 ]] || return 1
+    [[ "$(jq -r '.camera.pan_x' <<<"$viewport_evidence")" == 0 ]] || return 1
+    [[ "$(jq -r '.camera.pan_y' <<<"$viewport_evidence")" == 0 ]] || return 1
+    startup_image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    startup_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    evidence_wire_ready "$startup_image_id" || return 1
+    viewport_startup_evidence="$viewport_evidence"
+}
+
+rgb_pixel_count() {
+    local image="$1"
+    local red="$2"
+    local green="$3"
+    local blue="$4"
+    local count
+    count="$(magick "$image" -crop 800x480+0+0 \
+        -fx "(floor(r*255+0.5)==${red} && floor(g*255+0.5)==${green} && floor(b*255+0.5)==${blue}) ? 1 : 0" \
+        -format '%[fx:mean*w*h]' info: 2>/dev/null || true)"
+    [[ "$count" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    printf '%.0f' "$count"
+}
+
 rendered_viewport_ready() {
-    local colors
-    colors="$(magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 -format '%k' info: 2>/dev/null || true)"
-    [[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 8 ]]
+    local screenshot="$1"
+    local body_pixels edge_pixels
+    body_pixels="$(rgb_pixel_count "$screenshot" 125 125 152)" || return 1
+    edge_pixels="$(rgb_pixel_count "$screenshot" 198 165 162)" || return 1
+    [[ "$body_pixels" -ge 100 && "$edge_pixels" -ge 10 ]]
 }
 
 orbit_ready() {
     grep -aFq '[motion-trail] Orbit right' "$PTY_OUTPUT" 2>/dev/null || return 1
     grep -aFq 'a=T,t=d' "$PTY_OUTPUT" 2>/dev/null || return 1
+    extract_viewport_evidence || return 1
+    validate_viewport_evidence "$viewport_evidence" || return 1
+    [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$startup_revision" ]] || return 1
+    [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$startup_image_id" ]] || return 1
+    [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" != 0 ]] || return 1
+    [[ "$(jq -r '.camera.pitch_degrees' <<<"$viewport_evidence")" == "$(jq -r '.camera.pitch_degrees' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.zoom_percent' <<<"$viewport_evidence")" == "$(jq -r '.camera.zoom_percent' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.pan_x' <<<"$viewport_evidence")" == "$(jq -r '.camera.pan_x' <<<"$viewport_startup_evidence")" ]] || return 1
+    [[ "$(jq -r '.camera.pan_y' <<<"$viewport_evidence")" == "$(jq -r '.camera.pan_y' <<<"$viewport_startup_evidence")" ]] || return 1
+    local image_id
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    evidence_wire_ready "$image_id" || return 1
+    viewport_orbit_evidence="$viewport_evidence"
+    final_image_id="$image_id"
+    final_image_id_json="$image_id"
     return 0
 }
 
@@ -455,6 +582,7 @@ start_ghostty() {
     write_child_wrapper
     env -u TERM -u TERM_PROGRAM -u TMUX -u SSH_CONNECTION -u SSH_TTY \
         LC_ALL=C.UTF-8 LANG=C.UTF-8 HOME="$EVIDENCE_ROOT/home" \
+        THREETERM_PALETTE=catppuccin \
         XDG_CONFIG_HOME="$EVIDENCE_ROOT/config" XDG_CACHE_HOME="$EVIDENCE_ROOT/cache" \
         XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         setsid ghostty --gtk-single-instance=false --class=ThreeTermGraphicalTest \
@@ -481,7 +609,8 @@ wait_for_tui_readiness() {
     local ocr
     ocr="$(tesseract "$STARTUP_SCREENSHOT" stdout 2>/dev/null || true)"
     grep -Fq 'Interactive Modeling ready' <<<"$ocr" || die visible_readiness_failed 'readiness marker was not visible in the startup screenshot'
-    rendered_viewport_ready || die viewport_not_rendered 'startup screenshot does not contain a non-flat rendered viewport'
+    grep -Fq 'Viewport presented' <<<"$ocr" || die viewport_marker_not_visible 'viewport evidence marker was not visible in the startup screenshot'
+    rendered_viewport_ready "$STARTUP_SCREENSHOT" || die viewport_not_rendered 'startup screenshot does not contain palette-bound rendered geometry'
     wait_for_probe_stimulus
     probe_status='passed'
     readiness_status='passed'
@@ -495,6 +624,11 @@ run_orbit() {
     after_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     ((after_acks > before_acks)) || die orbit_not_acknowledged 'orbit did not receive a new Kitty acknowledgement'
     capture_screenshot "$ORBIT_SCREENSHOT" || die orbit_screenshot_failed 'orbit screenshot was not fixed at 800x600'
+    local ocr
+    ocr="$(tesseract "$ORBIT_SCREENSHOT" stdout 2>/dev/null || true)"
+    grep -Fq 'Orbit right' <<<"$ocr" || die orbit_marker_not_visible 'orbit acknowledgement was not visible in the orbit screenshot'
+    grep -Fq 'Viewport presented' <<<"$ocr" || die orbit_viewport_marker_not_visible 'orbit viewport evidence was not visible in the orbit screenshot'
+    rendered_viewport_ready "$ORBIT_SCREENSHOT" || die orbit_not_rendered 'orbit screenshot does not contain palette-bound rendered geometry'
     magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 "${EVIDENCE_ROOT}/startup-viewport.png"
     magick "$ORBIT_SCREENSHOT" -crop 800x480+0+0 "${EVIDENCE_ROOT}/orbit-viewport.png"
     magick compare -metric AE "${EVIDENCE_ROOT}/startup-viewport.png" \
@@ -518,11 +652,33 @@ release_child_wrapper() {
 }
 
 verify_cleanup() {
-    grep -aFq 'a=d,d=I,i=' "$PTY_OUTPUT" 2>/dev/null || die image_cleanup_missing 'production output did not delete the active Kitty image'
-    for marker in '?1049l' '?1004l' '?1006l' '?1016l' '?2026l'; do
+    local line image_id
+    cleanup_deletions='[]'
+    final_delete_image_id=''
+    final_delete_image_id_json='null'
+    while IFS= read -r line; do
+        if [[ "$line" =~ a=d,d=I,i=([0-9]+) ]]; then
+            image_id="${BASH_REMATCH[1]}"
+            cleanup_deletions="$(jq --argjson image_id "$image_id" '. + [$image_id]' <<<"$cleanup_deletions")"
+            final_delete_image_id="$image_id"
+            final_delete_image_id_json="$image_id"
+        fi
+    done < <(tr '\r' '\n' <"$PTY_OUTPUT" 2>/dev/null || true)
+    [[ -n "$final_delete_image_id" ]] || die image_cleanup_missing 'production output did not delete the active Kitty image'
+    [[ "$final_delete_image_id" == "$final_image_id" ]] || die image_cleanup_wrong_image 'production output did not delete the final acknowledged Kitty image'
+    for marker in '?1049l' '?1002l' '?1004l' '?1006l' '?1016l' '?2026l'; do
         grep -aFq "$marker" "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing "production output did not contain cleanup marker $marker"
     done
+    grep -aFq '?25h' "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing 'production output did not restore the cursor'
+    grep -aFq '[0m' "$PTY_OUTPUT" 2>/dev/null || die terminal_cleanup_missing 'production output did not reset terminal attributes'
     cleanup_status='passed'
+}
+
+cleanup_screenshot_clear() {
+    local body_pixels edge_pixels
+    body_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 125 125 152)" || return 1
+    edge_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 198 165 162)" || return 1
+    [[ "$body_pixels" == 0 && "$edge_pixels" == 0 ]]
 }
 
 wait_for_pid_exit() {
@@ -597,6 +753,7 @@ write_manifest() {
             --argjson terminal_columns "$TERMINAL_COLUMNS" \
             --argjson terminal_rows "$TERMINAL_ROWS" \
             --arg viewport_crop "$VIEWPORT_CROP" \
+            --arg palette "catppuccin" \
             --arg toolchain_contract "$TOOLCHAIN_CONTRACT" \
             --argjson tool_versions "$tool_versions_json" \
             --arg probe_status "$probe_status" \
@@ -607,9 +764,14 @@ write_manifest() {
             --arg ghostty_status "$ghostty_status" \
             --arg weston_status "$weston_status" \
             --arg owned_processes_status "$owned_processes_status" \
+            --argjson viewport_startup "$viewport_startup_evidence" \
+            --argjson viewport_orbit "$viewport_orbit_evidence" \
+            --argjson final_image_id "$final_image_id_json" \
+            --argjson final_delete_image_id "$final_delete_image_id_json" \
+            --argjson cleanup_deletions "$cleanup_deletions" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-            '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},failure:$failure,artifacts:$artifacts}' \
+            '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,orbit:$viewport_orbit},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -657,6 +819,7 @@ wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'pr
 tui_status='passed'
 verify_cleanup
 capture_screenshot "$CLEANUP_SCREENSHOT" || die cleanup_screenshot_failed 'cleanup screenshot was not captured before Ghostty teardown'
+cleanup_screenshot_clear || die cleanup_screenshot_not_clear 'cleanup screenshot still contains viewport geometry pixels'
 cleanup_screenshot_taken=1
 release_child_wrapper || die wrapper_release_failed 'Ghostty child wrapper did not accept its release event'
 wait_for_pid_exit "$GHOSTTY_PID" "$RUNNER_TIMEOUT_SECONDS" || die ghostty_exit_timeout 'Ghostty did not exit after the production TUI wrapper was released'

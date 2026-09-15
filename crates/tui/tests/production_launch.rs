@@ -264,6 +264,26 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         "production frame uses the detected terminal cell placement"
     );
     let output = String::from_utf8_lossy(&terminal.writes);
+    let evidence_line = output
+        .lines()
+        .find(|line| line.contains("[viewport-status] Viewport presented "))
+        .expect("initial acknowledged frame emits viewport evidence");
+    let evidence: Value = serde_json::from_str(
+        evidence_line
+            .split_once("presented ")
+            .expect("viewport evidence marker has a JSON payload")
+            .1,
+    )
+    .expect("viewport evidence is JSON");
+    assert_eq!(evidence["schema_version"], "threeterm.viewport-evidence/1");
+    assert_eq!(evidence["acknowledgement"], "viewport-presented");
+    assert_eq!(evidence["frame"]["frame_token"], 1);
+    assert_eq!(evidence["frame"]["image_id"], 1);
+    assert_eq!(evidence["frame"]["width"], 64);
+    assert_eq!(evidence["frame"]["height"], 48);
+    assert_eq!(evidence["palette"]["name"], "catppuccin");
+    assert_eq!(evidence["camera"]["yaw_degrees"], 0);
+    assert_eq!(evidence["camera"]["pitch_degrees"], 20);
     assert!(
         output.contains("[ready-status] Interactive Modeling ready"),
         "readiness is visible only after the positive probe and initial frame"
@@ -291,6 +311,62 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_binds_orbit_evidence_to_the_new_acknowledged_frame() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-evidence-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b[C".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("orbit completes the production event loop");
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    let evidence = output
+        .lines()
+        .filter(|line| line.contains("[viewport-status] Viewport presented "))
+        .map(|line| {
+            serde_json::from_str::<Value>(
+                line.split_once("Viewport presented ")
+                    .expect("viewport marker contains JSON")
+                    .1,
+            )
+            .expect("viewport marker is JSON")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        evidence.len() >= 2,
+        "initial and orbit evidence are emitted"
+    );
+    let startup = &evidence[0];
+    let orbit = evidence.last().expect("orbit evidence exists");
+    assert_eq!(startup["frame"]["image_id"], 1);
+    assert_eq!(orbit["frame"]["image_id"], 3);
+    assert_eq!(startup["frame"]["revision"], orbit["frame"]["revision"]);
+    assert_eq!(startup["scene"]["solids"], orbit["scene"]["solids"]);
+    assert_eq!(
+        startup["scene"]["triangle_count"],
+        orbit["scene"]["triangle_count"]
+    );
+    assert_eq!(orbit["camera"]["yaw_degrees"], 5);
+    assert_eq!(orbit["camera"]["pitch_degrees"], 20);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

@@ -13,6 +13,7 @@ for expected in \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
+    '--validate-viewport-evidence' \
     '--print-plan'; do
     grep -Fq -- "${expected}" <<<"${help}"
 done
@@ -23,6 +24,7 @@ jq -e '
     .result == "not_run" and
     .test == "production_tui_ghostty_session" and
     .configuration.locale == "C.UTF-8" and
+    .configuration.palette == "catppuccin" and
     .configuration.compositor.width == 800 and
     .configuration.compositor.height == 600 and
     .configuration.terminal.columns == 80 and
@@ -57,6 +59,12 @@ for required in \
     'kill -- -' \
     'threeterm.graphical-tui/1' \
     '1.3.1-arch2' \
+    'THREETERM_PALETTE=catppuccin' \
+    'threeterm.viewport-evidence/1' \
+    'Viewport presented' \
+    'validate_viewport_evidence' \
+    'rgb_pixel_count' \
+    'l-bracket' \
     'sha256' \
     'probe_stimulus_failed' \
     'probe_stimulus_timeout' \
@@ -64,7 +72,9 @@ for required in \
     'fail_stimulus' \
     'check_probe_stimulus' \
     'wait_for_probe_stimulus' \
-    '800x480'; do
+    '800x480' \
+    '?1002l' \
+    'cleanup_evidence'; do
     grep -Fq -- "${required}" "${RUNNER}"
 done
 
@@ -141,6 +151,39 @@ run_invalid_path project_root_unavailable \
     --tui-binary /bin/true --project-root "${evidence}/missing-project"
 run_invalid_path tui_binary_unavailable \
     --tui-binary "${evidence}/missing-bin/tui" --project-root "${ROOT}"
+
+valid_viewport_evidence="${evidence}/valid-viewport-evidence.json"
+jq -n '
+    {
+        schema_version: "threeterm.viewport-evidence/1",
+        acknowledgement: "viewport-presented",
+        frame: {frame_token: 1, image_id: 1, generation: 0, revision: "revision", width: 800, height: 480},
+        scene: {
+            solids: [{feature_id: "l-bracket", triangle_count: 12}],
+            triangle_count: 12,
+            body_pixels: 100,
+            edge_pixels: 10,
+            non_background_pixels: 110
+        },
+        palette: {
+            name: "catppuccin",
+            colors: {
+                background: [29,29,45], body: [125,125,152], edge: [198,165,162],
+                grid: [119,155,149], selected_body: [192,193,222], selected_edge: [121,111,136],
+                candidate_body: [164,153,179], candidate_edge: [221,207,180],
+                drag_feedback: [146,167,189], overlay: [155,132,152],
+                warning: [235,220,193], error: [208,174,171]
+            }
+        },
+        camera: {yaw_degrees: 0, pitch_degrees: 20, zoom_percent: 100, pan_x: 0, pan_y: 0}
+    }
+' >"${valid_viewport_evidence}"
+bash "${RUNNER}" --validate-viewport-evidence "${valid_viewport_evidence}"
+jq -n '{schema_version: "threeterm.viewport-evidence/1"}' >"${evidence}/invalid-viewport-evidence.json"
+if bash "${RUNNER}" --validate-viewport-evidence "${evidence}/invalid-viewport-evidence.json"; then
+    echo "malformed viewport evidence unexpectedly passed" >&2
+    exit 1
+fi
 
 tool_versions_dir="$(mktemp -d "${evidence}/tool-versions.XXXXXX")"
 fake_bin="${tool_versions_dir}/bin"

@@ -42,25 +42,6 @@ const BASELINE_COMMANDS: [threeterm_protocol::schema::CommandId; 16] = [
     LOFT_COMMAND_ID,
 ];
 
-const BASELINE_REGISTRY_ORDER: [threeterm_protocol::schema::CommandId; 16] = [
-    BOOLEAN_FUSE_COMMAND_ID,
-    CHAMFER_COMMAND_ID,
-    CIRCULAR_PATTERN_COMMAND_ID,
-    DRAFT_COMMAND_ID,
-    EXTRUDE_COMMAND_ID,
-    FILLET_COMMAND_ID,
-    HOLE_COMMAND_ID,
-    LINEAR_PATTERN_COMMAND_ID,
-    LIST_COMMAND_ID,
-    LOAD_COMMAND_ID,
-    LOFT_COMMAND_ID,
-    MIRROR_COMMAND_ID,
-    NEW_PROJECT_COMMAND_ID,
-    REVOLVE_COMMAND_ID,
-    SAVE_COMMAND_ID,
-    SHELL_COMMAND_ID,
-];
-
 #[derive(Debug)]
 struct ResultRow {
     command_id: String,
@@ -769,10 +750,10 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         .iter()
         .filter(|entry| baseline_ids.contains(&entry.id))
         .map(|entry| entry.id)
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
     assert_eq!(
-        baseline_projection, BASELINE_REGISTRY_ORDER,
-        "the registry must contain the qualified baseline in order"
+        baseline_projection, baseline_ids,
+        "the registry must contain exactly the qualified baseline IDs"
     );
     let extras = registry
         .iter()

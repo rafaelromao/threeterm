@@ -184,13 +184,11 @@ impl McpProcess {
     fn finish(mut self) -> McpEvidence {
         self.stdin.take();
         let status = wait_for_exit(&mut self.child, Duration::from_secs(10));
-        let stdout_thread = self
-            .stdout_thread
+        self.stdout_thread
             .take()
             .expect("MCP stdout reader remains owned")
             .join()
             .expect("MCP stdout reader joins");
-        let _ = stdout_thread;
 
         while let Ok(line) = self.stdout.try_recv() {
             let line = line.unwrap_or_else(|error| panic!("MCP stdout read failed: {error}"));

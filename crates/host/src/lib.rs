@@ -2990,7 +2990,9 @@ impl Host {
 
     /// Execute the migrated versioned domain commands behind one semantic
     /// boundary. Transport adapters may frame or render the result, but they
-    /// do not validate or implement these commands independently.
+    /// do not validate or implement these commands independently. Lifecycle
+    /// commands create an empty bundle, append canonical feature transactions,
+    /// and reload that durable state without relying on this `Host` instance.
     pub fn execute_domain_command(
         &self,
         command: CommandId,

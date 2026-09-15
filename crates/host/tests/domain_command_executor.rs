@@ -498,6 +498,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
     let lifecycle_parent = root("public-dispatcher-lifecycle");
     let lifecycle_root = lifecycle_parent.join("new-project");
     let mut saved_hashes = None;
+    let native_worker_required = std::env::var_os("THREETERM_REQUIRE_OCCT").is_some();
     for command in BASELINE_COMMANDS {
         let command_root = match command {
             NEW_PROJECT_COMMAND_ID => lifecycle_parent.clone(),
@@ -617,6 +618,8 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 }
             }
             Err(ExecutionError::Handler(error)) => {
+                let native_worker_unavailable =
+                    matches!(&error, HostError::WorkerUnavailable { .. });
                 if matches!(
                     command,
                     EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
@@ -664,6 +667,10 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                     fs::read(command_root.join("transactions.log")).ok(),
                     before_log
                 );
+                if native_worker_unavailable {
+                    assert!(!native_worker_required, "native OCCT worker is required");
+                    eprintln!("{} skipped: native OCCT worker is unavailable", command.0);
+                }
             }
             Err(error) => panic!(
                 "baseline command {} bypassed the host handler: {error:?}",

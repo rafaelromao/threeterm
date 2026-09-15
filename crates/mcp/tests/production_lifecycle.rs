@@ -285,24 +285,12 @@ fn fresh_root() -> PathBuf {
     ))
 }
 
-fn require_native_worker(test_name: &str) -> bool {
+fn require_native_worker(test_name: &str) {
     match OcctWorker::locate() {
         Ok(worker) => {
             drop(worker);
-            true
         }
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
-        {
-            panic!("{test_name}: native OCCT worker is required: {error}");
-        }
-        Err(error) => {
-            eprintln!(
-                "{test_name}: native OCCT worker unavailable; skipping geometry calls: {error}"
-            );
-            false
-        }
+        Err(error) => panic!("{test_name}: native OCCT worker is required: {error}"),
     }
 }
 
@@ -394,6 +382,7 @@ fn revision_hash(root: &Path) -> String {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio() {
     let root = fresh_root();
     assert!(!root.exists(), "the MCP project destination starts absent");
@@ -451,15 +440,9 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
     assert!(tool_names.iter().any(|name| name == NEW_PROJECT_TOOL));
     assert!(tool_names.iter().any(|name| name == EXTRUDE_TOOL));
 
-    if !require_native_worker(
+    require_native_worker(
         "production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio",
-    ) {
-        let evidence = client.finish();
-        assert!(evidence.domain_errors.is_empty());
-        assert!(!evidence.protocol.is_empty());
-        let _ = fs::remove_dir_all(root);
-        return;
-    }
+    );
 
     let project = client.call_tool(
         "create",
@@ -573,8 +556,17 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
         "brep_invalid"
     );
     assert_eq!(
+        invalid["result"]["structuredContent"]["schema_version"],
+        "threeterm.protocol/1"
+    );
+    assert!(invalid["result"]["structuredContent"]["arg"].is_string());
+    assert_eq!(
         invalid["result"]["structuredContent"]["affected_ids"],
         json!(["invalid"])
+    );
+    assert_eq!(
+        invalid["result"]["structuredContent"]["recovery"],
+        "correct_geometry_or_restore_revision"
     );
     assert_eq!(
         fs::read(root.join("manifest.json")).expect("manifest reads after error"),
@@ -609,9 +601,10 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
     assert_eq!(
         evidence.domain_errors.len(),
         1,
-        "domain errors are separately attributed"
+        "domain errors are separately attributed; protocol={:?}; server_diagnostics={:?}",
+        evidence.protocol,
+        evidence.server_diagnostics
     );
     assert_eq!(evidence.domain_errors[0]["id"], "invalid");
-    let _ = &evidence.server_diagnostics;
     let _ = fs::remove_dir_all(root);
 }

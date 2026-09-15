@@ -364,6 +364,27 @@ fn advertised_tools(client: &mut McpProcess) -> Vec<Value> {
     pages
 }
 
+fn domain_diagnostic_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["code", "arg", "schema_version"],
+        "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "arg": {"type": "string", "minLength": 1},
+            "schema_version": {"const": "threeterm.protocol/1"},
+            "affected_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+            },
+            "source": {"type": "string", "minLength": 1},
+            "detail": {"type": "string", "minLength": 1},
+            "recovery": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+    })
+}
+
 fn assert_fresh_project(root: &Path, generation_id: &str) -> String {
     let bundle = Bundle::at(root).open().expect("MCP-created project opens");
     assert_eq!(bundle.manifest.generation_id, generation_id);
@@ -555,6 +576,11 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
         invalid["result"]["structuredContent"]["code"],
         "brep_invalid"
     );
+    validate(
+        &domain_diagnostic_schema(),
+        &invalid["result"]["structuredContent"],
+    )
+    .expect("MCP domain diagnostic validates");
     assert_eq!(
         invalid["result"]["structuredContent"]["schema_version"],
         "threeterm.protocol/1"

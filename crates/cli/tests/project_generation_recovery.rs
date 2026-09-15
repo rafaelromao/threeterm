@@ -157,6 +157,30 @@ fn generation_interruption_recovery() {
         }
         Err(error) => {
             eprintln!("OCCT generation recovery integration skipped: {error:?}");
+            let deterministic_scenario = unique_scenario("deterministic-fallback");
+            let deterministic_root = deterministic_scenario.join("project");
+            response(
+                &run_save(&deterministic_root, "before", None),
+                "deterministic initial save",
+            );
+            let before = GenerationHashes::from_response(
+                &response(
+                    &run_save(&deterministic_root, "current", None),
+                    "deterministic current save",
+                ),
+                "deterministic pre-save generation",
+            );
+            let interrupted = run_save(&deterministic_root, "interrupted", Some("staged-files"));
+            assert_eq!(interrupted.status.code(), Some(137));
+            let recovered = response(
+                &run_load(&deterministic_root),
+                "deterministic recovery load",
+            );
+            assert_eq!(
+                GenerationHashes::from_response(&recovered, "deterministic recovered generation"),
+                before
+            );
+            let _ = fs::remove_dir_all(deterministic_scenario);
             return;
         }
     };

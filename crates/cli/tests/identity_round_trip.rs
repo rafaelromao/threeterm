@@ -70,16 +70,6 @@ fn read_manifest_revision_hash(root: &Path) -> String {
 
 #[test]
 fn generation_identity() {
-    match OcctWorker::locate() {
-        Ok(_) => {}
-        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
-            panic!("OCCT generation identity integration requires the native worker: {error:?}");
-        }
-        Err(error) => {
-            eprintln!("OCCT generation identity integration skipped: {error:?}");
-            return;
-        }
-    }
     let root = unique_root("empty");
 
     let new = run(&["new-project", root.to_str().expect("utf-8 path")]);
@@ -106,40 +96,56 @@ fn generation_identity() {
         "identity advances on every accepted command"
     );
 
-    let profile = root.join("identity-profile.json");
-    fs::write(&profile, "[[0.0,0.0],[4.0,0.0],[2.0,4.0]]").expect("profile writes");
-    run(&[
-        "--machine",
-        "extrude",
-        "--bundle",
-        root.to_str().expect("utf-8 path"),
-        "--feature-id",
-        "extrude-1",
-        "--profile-file",
-        profile.to_str().expect("utf-8 path"),
-        "--height",
-        "2.0",
-        "--mode",
-        "additive",
-    ]);
-    let after_extrude = read_manifest_generation_id(&root);
-    let after_extrude_revision = read_manifest_revision_hash(&root);
-    assert_ne!(
-        after_extrude, after_save,
-        "Project Generation identity advances on an accepted extrude"
-    );
-    assert_ne!(
-        after_extrude_revision, after_save_revision,
-        "Revision Snapshot identity advances on an accepted extrude"
-    );
+    let (expected_generation, expected_revision) = match OcctWorker::locate() {
+        Ok(_) => {
+            let profile = root.join("identity-profile.json");
+            fs::write(&profile, "[[0.0,0.0],[4.0,0.0],[2.0,4.0]]").expect("profile writes");
+            run(&[
+                "--machine",
+                "extrude",
+                "--bundle",
+                root.to_str().expect("utf-8 path"),
+                "--feature-id",
+                "extrude-1",
+                "--profile-file",
+                profile.to_str().expect("utf-8 path"),
+                "--height",
+                "2.0",
+                "--mode",
+                "additive",
+            ]);
+            let after_extrude = read_manifest_generation_id(&root);
+            let after_extrude_revision = read_manifest_revision_hash(&root);
+            assert_ne!(
+                after_extrude, after_save,
+                "Project Generation identity advances on an accepted extrude"
+            );
+            assert_ne!(
+                after_extrude_revision, after_save_revision,
+                "Revision Snapshot identity advances on an accepted extrude"
+            );
+            (after_extrude, after_extrude_revision)
+        }
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT generation identity integration requires the native worker: {error:?}");
+        }
+        Err(error) => {
+            eprintln!("OCCT extrude identity integration skipped: {error:?}");
+            (after_save, after_save_revision)
+        }
+    };
 
     let _loaded = run(&["--machine", "load", root.to_str().expect("utf-8 path")]);
     let after_reload = read_manifest_generation_id(&root);
     let after_reload_digest = read_manifest_terminal_log_digest(&root);
     let after_reload_revision = read_manifest_revision_hash(&root);
     assert_eq!(
-        after_reload, after_extrude,
+        after_reload, expected_generation,
         "Project Generation identity is byte-equal after reload"
+    );
+    assert_eq!(
+        after_reload_revision, expected_revision,
+        "Revision Snapshot identity is byte-equal after reload"
     );
     assert_ne!(after_reload, after_reload_digest);
     assert_ne!(after_reload, after_reload_revision);

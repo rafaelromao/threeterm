@@ -76,9 +76,15 @@ fn extrude_command_is_registered() {
 
 #[test]
 fn generation_publication() {
-    if let Err(error) = OcctWorker::locate() {
-        eprintln!("OCCT extrude integration skipped: {error:?}");
-        return;
+    match OcctWorker::locate() {
+        Ok(_) => {}
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT extrude integration requires the native worker: {error:?}");
+        }
+        Err(error) => {
+            eprintln!("OCCT extrude integration skipped: {error:?}");
+            return;
+        }
     }
 
     let bin = env!("CARGO_BIN_EXE_threeterm");

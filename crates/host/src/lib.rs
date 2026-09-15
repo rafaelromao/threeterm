@@ -1374,9 +1374,7 @@ fn host_error_from_execution(error: ExecutionError<HostError>) -> HostError {
         ExecutionError::InvalidRequest(detail) => HostError::Validation { detail },
         ExecutionError::Handler(error) => error,
         ExecutionError::InvalidResponse(detail) => HostError::DerivedResult {
-            diagnostic: Diagnostic::integrity_failure(&format!(
-                "response violates registered schema: {detail}"
-            )),
+            diagnostic: Diagnostic::integrity_failure(&detail),
         },
     }
 }
@@ -1423,7 +1421,12 @@ pub fn domain_command_diagnostic(error: &HostError) -> Diagnostic {
             .unwrap_or_else(|_| "{\"kind\":\"worker_terminated\"}".to_string());
             Diagnostic::worker_failure(&detail)
         }
-        HostError::BrepIo { detail } => Diagnostic::brep_invalid(detail),
+        HostError::BrepFileMissing { path }
+        | HostError::BundlePathMissing { path }
+        | HostError::BundlePathNotDirectory { path } => {
+            Diagnostic::persistence_failure(&path.display().to_string())
+        }
+        HostError::BrepIo { detail } => Diagnostic::persistence_failure(detail),
         HostError::StaleLastValidGeometry { .. } => Diagnostic::invalid_request(&error.to_string()),
         HostError::Persistence(error) => Diagnostic::persistence_failure(&error.to_string()),
         HostError::DerivedResult { diagnostic } => diagnostic.clone(),
@@ -1440,9 +1443,7 @@ pub fn domain_execution_diagnostic(error: &ExecutionError<HostError>) -> Diagnos
         ExecutionError::UnknownCommand(command) => Diagnostic::unknown_command(command.0),
         ExecutionError::InvalidRequest(detail) => Diagnostic::invalid_request(detail),
         ExecutionError::Handler(error) => domain_command_diagnostic(error),
-        ExecutionError::InvalidResponse(detail) => {
-            Diagnostic::integrity_failure(&format!("response violates registered schema: {detail}"))
-        }
+        ExecutionError::InvalidResponse(detail) => Diagnostic::integrity_failure(detail),
     }
 }
 

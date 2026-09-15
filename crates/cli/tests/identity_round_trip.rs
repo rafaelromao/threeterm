@@ -70,9 +70,15 @@ fn read_manifest_revision_hash(root: &Path) -> String {
 
 #[test]
 fn generation_identity() {
-    if let Err(error) = OcctWorker::locate() {
-        eprintln!("OCCT generation identity integration skipped: {error:?}");
-        return;
+    match OcctWorker::locate() {
+        Ok(_) => {}
+        Err(error) if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() => {
+            panic!("OCCT generation identity integration requires the native worker: {error:?}");
+        }
+        Err(error) => {
+            eprintln!("OCCT generation identity integration skipped: {error:?}");
+            return;
+        }
     }
     let root = unique_root("empty");
 

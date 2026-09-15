@@ -1,10 +1,12 @@
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs;
-use std::sync::atomic::AtomicBool;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::{Host, HostError, domain_command_diagnostic};
+use threeterm_host::{Host, HostError, domain_command_diagnostic, domain_execution_diagnostic};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
@@ -36,6 +38,186 @@ const BASELINE_COMMANDS: [threeterm_protocol::schema::CommandId; 16] = [
     DRAFT_COMMAND_ID,
     LOFT_COMMAND_ID,
 ];
+
+#[derive(Debug)]
+struct ResultRow {
+    command_id: String,
+    request_schema_version: String,
+    response_schema_version: String,
+    result_kind: String,
+    diagnostic_code: Option<String>,
+    canonical_revision_before: String,
+    canonical_revision_after: String,
+    log_length_before: usize,
+    log_length_after: usize,
+    artifact_path: Option<String>,
+}
+
+const BASELINE_SCHEMA_CONTRACTS: [(&str, &str, &str, &str, &str, &str); 16] = [
+    (
+        "list",
+        "threeterm.command.list/1",
+        "threeterm.command.list.request/1",
+        "threeterm.command.list.response/1",
+        "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "0c83504d70205aa702803d139e2ca37d54c0a7e654148637e07946c830b8f58e",
+    ),
+    (
+        "new-project",
+        "threeterm.command.new-project/1",
+        "threeterm.command.new-project.request/1",
+        "threeterm.command.new-project.response/1",
+        "47253ca99da82b00965e962534a6a7942af7f00e2952997b9b97a3437c7064c7",
+        "14402e6af7365248d96e5b01256b83fa6965d975f5754fec8aab3505326ba18c",
+    ),
+    (
+        "save",
+        "threeterm.command.save/1",
+        "threeterm.command.save.request/1",
+        "threeterm.command.save.response/1",
+        "849b03bf4fbdbc5ff292252db290bf2320f8bfe5afbacbfe5141309ae1b60019",
+        "127fedb41c0c183f5c79fddbf91a6ebab39d58ab454e9c3b403a16ec4839d0d9",
+    ),
+    (
+        "load",
+        "threeterm.command.load/1",
+        "threeterm.command.load.request/1",
+        "threeterm.command.load.response/2",
+        "bdd2fcc2f3e3d9007185880a3f57d3b82925a63d1861ae73f316f6ae6b27c541",
+        "31cd08b935d28b0ebde673b72ff9914fe26a028b6b212dd4d9e113f3f2cdd193",
+    ),
+    (
+        "extrude",
+        "threeterm.command.extrude/2",
+        "threeterm.command.extrude.request/2",
+        "threeterm.command.extrude.response/4",
+        "976e758d121a1337a55dfcc19a50f457f2c115f6a34b93275fe210df521347c4",
+        "a99f912f4bc5af6080140a80855ec12655a84eb86fb650ea2d7411fa9865560a",
+    ),
+    (
+        "boolean-fuse",
+        "threeterm.command.boolean-fuse/1",
+        "threeterm.command.boolean-fuse.request/1",
+        "threeterm.command.boolean-fuse.response/1",
+        "a2a2150f6667b14f8bc7deaa62fbc0b21e2e54700cffce9f0de50da77ef82bd7",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "fillet",
+        "threeterm.command.fillet/1",
+        "threeterm.command.fillet.request/1",
+        "threeterm.command.fillet.response/1",
+        "dfa226e5e1f5b77ac28c54d892b0e1acf5d409239dd11a86b1ae4f4132f7d5a6",
+        "e32c1f65995737071298d52ff675877ebae59a8b0438df815093eb07440f3ec5",
+    ),
+    (
+        "chamfer",
+        "threeterm.command.chamfer/1",
+        "threeterm.command.chamfer.request/1",
+        "threeterm.command.chamfer.response/1",
+        "9f240a86a6e2c2620575213f2cef30218a8c3ffadb3048458eeabbf6e065e67c",
+        "e32c1f65995737071298d52ff675877ebae59a8b0438df815093eb07440f3ec5",
+    ),
+    (
+        "hole",
+        "threeterm.command.hole/1",
+        "threeterm.command.hole.request/1",
+        "threeterm.command.hole.response/1",
+        "e334102473422ff7d774eceb8b5b5c82f51f8b965430c36bee4c3f3f0b8cb803",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "revolve",
+        "threeterm.command.revolve/1",
+        "threeterm.command.revolve.request/1",
+        "threeterm.command.revolve.response/1",
+        "cdf071216038d971bed8e85714b91e9f07e12638cc09d6f129891e628fe68d3f",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "mirror",
+        "threeterm.command.mirror/1",
+        "threeterm.command.mirror.request/1",
+        "threeterm.command.mirror.response/1",
+        "317c67381a96e0f6bbcbd5ab0b08520f838150e767507c05bb02faddd0fd1e6c",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "linear-pattern",
+        "threeterm.command.linear-pattern/1",
+        "threeterm.command.linear-pattern.request/1",
+        "threeterm.command.linear-pattern.response/1",
+        "af98d3e8be22c0caa683bf232c2f5c4f05822bd48046a67dc213117b1de078fe",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "circular-pattern",
+        "threeterm.command.circular-pattern/1",
+        "threeterm.command.circular-pattern.request/1",
+        "threeterm.command.circular-pattern.response/1",
+        "d4bd981cf94980121136a7372420a6da1e90acdf0416e6cab5ec3d873c6de5ab",
+        "1f47faa8f45285e924e257c69b6152e611236eb810ffc67509e0badc8df0888a",
+    ),
+    (
+        "shell",
+        "threeterm.command.shell/1",
+        "threeterm.command.shell.request/1",
+        "threeterm.command.shell.response/1",
+        "4705622ec38b335bb8f6140b0e7d7f2d489ec9fb4449c7a733ad3882997042f3",
+        "0d4ed1be13a185f455b70b71802bf142373d58f34c53a775292a32744abc07f6",
+    ),
+    (
+        "draft",
+        "threeterm.command.draft/1",
+        "threeterm.command.draft.request/1",
+        "threeterm.command.draft.response/1",
+        "4978ede88fc8cd9af6f9e3ca3bcff4e206af61a7ea5756410e01324ae2218483",
+        "0d4ed1be13a185f455b70b71802bf142373d58f34c53a775292a32744abc07f6",
+    ),
+    (
+        "loft",
+        "threeterm.command.loft/1",
+        "threeterm.command.loft.request/1",
+        "threeterm.command.loft.response/1",
+        "03d424e489b849d6e993a9c0be7d214ca6dfb14414ea00281e0572807dc32416",
+        "0d4ed1be13a185f455b70b71802bf142373d58f34c53a775292a32744abc07f6",
+    ),
+];
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| {
+                        format!(
+                            "{}:{}",
+                            serde_json::to_string(key).expect("schema key serializes"),
+                            canonical_json(&object[key])
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => serde_json::to_string(value).expect("schema value serializes"),
+    }
+}
+
+fn schema_hash(schema: &Value) -> String {
+    sha256_hex(canonical_json(schema).as_bytes())
+}
 
 fn root(label: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -472,7 +654,7 @@ fn rehearsal_response_fixture() -> Value {
 #[test]
 fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_contract() {
     let registry = threeterm_protocol::schema::iter().collect::<Vec<_>>();
-    let baseline_ids = BASELINE_COMMANDS.iter().collect::<HashSet<_>>();
+    let baseline_ids = BASELINE_COMMANDS.into_iter().collect::<HashSet<_>>();
     assert_eq!(baseline_ids.len(), BASELINE_COMMANDS.len());
     assert_eq!(
         registry
@@ -481,6 +663,23 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
             .count(),
         BASELINE_COMMANDS.len()
     );
+    let baseline_projection = BASELINE_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| registry.iter().any(|entry| entry.id == *command))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        baseline_projection, BASELINE_COMMANDS,
+        "the registry must contain the qualified baseline in order"
+    );
+    let extras = registry
+        .iter()
+        .filter(|entry| !baseline_ids.contains(&entry.id))
+        .map(|entry| entry.id.0)
+        .collect::<Vec<_>>();
+    if !extras.is_empty() {
+        eprintln!("registry entries outside the baseline projection: {extras:?}");
+    }
     for command in BASELINE_COMMANDS {
         let schema = threeterm_protocol::schema::find(command)
             .unwrap_or_else(|| panic!("baseline command {} is not registered", command.0));
@@ -499,6 +698,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
     let lifecycle_root = lifecycle_parent.join("new-project");
     let mut saved_hashes = None;
     let native_worker_required = std::env::var_os("THREETERM_REQUIRE_OCCT").is_some();
+    let mut rows = Vec::new();
     for command in BASELINE_COMMANDS {
         let command_root = match command {
             NEW_PROJECT_COMMAND_ID => lifecycle_parent.clone(),
@@ -528,9 +728,22 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
         let before_manifest = fs::read(command_root.join("manifest.json")).ok();
         let before_log = fs::read(command_root.join("transactions.log")).ok();
         let before = Bundle::at(&command_root).open().ok();
+        let before_revision = before
+            .as_ref()
+            .map(|snapshot| snapshot.revision_hash_hex().to_string())
+            .unwrap_or_default();
+        let before_log_length = before.as_ref().map_or(0, |snapshot| snapshot.log.len());
+        let before_artifacts = before_entries
+            .iter()
+            .filter(|(path, _)| path.starts_with("brep/") && path.ends_with(".brep"))
+            .count();
+        let result_kind;
+        let mut diagnostic_code = None;
+        let mut artifact_path = None;
         let result = Host::new().execute_domain_command(command, request);
         match result {
             Ok(response) => {
+                result_kind = "success".to_string();
                 validate(&schema.response_schema, &response).unwrap_or_else(|error| {
                     panic!("response for {} fails its schema: {error}", command.0)
                 });
@@ -585,6 +798,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                     let brep_path = response["brep_path"]
                         .as_str()
                         .expect("geometry response has a string BREP path");
+                    artifact_path = Some(brep_path.to_string());
                     assert!(std::path::Path::new(brep_path).is_file());
                     assert!(
                         response["brep_sha256"]
@@ -618,6 +832,7 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 }
             }
             Err(ExecutionError::Handler(error)) => {
+                result_kind = "handler".to_string();
                 let native_worker_unavailable =
                     matches!(&error, HostError::WorkerUnavailable { .. });
                 if matches!(
@@ -640,6 +855,13 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                     );
                 }
                 let diagnostic = domain_command_diagnostic(&error);
+                diagnostic_code = Some(
+                    serde_json::to_value(diagnostic.code)
+                        .expect("diagnostic code serializes")
+                        .as_str()
+                        .expect("diagnostic code is a string")
+                        .to_string(),
+                );
                 assert_eq!(
                     diagnostic.schema_version,
                     threeterm_protocol::schema_version()
@@ -677,6 +899,45 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                 command.0
             ),
         }
+        let observed_root = if command == NEW_PROJECT_COMMAND_ID {
+            &lifecycle_root
+        } else {
+            &command_root
+        };
+        let after = Bundle::at(observed_root).open().ok();
+        let after_revision = after
+            .as_ref()
+            .map(|snapshot| snapshot.revision_hash_hex().to_string())
+            .unwrap_or_default();
+        let after_log_length = after.as_ref().map_or(0, |snapshot| snapshot.log.len());
+        let after_artifacts = filesystem_snapshot(observed_root)
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("brep/") && path.ends_with(".brep"))
+            .count();
+        if result_kind == "success"
+            && matches!(
+                command,
+                EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
+            )
+        {
+            assert_eq!(
+                after_artifacts,
+                before_artifacts + 1,
+                "successful geometry must promote exactly one BREP"
+            );
+        }
+        rows.push(ResultRow {
+            command_id: command.0.to_string(),
+            request_schema_version: schema.request_schema_version.to_string(),
+            response_schema_version: schema.response_schema_version.to_string(),
+            result_kind,
+            diagnostic_code,
+            canonical_revision_before: before_revision,
+            canonical_revision_after: after_revision,
+            log_length_before: before_log_length,
+            log_length_after: after_log_length,
+            artifact_path,
+        });
         if !matches!(
             command,
             NEW_PROJECT_COMMAND_ID | SAVE_COMMAND_ID | LOAD_COMMAND_ID
@@ -686,6 +947,85 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
     }
 
     let _ = fs::remove_dir_all(&lifecycle_parent);
+    assert_eq!(rows.len(), BASELINE_COMMANDS.len());
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.command_id.as_str())
+            .collect::<Vec<_>>(),
+        BASELINE_COMMANDS
+            .iter()
+            .map(|command| command.0)
+            .collect::<Vec<_>>()
+    );
+    for row in &rows {
+        assert!(!row.request_schema_version.is_empty());
+        assert!(!row.response_schema_version.is_empty());
+        match row.result_kind.as_str() {
+            "success" => assert!(row.diagnostic_code.is_none()),
+            "handler" => assert!(matches!(
+                row.diagnostic_code.as_deref(),
+                Some("invalid_request") | Some("worker_failure") | Some("unsupported_geometry")
+            )),
+            other => panic!("unexpected result kind {other}"),
+        }
+        if row.command_id == "new-project" {
+            assert!(!row.canonical_revision_after.is_empty());
+            assert_eq!(row.log_length_after, 0);
+        } else if row.command_id == "save" {
+            assert_eq!(row.log_length_after, row.log_length_before + 1);
+            assert_ne!(row.canonical_revision_after, row.canonical_revision_before);
+        } else if row.command_id == "load" || row.command_id == "list" {
+            assert_eq!(row.canonical_revision_after, row.canonical_revision_before);
+            assert_eq!(row.log_length_after, row.log_length_before);
+        } else if row.result_kind == "handler" {
+            assert_eq!(row.canonical_revision_after, row.canonical_revision_before);
+            assert_eq!(row.log_length_after, row.log_length_before);
+            assert!(row.artifact_path.is_none());
+        }
+        if matches!(row.command_id.as_str(), "extrude" | "revolve" | "loft")
+            && row.result_kind == "success"
+        {
+            assert!(row.artifact_path.is_some());
+        }
+    }
+}
+
+#[test]
+fn baseline_schema_contracts_match_the_immutable_snapshot() {
+    for (
+        name,
+        schema_version,
+        request_schema_version,
+        response_schema_version,
+        request_hash,
+        response_hash,
+    ) in BASELINE_SCHEMA_CONTRACTS
+    {
+        let schema = threeterm_protocol::schema::find(threeterm_protocol::schema::CommandId(name))
+            .expect("baseline schema exists");
+        assert_eq!(
+            schema.schema_version, schema_version,
+            "{name} command schema drifted"
+        );
+        assert_eq!(
+            schema.request_schema_version, request_schema_version,
+            "{name} request schema version drifted"
+        );
+        assert_eq!(
+            schema.response_schema_version, response_schema_version,
+            "{name} response schema version drifted"
+        );
+        assert_eq!(
+            schema_hash(&schema.request_schema),
+            request_hash,
+            "{name} request schema drifted"
+        );
+        assert_eq!(
+            schema_hash(&schema.response_schema),
+            response_hash,
+            "{name} response schema drifted"
+        );
+    }
 }
 
 #[test]
@@ -726,65 +1066,292 @@ fn baseline_invalid_requests_preserve_canonical_state() {
 }
 
 #[test]
+fn shared_executor_validates_before_and_after_the_injected_handler() {
+    let host = Host::new();
+    let request_called = Cell::new(false);
+    let invalid_request = host.execute_domain_command_with_handler(
+        LIST_COMMAND_ID,
+        json!({"unexpected": true}),
+        |_| {
+            request_called.set(true);
+            Ok::<Value, ()>(json!([]))
+        },
+    );
+    assert!(matches!(
+        invalid_request,
+        Err(ExecutionError::InvalidRequest(_))
+    ));
+    assert!(
+        !request_called.get(),
+        "invalid requests must not reach handlers"
+    );
+
+    let root = root("malformed-response");
+    let bundle = Bundle::create(&root).expect("bundle creates");
+    let revision = bundle
+        .open()
+        .expect("bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    let before = filesystem_snapshot(&root);
+    let response_called = Cell::new(false);
+    let invalid_response = host.execute_domain_command_with_handler(
+        APPLY_COMMAND_ID,
+        apply_request(&root, &revision, Some("cube")),
+        |_| {
+            response_called.set(true);
+            Ok::<Value, ()>(json!({}))
+        },
+    );
+    let Err(ExecutionError::InvalidResponse(detail)) = invalid_response else {
+        panic!("malformed handler response must be rejected: {invalid_response:?}");
+    };
+    assert!(response_called.get());
+    assert!(!detail.is_empty());
+    let diagnostic = domain_execution_diagnostic(&ExecutionError::<HostError>::InvalidResponse(
+        detail.clone(),
+    ));
+    assert_eq!(
+        diagnostic.code,
+        threeterm_protocol::diagnostic::DiagnosticCode::IntegrityFailure
+    );
+    assert_eq!(diagnostic.arg, detail);
+    assert_eq!(filesystem_snapshot(&root), before);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn domain_execution_diagnostic_maps_all_shared_failures() {
-    let cases = [
+    let persistence_error = Bundle::at(root("diagnostic-missing"))
+        .open()
+        .expect_err("missing diagnostic bundle must fail");
+    let termination = threeterm_protocol::supervisor::TerminationRecord {
+        request_id: "req-cancel".to_string(),
+        stage: "boolean_pattern".to_string(),
+        cancel_reason: Some("cancelled by host".to_string()),
+        elapsed: Duration::from_millis(4),
+        last_progress: None,
+        last_artifact_error: None,
+        exit_signal: None,
+        exit_code: Some(0),
+        stderr_tail: "worker stderr".to_string(),
+        failed_code: None,
+        failed_detail: None,
+        protocol_diagnostic: None,
+        termination_error: None,
+        exit_kind: threeterm_protocol::supervisor::ExitKind::Cooperative,
+    };
+    let cases = vec![
         (
             ExecutionError::UnknownCommand(threeterm_protocol::schema::CommandId("missing")),
-            "unknown_command",
+            threeterm_protocol::diagnostic::DiagnosticCode::UnknownCommand,
+            Some("missing"),
+            Vec::<&str>::new(),
+            None,
         ),
         (
             ExecutionError::InvalidRequest("request is invalid".to_string()),
-            "invalid_request",
+            threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest,
+            Some("request is invalid"),
+            Vec::new(),
+            None,
         ),
         (
             ExecutionError::InvalidResponse("response is invalid".to_string()),
-            "integrity_failure",
+            threeterm_protocol::diagnostic::DiagnosticCode::IntegrityFailure,
+            Some("response is invalid"),
+            Vec::new(),
+            None,
         ),
         (
             ExecutionError::Handler(HostError::Validation {
                 detail: "handler rejected request".to_string(),
             }),
-            "invalid_request",
+            threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest,
+            Some("handler rejected request"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::BundlePathMissing {
+                path: "/missing-bundle".into(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure,
+            Some("/missing-bundle"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::BundlePathNotDirectory {
+                path: "/not-a-directory".into(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure,
+            Some("/not-a-directory"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::Persistence(persistence_error)),
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure,
+            None,
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::BrepFileMissing {
+                path: "/missing.brep".into(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure,
+            Some("/missing.brep"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::BrepIo {
+                detail: "BREP read failed".to_string(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::PersistenceFailure,
+            Some("BREP read failed"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::WorkerFailure {
+                request_id: Some("req-worker".to_string()),
+                detail: "worker failed".to_string(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure,
+            Some("worker failed"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::WorkerUnavailable {
+                detail: "worker missing".to_string(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure,
+            Some("worker missing"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::UnsupportedGeometry {
+                request_id: None,
+                detail: "unsupported solid".to_string(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::UnsupportedGeometry,
+            Some("unsupported solid"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::BrepInvalid {
+                request_id: None,
+                detail: "invalid BREP".to_string(),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::BrepInvalid,
+            Some("invalid BREP"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::WorkerTerminated {
+                record: Box::new(termination),
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::WorkerFailure,
+            Some("req-cancel"),
+            Vec::new(),
+            None,
+        ),
+        (
+            ExecutionError::Handler(HostError::InvalidEdit {
+                detail: "edge changed".to_string(),
+                affected_ids: vec!["edge".to_string(), "edge".to_string(), "face".to_string()],
+                recovery: "reselect the edge",
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::BrepInvalid,
+            Some("edge changed"),
+            vec!["edge", "face"],
+            Some("reselect the edge"),
+        ),
+        (
+            ExecutionError::Handler(HostError::InvalidReference {
+                detail: "reference lost".to_string(),
+                affected_ids: vec!["edge".to_string(), "edge".to_string(), "face".to_string()],
+                recovery: "choose another reference",
+            }),
+            threeterm_protocol::diagnostic::DiagnosticCode::InvalidRequest,
+            Some("reference lost"),
+            vec!["edge", "face"],
+            Some("choose another reference"),
         ),
     ];
 
-    for (error, expected_code) in cases {
-        let diagnostic = threeterm_host::domain_execution_diagnostic(&error);
-        let value = serde_json::to_value(diagnostic).expect("diagnostic serializes");
-        assert_eq!(value["code"], expected_code);
+    for (error, expected_code, expected_arg, expected_ids, expected_recovery) in cases {
+        let diagnostic = domain_execution_diagnostic(&error);
+        assert_eq!(diagnostic.code, expected_code);
+        assert_eq!(
+            diagnostic.schema_version,
+            threeterm_protocol::schema_version()
+        );
+        if let Some(expected_arg) = expected_arg {
+            assert!(
+                diagnostic.arg.contains(expected_arg),
+                "diagnostic arg {:?} does not contain {:?}",
+                diagnostic.arg,
+                expected_arg
+            );
+        }
+        assert_eq!(diagnostic.affected_ids, expected_ids);
+        assert_eq!(diagnostic.recovery.as_deref(), expected_recovery);
+        let value = serde_json::to_value(&diagnostic).expect("diagnostic serializes");
         assert_eq!(
             value["schema_version"],
             threeterm_protocol::schema_version()
         );
+        assert!(value["code"].is_string());
+        assert!(value["arg"].is_string());
     }
 }
 
 #[test]
 fn public_dispatcher_propagates_cancellation_without_persistence() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error) => {
-            eprintln!("OCCT cancellation integration skipped: {error}");
-            return;
-        }
-    };
     let root = root("public-dispatcher-cancel");
-    let host = Host::new();
-    host.execute_domain_command(
-        BRACKET_COMMAND_ID,
-        json!({
-            "bundle_path": root.to_string_lossy(),
-            "bracket_id": "base",
-            "length": 60.0,
-            "width": 30.0,
-            "height": 40.0,
-            "thickness": 3.0
-        }),
+    let worker_root = root.with_extension("fixture");
+    fs::create_dir_all(&worker_root).expect("fixture worker directory creates");
+    let worker_script = worker_root.join("worker.sh");
+    fs::write(
+        &worker_script,
+        r##"#!/bin/sh
+printf '%s\n' '{"kind":"worker_ready","schema_version":"threeterm.protocol/1","worker_id":"occt"}'
+IFS= read -r request || exit 1
+request_id=$(printf '%s\n' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '%s\n' "{\"kind\":\"progress\",\"schema_version\":\"threeterm.protocol/1\",\"request_id\":\"$request_id\",\"stage\":\"boolean_pattern:started\",\"percent\":1}"
+while :; do sleep 1; done
+"##,
     )
-    .expect("public dispatcher creates the cancellation fixture");
+    .expect("fixture worker writes");
+    fs::set_permissions(&worker_script, fs::Permissions::from_mode(0o700))
+        .expect("fixture worker becomes executable");
+    let worker = OcctWorker::with_binary_path(worker_script)
+        .with_grace(Duration::from_millis(500))
+        .with_operation_grace(
+            threeterm_occt_worker::Operation::BooleanPattern,
+            Duration::from_millis(50),
+        );
+    let bundle = Bundle::create(&root).expect("cancellation bundle creates");
+    let revision = bundle
+        .open()
+        .expect("cancellation bundle opens")
+        .revision_hash_hex()
+        .to_string();
+    bundle
+        .append_feature_with_brep_if_revision("base", "brep:base", &revision, b"base-brep")
+        .expect("cancellation base BREP persists");
+    let host = Host::new();
     let before = Bundle::at(&root).open().expect("cancellation bundle opens");
     let before_files = filesystem_snapshot(&root);
-    let cancel = AtomicBool::new(true);
+    let cancel = AtomicBool::new(false);
     let mut progress = Vec::new();
     let result = host.execute_domain_command_with_worker_and_cancel_and_progress(
         BOOLEAN_PATTERN_COMMAND_ID,
@@ -800,15 +1367,19 @@ fn public_dispatcher_propagates_cancellation_without_persistence() {
         }),
         Some(&worker),
         &cancel,
-        &mut |event| progress.push(event.stage.clone()),
+        &mut |event| {
+            progress.push(event.stage.clone());
+            cancel.store(true, Ordering::SeqCst);
+        },
     );
     let Err(ExecutionError::Handler(HostError::WorkerTerminated { record })) = result else {
-        panic!("cancelled command must return a structured termination: {result:?}");
+        panic!("fixture cancellation must return a structured termination: {result:?}");
     };
-    assert_eq!(record.cancel_reason.as_deref(), Some("cancelled by host"));
+    assert!(record.request_id.starts_with("req-"));
+    assert!(record.last_progress.is_some());
     assert_eq!(
         record.exit_kind,
-        threeterm_protocol::supervisor::ExitKind::Cooperative
+        threeterm_protocol::supervisor::ExitKind::ForceAfterGrace
     );
     assert_eq!(
         threeterm_host::domain_execution_diagnostic(&ExecutionError::Handler(
@@ -821,9 +1392,18 @@ fn public_dispatcher_propagates_cancellation_without_persistence() {
         Bundle::at(&root).open().expect("bundle reopens").log.len(),
         before.log.len()
     );
-    assert_eq!(filesystem_snapshot(&root), before_files);
-    let _ = progress;
+    let after_files = filesystem_snapshot(&root);
+    assert_eq!(
+        after_files
+            .iter()
+            .filter(|(path, _)| path != ".derived")
+            .collect::<Vec<_>>(),
+        before_files.iter().collect::<Vec<_>>()
+    );
+    assert!(!root.join(".derived/boolean_pattern").exists());
+    assert_eq!(progress, ["boolean_pattern:started"]);
     let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&worker_root);
 }
 
 #[test]

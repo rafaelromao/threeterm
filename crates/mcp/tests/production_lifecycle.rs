@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_occt_worker::OcctWorker;
-use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{EXTRUDE_COMMAND_ID, NEW_PROJECT_COMMAND_ID, find, iter};
 use threeterm_protocol::schema_validator::validate;
@@ -184,11 +184,14 @@ impl McpProcess {
     fn finish(mut self) -> McpEvidence {
         self.stdin.take();
         let status = wait_for_exit(&mut self.child, Duration::from_secs(10));
-        self.stdout_thread
+        let stdout_reader = self
+            .stdout_thread
             .take()
-            .expect("MCP stdout reader remains owned")
-            .join()
-            .expect("MCP stdout reader joins");
+            .expect("MCP stdout reader remains owned");
+        assert!(
+            join_reader(stdout_reader, Duration::from_secs(1)).is_some(),
+            "MCP stdout reader did not stop within the cleanup deadline"
+        );
 
         while let Ok(line) = self.stdout.try_recv() {
             let line = line.unwrap_or_else(|error| panic!("MCP stdout read failed: {error}"));
@@ -200,13 +203,14 @@ impl McpProcess {
             self.protocol.push(value);
         }
 
-        let stderr = self
-            .stderr_thread
-            .take()
-            .expect("MCP stderr reader remains owned")
-            .join()
-            .expect("MCP stderr reader joins")
-            .unwrap_or_else(|error| panic!("MCP stderr read failed: {error}"));
+        let stderr = join_reader(
+            self.stderr_thread
+                .take()
+                .expect("MCP stderr reader remains owned"),
+            Duration::from_secs(1),
+        )
+        .expect("MCP stderr reader did not stop within the cleanup deadline")
+        .unwrap_or_else(|error| panic!("MCP stderr read failed: {error}"));
         assert!(
             status.success(),
             "production MCP exits unsuccessfully: status={status:?}, server_diagnostics={}",
@@ -229,12 +233,30 @@ impl Drop for McpProcess {
             let deadline = Instant::now() + Duration::from_secs(1);
             while Instant::now() < deadline {
                 match self.child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(_)) => break,
                     Ok(None) => thread::sleep(Duration::from_millis(10)),
-                    Err(_) => return,
+                    Err(_) => break,
                 }
             }
         }
+        if let Some(reader) = self.stdout_thread.take() {
+            let _ = join_reader(reader, Duration::from_secs(1));
+        }
+        if let Some(reader) = self.stderr_thread.take() {
+            let _ = join_reader(reader, Duration::from_secs(1));
+        }
+    }
+}
+
+fn join_reader<T>(reader: JoinHandle<T>, timeout: Duration) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    while !reader.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if reader.is_finished() {
+        Some(reader.join().expect("MCP stream reader joins"))
+    } else {
+        None
     }
 }
 
@@ -544,14 +566,24 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
         entry.intent.as_ref(),
         Some(CanonicalIntent::Extrude(intent))
             if intent.command == "extrude"
+                && intent.schema_version == EXTRUDE_INTENT_SCHEMA_VERSION
                 && intent.operation == "additive"
                 && intent.mode == "additive"
                 && intent.target_feature_id.is_none()
+                && !intent.request_id.is_empty()
                 && intent.deterministic_inputs.profile == extrusion_profile
                 && intent.deterministic_inputs.height == 2.0
                 && intent.source_revision == initial_revision
                 && intent.affected_semantic_ids == ["mcp-extrude"]
+                && intent.worker_requirements.worker_kind == "occt"
+                && !intent.worker_requirements.worker_schema_version.is_empty()
+                && intent.worker_requirements.protocol_schema_version == "threeterm.protocol/1"
     ));
+    if let Some(CanonicalIntent::Extrude(intent)) = entry.intent.as_ref() {
+        intent
+            .validate("mcp-extrude")
+            .expect("persisted MCP extrusion intent validates");
+    }
 
     let manifest_before_error = fs::read(root.join("manifest.json")).expect("manifest reads");
     let log_before_error = fs::read(root.join("transactions.log")).expect("log reads");

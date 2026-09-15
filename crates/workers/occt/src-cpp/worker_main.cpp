@@ -3313,6 +3313,13 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
             return false;
         }
+        GProp_GProps material_properties;
+        BRepGProp::VolumeProperties(shelled, material_properties);
+        const double material_volume = material_properties.Mass();
+        if (!std::isfinite(material_volume) || !(material_volume > 0.0)) {
+            error = "shell material volume is not a positive finite number";
+            return false;
+        }
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {
@@ -3340,8 +3347,11 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             << "\"operation\":\"shell\","
             << "\"status\":\"" << json_escape(status) << "\","
             << "\"brep_path\":\"" << json_escape(output_path.string()) << "\","
-            << "\"brep_sha256\":\"" << json_escape(sha) << "\","
+            << "\"brep_sha256\":\""
+            << json_escape(sha)
+            << "\","
             << "\"brep_bytes\":" << bytes.str().size() << ","
+            << "\"material_volume\":" << std::setprecision(17) << material_volume << ","
             << "\"feature_id\":\"" << json_escape(feature_id) << "\""
             << "}";
         g_result_json = out.str();

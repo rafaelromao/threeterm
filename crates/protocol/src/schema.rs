@@ -687,6 +687,7 @@ pub static HOLE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "diameter": { "type": "number", "exclusiveMinimum": 0 },
             "expected_revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "hole_kind": { "enum": ["drilled", "tapped"] },
+            "measure_removed_volume": { "type": "boolean" },
             "thread_designation": { "type": "string", "minLength": 1 },
             "thread_pitch": { "type": "number", "exclusiveMinimum": 0 },
             "thread_depth": { "type": "number", "exclusiveMinimum": 0 }
@@ -1123,6 +1124,7 @@ pub static HOLE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "removed_volume": { "type": "number" },
             "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },
@@ -1412,6 +1414,7 @@ pub static SHELL_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
             "brep_path": { "type": "string", "minLength": 1 },
             "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "brep_bytes": { "type": "integer", "minimum": 0 },
+            "material_volume": { "type": "number" },
             "derived_result": derived_result_schema(),
             "schema_version": { "type": "string" }
         },

@@ -569,6 +569,14 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                     EXTRUDE_COMMAND_ID | REVOLVE_COMMAND_ID | LOFT_COMMAND_ID
                 ) {
                     assert!(response.get("brep_path").is_some());
+                    let derived = response
+                        .get("derived_result")
+                        .and_then(Value::as_object)
+                        .expect("geometry response includes derived-result provenance");
+                    assert_eq!(derived["artifact_kind"], "brep");
+                    assert_eq!(derived["artifact_name"], response["artifact_name"]);
+                    assert_eq!(derived["byte_count"], response["brep_bytes"]);
+                    assert_eq!(derived["sha256"], response["brep_sha256"]);
                 }
                 if response.get("brep_path").is_some() {
                     let brep_path = response["brep_path"]

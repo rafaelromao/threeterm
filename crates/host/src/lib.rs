@@ -10269,8 +10269,9 @@ impl Host {
         );
         let preview_solid = self
             .preview_solid_from_artifact(&derived.artifact, &source_revision, worker)
-            .map_err(ExecutionError::Handler)?;
+            .map_err(ExecutionError::Handler);
         self.discard_staged_occt_result(&derived);
+        let preview_solid = preview_solid?;
         Ok(DomainCommandPreview {
             command,
             source_revision,
@@ -10320,8 +10321,12 @@ impl Host {
             let triangles = parse_ascii_stl(&exported.brep_path, &artifact.feature_id)?;
             Ok(SceneSolid::new(&artifact.feature_id, triangles))
         })();
-        let _ = fs::remove_dir_all(&stage);
-        result
+        match fs::remove_dir_all(&stage) {
+            Ok(()) => result,
+            Err(error) => Err(HostError::BrepIo {
+                detail: format!("remove preview tessellation stage failed: {error}"),
+            }),
+        }
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(

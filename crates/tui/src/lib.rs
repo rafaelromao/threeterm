@@ -4230,13 +4230,27 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     fn reject_preview(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        let had_transient_scene = self.scene.revision != self.canonical_scene.revision;
+        self.draft.invalidate_preview();
         self.restore_canonical_scene();
         self.tui
             .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Rejected {
                 detail: detail.clone(),
             }))
             .map_err(TuiViewportError::Tui)?;
-        Ok(self.keyboard_overlay(format!("[error-glyph] Failure: preview rejected: {detail}")))
+        let submission = if had_transient_scene {
+            self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+            Some(self.render_current().map_err(TuiViewportError::Viewport)?)
+        } else {
+            None
+        };
+        Ok(KeyboardInputOutcome {
+            rendered: None,
+            submission,
+            overlay: format!("[error-glyph] Failure: preview rejected: {detail}"),
+            response: None,
+            active_project_root: None,
+        })
     }
 
     fn commit_draft<G: CommandGateway>(
@@ -4246,20 +4260,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         if self.draft.preview().is_none() {
-            let command = self.draft.draft().expect("draft remains").command;
-            let request = match self.domain_request(root, false) {
-                Ok(request) => request,
-                Err(detail) => return self.reject_commit(detail),
-            };
-            let preview = match gateway.preview(command, request) {
-                Ok(preview) => preview,
-                Err(error) => return self.reject_commit(format!("preview failed: {error}")),
-            };
-            self.draft.set_preview(
-                preview.preview_revision,
-                preview.input_fingerprint,
-                preview.geometry_fingerprint,
-            );
+            return self.preview_draft(gateway, root);
         }
         self.tui
             .transition_command(CommandEvent::CommitRequested)

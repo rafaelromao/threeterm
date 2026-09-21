@@ -485,6 +485,18 @@ fn run_event_loop<W: InteractiveTerminal>(
         }
         for event in events {
             if (event == b"q" || event == b"\x03") && !session.command_input_active() {
+                if session.coordinator().in_flight().is_some() {
+                    let revision = session.state().canonical_revision;
+                    session
+                        .coordinator_mut()
+                        .renderer_mut()
+                        .write_control(
+                            b"\r\n[ready-status] Close waits for viewport acknowledgement\r\n",
+                            &revision,
+                        )
+                        .map_err(LaunchError::Viewport)?;
+                    continue;
+                }
                 session
                     .handle_close()
                     .map_err(|error| LaunchError::Runtime(format!("{error:?}")))?;

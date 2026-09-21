@@ -72,6 +72,8 @@ fn validate_unknown_feature_reports_reference_lost_through_the_dispatcher() {
     let parent = root("unknown-feature");
     let host = Host::new();
     let bundle = new_project(&host, &parent);
+    let manifest = std::fs::read(bundle.join("manifest.json")).expect("manifest reads");
+    let log = std::fs::read(bundle.join("transactions.log")).expect("log reads");
 
     let error = Host::new()
         .execute_domain_command(
@@ -97,6 +99,16 @@ fn validate_unknown_feature_reports_reference_lost_through_the_dispatcher() {
         detail: detail.clone(),
     }));
     assert_eq!(diagnostic.code, DiagnosticCode::InvalidRequest);
+    assert_eq!(
+        std::fs::read(bundle.join("manifest.json")).expect("manifest re-reads"),
+        manifest,
+        "refusal leaves the manifest untouched"
+    );
+    assert_eq!(
+        std::fs::read(bundle.join("transactions.log")).expect("log re-reads"),
+        log,
+        "refusal appends no transaction"
+    );
 
     let _ = std::fs::remove_dir_all(&parent);
 }
@@ -106,6 +118,8 @@ fn validate_empty_feature_id_is_rejected_by_the_request_contract() {
     let parent = root("empty-feature");
     let host = Host::new();
     let bundle = new_project(&host, &parent);
+    let manifest = std::fs::read(bundle.join("manifest.json")).expect("manifest reads");
+    let log = std::fs::read(bundle.join("transactions.log")).expect("log reads");
 
     let error = host
         .execute_domain_command(
@@ -119,6 +133,16 @@ fn validate_empty_feature_id_is_rejected_by_the_request_contract() {
     assert!(
         matches!(error, ExecutionError::InvalidRequest(_)),
         "empty feature id fails request validation, got {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(bundle.join("manifest.json")).expect("manifest re-reads"),
+        manifest,
+        "rejection leaves the manifest untouched"
+    );
+    assert_eq!(
+        std::fs::read(bundle.join("transactions.log")).expect("log re-reads"),
+        log,
+        "rejection appends no transaction"
     );
 
     let _ = std::fs::remove_dir_all(&parent);
@@ -360,6 +384,8 @@ fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
         .collect();
     assert_ne!(corrupted, bytes);
     std::fs::write(&brep_path, &corrupted).expect("corrupted BREP writes");
+    let manifest = std::fs::read(bundle.join("manifest.json")).expect("manifest reads");
+    let log = std::fs::read(bundle.join("transactions.log")).expect("log reads");
 
     let error = Host::new()
         .execute_domain_command(
@@ -385,6 +411,16 @@ fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
     assert!(
         !output.exists() && !parent.join("arm-x.stl").exists(),
         "refusal produces no export output"
+    );
+    assert_eq!(
+        std::fs::read(bundle.join("manifest.json")).expect("manifest re-reads"),
+        manifest,
+        "refusal leaves the manifest untouched"
+    );
+    assert_eq!(
+        std::fs::read(bundle.join("transactions.log")).expect("log re-reads"),
+        log,
+        "refusal appends no transaction"
     );
 
     let _ = std::fs::remove_dir_all(&parent);

@@ -13546,16 +13546,32 @@ fn replay_finishing_geometry(
                 Some((result.brep_bytes, result.brep_sha256.as_str())),
             )
             .map_err(|detail| HostError::BrepIo { detail })?;
-            // Finishing operations such as thick-solid shells can serialize
-            // to different but geometrically equivalent BREP bytes across
-            // runs while remaining valid against the worker's own hash.
-            // Other replay arms (extrude/boolean/hole) already accept the
-            // trusted worker output without byte equality; require validity
-            // here rather than byte identity so deterministic canonical
-            // state (revision/model fingerprint) is preserved under the
-            // frozen recipe tolerances.
-            let _ = (expected_bytes, expected_sha);
-            bytes
+            if bytes.len() == expected_bytes && sha256_hex(&bytes) == expected_sha {
+                bytes
+            } else {
+                // OCCT finishing serialization (notably thick-solid shells)
+                // can vary across runs while the authenticated bytes persist
+                // in the previous generation sibling, which survives derived
+                // BREP removal. Restore those bytes when they match so replay
+                // preserves byte identity without weakening authentication.
+                let previous = previous_generation_path(root)
+                    .join(BREP_SUBDIR)
+                    .join(format!("{feature_id}.brep"));
+                if previous.is_file()
+                    && let Ok(authenticated) = read_brep_verified(
+                        &previous,
+                        Some((expected_bytes, expected_sha)),
+                    )
+                {
+                    authenticated
+                } else {
+                    return Err(HostError::BrepIo {
+                        detail: format!(
+                            "replayed finishing BREP does not match authenticated geometry: {feature_id}"
+                        ),
+                    });
+                }
+            }
         }};
     }
 

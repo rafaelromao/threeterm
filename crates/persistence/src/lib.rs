@@ -2896,16 +2896,13 @@ impl Bundle {
                         "derived result restore has no authenticated BREP provenance".to_string(),
                     )
                 })?;
-            // Derived BREPs are regenerable artifacts; the host already
-            // validated replayed bytes against the trusted worker output.
-            // Finishing operations such as thick-solid shells can serialize
-            // to equivalent but non-identical bytes, so require provenance
-            // rather than byte identity here.
-            let _ = (
-                entry.brep_byte_count,
-                entry.brep_sha256.as_deref(),
-                brep_bytes.len(),
-            );
+            if entry.brep_byte_count != Some(brep_bytes.len() as u64)
+                || entry.brep_sha256.as_deref() != Some(hash(brep_bytes).as_str())
+            {
+                return Err(BundleError::Invalid(
+                    "replayed BREP does not match authenticated geometry".to_string(),
+                ));
+            }
             let brep_root = self.root.join("brep");
             fs::create_dir_all(&brep_root)?;
             let path = brep_root.join(format!("{feature_id}.brep"));
@@ -2937,7 +2934,7 @@ impl Bundle {
             }
 
             let mut feature_ids = std::collections::BTreeSet::new();
-            for (feature_id, _bytes) in artifacts {
+            for (feature_id, bytes) in artifacts {
                 if !valid_feature_path_component(feature_id) {
                     return Err(BundleError::Invalid(
                         "derived result feature ID must be a plain path component".to_string(),
@@ -2948,7 +2945,7 @@ impl Bundle {
                         "duplicate replay artifact feature: {feature_id}"
                     )));
                 }
-                let _entry = loaded
+                let entry = loaded
                     .log
                     .entries()
                     .iter()
@@ -2959,10 +2956,13 @@ impl Bundle {
                             "derived result restore has no authenticated BREP provenance: {feature_id}"
                         ))
                     })?;
-                // See the singular restore above: derived BREPs are trusted
-                // from the host's validated worker replay; finishing
-                // serialization can vary while remaining geometrically
-                // equivalent under the frozen tolerances.
+                if entry.brep_byte_count != Some(bytes.len() as u64)
+                    || entry.brep_sha256.as_deref() != Some(hash(bytes).as_str())
+                {
+                    return Err(BundleError::Invalid(format!(
+                        "replayed BREP does not match authenticated geometry: {feature_id}"
+                    )));
+                }
             }
 
             let derived_root = self.root.join(".derived");

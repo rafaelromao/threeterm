@@ -329,6 +329,78 @@ fn validate_known_good_solid_reports_bound_success_after_reopen() {
 }
 
 #[test]
+fn validate_rejects_a_kernel_valid_brep_with_wrong_authenticated_provenance() {
+    if required_fixture_worker(
+        "validate_rejects_a_kernel_valid_brep_with_wrong_authenticated_provenance",
+    )
+    .is_none()
+    {
+        eprintln!("validate: no OCCT worker binary found; CI runs this production path");
+        return;
+    }
+    let parent = root("wrong-provenance");
+    let host = Host::new();
+    let bundle = new_project(&host, &parent);
+    for (feature_id, profile, height) in [
+        (
+            "arm-x",
+            vec![[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]],
+            8.0,
+        ),
+        (
+            "other-solid",
+            vec![[0.0, 0.0], [35.0, 0.0], [35.0, 12.0], [0.0, 12.0]],
+            5.0,
+        ),
+    ] {
+        let mut extrude = json!({
+            "feature_id": feature_id,
+            "profile": profile,
+            "height": height,
+            "mode": "additive",
+        });
+        extrude["bundle_path"] = bundle.to_string_lossy().into_owned().into();
+        assert_eq!(
+            command_response(&host, EXTRUDE_COMMAND_ID, extrude)["status"],
+            "ok"
+        );
+    }
+
+    let reopened = Host::new();
+    command_response(
+        &reopened,
+        LOAD_COMMAND_ID,
+        json!({"bundle_path": bundle.to_string_lossy()}),
+    );
+    let replacement =
+        std::fs::read(bundle.join("brep/other-solid.brep")).expect("replacement BREP reads");
+    std::fs::write(bundle.join("brep/arm-x.brep"), replacement).expect("replacement BREP writes");
+
+    let error = reopened
+        .execute_domain_command(
+            VALIDATE_COMMAND_ID,
+            json!({
+                "bundle_path": bundle.to_string_lossy(),
+                "feature_id": "arm-x",
+            }),
+        )
+        .expect_err("a valid but wrong BREP is refused");
+    let ExecutionError::Handler(HostError::BrepInvalid { detail, .. }) = error else {
+        panic!("wrong BREP must report BrepInvalid, got {error:?}");
+    };
+    assert!(
+        detail.contains("authenticated BREP provenance mismatch") && detail.contains("arm-x"),
+        "refusal identifies the provenance mismatch: {detail}"
+    );
+    assert!(
+        !parent.join("output").exists(),
+        "validation produces no export artifact"
+    );
+
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+#[test]
 fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
     if required_fixture_worker("validate_corrupt_committed_brep_is_refused_as_brep_invalid")
         .is_none()

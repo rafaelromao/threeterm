@@ -2430,6 +2430,31 @@ impl Host {
                 detail: format!("selected feature is not current-valid: {feature_id}"),
             });
         }
+        let Some(provenance) = loaded.log.entries().iter().rev().find(|entry| {
+            entry.feature_id == feature_id
+                && entry.brep_path.is_some()
+                && entry.brep_sha256.is_some()
+        }) else {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "selected feature has no authenticated BREP provenance: {feature_id}"
+                ),
+            });
+        };
+        let expected_brep_path = format!("{BREP_SUBDIR}/{feature_id}.brep");
+        if provenance.brep_path.as_deref() != Some(expected_brep_path.as_str()) {
+            return Err(HostError::BrepInvalid {
+                request_id: None,
+                detail: format!(
+                    "authenticated BREP path mismatch for {feature_id}: expected {expected_brep_path}, found {}",
+                    provenance.brep_path.as_deref().unwrap_or("<missing>")
+                ),
+            });
+        }
+        let expected_brep_sha256 = provenance
+            .brep_sha256
+            .as_deref()
+            .expect("authenticated BREP provenance includes its fingerprint");
         let brep = bundle_root(root)
             .join(BREP_SUBDIR)
             .join(format!("{feature_id}.brep"));
@@ -2443,6 +2468,17 @@ impl Host {
             return Err(HostError::BrepInvalid {
                 request_id: Some(request.request_id.clone()),
                 detail: "validate worker did not confirm the selected solid".to_string(),
+            });
+        }
+        let actual_brep_sha256 = sha256_path(&brep).map_err(|error| HostError::BrepIo {
+            detail: format!("hash validated BREP failed: {error}"),
+        })?;
+        if actual_brep_sha256 != expected_brep_sha256 {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id),
+                detail: format!(
+                    "authenticated BREP provenance mismatch for {feature_id}: expected sha256 {expected_brep_sha256}, found {actual_brep_sha256}"
+                ),
             });
         }
         Ok(SelectedSolidValidationView {

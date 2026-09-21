@@ -487,13 +487,16 @@ pub struct ExtrudeDerivedResult {
     pub artifact: Layer1DerivedResult,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DomainCommandPreview {
     pub command: CommandId,
     pub source_revision: String,
     pub preview_revision: String,
     pub input_fingerprint: String,
     pub geometry_fingerprint: String,
+    /// A disposable tessellation for presentation only. It is never stored in
+    /// the canonical bundle or the host's Layer 1 cache.
+    pub preview_solid: Option<SceneSolid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4663,6 +4666,7 @@ impl Host {
                 source_revision,
                 input_fingerprint,
                 geometry_fingerprint,
+                preview_solid: None,
             });
         }
         if command == BRACKET_COMMAND_ID {
@@ -4758,6 +4762,7 @@ impl Host {
                 ),
                 input_fingerprint,
                 geometry_fingerprint,
+                preview_solid: None,
             });
         }
         if command == HOLE_COMMAND_ID {
@@ -4886,13 +4891,18 @@ impl Host {
                 format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
                     .as_bytes(),
             );
+            let preview_solid = self
+                .preview_solid_from_artifact(&derived.artifact, &source_revision, &worker)
+                .map_err(ExecutionError::Handler);
             self.discard_staged_occt_result(&derived);
+            let preview_solid = preview_solid?;
             return Ok(DomainCommandPreview {
                 command,
                 source_revision,
                 preview_revision,
                 input_fingerprint,
                 geometry_fingerprint,
+                preview_solid: Some(preview_solid),
             });
         }
 
@@ -5279,13 +5289,18 @@ impl Host {
             format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
                 .as_bytes(),
         );
+        let preview_solid = self
+            .preview_solid_from_artifact(&derived.artifact, &source_revision, &worker)
+            .map_err(ExecutionError::Handler);
         self.discard_extrude_derived(derived);
+        let preview_solid = preview_solid?;
         Ok(DomainCommandPreview {
             command,
             source_revision,
             preview_revision,
             input_fingerprint,
             geometry_fingerprint,
+            preview_solid: Some(preview_solid),
         })
     }
 
@@ -5539,12 +5554,24 @@ impl Host {
                 format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
                     .as_bytes(),
             );
+            let preview_solid = self
+                .preview_solid_from_artifact(
+                    &derived.artifact,
+                    &source_revision,
+                    &OcctWorker::locate().map_err(|error| {
+                        ExecutionError::Handler(HostError::WorkerUnavailable {
+                            detail: error.to_string(),
+                        })
+                    })?,
+                )
+                .map_err(ExecutionError::Handler)?;
             Ok(DomainCommandPreview {
                 command,
                 source_revision,
                 preview_revision,
                 input_fingerprint,
                 geometry_fingerprint,
+                preview_solid: Some(preview_solid),
             })
         })();
         self.discard_staged_occt_result(&derived);
@@ -10240,6 +10267,9 @@ impl Host {
             format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
                 .as_bytes(),
         );
+        let preview_solid = self
+            .preview_solid_from_artifact(&derived.artifact, &source_revision, worker)
+            .map_err(ExecutionError::Handler)?;
         self.discard_staged_occt_result(&derived);
         Ok(DomainCommandPreview {
             command,
@@ -10247,7 +10277,51 @@ impl Host {
             preview_revision,
             input_fingerprint,
             geometry_fingerprint,
+            preview_solid: Some(preview_solid),
         })
+    }
+
+    fn preview_solid_from_artifact(
+        &self,
+        artifact: &Layer1DerivedResult,
+        source_revision: &str,
+        worker: &OcctWorker,
+    ) -> Result<SceneSolid, HostError> {
+        let stage = std::env::temp_dir().join(format!(
+            "threeterm-preview-tessellation-{}-{}",
+            std::process::id(),
+            TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
+            detail: format!("create preview tessellation stage failed: {error}"),
+        })?;
+        let result = (|| {
+            let request = ExportRequest::new(
+                format!("preview-tessellation-{}", artifact.feature_id),
+                artifact.path.clone(),
+                0.1,
+            )
+            .with_output_path(&stage, format!("{}.stl", artifact.feature_id))
+            .with_feature_id(&artifact.feature_id);
+            let exported = worker
+                .clone()
+                .with_revision_id(source_revision.to_string())
+                .export(&request)
+                .map_err(HostError::from)?;
+            if !exported.is_success() || !exported.brep_path.is_file() {
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!(
+                        "preview tessellation did not produce a mesh: {}",
+                        artifact.feature_id
+                    ),
+                });
+            }
+            let triangles = parse_ascii_stl(&exported.brep_path, &artifact.feature_id)?;
+            Ok(SceneSolid::new(&artifact.feature_id, triangles))
+        })();
+        let _ = fs::remove_dir_all(&stage);
+        result
     }
 
     fn stage_occt_result_with_cancel_and_progress<R>(

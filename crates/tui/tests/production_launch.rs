@@ -1239,6 +1239,134 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
 
 #[test]
 #[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_retains_preview_cancellation_and_recommit_evidence() {
+    OcctWorker::locate().expect("preview cancellation workflow requires the OCCT worker");
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-preview-cancel-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("preview cancellation fixture persists");
+    let before_identity = host.identity(&root).expect("canonical identity reads");
+    let before_tree = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("canonical scene reads");
+    let request = br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ]);
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    let outcome = launch(&host, &root, &mut terminal, official_environment())
+        .expect("preview cancellation and recommit workflow succeeds");
+
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity remains readable")
+            .transaction_count,
+        before_identity.transaction_count + 1
+    );
+    assert_ne!(
+        host.identity(&root).expect("committed identity reads"),
+        before_identity
+    );
+    assert_ne!(snapshot_tree(&root), before_tree);
+    assert_eq!(before_scene.revision, before_identity.revision_hash);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+    assert!(!root.join(".derived").exists());
+
+    let transcript = outcome.action_transcript;
+    let kinds = transcript
+        .entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "draft_opened",
+            "preview_ready",
+            "cancelled",
+            "draft_opened",
+            "preview_ready",
+            "committed"
+        ]
+    );
+    assert!(
+        transcript.entries[1]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_eq!(
+        transcript.entries[2].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(
+        transcript.entries[4]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_ne!(
+        transcript.entries[5].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(String::from_utf8_lossy(&terminal.writes).contains("[action-transcript]"));
+
+    let bundle = Bundle::at(&root).open().expect("committed bundle opens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref());
+    let Some(CanonicalIntent::Extrude(intent)) = intent else {
+        panic!("recommitted feature retains extrusion intent");
+    };
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+
+    fs::remove_dir_all(root).expect("preview cancellation fixture removes");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_cancels_typed_extrusion_without_mutation() {
     OcctWorker::locate().expect("extrusion cancellation requires the OCCT worker");
     let suffix = SystemTime::now()

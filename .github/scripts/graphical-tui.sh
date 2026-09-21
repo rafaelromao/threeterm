@@ -36,6 +36,15 @@ TUI_STDERR=''
 WESTON_LOG=''
 STARTUP_SCREENSHOT=''
 ORBIT_SCREENSHOT=''
+STARTUP_VIEWPORT_CROP=''
+SELECTION_SCREENSHOT=''
+PAN_SCREENSHOT=''
+ZOOM_SCREENSHOT=''
+SELECTION_VIEWPORT_CROP=''
+ORBIT_VIEWPORT_CROP=''
+PAN_VIEWPORT_CROP=''
+ZOOM_VIEWPORT_CROP=''
+NAVIGATION_TRANSCRIPT=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
 PROJECT_IDENTITY=''
@@ -53,6 +62,9 @@ viewport_evidence='null'
 viewport_startup_evidence='null'
 viewport_orbit_evidence='null'
 viewport_workflow_evidence='null'
+viewport_selection_evidence='null'
+viewport_pan_evidence='null'
+viewport_zoom_evidence='null'
 startup_image_id=''
 startup_revision=''
 final_image_id=''
@@ -63,6 +75,7 @@ cleanup_deletions='[]'
 probe_status='not_run'
 readiness_status='not_run'
 orbit_status='not_run'
+navigation_status='not_run'
 workflow_status='not_run'
 cleanup_status='not_run'
 ghostty_status='not_run'
@@ -72,6 +85,8 @@ owned_processes_status='not_run'
 cleanup_screenshot_taken=0
 source_commit='unknown'
 source_dirty=false
+navigation_project_fingerprint_before=''
+navigation_project_fingerprint_after=''
 path_failure_code=''
 path_failure_detail=''
 EXPECTED_FEATURE_ID='l-bracket'
@@ -83,6 +98,7 @@ usage() {
 Usage:
   graphical-tui.sh production_tui_ghostty_session --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_create_project_extrude --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_keyboard_navigation --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
   graphical-tui.sh --validate-viewport-evidence PATH
 
@@ -176,6 +192,15 @@ validate_empty_viewport_evidence() {
     ' <<<"$payload" >/dev/null 2>&1
 }
 
+validate_selected_viewport_evidence() {
+    local payload="$1"
+    local expected_feature="$2"
+    validate_viewport_evidence "$payload" || return 1
+    jq -e --arg expected_feature "$expected_feature" '
+        .selected_feature_id == $expected_feature
+    ' <<<"$payload" >/dev/null 2>&1
+}
+
 while (($# > 0)); do
     case "$1" in
         --help|-h)
@@ -206,12 +231,15 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session|production_tui_create_project_extrude)
+        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
             if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.create-project-extrude/1'
+            elif [[ "$TEST_NAME" == 'production_tui_keyboard_navigation' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.keyboard-navigation/1'
             fi
             shift
             ;;
@@ -286,6 +314,17 @@ else
     EXTRUSION_COMMITTED_SCREENSHOT=''
 fi
 ORBIT_SCREENSHOT="${EVIDENCE_ROOT}/orbit.png"
+if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
+    STARTUP_VIEWPORT_CROP="${EVIDENCE_ROOT}/startup-viewport.png"
+    SELECTION_SCREENSHOT="${EVIDENCE_ROOT}/selection.png"
+    PAN_SCREENSHOT="${EVIDENCE_ROOT}/pan.png"
+    ZOOM_SCREENSHOT="${EVIDENCE_ROOT}/zoom.png"
+    SELECTION_VIEWPORT_CROP="${EVIDENCE_ROOT}/selection-viewport.png"
+    ORBIT_VIEWPORT_CROP="${EVIDENCE_ROOT}/orbit-viewport.png"
+    PAN_VIEWPORT_CROP="${EVIDENCE_ROOT}/pan-viewport.png"
+    ZOOM_VIEWPORT_CROP="${EVIDENCE_ROOT}/zoom-viewport.png"
+    NAVIGATION_TRANSCRIPT="${EVIDENCE_ROOT}/navigation-transcript.jsonl"
+fi
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     PROJECT_IDENTITY="${EVIDENCE_ROOT}/project-identity.json"
 else
@@ -541,6 +580,14 @@ rendered_viewport_ready() {
     [[ "$body_pixels" -ge 100 && "$edge_pixels" -ge 10 ]]
 }
 
+rendered_selected_viewport_ready() {
+    local screenshot="$1"
+    local selected_body selected_edge
+    selected_body="$(rgb_pixel_count "$screenshot" 192 193 222)" || return 1
+    selected_edge="$(rgb_pixel_count "$screenshot" 121 111 136)" || return 1
+    [[ "$selected_body" -ge 100 && "$selected_edge" -ge 10 ]]
+}
+
 project_state_fingerprint() {
     local root="$1" path
     [[ -d "$root" ]] || return 1
@@ -734,18 +781,161 @@ run_orbit() {
     grep -Fq 'Orbit right' <<<"$ocr" || die orbit_marker_not_visible 'orbit acknowledgement was not visible in the orbit screenshot'
     grep -Fq 'Viewport presented' <<<"$ocr" || die orbit_viewport_marker_not_visible 'orbit viewport evidence was not visible in the orbit screenshot'
     rendered_viewport_ready "$ORBIT_SCREENSHOT" || die orbit_not_rendered 'orbit screenshot does not contain palette-bound rendered geometry'
-    local before_screenshot="$STARTUP_SCREENSHOT"
-    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
-        before_screenshot="$EXTRUSION_COMMITTED_SCREENSHOT"
-    fi
-    magick "$before_screenshot" -crop 800x480+0+0 "${EVIDENCE_ROOT}/startup-viewport.png"
-    magick "$ORBIT_SCREENSHOT" -crop 800x480+0+0 "${EVIDENCE_ROOT}/orbit-viewport.png"
-    magick compare -metric AE "${EVIDENCE_ROOT}/startup-viewport.png" \
-        "${EVIDENCE_ROOT}/orbit-viewport.png" null: 2>"$DIFF_LOG" || true
-    local difference
-    difference="$(tr -d '[:space:]' <"$DIFF_LOG" 2>/dev/null || true)"
-    [[ "$difference" =~ ^[0-9]+$ && "$difference" -gt 0 ]] || die orbit_not_rendered 'orbit did not change the fixed viewport crop'
+    [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$startup_image_id" ]] ||
+        die orbit_not_rendered 'orbit did not receive a new viewport frame'
+    [[ "$(jq -r '.camera.yaw_degrees' <<<"$viewport_evidence")" != 0 ]] ||
+        die orbit_not_rendered 'orbit did not change the camera yaw'
     orbit_status='passed'
+}
+
+navigation_checkpoint_ready() {
+    local expected_feature="$1"
+    local expected_yaw="$2"
+    local expected_pitch="$3"
+    local expected_zoom="$4"
+    local expected_pan_x="$5"
+    local expected_pan_y="$6"
+    local marker="$7"
+    local before_acks="$8"
+    local before_markers="$9"
+    local image_id ack_count marker_count
+
+    extract_viewport_evidence || return 1
+    validate_selected_viewport_evidence "$viewport_evidence" "$expected_feature" || return 1
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    [[ "$image_id" != "$navigation_previous_image_id" ]] || return 1
+    ack_count="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    marker_count="$(grep -aFc "$marker" "$PTY_OUTPUT" 2>/dev/null || true)"
+    ((ack_count > before_acks)) || return 1
+    ((marker_count > before_markers)) || return 1
+    jq -e \
+        --arg feature "$expected_feature" \
+        --argjson yaw "$expected_yaw" \
+        --argjson pitch "$expected_pitch" \
+        --argjson zoom "$expected_zoom" \
+        --argjson pan_x "$expected_pan_x" \
+        --argjson pan_y "$expected_pan_y" \
+        '.selected_feature_id == $feature and
+         .camera.yaw_degrees == $yaw and
+         .camera.pitch_degrees == $pitch and
+         .camera.zoom_percent == $zoom and
+         .camera.pan_x == $pan_x and
+         .camera.pan_y == $pan_y and
+         (.scene.body_pixels + .scene.edge_pixels + .scene.non_background_pixels) > 0' \
+        <<<"$viewport_evidence" >/dev/null 2>&1
+}
+
+navigation_marker_line() {
+    local marker="$1"
+    local line
+    while IFS= read -r line; do
+        [[ "$line" == *"$marker"* ]] || continue
+        printf '%s' "$line"
+    done < <(tr '\r' '\n' <"$PTY_OUTPUT" 2>/dev/null || true)
+}
+
+capture_navigation_checkpoint() {
+    local action="$1"
+    local input="$2"
+    local marker="$3"
+    local visible_text="$4"
+    local screenshot="$5"
+    local crop="$6"
+    local ocr
+    capture_screenshot "$screenshot" || die "${action}_screenshot_failed" "${action} screenshot was not fixed at 800x600"
+    magick "$screenshot" -crop 800x480+0+0 "$crop" ||
+        die "${action}_viewport_crop_failed" "${action} viewport crop could not be retained"
+    ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
+    grep -Fq 'Viewport presented' <<<"$ocr" ||
+        die "${action}_viewport_marker_not_visible" "${action} viewport evidence was not visible in the screenshot"
+    grep -Fq "$visible_text" <<<"$ocr" ||
+        die "${action}_acknowledgement_not_visible" "${action} acknowledgement was not visible in the screenshot"
+    local screenshot_sha crop_sha acknowledgement_text
+    screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
+    crop_sha="$(sha256sum "$crop" | cut -d' ' -f1)"
+    acknowledgement_text="$(navigation_marker_line "$marker")"
+    jq -n \
+        --arg schema_version "$SCHEMA_VERSION" \
+        --arg action "$action" \
+        --arg input "$input" \
+        --arg marker "$marker" \
+        --arg acknowledgement_text "$acknowledgement_text" \
+        --arg screenshot "$screenshot" \
+        --arg screenshot_sha256 "$screenshot_sha" \
+        --arg viewport_crop "$crop" \
+        --arg viewport_crop_sha256 "$crop_sha" \
+        --argjson viewport "$viewport_evidence" \
+        '{schema_version:$schema_version,action:$action,input:$input,acknowledgement:{marker:$marker,text:$acknowledgement_text},frame:$viewport.frame,camera:$viewport.camera,selection:$viewport.selected_feature_id,revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshots:{full:{path:$screenshot,sha256:$screenshot_sha256},viewport:{path:$viewport_crop,sha256:$viewport_crop_sha256}}}' \
+        >>"$NAVIGATION_TRANSCRIPT"
+    navigation_previous_image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    final_image_id="$navigation_previous_image_id"
+    final_image_id_json="$final_image_id"
+}
+
+run_keyboard_navigation() {
+    [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]] || return 0
+    : >"$NAVIGATION_TRANSCRIPT"
+    magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 "$STARTUP_VIEWPORT_CROP" ||
+        die startup_viewport_crop_failed 'startup viewport crop could not be retained'
+    navigation_project_fingerprint_before="$(project_state_fingerprint "$PROJECT_ROOT")" ||
+        die navigation_project_snapshot_failed 'saved project state could not be fingerprinted before navigation'
+    navigation_previous_image_id="$startup_image_id"
+
+    local before_acks before_markers
+    before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    before_markers="$(grep -aFc '[selection-glyph]' "$PTY_OUTPUT" 2>/dev/null || true)"
+    wtype -k Down || die input_injection_failed 'compositor keyboard input could not select the feature'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+        'l-bracket' 0 25 100 0 0 '[selection-glyph]' "$before_acks" "$before_markers" ||
+        die selection_not_observed 'keyboard selection did not produce bound acknowledged viewport evidence'
+    validate_selected_viewport_evidence "$viewport_evidence" 'l-bracket' ||
+        die selection_not_bound 'selection evidence did not name l-bracket'
+    capture_navigation_checkpoint 'selection' $'\e[B' '[selection-glyph]' \
+        'selected feature l-bracket' \
+        "$SELECTION_SCREENSHOT" "$SELECTION_VIEWPORT_CROP"
+    viewport_selection_evidence="$viewport_evidence"
+    rendered_selected_viewport_ready "$SELECTION_SCREENSHOT" ||
+        die selection_not_rendered 'selection screenshot does not contain selected geometry pixels'
+
+    before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    before_markers="$(grep -aFc '[motion-trail] Orbit right' "$PTY_OUTPUT" 2>/dev/null || true)"
+    wtype -k Right || die input_injection_failed 'compositor keyboard input could not orbit the viewport'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+        'l-bracket' 5 25 100 0 0 '[motion-trail] Orbit right' "$before_acks" "$before_markers" ||
+        die orbit_not_observed 'keyboard orbit did not produce updated viewport evidence'
+    capture_navigation_checkpoint 'orbit' $'\e[C' '[motion-trail] Orbit right' \
+        'Orbit right' \
+        "$ORBIT_SCREENSHOT" "$ORBIT_VIEWPORT_CROP"
+    viewport_orbit_evidence="$viewport_evidence"
+    rendered_viewport_ready "$ORBIT_SCREENSHOT" ||
+        die orbit_not_rendered 'orbit screenshot does not contain rendered geometry pixels'
+
+    before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    before_markers="$(grep -aFc '[motion-trail] Pan up' "$PTY_OUTPUT" 2>/dev/null || true)"
+    wtype w || die input_injection_failed 'compositor keyboard input could not pan the viewport'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+        'l-bracket' 5 25 100 0 -5 '[motion-trail] Pan up' "$before_acks" "$before_markers" ||
+        die pan_not_observed 'keyboard pan did not produce updated viewport evidence'
+    capture_navigation_checkpoint 'pan' 'w' '[motion-trail] Pan up' \
+        'Pan up' \
+        "$PAN_SCREENSHOT" "$PAN_VIEWPORT_CROP"
+    viewport_pan_evidence="$viewport_evidence"
+    rendered_viewport_ready "$PAN_SCREENSHOT" ||
+        die pan_not_rendered 'pan screenshot does not contain rendered geometry pixels'
+
+    before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    before_markers="$(grep -aFc '[motion-trail] Zoom in' "$PTY_OUTPUT" 2>/dev/null || true)"
+    wtype + || die input_injection_failed 'compositor keyboard input could not zoom the viewport'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+        'l-bracket' 5 25 105 0 -5 '[motion-trail] Zoom in' "$before_acks" "$before_markers" ||
+        die zoom_not_observed 'keyboard zoom did not produce updated viewport evidence'
+    capture_navigation_checkpoint 'zoom' '+' '[motion-trail] Zoom in' \
+        'Zoom in' \
+        "$ZOOM_SCREENSHOT" "$ZOOM_VIEWPORT_CROP"
+    viewport_zoom_evidence="$viewport_evidence"
+    rendered_viewport_ready "$ZOOM_SCREENSHOT" ||
+        die zoom_not_rendered 'zoom screenshot does not contain rendered geometry pixels'
+    navigation_status='passed'
 }
 
 wait_for_output_marker() {
@@ -946,13 +1136,19 @@ write_manifest() {
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
         "$STARTUP_SCREENSHOT" "$PROJECT_CREATED_SCREENSHOT" "$EXTRUSION_COMMITTED_SCREENSHOT"
-        "$ORBIT_SCREENSHOT" "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
+        "$ORBIT_SCREENSHOT" "$SELECTION_SCREENSHOT" "$PAN_SCREENSHOT" "$ZOOM_SCREENSHOT"
+        "$STARTUP_VIEWPORT_CROP" "$SELECTION_VIEWPORT_CROP" "$ORBIT_VIEWPORT_CROP"
+        "$PAN_VIEWPORT_CROP" "$ZOOM_VIEWPORT_CROP" "$NAVIGATION_TRANSCRIPT"
+        "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
         "$DIFF_LOG" "${EVIDENCE_ROOT}/window-ready.png" "$STIMULUS_ERROR"
     )
     local -a evidence_kinds=(
         pty_output pty_input tui_stderr compositor_log tool_versions
         startup_screenshot project_created_screenshot extrusion_committed_screenshot
-        orbit_screenshot cleanup_screenshot failure_screenshot
+        orbit_screenshot selection_screenshot pan_screenshot zoom_screenshot
+        startup_viewport_crop selection_viewport_crop orbit_viewport_crop
+        pan_viewport_crop zoom_viewport_crop navigation_transcript
+        cleanup_screenshot failure_screenshot
         orbit_difference window_screenshot probe_stimulus_error
     )
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
@@ -1018,16 +1214,23 @@ write_manifest() {
             --arg ghostty_status "$ghostty_status" \
             --arg weston_status "$weston_status" \
             --arg owned_processes_status "$owned_processes_status" \
-            --argjson viewport_startup "$persisted_viewport_startup" \
-            --argjson viewport_orbit "$viewport_orbit_evidence" \
-            --argjson viewport_workflow "$viewport_workflow_evidence" \
-            --argjson final_image_id "$final_image_id_json" \
+             --argjson viewport_startup "$persisted_viewport_startup" \
+             --argjson viewport_orbit "$viewport_orbit_evidence" \
+             --argjson viewport_workflow "$viewport_workflow_evidence" \
+             --argjson viewport_selection "$viewport_selection_evidence" \
+             --argjson viewport_pan "$viewport_pan_evidence" \
+             --argjson viewport_zoom "$viewport_zoom_evidence" \
+             --argjson final_image_id "$final_image_id_json" \
             --argjson final_delete_image_id "$final_delete_image_id_json" \
-            --argjson cleanup_deletions "$cleanup_deletions" \
-            --arg workflow_status "$workflow_status" \
+             --argjson cleanup_deletions "$cleanup_deletions" \
+             --arg navigation_transcript "$NAVIGATION_TRANSCRIPT" \
+             --arg navigation_before "$navigation_project_fingerprint_before" \
+             --arg navigation_after "$navigation_project_fingerprint_after" \
+             --arg navigation_status "$navigation_status" \
+             --arg workflow_status "$workflow_status" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-            '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,orbit:$viewport_orbit,workflow:$viewport_workflow},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+             '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_fingerprint_before:$navigation_before,project_fingerprint_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -1081,10 +1284,20 @@ wait_for_tui_readiness
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     run_create_project_extrude
 fi
-run_orbit
+if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
+    run_keyboard_navigation
+else
+    run_orbit
+fi
 wtype q || die input_injection_failed 'compositor keyboard input could not send q'
 wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'
 tui_status='passed'
+if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
+    navigation_project_fingerprint_after="$(project_state_fingerprint "$PROJECT_ROOT")" ||
+        die navigation_project_snapshot_failed 'saved project state could not be fingerprinted after navigation'
+    [[ "$navigation_project_fingerprint_after" == "$navigation_project_fingerprint_before" ]] ||
+        die navigation_mutated_project 'keyboard navigation changed the canonical saved project'
+fi
 verify_cleanup
 capture_screenshot "$CLEANUP_SCREENSHOT" || die cleanup_screenshot_failed 'cleanup screenshot was not captured before Ghostty teardown'
 cleanup_screenshot_clear || die cleanup_screenshot_not_clear 'cleanup screenshot still contains viewport geometry pixels'

@@ -299,6 +299,7 @@ pub struct ViewportPaletteEvidence {
 pub struct ViewportPresentationEvidence {
     pub schema_version: &'static str,
     pub acknowledgement: &'static str,
+    pub selected_feature_id: Option<String>,
     pub frame: ViewportFrameEvidence,
     pub scene: ViewportSceneEvidence,
     pub palette: ViewportPaletteEvidence,
@@ -3270,10 +3271,10 @@ pub struct TuiViewportSession<R: Renderer> {
     height: u32,
     viewport_colors: ViewportColors,
     coordinator: RenderCoordinator<R>,
-    visible_presentation: Option<(u64, CameraState)>,
+    visible_presentation: Option<(u64, CameraState, Option<String>)>,
     visible_frame_identity: Option<FrameIdentity>,
-    in_flight_presentation: Option<(u64, CameraState)>,
-    pending_presentation: Option<(u64, CameraState)>,
+    in_flight_presentation: Option<(u64, CameraState, Option<String>)>,
+    pending_presentation: Option<(u64, CameraState, Option<String>)>,
 }
 
 impl<R: Renderer> TuiViewportSession<R> {
@@ -3423,6 +3424,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             .as_deref()
             .and_then(|selected_id| scene_feature_selection_id(&self.scene, selected_id));
         let generation = self.tui.state().presentation_generation;
+        let selected_feature_id = self.scene.selected_id.clone();
         let frame = ProtocolNeutralViewport::project(
             &self.scene,
             ViewportRequest::new(
@@ -3437,10 +3439,11 @@ impl<R: Renderer> TuiViewportSession<R> {
         let camera = self.camera;
         let submission = self.coordinator.submit(frame)?;
         if let Some(identity) = submission.started.as_ref() {
-            self.in_flight_presentation = Some((identity.generation, camera));
+            self.in_flight_presentation =
+                Some((identity.generation, camera, selected_feature_id.clone()));
         }
         if let Some(identity) = submission.queued.as_ref() {
-            self.pending_presentation = Some((identity.generation, camera));
+            self.pending_presentation = Some((identity.generation, camera, selected_feature_id));
         }
         Ok(submission)
     }
@@ -3451,7 +3454,8 @@ impl<R: Renderer> TuiViewportSession<R> {
         x: u32,
         y: u32,
     ) -> Result<PickInputOutcome, TuiViewportError> {
-        let Some((generation, camera)) = self.visible_presentation else {
+        let Some((generation, camera, _selected_feature_id)) = self.visible_presentation.clone()
+        else {
             return Err(TuiViewportError::Tui(TuiDiagnostic {
                 code: TuiDiagnosticCode::StalePick,
                 detail: "pick cannot target a frame before its first acknowledgement".to_string(),
@@ -4479,7 +4483,7 @@ impl<R: Renderer> TuiViewportSession<R> {
 
     pub fn presentation_evidence(&self) -> Option<ViewportPresentationEvidence> {
         let identity = self.visible_frame_identity.as_ref()?;
-        let (_, camera) = *self.visible_presentation.as_ref()?;
+        let (_, camera, selected_feature_id) = self.visible_presentation.as_ref()?.clone();
         let frame = self.coordinator.visible_frame()?;
         if frame.frame_token != Some(identity.frame_token)
             || frame.generation != identity.generation
@@ -4501,6 +4505,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         Some(ViewportPresentationEvidence {
             schema_version: VIEWPORT_EVIDENCE_SCHEMA_VERSION,
             acknowledgement: "viewport-presented",
+            selected_feature_id,
             frame: ViewportFrameEvidence {
                 frame_token: identity.frame_token,
                 image_id: identity.image_id,

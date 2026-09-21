@@ -11,6 +11,7 @@ help="$(bash "${RUNNER}" --help)"
 for expected in \
     'production_tui_ghostty_session' \
     'production_tui_create_project_extrude' \
+    'production_tui_keyboard_navigation' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -53,6 +54,13 @@ jq -e '
     .test == "production_tui_create_project_extrude"
 ' <<<"${fresh_plan}" >/dev/null
 
+navigation_plan="$(bash "${RUNNER}" production_tui_keyboard_navigation --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.keyboard-navigation/1" and
+    .result == "not_run" and
+    .test == "production_tui_keyboard_navigation"
+' <<<"${navigation_plan}" >/dev/null
+
 for required in \
     'LC_ALL=C.UTF-8' \
     'LANG=C.UTF-8' \
@@ -67,6 +75,7 @@ for required in \
     'kill -- -' \
     'threeterm.graphical-tui/1' \
     'threeterm.graphical-tui.create-project-extrude/1' \
+    'threeterm.graphical-tui.keyboard-navigation/1' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \
@@ -77,6 +86,16 @@ for required in \
     'toolchain_contract_missing' \
     'THREETERM_GRAPHICAL_FORCE_CAPABILITY_DENIAL' \
     'selected feature keyboard-extrude' \
+    'selected_feature_id' \
+    'navigation-transcript.jsonl' \
+    'selection.png' \
+    'pan.png' \
+    'zoom.png' \
+    'selection-viewport.png' \
+    'pan-viewport.png' \
+    'zoom-viewport.png' \
+    'navigation_project_fingerprint' \
+    'rendered_selected_viewport_ready' \
     'empty-session-source' \
     'project_state_fingerprint' \
     'cancellation_changed_routing' \
@@ -106,6 +125,11 @@ for required in \
     'cleanup_evidence'; do
     grep -Fq -- "${required}" "${RUNNER}"
 done
+
+if grep -Fq 'magick compare' "${RUNNER}"; then
+    echo "graphical navigation must not gate on full-screen pixel equality" >&2
+    exit 1
+fi
 
 readiness_body="$(sed -n '/^wait_for_tui_readiness()/,/^}/p' "${RUNNER}")"
 grep -Fq 'wait_for_probe_stimulus' <<<"${readiness_body}" || {

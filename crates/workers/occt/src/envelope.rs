@@ -1049,6 +1049,8 @@ pub struct EdgeInspectionResult {
     pub status: String,
     pub feature_id: String,
     pub edge_candidates: Vec<EdgeCandidateEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_volume: Option<f64>,
 }
 
 /// Chamfer request: apply a constant-distance chamfer to every edge of
@@ -3076,6 +3078,33 @@ mod tests {
     fn operation_as_str_returns_snake_case_for_fillet_and_chamfer() {
         assert_eq!(Operation::Fillet.as_str(), "fillet");
         assert_eq!(Operation::Chamfer.as_str(), "chamfer");
+    }
+
+    #[test]
+    fn edge_inspection_result_accepts_optional_material_volume() {
+        let raw = r#"{
+            "schema_version": "threeterm.workers.occt/1",
+            "request_id": "req-1",
+            "operation": "inspect_edges",
+            "status": "ok",
+            "feature_id": "bracket",
+            "edge_candidates": [],
+            "material_volume": 123.5
+        }"#;
+        let result: EdgeInspectionResult =
+            serde_json::from_str(raw).expect("volume-enabled inspection result deserializes");
+        assert_eq!(result.material_volume, Some(123.5));
+        let without_volume = EdgeInspectionResult {
+            material_volume: None,
+            ..result
+        };
+        assert!(
+            !serde_json::to_value(without_volume)
+                .expect("inspection result serializes")
+                .as_object()
+                .expect("inspection result is an object")
+                .contains_key("material_volume")
+        );
     }
 
     #[test]

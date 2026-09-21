@@ -187,6 +187,10 @@ run_gate worker.native \
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-host --test occt_geometry_smoke real_occt_geometry_smoke \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-host --test bracket_base_qualification \
+            bracket_complete_recipe_qualifies_through_public_commands \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
         THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-slvs-worker --test real_worker \
             --jobs 1 -- --test-threads=1
         finalize_native_worker_manifest "${ACCEPTANCE_OCCT_WORKER}" "${ACCEPTANCE_SLVS_WORKER}" true

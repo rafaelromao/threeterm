@@ -276,8 +276,8 @@ fn production_tui_keyboard_navigation() {
     assert_eq!(manifest["viewport"]["orbit"]["camera"]["yaw_degrees"], 5);
     assert_eq!(manifest["viewport"]["pan"]["camera"]["pan_y"], -5);
     assert_eq!(manifest["viewport"]["zoom"]["camera"]["zoom_percent"], 105);
-    for checkpoint in ["selection", "orbit", "pan", "zoom"] {
-        let viewport = &manifest["viewport"][checkpoint];
+    for viewport_name in ["selection", "orbit", "pan", "zoom"] {
+        let viewport = &manifest["viewport"][viewport_name];
         assert!(viewport["scene"]["body_pixels"].as_u64().unwrap_or(0) > 0);
         assert!(viewport["frame"]["image_id"].as_u64().unwrap_or(0) > 0);
         assert_eq!(viewport["palette"]["name"], "catppuccin");
@@ -287,10 +287,10 @@ fn production_tui_keyboard_navigation() {
         manifest["navigation"]["project_generation_digest_after"]
     );
     let startup_revision = manifest["viewport"]["startup"]["frame"]["revision"].clone();
-    for checkpoint in ["selection", "orbit", "pan", "zoom"] {
+    for viewport_name in ["selection", "orbit", "pan", "zoom"] {
         assert_eq!(
-            manifest["viewport"][checkpoint]["frame"]["revision"], startup_revision,
-            "{checkpoint} must remain bound to the saved project revision"
+            manifest["viewport"][viewport_name]["frame"]["revision"], startup_revision,
+            "{viewport_name} must remain bound to the saved project revision"
         );
     }
     assert_eq!(
@@ -301,6 +301,7 @@ fn production_tui_keyboard_navigation() {
         "pty_output",
         "pty_input",
         "navigation_transcript",
+        "startup_viewport_crop",
         "selection_screenshot",
         "orbit_screenshot",
         "pan_screenshot",
@@ -320,13 +321,22 @@ fn production_tui_keyboard_navigation() {
     }
     let transcript = fs::read_to_string(evidence.join("navigation-transcript.jsonl"))
         .expect("navigation transcript exists");
-    for action in ["selection", "orbit", "pan", "zoom"] {
-        assert!(
-            transcript
-                .lines()
-                .any(|line| line.contains(&format!("\"action\":\"{action}\"")))
-        );
-    }
+    let transcript_actions = transcript
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect("navigation transcript line is JSON")
+        })
+        .map(|entry| {
+            entry["action"]
+                .as_str()
+                .expect("navigation transcript action is a string")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transcript_actions,
+        vec!["selection", "orbit", "pan", "zoom"]
+    );
     let pty_output =
         fs::read_to_string(evidence.join("pty-output.log")).expect("PTY output exists");
     for marker in [

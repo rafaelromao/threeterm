@@ -411,6 +411,7 @@ fn production_launch_routes_keyboard_navigation_to_acknowledged_viewport_frames(
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
     let before = host.current().expect("canonical state exists");
+    let before_tree = snapshot_tree(&root);
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
@@ -471,6 +472,7 @@ fn production_launch_routes_keyboard_navigation_to_acknowledged_viewport_frames(
     assert_eq!(final_frame["camera"]["zoom_percent"], 105);
     assert_eq!(final_frame["selected_feature_id"], "feature-a");
     assert_eq!(host.current(), Some(before));
+    assert_eq!(snapshot_tree(&root), before_tree);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

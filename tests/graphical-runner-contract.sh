@@ -94,6 +94,8 @@ for required in \
     'selection-viewport.png' \
     'pan-viewport.png' \
     'zoom-viewport.png' \
+    'startup-viewport.png' \
+    'failure.png' \
     'navigation_project_generation_digest' \
     'rendered_selected_viewport_ready' \
     'empty-session-source' \

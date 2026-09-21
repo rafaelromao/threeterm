@@ -87,6 +87,8 @@ source_commit='unknown'
 source_dirty=false
 navigation_project_generation_digest_before=''
 navigation_project_generation_digest_after=''
+navigation_previous_image_id=''
+navigation_previous_viewport_crop_sha256=''
 path_failure_code=''
 path_failure_detail=''
 EXPECTED_FEATURE_ID='l-bracket'
@@ -855,6 +857,9 @@ capture_navigation_frame() {
     local screenshot_sha crop_sha acknowledgement_text
     screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
     crop_sha="$(sha256sum "$crop" | cut -d' ' -f1)"
+    if [[ -n "$navigation_previous_viewport_crop_sha256" && "$crop_sha" == "$navigation_previous_viewport_crop_sha256" ]]; then
+        die "${action}_presentation_unchanged" "${action} viewport crop matched the previous rendered presentation"
+    fi
     acknowledgement_text="$(navigation_marker_line "$marker")"
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
@@ -870,6 +875,7 @@ capture_navigation_frame() {
         '{schema_version:$schema_version,action:$action,input:$input,acknowledgement:{marker:$marker,text:$acknowledgement_text},frame:$viewport.frame,camera:$viewport.camera,selection:$viewport.selected_feature_id,revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshots:{full:{path:$screenshot,sha256:$screenshot_sha256},viewport:{path:$viewport_crop,sha256:$viewport_crop_sha256}}}' \
         >>"$NAVIGATION_TRANSCRIPT"
     navigation_previous_image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    navigation_previous_viewport_crop_sha256="$crop_sha"
     final_image_id="$navigation_previous_image_id"
     final_image_id_json="$final_image_id"
 }
@@ -879,8 +885,9 @@ run_keyboard_navigation() {
     : >"$NAVIGATION_TRANSCRIPT"
     magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 "$STARTUP_VIEWPORT_CROP" ||
         die startup_viewport_crop_failed 'startup viewport crop could not be retained'
+    navigation_previous_viewport_crop_sha256="$(sha256sum "$STARTUP_VIEWPORT_CROP" | cut -d' ' -f1)"
     navigation_project_generation_digest_before="$(project_generation_digest "$PROJECT_ROOT")" ||
-        die navigation_project_snapshot_failed 'saved project generation could not be digested before navigation'
+        die navigation_project_generation_digest_failed 'saved project generation could not be digested before navigation'
     navigation_previous_image_id="$startup_image_id"
 
     local before_acks before_markers
@@ -909,8 +916,8 @@ run_keyboard_navigation() {
         'Orbit right' \
         "$ORBIT_SCREENSHOT" "$ORBIT_VIEWPORT_CROP"
     viewport_orbit_evidence="$viewport_evidence"
-    rendered_viewport_ready "$ORBIT_SCREENSHOT" ||
-        die orbit_not_rendered 'orbit screenshot does not contain rendered geometry pixels'
+    rendered_selected_viewport_ready "$ORBIT_SCREENSHOT" ||
+        die orbit_not_rendered 'orbit screenshot does not contain selected geometry pixels'
 
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[motion-trail] Pan up' "$PTY_OUTPUT" 2>/dev/null || true)"
@@ -922,8 +929,8 @@ run_keyboard_navigation() {
         'Pan up' \
         "$PAN_SCREENSHOT" "$PAN_VIEWPORT_CROP"
     viewport_pan_evidence="$viewport_evidence"
-    rendered_viewport_ready "$PAN_SCREENSHOT" ||
-        die pan_not_rendered 'pan screenshot does not contain rendered geometry pixels'
+    rendered_selected_viewport_ready "$PAN_SCREENSHOT" ||
+        die pan_not_rendered 'pan screenshot does not contain selected geometry pixels'
 
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[motion-trail] Zoom in' "$PTY_OUTPUT" 2>/dev/null || true)"
@@ -935,8 +942,8 @@ run_keyboard_navigation() {
         'Zoom in' \
         "$ZOOM_SCREENSHOT" "$ZOOM_VIEWPORT_CROP"
     viewport_zoom_evidence="$viewport_evidence"
-    rendered_viewport_ready "$ZOOM_SCREENSHOT" ||
-        die zoom_not_rendered 'zoom screenshot does not contain rendered geometry pixels'
+    rendered_selected_viewport_ready "$ZOOM_SCREENSHOT" ||
+        die zoom_not_rendered 'zoom screenshot does not contain selected geometry pixels'
     navigation_status='passed'
 }
 
@@ -998,7 +1005,7 @@ run_create_project_extrude() {
     grep -Fq 'Viewport presented' <<<"$project_ocr" || die project_viewport_marker_not_visible 'empty viewport evidence was not visible in the project-created screenshot'
     local project_generation_digest_before_extrusion
     project_generation_digest_before_extrusion="$(project_generation_digest "$CREATED_PROJECT_ROOT")" ||
-        die project_state_snapshot_failed 'project generation could not be digested before extrusion cancellation'
+        die project_generation_digest_failed 'project generation could not be digested before extrusion cancellation'
 
     local extrude_request
     extrude_request='{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}'
@@ -1093,10 +1100,12 @@ verify_cleanup() {
 }
 
 cleanup_screenshot_clear() {
-    local body_pixels edge_pixels
+    local body_pixels edge_pixels selected_body selected_edge
     body_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 125 125 152)" || return 1
     edge_pixels="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 198 165 162)" || return 1
-    [[ "$body_pixels" == 0 && "$edge_pixels" == 0 ]]
+    selected_body="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 192 193 222)" || return 1
+    selected_edge="$(rgb_pixel_count "$CLEANUP_SCREENSHOT" 121 111 136)" || return 1
+    [[ "$body_pixels" == 0 && "$edge_pixels" == 0 && "$selected_body" == 0 && "$selected_edge" == 0 ]]
 }
 
 redact_transient_source_revision() {
@@ -1296,7 +1305,7 @@ wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'pr
 tui_status='passed'
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
     navigation_project_generation_digest_after="$(project_generation_digest "$PROJECT_ROOT")" ||
-        die navigation_project_snapshot_failed 'saved project generation could not be digested after navigation'
+        die navigation_project_generation_digest_failed 'saved project generation could not be digested after navigation'
     [[ "$navigation_project_generation_digest_after" == "$navigation_project_generation_digest_before" ]] ||
         die navigation_mutated_project 'keyboard navigation changed the canonical saved project'
 fi

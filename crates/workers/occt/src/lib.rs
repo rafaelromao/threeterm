@@ -54,7 +54,7 @@ pub use envelope::{
     LoftResult, MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate,
     PlanarFaceEvidenceRequest, PlanarFaceEvidenceResult, RevolveRequest, RevolveResult,
     SCHEMA_VERSION, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
-    TranslateRequest, TranslateResult,
+    TranslateRequest, TranslateResult, ValidateRequest, ValidateResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -949,6 +949,14 @@ impl OcctWorker {
         .into_export()
     }
 
+    pub fn validate(&self, request: &ValidateRequest) -> Result<ValidateResult, WorkerError> {
+        let bytes = bounded_serialize(request, "validate", &request.request_id)?;
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
+        self.invoke(&bytes, None)?.into_validate(request)
+    }
+
     pub fn planar_face_evidence(
         &self,
         request: &PlanarFaceEvidenceRequest,
@@ -1818,6 +1826,19 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_validate(self, request: &ValidateRequest) -> Result<ValidateResult, WorkerError> {
+        let result: ValidateResult = serde_json::from_value(self.value).map_err(|error| {
+            malformed_for_request(
+                &self.request_id,
+                format!("validate response could not be parsed: {error}"),
+            )
+        })?;
+        result
+            .validate_for(request)
+            .map_err(|detail| malformed_for_request(&self.request_id, detail))?;
+        Ok(result)
+    }
+
     fn into_planar_face_evidence(
         self,
         request: &PlanarFaceEvidenceRequest,
@@ -1911,6 +1932,10 @@ pub fn parse_draft_request(raw: &str) -> Result<DraftRequest, serde_json::Error>
 }
 
 pub fn parse_loft_request(raw: &str) -> Result<LoftRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+pub fn parse_validate_request(raw: &str) -> Result<ValidateRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 

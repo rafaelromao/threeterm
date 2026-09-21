@@ -679,6 +679,10 @@ fn registry_request(name: &str, path: &std::path::Path, revision: &str) -> Value
             "override_warnings": false,
             "accept_stale_geometry": false
         }),
+        "validate" => json!({
+            "bundle_path": bundle_path,
+            "feature_id": "base",
+        }),
         other => panic!("registry fixture is missing for {other}"),
     }
 }

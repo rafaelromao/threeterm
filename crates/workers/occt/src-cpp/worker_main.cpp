@@ -1638,6 +1638,17 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
+bool handle_validate(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path = get_string(request, "base_path");
+    if (request_id.empty() || feature_id.empty() || base_path.empty()) { error = "validate request is missing required fields"; return false; }
+    TopoDS_Shape shape; BRep_Builder builder;
+    if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) { error = "could not read validation BREP"; return false; }
+    if (!analyze_brep(shape)) { error = "brep_invalid: BRepCheck_Analyzer failed"; return false; }
+    std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"validate\",\"status\":\"ok\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
+}
+
 std::string edge_role(const TopoDS_Edge& edge) {
     return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line ? "outer-perimeter"
                                                               : "fillet-transition";
@@ -3887,6 +3898,8 @@ int main() {
         success = handle_loft(*args, error);
     } else if (command_id == "export") {
         success = handle_export(*args, error);
+    } else if (command_id == "validate") {
+        success = handle_validate(*args, error);
     } else if (command_id == "planar_face_evidence") {
         success = handle_planar_face_evidence(*args, error);
     } else {

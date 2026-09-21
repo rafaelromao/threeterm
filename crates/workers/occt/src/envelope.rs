@@ -58,6 +58,7 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    Validate,
     PlanarFaceEvidence,
     InspectEdges,
 }
@@ -101,6 +102,7 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::Validate => "validate",
             Self::PlanarFaceEvidence => "planar_face_evidence",
             Self::InspectEdges => "inspect_edges",
         }
@@ -427,6 +429,72 @@ pub struct ExportResult {
 impl ExportResult {
     pub fn is_success(&self) -> bool {
         self.status == "ok"
+    }
+}
+
+/// Validate request: run `BRepCheck_Analyzer` over one committed BREP
+/// without tessellating or writing export artifacts. The host resolves
+/// the selected feature to its committed path; the path is disposable
+/// worker input, never canonical intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub feature_id: String,
+}
+impl ValidateRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        feature_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Validate,
+            base_path: base_path.into(),
+            feature_id: feature_id.into(),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version)
+            || !is_request_id(&self.request_id)
+            || !is_feature_id(&self.feature_id)
+            || self.operation != Operation::Validate
+            || self.base_path.as_os_str().is_empty()
+        {
+            return Err("invalid validate request".to_string());
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+}
+impl ValidateResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+
+    pub fn validate_for(&self, request: &ValidateRequest) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION
+            || self.request_id != request.request_id
+            || self.operation != Operation::Validate
+            || self.feature_id != request.feature_id
+            || self.status != "ok"
+        {
+            return Err("validate response identity is invalid".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -2808,6 +2876,44 @@ impl BooleanPatternResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_operation_serializes_to_the_worker_command_id() {
+        assert_eq!(
+            serde_json::to_value(Operation::Validate).expect("operation serializes"),
+            serde_json::json!("validate")
+        );
+    }
+
+    #[test]
+    fn validate_envelope_accepts_a_committed_brep_and_binds_the_response() {
+        let request = ValidateRequest::new("req-1", "/tmp/box-1.brep", "box-1");
+        request.validate().expect("validate envelope is valid");
+
+        let result = ValidateResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::Validate,
+            status: "ok".to_string(),
+            feature_id: "box-1".to_string(),
+        };
+        assert!(result.is_success());
+        result
+            .validate_for(&request)
+            .expect("validate response binds request identity");
+
+        let mismatched = ValidateResult {
+            feature_id: "other".to_string(),
+            ..result.clone()
+        };
+        assert!(mismatched.validate_for(&request).is_err());
+    }
+
+    #[test]
+    fn validate_envelope_rejects_missing_identity() {
+        let request = ValidateRequest::new("req-1", "/tmp/box-1.brep", "");
+        assert!(request.validate().is_err());
+    }
 
     #[test]
     fn validate_accepts_canonical_extrude() {

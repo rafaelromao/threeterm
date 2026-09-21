@@ -94,10 +94,10 @@ for required in \
     'selection-viewport.png' \
     'pan-viewport.png' \
     'zoom-viewport.png' \
-    'navigation_project_fingerprint' \
+    'navigation_project_generation_digest' \
     'rendered_selected_viewport_ready' \
     'empty-session-source' \
-    'project_state_fingerprint' \
+    'project_generation_digest' \
     'cancellation_changed_routing' \
     'brep_sha256' \
     'transaction_count' \
@@ -142,6 +142,16 @@ for marker in 'startup_screenshot' 'rendered_viewport_ready' 'wait_for_probe_sti
         exit 1
     }
 done
+
+navigation_body="$(sed -n '/^navigation_frame_ready()/,/^}/p' "${RUNNER}")"
+grep -Fq 'startup_revision' <<<"${navigation_body}" || {
+    echo "navigation frames must remain bound to the startup project revision" >&2
+    exit 1
+}
+grep -Fq 'evidence_wire_ready "$image_id"' <<<"${navigation_body}" || {
+    echo "navigation frames must verify the acknowledgement for their exact image" >&2
+    exit 1
+}
 python3 - "${RUNNER}" <<'PY'
 import re, sys
 path = sys.argv[1]

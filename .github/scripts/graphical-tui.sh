@@ -85,8 +85,8 @@ owned_processes_status='not_run'
 cleanup_screenshot_taken=0
 source_commit='unknown'
 source_dirty=false
-navigation_project_fingerprint_before=''
-navigation_project_fingerprint_after=''
+navigation_project_generation_digest_before=''
+navigation_project_generation_digest_after=''
 path_failure_code=''
 path_failure_detail=''
 EXPECTED_FEATURE_ID='l-bracket'
@@ -588,7 +588,7 @@ rendered_selected_viewport_ready() {
     [[ "$selected_body" -ge 100 && "$selected_edge" -ge 10 ]]
 }
 
-project_state_fingerprint() {
+project_generation_digest() {
     local root="$1" path
     [[ -d "$root" ]] || return 1
     (
@@ -788,7 +788,7 @@ run_orbit() {
     orbit_status='passed'
 }
 
-navigation_checkpoint_ready() {
+navigation_frame_ready() {
     local expected_feature="$1"
     local expected_yaw="$2"
     local expected_pitch="$3"
@@ -804,6 +804,8 @@ navigation_checkpoint_ready() {
     validate_selected_viewport_evidence "$viewport_evidence" "$expected_feature" || return 1
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     [[ "$image_id" != "$navigation_previous_image_id" ]] || return 1
+    [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$startup_revision" ]] || return 1
+    evidence_wire_ready "$image_id" || return 1
     ack_count="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     marker_count="$(grep -aFc "$marker" "$PTY_OUTPUT" 2>/dev/null || true)"
     ((ack_count > before_acks)) || return 1
@@ -834,7 +836,7 @@ navigation_marker_line() {
     done < <(tr '\r' '\n' <"$PTY_OUTPUT" 2>/dev/null || true)
 }
 
-capture_navigation_checkpoint() {
+capture_navigation_frame() {
     local action="$1"
     local input="$2"
     local marker="$3"
@@ -877,20 +879,20 @@ run_keyboard_navigation() {
     : >"$NAVIGATION_TRANSCRIPT"
     magick "$STARTUP_SCREENSHOT" -crop 800x480+0+0 "$STARTUP_VIEWPORT_CROP" ||
         die startup_viewport_crop_failed 'startup viewport crop could not be retained'
-    navigation_project_fingerprint_before="$(project_state_fingerprint "$PROJECT_ROOT")" ||
-        die navigation_project_snapshot_failed 'saved project state could not be fingerprinted before navigation'
+    navigation_project_generation_digest_before="$(project_generation_digest "$PROJECT_ROOT")" ||
+        die navigation_project_snapshot_failed 'saved project generation could not be digested before navigation'
     navigation_previous_image_id="$startup_image_id"
 
     local before_acks before_markers
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[selection-glyph]' "$PTY_OUTPUT" 2>/dev/null || true)"
     wtype -k Down || die input_injection_failed 'compositor keyboard input could not select the feature'
-    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_frame_ready \
         'l-bracket' 0 25 100 0 0 '[selection-glyph]' "$before_acks" "$before_markers" ||
         die selection_not_observed 'keyboard selection did not produce bound acknowledged viewport evidence'
     validate_selected_viewport_evidence "$viewport_evidence" 'l-bracket' ||
         die selection_not_bound 'selection evidence did not name l-bracket'
-    capture_navigation_checkpoint 'selection' $'\e[B' '[selection-glyph]' \
+    capture_navigation_frame 'selection' $'\e[B' '[selection-glyph]' \
         'selected feature l-bracket' \
         "$SELECTION_SCREENSHOT" "$SELECTION_VIEWPORT_CROP"
     viewport_selection_evidence="$viewport_evidence"
@@ -900,10 +902,10 @@ run_keyboard_navigation() {
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[motion-trail] Orbit right' "$PTY_OUTPUT" 2>/dev/null || true)"
     wtype -k Right || die input_injection_failed 'compositor keyboard input could not orbit the viewport'
-    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_frame_ready \
         'l-bracket' 5 25 100 0 0 '[motion-trail] Orbit right' "$before_acks" "$before_markers" ||
         die orbit_not_observed 'keyboard orbit did not produce updated viewport evidence'
-    capture_navigation_checkpoint 'orbit' $'\e[C' '[motion-trail] Orbit right' \
+    capture_navigation_frame 'orbit' $'\e[C' '[motion-trail] Orbit right' \
         'Orbit right' \
         "$ORBIT_SCREENSHOT" "$ORBIT_VIEWPORT_CROP"
     viewport_orbit_evidence="$viewport_evidence"
@@ -913,10 +915,10 @@ run_keyboard_navigation() {
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[motion-trail] Pan up' "$PTY_OUTPUT" 2>/dev/null || true)"
     wtype w || die input_injection_failed 'compositor keyboard input could not pan the viewport'
-    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_frame_ready \
         'l-bracket' 5 25 100 0 -5 '[motion-trail] Pan up' "$before_acks" "$before_markers" ||
         die pan_not_observed 'keyboard pan did not produce updated viewport evidence'
-    capture_navigation_checkpoint 'pan' 'w' '[motion-trail] Pan up' \
+    capture_navigation_frame 'pan' 'w' '[motion-trail] Pan up' \
         'Pan up' \
         "$PAN_SCREENSHOT" "$PAN_VIEWPORT_CROP"
     viewport_pan_evidence="$viewport_evidence"
@@ -926,10 +928,10 @@ run_keyboard_navigation() {
     before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
     before_markers="$(grep -aFc '[motion-trail] Zoom in' "$PTY_OUTPUT" 2>/dev/null || true)"
     wtype + || die input_injection_failed 'compositor keyboard input could not zoom the viewport'
-    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_checkpoint_ready \
+    wait_until "$RUNNER_TIMEOUT_SECONDS" navigation_frame_ready \
         'l-bracket' 5 25 105 0 -5 '[motion-trail] Zoom in' "$before_acks" "$before_markers" ||
         die zoom_not_observed 'keyboard zoom did not produce updated viewport evidence'
-    capture_navigation_checkpoint 'zoom' '+' '[motion-trail] Zoom in' \
+    capture_navigation_frame 'zoom' '+' '[motion-trail] Zoom in' \
         'Zoom in' \
         "$ZOOM_SCREENSHOT" "$ZOOM_VIEWPORT_CROP"
     viewport_zoom_evidence="$viewport_evidence"
@@ -994,9 +996,9 @@ run_create_project_extrude() {
     grep -Fq 'Project created' <<<"$project_ocr" || die project_marker_not_visible 'project creation acknowledgement was not visible in the project-created screenshot'
     grep -Fq 'transaction_count=0' <<<"$project_ocr" || die project_transaction_marker_not_visible 'zero-transaction checkpoint was not visible in the project-created screenshot'
     grep -Fq 'Viewport presented' <<<"$project_ocr" || die project_viewport_marker_not_visible 'empty viewport evidence was not visible in the project-created screenshot'
-    local project_state_before_extrusion
-    project_state_before_extrusion="$(project_state_fingerprint "$CREATED_PROJECT_ROOT")" ||
-        die project_state_snapshot_failed 'project state could not be snapshotted before extrusion cancellation'
+    local project_generation_digest_before_extrusion
+    project_generation_digest_before_extrusion="$(project_generation_digest "$CREATED_PROJECT_ROOT")" ||
+        die project_state_snapshot_failed 'project generation could not be digested before extrusion cancellation'
 
     local extrude_request
     extrude_request='{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}'
@@ -1008,7 +1010,7 @@ run_create_project_extrude() {
     wait_for_output_marker '[dashed-outline] Preview: extrude'
     wtype -k Escape || die input_injection_failed 'compositor keyboard input could not cancel the extrusion draft'
     wait_for_output_marker_count '[cancellation-glyph] Cancellation: command draft discarded' 2
-    [[ "$(project_state_fingerprint "$CREATED_PROJECT_ROOT")" == "$project_state_before_extrusion" ]] ||
+    [[ "$(project_generation_digest "$CREATED_PROJECT_ROOT")" == "$project_generation_digest_before_extrusion" ]] ||
         die cancellation_mutated_project 'cancelled extrusion draft changed the created project state'
     [[ ! -e "$PROJECT_ROOT" && -f "$CREATED_PROJECT_ROOT/manifest.json" ]] ||
         die cancellation_changed_routing 'cancelled extrusion draft changed the active project routing'
@@ -1224,13 +1226,13 @@ write_manifest() {
             --argjson final_delete_image_id "$final_delete_image_id_json" \
              --argjson cleanup_deletions "$cleanup_deletions" \
              --arg navigation_transcript "$NAVIGATION_TRANSCRIPT" \
-             --arg navigation_before "$navigation_project_fingerprint_before" \
-             --arg navigation_after "$navigation_project_fingerprint_after" \
+              --arg navigation_before "$navigation_project_generation_digest_before" \
+              --arg navigation_after "$navigation_project_generation_digest_after" \
              --arg navigation_status "$navigation_status" \
              --arg workflow_status "$workflow_status" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-             '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_fingerprint_before:$navigation_before,project_fingerprint_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -1293,9 +1295,9 @@ wtype q || die input_injection_failed 'compositor keyboard input could not send 
 wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'
 tui_status='passed'
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
-    navigation_project_fingerprint_after="$(project_state_fingerprint "$PROJECT_ROOT")" ||
-        die navigation_project_snapshot_failed 'saved project state could not be fingerprinted after navigation'
-    [[ "$navigation_project_fingerprint_after" == "$navigation_project_fingerprint_before" ]] ||
+    navigation_project_generation_digest_after="$(project_generation_digest "$PROJECT_ROOT")" ||
+        die navigation_project_snapshot_failed 'saved project generation could not be digested after navigation'
+    [[ "$navigation_project_generation_digest_after" == "$navigation_project_generation_digest_before" ]] ||
         die navigation_mutated_project 'keyboard navigation changed the canonical saved project'
 fi
 verify_cleanup

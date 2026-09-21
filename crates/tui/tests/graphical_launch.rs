@@ -209,7 +209,10 @@ fn production_tui_keyboard_navigation() {
         "threeterm-graphical-navigation-{}-{suffix}",
         std::process::id()
     ));
-    let evidence = root.join("evidence");
+    let evidence = std::env::temp_dir().join(format!(
+        "threeterm-graphical-navigation-evidence-{}-{suffix}",
+        std::process::id()
+    ));
     let worker = OcctWorker::locate()
         .unwrap_or_else(|error| panic!("graphical navigation requires the OCCT worker: {error}"));
     Host::new()
@@ -280,9 +283,16 @@ fn production_tui_keyboard_navigation() {
         assert_eq!(viewport["palette"]["name"], "catppuccin");
     }
     assert_eq!(
-        manifest["navigation"]["project_fingerprint_before"],
-        manifest["navigation"]["project_fingerprint_after"]
+        manifest["navigation"]["project_generation_digest_before"],
+        manifest["navigation"]["project_generation_digest_after"]
     );
+    let startup_revision = manifest["viewport"]["startup"]["frame"]["revision"].clone();
+    for checkpoint in ["selection", "orbit", "pan", "zoom"] {
+        assert_eq!(
+            manifest["viewport"][checkpoint]["frame"]["revision"], startup_revision,
+            "{checkpoint} must remain bound to the saved project revision"
+        );
+    }
     assert_eq!(
         manifest["cleanup_evidence"]["final_image_id"],
         manifest["cleanup_evidence"]["final_delete_image_id"]
@@ -331,7 +341,11 @@ fn production_tui_keyboard_navigation() {
         );
     }
 
-    fs::remove_dir_all(root).expect("graphical navigation evidence root removes");
+    fs::remove_dir_all(root).expect("graphical navigation project root removes");
+    eprintln!(
+        "retained graphical navigation evidence: {}",
+        evidence.display()
+    );
 }
 
 #[test]

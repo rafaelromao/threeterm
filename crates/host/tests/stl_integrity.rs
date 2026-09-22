@@ -180,6 +180,20 @@ fn verifier_accepts_a_closed_ascii_tetrahedron() {
 }
 
 #[test]
+fn verifier_accepts_a_small_but_non_degenerate_positive_volume_mesh() {
+    let scale = 1.0e-8;
+    let report = verify_bytes(&ascii_mesh([
+        [[0.0, 0.0, 0.0], [0.0, scale, 0.0], [scale, 0.0, 0.0]],
+        [[0.0, 0.0, 0.0], [scale, 0.0, 0.0], [0.0, 0.0, scale]],
+        [[0.0, 0.0, 0.0], [0.0, 0.0, scale], [0.0, scale, 0.0]],
+        [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, scale]],
+    ]))
+    .expect("small non-degenerate mesh is valid");
+
+    assert!(report.material_volume > 0.0);
+}
+
+#[test]
 fn verifier_exposes_stable_reason_for_empty_mesh() {
     let error = verify_bytes(b"").expect_err("empty STL must be rejected");
 
@@ -269,6 +283,15 @@ fn verifier_rejects_detached_material_and_wrong_way_cavity_shells() {
     );
     let error = verify_bytes(&wrong_way).expect_err("positive cavity must be rejected");
     assert_eq!(error.reason, IntegrityReason::MaterialBodyCount);
+
+    let nested = ascii_mesh(
+        cube_facets(0.0, 10.0, false)
+            .into_iter()
+            .chain(cube_facets(2.0, 8.0, true))
+            .chain(cube_facets(3.0, 7.0, true)),
+    );
+    let error = verify_bytes(&nested).expect_err("nested cavity boundaries must be rejected");
+    assert_eq!(error.reason, IntegrityReason::CavityContainment);
 }
 
 #[test]
@@ -286,69 +309,77 @@ fn verifier_accepts_the_checked_in_production_stl_artifact() {
 
 #[test]
 fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
-    let Some(_worker) = threeterm_occt_worker::OcctWorker::locate().ok() else {
+    let checked_in_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
+    let (production_path, cleanup_root) = if threeterm_occt_worker::OcctWorker::locate().is_ok() {
+        let parent = root("oracle");
+        let bundle = parent.join("project");
+        let output = parent.join("export");
+        let host = Host::new();
+        command_response(
+            &host,
+            NEW_PROJECT_COMMAND_ID,
+            json!({"destination": bundle.to_string_lossy()}),
+        );
+        command_response(
+            &host,
+            BRACKET_COMMAND_ID,
+            json!({
+                "bundle_path": bundle.to_string_lossy(),
+                "bracket_id": "l-bracket",
+                "length": 60.0,
+                "width": 30.0,
+                "height": 40.0,
+                "thickness": 3.0,
+            }),
+        );
+        let reopened = Host::new();
+        command_response(
+            &reopened,
+            LOAD_COMMAND_ID,
+            json!({"bundle_path": bundle.to_string_lossy()}),
+        );
+        command_response(
+            &reopened,
+            VALIDATE_COMMAND_ID,
+            json!({
+                "bundle_path": bundle.to_string_lossy(),
+                "feature_id": "l-bracket",
+            }),
+        );
+        command_response(
+            &reopened,
+            EXPORT_COMMAND_ID,
+            export_request(&bundle, &output),
+        );
+        (output.join("l-bracket.stl"), Some(parent))
+    } else {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
             panic!("STL integrity oracle requires the OCCT worker");
         }
-        eprintln!("stl_integrity: no OCCT worker binary found; CI runs this production path");
-        return;
+        eprintln!(
+            "stl_integrity: OCCT unavailable; verifying the checked-in production export and controls"
+        );
+        (checked_in_path.clone(), None)
     };
-    let parent = root("oracle");
-    let bundle = parent.join("project");
-    let output = parent.join("export");
-    let host = Host::new();
-    command_response(
-        &host,
-        NEW_PROJECT_COMMAND_ID,
-        json!({"destination": bundle.to_string_lossy()}),
-    );
-    command_response(
-        &host,
-        BRACKET_COMMAND_ID,
-        json!({
-            "bundle_path": bundle.to_string_lossy(),
-            "bracket_id": "l-bracket",
-            "length": 60.0,
-            "width": 30.0,
-            "height": 40.0,
-            "thickness": 3.0,
-        }),
-    );
 
-    let reopened = Host::new();
-    command_response(
-        &reopened,
-        LOAD_COMMAND_ID,
-        json!({"bundle_path": bundle.to_string_lossy()}),
-    );
-    command_response(
-        &reopened,
-        VALIDATE_COMMAND_ID,
-        json!({
-            "bundle_path": bundle.to_string_lossy(),
-            "feature_id": "l-bracket",
-        }),
-    );
-    command_response(
-        &reopened,
-        EXPORT_COMMAND_ID,
-        export_request(&bundle, &output),
-    );
-
-    let stl_path = output.join("l-bracket.stl");
-    let before = fs::read(&stl_path).expect("production STL reads");
-    let report = threeterm_host::stl_integrity::verify_path(&stl_path)
+    let before = fs::read(&production_path).expect("production STL reads");
+    let report = threeterm_host::stl_integrity::verify_path(&production_path)
         .expect("production STL passes independent integrity oracle");
     assert_eq!(report.format, StlFormat::Ascii);
     assert!(report.triangle_count > 0);
     assert_eq!(report.shell_count, 1);
     assert!(report.material_volume > 0.0);
-    assert_eq!(fs::read(&stl_path).expect("STL re-reads"), before);
+    assert_eq!(fs::read(&production_path).expect("STL re-reads"), before);
 
     let empty = verify_bytes(b"").expect_err("empty control must be rejected");
     assert_eq!(empty.reason, IntegrityReason::Empty);
 
-    let truncated = verify_bytes(&before[..before.len() / 2])
+    let endsolid = before
+        .windows(b"endsolid".len())
+        .position(|window| window == b"endsolid")
+        .expect("production STL has an endsolid marker");
+    let truncated = verify_bytes(&before[..endsolid])
         .expect_err("truncated production control must be rejected");
     assert_eq!(truncated.reason, IntegrityReason::Truncated);
 
@@ -373,5 +404,7 @@ fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
     .expect_err("degenerate control must be rejected");
     assert_eq!(degenerate.reason, IntegrityReason::Degenerate);
 
-    let _ = fs::remove_dir_all(parent);
+    if let Some(root) = cleanup_root {
+        let _ = fs::remove_dir_all(root);
+    }
 }

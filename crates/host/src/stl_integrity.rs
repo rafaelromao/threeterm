@@ -10,8 +10,6 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-const AREA_SQUARED_EPSILON: f64 = 1.0e-24;
-const VOLUME_EPSILON: f64 = 1.0e-12;
 const GEOMETRIC_EPSILON: f64 = 1.0e-10;
 
 /// STL encoding selected by the strict parser.
@@ -465,7 +463,7 @@ fn verify_mesh(parsed: ParsedStl) -> Result<StlIntegrityReport, StlIntegrityErro
                 "triangle area is not finite",
             ));
         }
-        if area_squared <= AREA_SQUARED_EPSILON {
+        if area_squared == 0.0 {
             return Err(StlIntegrityError::at_triangle(
                 IntegrityReason::Degenerate,
                 triangle_index,
@@ -550,7 +548,7 @@ fn verify_mesh(parsed: ParsedStl) -> Result<StlIntegrityReport, StlIntegrityErro
     let positive_shells: Vec<_> = shell_signed_volumes
         .iter()
         .enumerate()
-        .filter_map(|(index, volume)| (*volume > VOLUME_EPSILON).then_some(index))
+        .filter_map(|(index, volume)| (*volume > 0.0).then_some(index))
         .collect();
     if positive_shells.is_empty() {
         return Err(StlIntegrityError::new(
@@ -573,13 +571,14 @@ fn verify_mesh(parsed: ParsedStl) -> Result<StlIntegrityReport, StlIntegrityErro
         if shell == exterior {
             continue;
         }
-        if *volume >= -VOLUME_EPSILON {
+        if *volume >= 0.0 {
             return Err(StlIntegrityError::new(
                 IntegrityReason::NonPositiveVolume,
                 format!("shell {shell} has no strictly negative cavity orientation"),
             ));
         }
         if !shell_vertices_strictly_inside(&shells[shell], &shells[exterior], &triangles, &vertices)
+            || shells_intersect(&shells[shell], &shells[exterior], &triangles)
         {
             return Err(StlIntegrityError::new(
                 IntegrityReason::CavityContainment,
@@ -588,8 +587,35 @@ fn verify_mesh(parsed: ParsedStl) -> Result<StlIntegrityReport, StlIntegrityErro
         }
         cavity_shell_count += 1;
     }
+    for (left_index, left) in shell_signed_volumes.iter().enumerate() {
+        if *left >= 0.0 {
+            continue;
+        }
+        for (right_index, right) in shell_signed_volumes.iter().enumerate().skip(left_index + 1) {
+            if *right < 0.0
+                && (shells_intersect(&shells[left_index], &shells[right_index], &triangles)
+                    || shell_vertices_strictly_inside(
+                        &shells[left_index],
+                        &shells[right_index],
+                        &triangles,
+                        &vertices,
+                    )
+                    || shell_vertices_strictly_inside(
+                        &shells[right_index],
+                        &shells[left_index],
+                        &triangles,
+                        &vertices,
+                    ))
+            {
+                return Err(StlIntegrityError::new(
+                    IntegrityReason::CavityContainment,
+                    format!("cavity shells {left_index} and {right_index} overlap or nest"),
+                ));
+            }
+        }
+    }
     let signed_volume = shell_signed_volumes.iter().sum::<f64>();
-    if !signed_volume.is_finite() || signed_volume <= VOLUME_EPSILON {
+    if !signed_volume.is_finite() || signed_volume <= 0.0 {
         return Err(StlIntegrityError::new(
             IntegrityReason::NonPositiveVolume,
             format!("material volume is not positive: {signed_volume}"),
@@ -700,6 +726,131 @@ fn shell_vertices_strictly_inside(
         .all(|vertex| point_inside_shell(coordinates[vertex], &outer_triangles))
 }
 
+fn shells_intersect(left: &[usize], right: &[usize], triangles: &[Triangle]) -> bool {
+    left.iter().any(|&left_triangle| {
+        right.iter().any(|&right_triangle| {
+            triangles_intersect(
+                triangles[left_triangle].vertices,
+                triangles[right_triangle].vertices,
+            )
+        })
+    })
+}
+
+fn triangles_intersect(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> bool {
+    let left_edges = [(left[0], left[1]), (left[1], left[2]), (left[2], left[0])];
+    let right_edges = [
+        (right[0], right[1]),
+        (right[1], right[2]),
+        (right[2], right[0]),
+    ];
+    left_edges
+        .into_iter()
+        .any(|(start, end)| segment_intersects_triangle(start, end, right))
+        || right_edges
+            .into_iter()
+            .any(|(start, end)| segment_intersects_triangle(start, end, left))
+}
+
+fn segment_intersects_triangle(start: [f64; 3], end: [f64; 3], triangle: [[f64; 3]; 3]) -> bool {
+    let [a, b, c] = triangle;
+    let direction = sub(end, start);
+    let edge1 = sub(b, a);
+    let edge2 = sub(c, a);
+    let pvec = cross(direction, edge2);
+    let determinant = dot(edge1, pvec);
+    if determinant.abs() <= GEOMETRIC_EPSILON {
+        let normal = cross(edge1, edge2);
+        if dot(sub(start, a), normal).abs() > GEOMETRIC_EPSILON
+            || dot(sub(end, a), normal).abs() > GEOMETRIC_EPSILON
+        {
+            return false;
+        }
+        let axis = dominant_axis(normal);
+        let segment_start = project(start, axis);
+        let segment_end = project(end, axis);
+        let projected = triangle.map(|vertex| project(vertex, axis));
+        return point_in_triangle_2d(segment_start, projected)
+            || point_in_triangle_2d(segment_end, projected)
+            || [
+                (projected[0], projected[1]),
+                (projected[1], projected[2]),
+                (projected[2], projected[0]),
+            ]
+            .into_iter()
+            .any(|(left, right)| segments_intersect_2d(segment_start, segment_end, left, right));
+    }
+    let inverse = 1.0 / determinant;
+    let tvec = sub(start, a);
+    let u = dot(tvec, pvec) * inverse;
+    let qvec = cross(tvec, edge1);
+    let v = dot(direction, qvec) * inverse;
+    let t = dot(edge2, qvec) * inverse;
+    (-GEOMETRIC_EPSILON..=1.0 + GEOMETRIC_EPSILON).contains(&t)
+        && u >= -GEOMETRIC_EPSILON
+        && v >= -GEOMETRIC_EPSILON
+        && u + v <= 1.0 + GEOMETRIC_EPSILON
+}
+
+fn dominant_axis(normal: [f64; 3]) -> usize {
+    let magnitudes = normal.map(f64::abs);
+    if magnitudes[1] > magnitudes[0] && magnitudes[1] >= magnitudes[2] {
+        1
+    } else if magnitudes[2] > magnitudes[0] && magnitudes[2] > magnitudes[1] {
+        2
+    } else {
+        0
+    }
+}
+
+fn project(point: [f64; 3], axis: usize) -> [f64; 2] {
+    match axis {
+        0 => [point[1], point[2]],
+        1 => [point[0], point[2]],
+        _ => [point[0], point[1]],
+    }
+}
+
+fn point_in_triangle_2d(point: [f64; 2], triangle: [[f64; 2]; 3]) -> bool {
+    let [a, b, c] = triangle;
+    let first = orient_2d(a, b, point);
+    let second = orient_2d(b, c, point);
+    let third = orient_2d(c, a, point);
+    (first >= -GEOMETRIC_EPSILON && second >= -GEOMETRIC_EPSILON && third >= -GEOMETRIC_EPSILON)
+        || (first <= GEOMETRIC_EPSILON && second <= GEOMETRIC_EPSILON && third <= GEOMETRIC_EPSILON)
+}
+
+fn segments_intersect_2d(
+    left_start: [f64; 2],
+    left_end: [f64; 2],
+    right_start: [f64; 2],
+    right_end: [f64; 2],
+) -> bool {
+    let first = orient_2d(left_start, left_end, right_start);
+    let second = orient_2d(left_start, left_end, right_end);
+    let third = orient_2d(right_start, right_end, left_start);
+    let fourth = orient_2d(right_start, right_end, left_end);
+    (first.abs() <= GEOMETRIC_EPSILON && point_on_segment_2d(right_start, left_start, left_end))
+        || (second.abs() <= GEOMETRIC_EPSILON
+            && point_on_segment_2d(right_end, left_start, left_end))
+        || (third.abs() <= GEOMETRIC_EPSILON
+            && point_on_segment_2d(left_start, right_start, right_end))
+        || (fourth.abs() <= GEOMETRIC_EPSILON
+            && point_on_segment_2d(left_end, right_start, right_end))
+        || ((first > 0.0) != (second > 0.0) && (third > 0.0) != (fourth > 0.0))
+}
+
+fn point_on_segment_2d(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> bool {
+    point[0] >= start[0].min(end[0]) - GEOMETRIC_EPSILON
+        && point[0] <= start[0].max(end[0]) + GEOMETRIC_EPSILON
+        && point[1] >= start[1].min(end[1]) - GEOMETRIC_EPSILON
+        && point[1] <= start[1].max(end[1]) + GEOMETRIC_EPSILON
+}
+
+fn orient_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
 fn point_inside_shell(point: [f64; 3], triangles: &[Triangle]) -> bool {
     if triangles
         .iter()
@@ -753,7 +904,7 @@ fn point_on_triangle(point: [f64; 3], vertices: [[f64; 3]; 3]) -> bool {
     let [a, b, c] = vertices;
     let normal = cross(sub(b, a), sub(c, a));
     let normal_length = dot(normal, normal).sqrt();
-    if normal_length <= AREA_SQUARED_EPSILON.sqrt() {
+    if normal_length == 0.0 {
         return false;
     }
     if dot(sub(point, a), normal).abs() > GEOMETRIC_EPSILON * normal_length {

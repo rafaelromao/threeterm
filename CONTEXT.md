@@ -92,6 +92,18 @@ A revision-bound relationship between stable sketch dimension constraints associ
 **Extrusion Mode**:
 The versioned domain input that selects additive prism creation or subtractive prism cutting. The mode is canonical intent, not worker state.
 
+**Reinforcing Feature**:
+A canonical attached contribution placed against a host solid. Its deterministic placement inputs are retained in the Canonical Transaction Log and replayed as geometry.
+
+**Mirror**:
+A versioned command that creates a revision-bound transformed feature by reflecting a canonical base feature across an explicit plane.
+
+**Linear Pattern**:
+A versioned command that repeats a canonical base feature at an explicit count and spacing along a direction.
+
+**Circular Pattern**:
+A versioned command that repeats a canonical base feature at an explicit count and angular step around an axis.
+
 **Semantic Extrusion Target**:
 The stable feature identity of the canonical solid consumed by a subtractive extrusion. The host resolves and authenticates its disposable BREP from canonical provenance; worker paths are never persisted as the target.
 

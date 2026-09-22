@@ -918,7 +918,11 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
     assert_eq!(domain_failure["id"], "domain-invalid");
     assert!(domain_failure.get("error").is_none() || domain_failure["error"].is_null());
     assert_eq!(domain_failure["result"]["isError"], true);
-    assert!(domain_failure["result"]["structuredContent"]["code"].is_string());
+    validate(
+        &domain_diagnostic_schema(),
+        &domain_failure["result"]["structuredContent"],
+    )
+    .expect("MCP domain diagnostic validates");
 
     let stl_path = output.join("l-bracket.stl");
     assert!(stl_path.is_file());

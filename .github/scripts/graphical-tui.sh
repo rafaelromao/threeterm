@@ -45,6 +45,12 @@ ORBIT_VIEWPORT_CROP=''
 PAN_VIEWPORT_CROP=''
 ZOOM_VIEWPORT_CROP=''
 NAVIGATION_TRANSCRIPT=''
+SAVE_SCREENSHOT=''
+REOPEN_SCREENSHOT=''
+VALIDATION_SCREENSHOT=''
+EXPORT_SCREENSHOT=''
+STL_PATH=''
+STL_INTEGRITY_EVIDENCE=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
 PROJECT_IDENTITY=''
@@ -77,6 +83,9 @@ readiness_status='not_run'
 orbit_status='not_run'
 navigation_status='not_run'
 workflow_status='not_run'
+lifecycle_status='not_run'
+validation_status='not_run'
+export_status='not_run'
 cleanup_status='not_run'
 ghostty_status='not_run'
 tui_status='not_run'
@@ -94,6 +103,7 @@ path_failure_detail=''
 EXPECTED_FEATURE_ID='l-bracket'
 CREATED_PROJECT_ROOT=''
 OCCT_WORKER=''
+SECOND_TUI_STATUS_FILE=''
 
 usage() {
     cat <<'EOF'
@@ -101,6 +111,7 @@ Usage:
   graphical-tui.sh production_tui_ghostty_session --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_create_project_extrude --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_keyboard_navigation --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_save_reopen_validate_export --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
   graphical-tui.sh --validate-viewport-evidence PATH
 
@@ -233,7 +244,7 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation)
+        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_save_reopen_validate_export)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
             if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
@@ -242,6 +253,9 @@ while (($# > 0)); do
             elif [[ "$TEST_NAME" == 'production_tui_keyboard_navigation' ]]; then
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.keyboard-navigation/1'
+            elif [[ "$TEST_NAME" == 'production_tui_save_reopen_validate_export' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.save-reopen-validate-export/1'
             fi
             shift
             ;;
@@ -314,6 +328,15 @@ else
     STARTUP_SCREENSHOT="${EVIDENCE_ROOT}/startup.png"
     PROJECT_CREATED_SCREENSHOT=''
     EXTRUSION_COMMITTED_SCREENSHOT=''
+fi
+if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+    SAVE_SCREENSHOT="${EVIDENCE_ROOT}/save.png"
+    REOPEN_SCREENSHOT="${EVIDENCE_ROOT}/reopen.png"
+    VALIDATION_SCREENSHOT="${EVIDENCE_ROOT}/validation.png"
+    EXPORT_SCREENSHOT="${EVIDENCE_ROOT}/export.png"
+    STL_PATH="${PROJECT_ROOT}/tui-export/l-bracket.stl"
+    STL_INTEGRITY_EVIDENCE="${EVIDENCE_ROOT}/stl-integrity.json"
+    SECOND_TUI_STATUS_FILE="${EVIDENCE_ROOT}/second-tui-exit-status"
 fi
 ORBIT_SCREENSHOT="${EVIDENCE_ROOT}/orbit.png"
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
@@ -449,6 +472,11 @@ check_prerequisites() {
         fi
         [[ -x "$OCCT_WORKER" ]] ||
             die occt_worker_unavailable 'qualified fresh workflow requires an executable OCCT worker'
+    elif [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+        [[ -f "$PROJECT_ROOT/brep/l-bracket.brep" ]] ||
+            die project_fixture_missing 'l-bracket fixture is missing its authenticated BREP'
+        [[ ! -e "$STL_PATH" ]] ||
+            die export_destination_exists 'qualified lifecycle export destination already exists'
     fi
 
     local contract_hash=''
@@ -646,13 +674,26 @@ project_root="$3"
 pty_output="$4"
 pty_input="$5"
 tui_stderr="$6"
-status_file="$7"
+first_status_file="$7"
+second_status_file="$8"
+lifecycle="$9"
 printf -v command_line '%q %q' "$tui_binary" "$project_root"
-set +e
-"$script_bin" --quiet --flush --log-out="$pty_output" --log-in="$pty_input" --command="$command_line" 2>"$tui_stderr"
+run_tui() {
+    local status_file="$1"
+    set +e
+    "$script_bin" --quiet --flush --append --log-out="$pty_output" --log-in="$pty_input" --command="$command_line" 2>>"$tui_stderr"
+    local status=$?
+    printf '%s\n' "$status" >"$status_file"
+    printf '\r\n[graphical-runner] tui-exited status=%s\r\n' "$status"
+    return "$status"
+}
+run_tui "$first_status_file"
 status=$?
-printf '%s\n' "$status" >"$status_file"
-printf '\r\n[graphical-runner] tui-exited status=%s\r\n' "$status"
+if [[ "$lifecycle" == 1 && "$status" == 0 ]]; then
+    printf '\r\n[graphical-runner] relaunching-tui\r\n'
+    run_tui "$second_status_file"
+    status=$?
+fi
 IFS= read -r -n 1 _ || true
 exit "$status"
 EOF
@@ -741,7 +782,8 @@ start_ghostty() {
         --window-width="$TERMINAL_COLUMNS" --window-height="$TERMINAL_ROWS" \
         --font-size=12 --quit-after-last-window=true -e bash "$WRAPPER" \
         "$(command -v script)" "$TUI_BINARY" "$PROJECT_ROOT" "$PTY_OUTPUT" "$PTY_INPUT" \
-        "$TUI_STDERR" "$TUI_STATUS_FILE" &
+        "$TUI_STDERR" "$TUI_STATUS_FILE" "$SECOND_TUI_STATUS_FILE" \
+        "$([[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]] && printf 1 || printf 0)" &
     GHOSTTY_PID=$!
 }
 
@@ -1064,10 +1106,117 @@ run_create_project_extrude() {
     workflow_status='passed'
 }
 
+wait_for_relaunched_tui() {
+    local ready_before="$(grep -aFc '[ready-status] Interactive Modeling ready' "$PTY_OUTPUT" 2>/dev/null || true)"
+    local deadline=$((SECONDS + RUNNER_TIMEOUT_SECONDS))
+    while ((SECONDS < deadline)); do
+        local ready_now="$(grep -aFc '[ready-status] Interactive Modeling ready' "$PTY_OUTPUT" 2>/dev/null || true)"
+        if ((ready_now > ready_before)) && readiness_ready; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+capture_lifecycle_screenshot() {
+    local screenshot="$1"
+    local marker="$2"
+    local failure_code_name="$3"
+    capture_screenshot "$screenshot" || die "${failure_code_name}_screenshot_failed" "lifecycle screenshot was not fixed at 800x600"
+    local ocr
+    ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
+    grep -Fq "$marker" <<<"$ocr" || die "${failure_code_name}_marker_not_visible" "lifecycle marker was not visible in the screenshot"
+    grep -Fq 'Viewport presented' <<<"$ocr" || die "${failure_code_name}_viewport_marker_not_visible" "viewport evidence was not visible in the lifecycle screenshot"
+}
+
+run_save_reopen_validate_export() {
+    [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]] || return 0
+    [[ ! -e "$STL_PATH" ]] || die export_destination_exists 'STL destination existed before the UI export'
+
+    local save_request='{"feature_id":"lifecycle-save-marker","kind":"box"}'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the save palette'
+    wtype save || die input_injection_failed 'compositor keyboard input could not type save'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select save'
+    wtype "$save_request" || die input_injection_failed 'compositor keyboard input could not type the save request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not preview save'
+    wait_for_output_marker '[dashed-outline] Preview: save'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit save'
+    wait_for_output_marker 'Save completed'
+    capture_lifecycle_screenshot "$SAVE_SCREENSHOT" 'Save completed' save
+    wtype q || die input_injection_failed 'compositor keyboard input could not close the saved session'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die first_tui_exit_failed 'save session did not close cleanly'
+
+    wait_for_relaunched_tui || die relaunch_not_ready 'fresh TUI relaunch did not reach production readiness'
+    capture_lifecycle_screenshot "$REOPEN_SCREENSHOT" 'Interactive Modeling ready' reopen
+
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the load palette'
+    wtype load || die input_injection_failed 'compositor keyboard input could not type load'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select load'
+    wtype '{}' || die input_injection_failed 'compositor keyboard input could not type the load request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not preview load'
+    wait_for_output_marker '[dashed-outline] Preview: load'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit load'
+    wait_for_output_marker 'Load completed'
+
+    local validate_request='{"feature_id":"l-bracket"}'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the validation palette'
+    wtype validate || die input_injection_failed 'compositor keyboard input could not type validate'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select validate'
+    wtype "$validate_request" || die input_injection_failed 'compositor keyboard input could not type the validation request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not preview validation'
+    wait_for_output_marker '[dashed-outline] Preview: validate'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit validation'
+    wait_for_output_marker '[validation-status] Validation passed'
+    capture_lifecycle_screenshot "$VALIDATION_SCREENSHOT" 'Validation passed' validation
+    validation_status='passed'
+
+    local export_request
+    export_request="$(jq -n \
+        --arg output_dir "${PROJECT_ROOT}/tui-export" \
+        '{feature_id:"l-bracket",formats:["stl"],output_dir:$output_dir,tessellation_deflection:0.1,override_warnings:false,accept_stale_geometry:false}')" ||
+        die export_request_failed 'export request could not be encoded'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the export palette'
+    wtype export || die input_injection_failed 'compositor keyboard input could not type export'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select export'
+    wtype "$export_request" || die input_injection_failed 'compositor keyboard input could not type the export request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not preview export'
+    wait_for_output_marker '[dashed-outline] Preview: export'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'compositor keyboard input could not commit export'
+    wait_for_output_marker '[export-status] Export completed'
+    [[ -f "$STL_PATH" ]] || die exported_stl_missing 'validated export did not create l-bracket.stl'
+    capture_lifecycle_screenshot "$EXPORT_SCREENSHOT" 'Export completed' export
+
+    local byte_count sha256 facet_count vertex_count
+    byte_count="$(wc -c <"$STL_PATH" | tr -d '[:space:]')"
+    sha256="$(sha256sum "$STL_PATH" | cut -d' ' -f1)"
+    facet_count="$(grep -aFc 'facet normal' "$STL_PATH" || true)"
+    vertex_count="$(grep -aFc 'vertex ' "$STL_PATH" || true)"
+    ((byte_count > 0 && facet_count > 0 && vertex_count == facet_count * 3)) ||
+        die stl_integrity_preflight_failed 'exported STL failed the graphical runner format preflight'
+    jq -n \
+        --arg checker 'threeterm_host::stl_integrity::verify_path' \
+        --arg path "$STL_PATH" \
+        --arg sha256 "$sha256" \
+        --argjson byte_count "$byte_count" \
+        --argjson facet_count "$facet_count" \
+        --argjson vertex_count "$vertex_count" \
+        '{checker:$checker,path:$path,format:"ascii",byte_count:$byte_count,facet_count:$facet_count,vertex_count:$vertex_count,sha256:$sha256}' \
+        >"$STL_INTEGRITY_EVIDENCE"
+    export_status='passed'
+
+    extract_viewport_evidence || die export_viewport_evidence_missing 'final export viewport evidence was not emitted'
+    final_image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    final_image_id_json="$final_image_id"
+    evidence_wire_ready "$final_image_id" || die export_viewport_not_acknowledged 'final export frame was not acknowledged'
+    lifecycle_status='passed'
+}
+
 read_tui_status() {
-    [[ -s "$TUI_STATUS_FILE" ]] || return 1
+    local status_file="${1:-$TUI_STATUS_FILE}"
+    [[ -s "$status_file" ]] || return 1
     local status
-    status="$(tr -d '[:space:]' <"$TUI_STATUS_FILE")"
+    status="$(tr -d '[:space:]' <"$status_file")"
     [[ "$status" == 0 ]]
 }
 
@@ -1170,6 +1319,13 @@ write_manifest() {
         )
         evidence_kinds+=(project_identity created_project_manifest derived_brep)
     fi
+    if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+        evidence_files+=(
+            "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT" "$VALIDATION_SCREENSHOT" "$EXPORT_SCREENSHOT"
+            "$STL_INTEGRITY_EVIDENCE" "$STL_PATH" "$TUI_STATUS_FILE" "$SECOND_TUI_STATUS_FILE"
+        )
+        evidence_kinds+=(save_screenshot reopen_screenshot validation_screenshot export_screenshot stl_integrity exported_stl first_tui_status second_tui_status)
+    fi
     if command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
         local index
         for index in "${!evidence_files[@]}"; do
@@ -1239,9 +1395,12 @@ write_manifest() {
               --arg navigation_after "$navigation_project_generation_digest_after" \
              --arg navigation_status "$navigation_status" \
              --arg workflow_status "$workflow_status" \
+             --arg lifecycle_status "$lifecycle_status" \
+             --arg validation_status "$validation_status" \
+             --arg export_status "$export_status" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -1295,13 +1454,19 @@ wait_for_tui_readiness
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     run_create_project_extrude
 fi
-if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
+if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+    run_save_reopen_validate_export
+elif [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
     run_keyboard_navigation
 else
     run_orbit
 fi
 wtype q || die input_injection_failed 'compositor keyboard input could not send q'
-wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'
+if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+    wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status "$SECOND_TUI_STATUS_FILE" || die tui_exit_timeout 'reopened production TUI did not exit cleanly after q'
+else
+    wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'
+fi
 tui_status='passed'
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
     navigation_project_generation_digest_after="$(project_generation_digest "$PROJECT_ROOT")" ||

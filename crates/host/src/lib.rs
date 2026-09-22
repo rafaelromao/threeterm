@@ -4921,6 +4921,43 @@ impl Host {
                 preview_solid: None,
             });
         }
+        if matches!(
+            command,
+            SAVE_COMMAND_ID | LOAD_COMMAND_ID | VALIDATE_COMMAND_ID | EXPORT_COMMAND_ID
+        ) {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let loaded = Bundle::at(bundle_path)
+                .open()
+                .map_err(|error| ExecutionError::Handler(error.into()))?;
+            if let Some(feature_id) = request
+                .get("feature_id")
+                .and_then(serde_json::Value::as_str)
+                && !loaded.graph.contains_feature(feature_id)
+                && command != SAVE_COMMAND_ID
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!("feature is missing: {feature_id}"),
+                }));
+            }
+            let source_revision = loaded.revision_hash_hex().to_string();
+            let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+            let geometry_fingerprint =
+                sha256_hex(format!("lifecycle-preview:{}:{source_revision}", command.0).as_bytes());
+            return Ok(DomainCommandPreview {
+                command,
+                preview_revision: sha256_hex(
+                    format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                        .as_bytes(),
+                ),
+                source_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+                preview_solid: None,
+            });
+        }
         if command == BRACKET_COMMAND_ID {
             let bundle_path = request
                 .get("bundle_path")

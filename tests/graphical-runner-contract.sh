@@ -12,6 +12,7 @@ for expected in \
     'production_tui_ghostty_session' \
     'production_tui_create_project_extrude' \
     'production_tui_keyboard_navigation' \
+    'production_tui_save_reopen_validate_export' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -61,6 +62,13 @@ jq -e '
     .test == "production_tui_keyboard_navigation"
 ' <<<"${navigation_plan}" >/dev/null
 
+lifecycle_plan="$(bash "${RUNNER}" production_tui_save_reopen_validate_export --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.save-reopen-validate-export/1" and
+    .result == "not_run" and
+    .test == "production_tui_save_reopen_validate_export"
+' <<<"${lifecycle_plan}" >/dev/null
+
 for required in \
     'LC_ALL=C.UTF-8' \
     'LANG=C.UTF-8' \
@@ -76,6 +84,7 @@ for required in \
     'threeterm.graphical-tui/1' \
     'threeterm.graphical-tui.create-project-extrude/1' \
     'threeterm.graphical-tui.keyboard-navigation/1' \
+    'threeterm.graphical-tui.save-reopen-validate-export/1' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \
@@ -126,6 +135,27 @@ for required in \
     '?1002l' \
     'cleanup_evidence'; do
     grep -Fq -- "${required}" "${RUNNER}"
+done
+
+for lifecycle_required in \
+    'production_tui_save_reopen_validate_export' \
+    'relaunching-tui' \
+    'save.png' \
+    'reopen.png' \
+    'validation.png' \
+    'export.png' \
+    'stl-integrity.json' \
+    'Save completed' \
+    'Load completed' \
+    '[validation-status] Validation passed' \
+    '[export-status] Export completed' \
+    'export_destination_exists' \
+    'project_fixture_missing' \
+    'stl_integrity_preflight_failed' \
+    'tui-export/l-bracket.stl' \
+    'threeterm_host::stl_integrity::verify_path' \
+    '--append'; do
+    grep -Fq -- "${lifecycle_required}" "${RUNNER}"
 done
 
 if grep -Fq 'magick compare' "${RUNNER}"; then

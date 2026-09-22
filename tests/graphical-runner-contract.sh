@@ -12,6 +12,7 @@ for expected in \
     'production_tui_ghostty_session' \
     'production_tui_create_project_extrude' \
     'production_tui_keyboard_navigation' \
+    'production_tui_mirror_pattern_reinforcing_features' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -61,6 +62,13 @@ jq -e '
     .test == "production_tui_keyboard_navigation"
 ' <<<"${navigation_plan}" >/dev/null
 
+reinforcing_plan="$(bash "${RUNNER}" production_tui_mirror_pattern_reinforcing_features --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.mirror-pattern-reinforcing-features/1" and
+    .result == "not_run" and
+    .test == "production_tui_mirror_pattern_reinforcing_features"
+' <<<"${reinforcing_plan}" >/dev/null
+
 for required in \
     'LC_ALL=C.UTF-8' \
     'LANG=C.UTF-8' \
@@ -76,6 +84,7 @@ for required in \
     'threeterm.graphical-tui/1' \
     'threeterm.graphical-tui.create-project-extrude/1' \
     'threeterm.graphical-tui.keyboard-navigation/1' \
+    'threeterm.graphical-tui.mirror-pattern-reinforcing-features/1' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \
@@ -98,6 +107,12 @@ for required in \
     'failure.png' \
     'navigation_project_generation_digest' \
     'rendered_selected_viewport_ready' \
+    'reinforcing_viewport_phase' \
+    'reinforcing_frame_ready' \
+    'reinforcing_transcript' \
+    'mirror_screenshot' \
+    'linear_pattern_screenshot' \
+    'circular_pattern_screenshot' \
     'empty-session-source' \
     'project_generation_digest' \
     'cancellation_changed_routing' \

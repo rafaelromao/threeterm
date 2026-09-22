@@ -33,14 +33,16 @@ case "${1:-}" in
             cargo test --workspace --jobs 1 -- --ignored \
                 --skip production_tui_ghostty_session \
                 --skip production_tui_create_project_extrude \
-                --skip production_tui_keyboard_navigation --test-threads=1
+                --skip production_tui_keyboard_navigation \
+                --skip production_tui_mirror_pattern_reinforcing_features --test-threads=1
         ;;
     e2e)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test --workspace --jobs 1 -- --include-ignored \
                 --skip production_tui_ghostty_session \
                 --skip production_tui_create_project_extrude \
-                --skip production_tui_keyboard_navigation --test-threads=1
+                --skip production_tui_keyboard_navigation \
+                --skip production_tui_mirror_pattern_reinforcing_features --test-threads=1
         ;;
     graphical)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \

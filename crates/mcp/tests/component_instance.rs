@@ -1109,18 +1109,45 @@ fn portable_exports(
     let normalized_metadata = export_metadata
         .into_iter()
         .map(|(format, mut metadata)| {
-            if format == "step"
-                && let Some(digest) = normalized_exports
-                    .get(&format)
-                    .map(|bytes| sha256_hex(bytes))
-                && let Some(object) = metadata.as_object_mut()
-            {
-                object.insert("sha256".to_string(), Value::String(digest));
+            if let Some(object) = metadata.as_object_mut() {
+                if let Some(path) = object.get_mut("output_path")
+                    && let Some(value) = path.as_str()
+                {
+                    *path = json!(
+                        Path::new(value)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                    );
+                }
+                if format == "step"
+                    && let Some(digest) = normalized_exports
+                        .get(&format)
+                        .map(|bytes| sha256_hex(bytes))
+                {
+                    object.insert("sha256".to_string(), Value::String(digest));
+                }
             }
             (format, metadata)
         })
         .collect::<BTreeMap<_, _>>();
     (normalized_exports, normalized_metadata)
+}
+
+#[test]
+fn portable_exports_normalizes_adapter_output_paths() {
+    let (_, metadata) = portable_exports(
+        BTreeMap::from([(String::from("stl"), Vec::new())]),
+        BTreeMap::from([(
+            String::from("stl"),
+            json!({
+                "source_revision_id": "revision",
+                "output_path": "/adapter/replay/copy-instance.stl"
+            }),
+        )]),
+    );
+
+    assert_eq!(metadata["stl"]["output_path"], "copy-instance.stl");
 }
 
 fn portable_component_state(state: &Value) -> Value {

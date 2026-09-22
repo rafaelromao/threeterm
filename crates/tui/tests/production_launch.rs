@@ -1743,7 +1743,7 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
         .expect("fillet landmarks inspect");
     assert!(pad_a.edge_candidates.iter().any(|candidate| {
         candidate.role == "fillet-transition"
-            && (candidate.length - 0.7853981633974483).abs() < 1e-3
+            && (candidate.length - std::f64::consts::FRAC_PI_4).abs() < 1e-3
     }));
     let pad_b = worker
         .inspect_edges(

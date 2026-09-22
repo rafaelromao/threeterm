@@ -654,7 +654,8 @@ orbit_ready() {
     grep -aFq 'a=T,t=d' "$PTY_OUTPUT" 2>/dev/null || return 1
     extract_viewport_evidence || return 1
     validate_viewport_evidence "$viewport_evidence" || return 1
-    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ||
+        "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
         [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$(jq -r '.frame.revision' <<<"$viewport_workflow_evidence")" ]] || return 1
         [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$(jq -r '.frame.image_id' <<<"$viewport_workflow_evidence")" ]] || return 1
     else

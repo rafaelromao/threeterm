@@ -1614,14 +1614,23 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
     }
 
     let bundle = Bundle::at(&root).open().expect("interactive bundle opens");
-    let feature_ids = bundle
-        .log
-        .entries()
+    let entries = bundle.log.entries();
+    assert_eq!(entries.len(), 11);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.log_index, index);
+        assert!(!entry.terminal_digest.is_empty());
+        assert!(
+            entry.intent.is_some(),
+            "{feature_id} retains its canonical intent",
+            feature_id = entry.feature_id
+        );
+    }
+    let feature_ids = entries
         .iter()
         .map(|entry| entry.feature_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(
-        &feature_ids[feature_ids.len() - 11..],
+        feature_ids,
         [
             "arm-x",
             "arm-z",
@@ -1636,6 +1645,93 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
             "bracket-foundation"
         ]
     );
+
+    let intent_value = |index: usize| {
+        serde_json::to_value(
+            entries[index]
+                .intent
+                .as_ref()
+                .expect("transaction retains canonical intent"),
+        )
+        .expect("canonical intent serializes")
+    };
+    for (index, command, operation) in [
+        (0, "extrude", "extrude"),
+        (1, "extrude", "extrude"),
+        (2, "extrude", "extrude"),
+        (3, "fillet", "fillet"),
+        (4, "extrude", "extrude"),
+        (5, "chamfer", "chamfer"),
+        (6, "boolean", "fuse"),
+        (7, "boolean", "fuse"),
+        (8, "boolean", "fuse"),
+        (9, "hole", "hole"),
+        (10, "hole", "hole"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(
+            intent["command"], command,
+            "intent command at index {index}"
+        );
+        assert_eq!(
+            intent["operation"], operation,
+            "intent operation at index {index}"
+        );
+        assert!(
+            intent["source_revision"]
+                .as_str()
+                .is_some_and(|revision| !revision.is_empty())
+        );
+    }
+    assert_eq!(
+        intent_value(0)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]])
+    );
+    assert_eq!(intent_value(0)["deterministic_inputs"]["height"], 8.0);
+    assert_eq!(
+        intent_value(1)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]])
+    );
+    assert_eq!(
+        intent_value(2)["deterministic_inputs"]["profile"],
+        json!([[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]])
+    );
+    assert_eq!(intent_value(3)["base_feature_id"], "pad-a-seed");
+    assert_eq!(intent_value(3)["radius"], 0.5);
+    assert_eq!(
+        intent_value(3)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-a-seed"
+    );
+    assert_eq!(intent_value(4)["deterministic_inputs"]["height"], 12.0);
+    assert_eq!(intent_value(5)["base_feature_id"], "pad-b-seed");
+    assert_eq!(intent_value(5)["distance"], 0.25);
+    assert_eq!(
+        intent_value(5)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-b-seed"
+    );
+    for (index, base_feature_id, tool_feature_id) in [
+        (6, "arm-x", "arm-z"),
+        (7, "bracket-l", "pad-a"),
+        (8, "bracket-lp1", "pad-b"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["tool_feature_id"], tool_feature_id);
+    }
+    for (index, base_feature_id, position) in [
+        (9, "bracket-base", [50.0, 10.0, 0.0]),
+        (10, "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["hole_kind"], "drilled");
+        assert_eq!(intent["deterministic_inputs"]["position"], json!(position));
+        assert_eq!(
+            intent["deterministic_inputs"]["direction"],
+            json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(intent["deterministic_inputs"]["diameter"], 4.5);
+    }
 
     let revision = bundle.revision_hash_hex().to_string();
     let pad_a = worker
@@ -1694,19 +1790,30 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
         }));
     }
 
-    let scene = host
+    let before_read_only = snapshot_tree(&root);
+    let before_scene = host
         .read_only_viewport_scene(&root)
         .expect("final project renders read-only");
-    let final_solid = scene
+    assert_eq!(snapshot_tree(&root), before_read_only);
+    assert_eq!(before_scene.solids.len(), 1);
+    let final_solid = before_scene
         .solids
         .iter()
         .find(|solid| solid.feature_id == "bracket-foundation")
         .expect("final fused body is visible");
     assert!(!final_solid.triangles.is_empty());
-    let before_read_only = snapshot_tree(&root);
-    let _ = Bundle::at(&root)
+    let baseline_revision = bundle.revision_hash_hex().to_string();
+    let baseline_entries = entries.to_vec();
+    drop(bundle);
+    let reopened = Bundle::at(&root)
         .open_read_only()
         .expect("retained project reopens read-only");
+    assert_eq!(reopened.revision_hash_hex(), baseline_revision);
+    assert_eq!(reopened.log.entries(), baseline_entries);
+    let reopened_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("retained project renders read-only after reopen");
+    assert_eq!(reopened_scene, before_scene);
     assert_eq!(snapshot_tree(&root), before_read_only);
 
     let _ = fs::remove_dir_all(root);

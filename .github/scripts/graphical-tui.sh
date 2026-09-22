@@ -216,7 +216,7 @@ validate_bracket_viewport_evidence() {
         .acknowledgement == "viewport-presented" and
         (.frame.image_id | type == "number" and . > 0) and
         (.frame.revision | type == "string" and length > 0) and
-        (.scene.solids | type == "array" and any(.[]; .feature_id == $expected_feature and .triangle_count > 0)) and
+        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == $expected_feature and .[0].triangle_count > 0) and
         (.scene.triangle_count | type == "number" and . > 0) and
         (.scene.body_pixels | type == "number" and . > 0) and
         (.scene.edge_pixels | type == "number" and . > 0) and
@@ -1139,8 +1139,9 @@ bracket_edge_reference() {
 }
 
 bracket_viewport_ready() {
+    local expected_feature="$1"
     extract_viewport_evidence || return 1
-    validate_bracket_viewport_evidence "$viewport_evidence" || return 1
+    validate_bracket_viewport_evidence "$viewport_evidence" "$expected_feature" || return 1
     local image_id
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     [[ "$image_id" != "$bracket_previous_image_id" ]] || return 1
@@ -1157,6 +1158,8 @@ bracket_step() {
     local request="$4"
     local screenshot ocr image_id revision marker screenshot_sha
     local before_preview_count before_commit_count
+    local preview_response commit_response commit_revision
+    local -a marker_lines
     bracket_step_index=$((bracket_step_index + 1))
     screenshot="${BRACKET_STEPS_DIR}/$(printf '%02d' "$bracket_step_index")-${step_id}.png"
     before_preview_count="$(grep -aFc "[dashed-outline] Preview: ${command}" "$PTY_OUTPUT" 2>/dev/null || true)"
@@ -1167,10 +1170,21 @@ bracket_step() {
     wtype "$request" || die input_injection_failed "could not type ${step_id} request"
     wtype -M ctrl -k v -m ctrl || die input_injection_failed "could not preview ${step_id}"
     wait_for_output_marker_count "[dashed-outline] Preview: ${command}" "$((before_preview_count + 1))"
+    mapfile -t marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "[dashed-outline] Preview: ${command}" || true
+    )
+    preview_response="${marker_lines[${#marker_lines[@]}-1]}"
     wtype -M ctrl -k Return -m ctrl || die input_injection_failed "could not commit ${step_id}"
     marker="[selection-glyph] Commit: ${command}"
     wait_for_output_marker_count "$marker" "$((before_commit_count + 1))"
-    wait_until "$RUNNER_TIMEOUT_SECONDS" bracket_viewport_ready ||
+    mapfile -t marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "$marker" || true
+    )
+    commit_response="${marker_lines[${#marker_lines[@]}-1]}"
+    commit_revision="${commit_response##* revision=}"
+    [[ "$commit_revision" =~ ^[0-9a-f]{64}$ ]] ||
+        die "${step_id}_commit_response_invalid" "commit acknowledgement did not expose a revision: ${commit_response}"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" bracket_viewport_ready "$feature_id" ||
         die "${step_id}_viewport_invalid" "viewport evidence did not advance for ${step_id}: ${viewport_evidence}"
     capture_screenshot "$screenshot" || die "${step_id}_screenshot_failed" "screenshot was not retained for ${step_id}"
     ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
@@ -1178,6 +1192,8 @@ bracket_step() {
     grep -Fq "Commit: ${command}" <<<"$ocr" || die "${step_id}_commit_marker_not_visible" "commit marker was not visible for ${step_id}"
     revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    [[ "$commit_revision" == "$revision" ]] ||
+        die "${step_id}_revision_mismatch" "commit acknowledgement revision ${commit_revision} differs from viewport revision ${revision}"
     screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
@@ -1185,12 +1201,15 @@ bracket_step() {
         --arg command "$command" \
         --arg feature_id "$feature_id" \
         --arg input "$request" \
+        --arg preview_response "$preview_response" \
+        --arg commit_response "$commit_response" \
+        --arg commit_revision "$commit_revision" \
         --arg marker "$marker" \
         --arg revision "$revision" \
         --arg screenshot "$screenshot" \
         --arg screenshot_sha256 "$screenshot_sha" \
         --argjson viewport "$viewport_evidence" \
-        '{schema_version:$schema_version,step:$step,command:$command,feature_id:$feature_id,input:$input,acknowledgement:{marker:$marker,text:$marker},revision:$revision,frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+        '{schema_version:$schema_version,step:$step,command:$command,feature_id:$feature_id,input:$input,acknowledgement:{preview:$preview_response,commit:$commit_response,marker:$marker},revision:$revision,commit_revision:$commit_revision,frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
         >>"$BRACKET_TRANSCRIPT"
 }
 

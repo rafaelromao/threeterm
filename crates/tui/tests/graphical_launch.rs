@@ -650,7 +650,17 @@ fn production_tui_bracket_foundation() {
     );
     assert!(transcript.lines().all(|line| {
         let entry: Value = serde_json::from_str(line).expect("transcript remains JSON");
-        entry["screenshot"]["path"].as_str().is_some()
+        entry["screenshot"]["path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).is_file())
+            && entry["acknowledgement"]["preview"]
+                .as_str()
+                .is_some_and(|marker| marker.contains("Preview:"))
+            && entry["acknowledgement"]["commit"]
+                .as_str()
+                .is_some_and(|marker| marker.contains("Commit:"))
+            && entry["commit_revision"] == entry["revision"]
+            && entry["commit_revision"] == entry["viewport_evidence"]["frame"]["revision"]
             && entry["viewport_evidence"]["frame"]["image_id"]
                 .as_u64()
                 .is_some_and(|image_id| image_id > 0)
@@ -738,6 +748,7 @@ fn production_tui_bracket_foundation() {
     let scene = Host::new()
         .read_only_viewport_scene(&root)
         .expect("retained bracket scene loads read-only");
+    assert_eq!(scene.solids.len(), 1);
     assert!(
         scene.solids.iter().any(|solid| {
             solid.feature_id == "bracket-foundation" && !solid.triangles.is_empty()

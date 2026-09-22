@@ -148,9 +148,13 @@ validate_viewport_evidence() {
     local reinforcing_test=false
     if [[ "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
         reinforcing_test=true
-        [[ "$reinforcing_viewport_phase" == 1 ]] && reinforcing=true
+        [[ "$reinforcing_viewport_phase" -gt 0 ]] && reinforcing=true
     fi
-    jq -e --arg expected_feature "$EXPECTED_FEATURE_ID" --argjson reinforcing "$reinforcing" --argjson reinforcing_test "$reinforcing_test" '
+    jq -e \
+        --arg expected_feature "$EXPECTED_FEATURE_ID" \
+        --argjson reinforcing "$reinforcing" \
+        --argjson reinforcing_test "$reinforcing_test" \
+        --argjson reinforcing_phase "$reinforcing_viewport_phase" '
         .schema_version == "threeterm.viewport-evidence/1" and
         .acknowledgement == "viewport-presented" and
         (.frame.frame_token | type == "number" and . > 0) and
@@ -159,7 +163,14 @@ validate_viewport_evidence() {
         (.frame.revision | type == "string" and length > 0) and
         .frame.width == 800 and .frame.height == 480 and
         (if $reinforcing then
-            (.scene.solids | type == "array" and length == 5 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-circular-lugs", "tui-linear-pads", "tui-mirror-pad"] and all(.[]; .triangle_count > 0))
+            (.scene.solids | type == "array" and
+                (if $reinforcing_phase == 3 then
+                    length == 3 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-mirror-pad"]
+                 elif $reinforcing_phase == 4 then
+                    length == 4 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-linear-pads", "tui-mirror-pad"]
+                 else
+                    length == 5 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-circular-lugs", "tui-linear-pads", "tui-mirror-pad"]
+                 end) and all(.[]; .triangle_count > 0))
          else
             (.scene.solids | type == "array" and
                 (if $reinforcing_test and $reinforcing == false then
@@ -1126,14 +1137,17 @@ run_reinforcing_features() {
         --argjson request "$mirror_request" \
         '{command:$command,request:$request,preview_marker:"[dashed-outline] Preview: mirror",cancellation_marker:"[cancellation-glyph] Cancellation: command draft discarded",outcome:"cancelled"}' \
         >>"$REINFORCING_TRANSCRIPT"
-    reinforcing_viewport_phase=1
-
     reinforcing_commit() {
         local command="$1"
         local request="$2"
         local screenshot="$3"
         local marker="[selection-glyph] Commit: ${command}"
         local ocr screenshot_sha
+        case "$command" in
+            mirror) reinforcing_viewport_phase=3 ;;
+            linear-pattern) reinforcing_viewport_phase=4 ;;
+            circular-pattern) reinforcing_viewport_phase=5 ;;
+        esac
         wtype -M ctrl -k p -m ctrl || die input_injection_failed "compositor keyboard input could not open the ${command} palette"
         wtype "$command" || die input_injection_failed "compositor keyboard input could not type ${command}"
         wtype -k Return || die input_injection_failed "compositor keyboard input could not select ${command}"

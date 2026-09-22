@@ -7,12 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
-use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
 };
-use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment, parse_ack};
+use threeterm_viewport::{
+    CapabilityProbeIo, CleanupSignal, SceneSolid, TerminalEnvironment, ViewportScene, parse_ack,
+};
 
 #[derive(Debug, Default)]
 struct ScriptedTerminal {
@@ -35,6 +37,118 @@ struct ScriptedTerminal {
     write_failures_remaining: usize,
     prepare_calls: usize,
     restore_calls: usize,
+    selection_targets: BTreeSet<String>,
+    selection_active: bool,
+    selection_down_queued: bool,
+    selection_waiting_for_frame: bool,
+    selection_output_cursor: usize,
+    selection_acknowledged_targets: BTreeSet<String>,
+    selection_ack_pending: bool,
+    selection_quit_queued: bool,
+}
+
+const SECTION_TOLERANCE_MM: f64 = 0.05;
+
+fn scene_solid<'a>(scene: &'a ViewportScene, feature_id: &str) -> &'a SceneSolid {
+    scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("scene has no solid for {feature_id}"))
+}
+
+fn solid_volume(solid: &SceneSolid) -> f64 {
+    solid
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices;
+            let cross = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+        })
+        .sum::<f64>()
+        .abs()
+}
+
+fn section_bounds(solid: &SceneSolid, z: f64) -> Option<[f64; 4]> {
+    let mut points = Vec::new();
+    for triangle in &solid.triangles {
+        let vertices = triangle.vertices;
+        for vertex in vertices {
+            if (vertex[2] - z).abs() <= SECTION_TOLERANCE_MM {
+                points.push([vertex[0], vertex[1]]);
+            }
+        }
+        for [a, b] in [
+            [vertices[0], vertices[1]],
+            [vertices[1], vertices[2]],
+            [vertices[2], vertices[0]],
+        ] {
+            let a_delta = a[2] - z;
+            let b_delta = b[2] - z;
+            if a_delta * b_delta < 0.0 {
+                let t = a_delta / (a_delta - b_delta);
+                points.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let mut bounds = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for [x, y] in points {
+        bounds[0] = bounds[0].min(x);
+        bounds[1] = bounds[1].max(x);
+        bounds[2] = bounds[2].min(y);
+        bounds[3] = bounds[3].max(y);
+    }
+    Some(bounds)
+}
+
+fn assert_closed_positive_mesh(solid: &SceneSolid) {
+    assert!(!solid.triangles.is_empty());
+    assert!(solid_volume(solid) > SECTION_TOLERANCE_MM);
+    let mut edges = BTreeMap::<([i64; 3], [i64; 3]), usize>::new();
+    let vertex_key = |vertex: [f64; 3]| {
+        [
+            (vertex[0] * 1000.0).round() as i64,
+            (vertex[1] * 1000.0).round() as i64,
+            (vertex[2] * 1000.0).round() as i64,
+        ]
+    };
+    for triangle in &solid.triangles {
+        let keys = triangle.vertices.map(vertex_key);
+        for [left, right] in [[keys[0], keys[1]], [keys[1], keys[2]], [keys[2], keys[0]]] {
+            let edge = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *edges.entry(edge).or_default() += 1;
+        }
+    }
+    assert!(edges.values().all(|count| *count == 2));
+}
+
+fn assert_authenticated_brep(root: &Path, entry: &LogEntry) {
+    let relative_path = entry
+        .brep_path
+        .as_deref()
+        .expect("committed feature records its BREP path");
+    let path = root.join(relative_path);
+    let bytes = fs::read(&path).expect("committed BREP reads");
+    assert_eq!(entry.brep_byte_count, Some(bytes.len() as u64));
+    let digest = threeterm_occt_worker::sha256_file(&path).expect("committed BREP hashes");
+    assert_eq!(entry.brep_sha256.as_deref(), Some(digest.as_str()));
 }
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -107,6 +221,52 @@ fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
         .unwrap_or(1)
 }
 
+fn latest_kitty_image_id(bytes: &[u8], offset: usize) -> Option<u64> {
+    let suffix = &bytes[offset..];
+    let mut found = None;
+    for (index, window) in suffix.windows(2).enumerate() {
+        if window != b"i=" {
+            continue;
+        }
+        let digits = suffix[index + 2..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .copied()
+            .collect::<Vec<_>>();
+        if suffix.get(index + 2 + digits.len()..index + 6 + digits.len())
+            == Some(b",o=z".as_slice())
+        {
+            found = std::str::from_utf8(&digits)
+                .ok()
+                .and_then(|value| value.parse().ok());
+        }
+    }
+    found
+}
+
+fn viewport_revision_between(output: &str, start_marker: &str, end_marker: &str) -> String {
+    let start = output
+        .find(start_marker)
+        .expect("viewport revision start marker exists");
+    let end = output
+        .find(end_marker)
+        .expect("viewport revision end marker exists");
+    assert!(start < end, "viewport revision markers are ordered");
+    let marker = "[viewport-status] Viewport presented ";
+    let mut cursor = start + start_marker.len();
+    let mut revision = None;
+    while let Some(relative) = output[cursor..end].find(marker) {
+        let json_start = cursor + relative + marker.len();
+        let mut stream = serde_json::Deserializer::from_str(output[json_start..end].trim_start())
+            .into_iter::<Value>();
+        if let Some(Ok(value)) = stream.next() {
+            revision = value["frame"]["revision"].as_str().map(str::to_string);
+        }
+        cursor = json_start;
+    }
+    revision.expect("viewport revision exists between command acknowledgements")
+}
+
 impl InteractiveTerminal for ScriptedTerminal {
     fn replay_probe_input(&mut self, bytes: &[u8]) {
         self.replayed_probe_input.extend_from_slice(bytes);
@@ -116,12 +276,20 @@ impl InteractiveTerminal for ScriptedTerminal {
     }
 
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
+        self.queue_selection_event();
         self.events_read += 1;
         let event = self
             .queued_events
             .pop()
             .or_else(|| self.events.pop())
             .unwrap_or_default();
+        if event == b"\x1b[B" && self.selection_down_queued {
+            self.selection_down_queued = false;
+            self.selection_waiting_for_frame = true;
+        }
+        if self.selection_ack_pending && event.starts_with(b"\x1b_G") {
+            self.selection_ack_pending = false;
+        }
         self.read_events.push(event.clone());
         if self.fail_writes_on_read == Some(self.events_read) {
             self.write_failures_remaining = 1;
@@ -167,6 +335,50 @@ impl InteractiveTerminal for ScriptedTerminal {
         } else {
             Ok(())
         }
+    }
+}
+
+impl ScriptedTerminal {
+    fn queue_selection_event(&mut self) {
+        if !self.selection_active || self.selection_quit_queued {
+            return;
+        }
+        let output = String::from_utf8_lossy(&self.writes);
+        if self.selection_down_queued {
+            return;
+        }
+        if self.selection_waiting_for_frame {
+            let Some(image_id) = latest_kitty_image_id(&self.writes, self.selection_output_cursor)
+            else {
+                return;
+            };
+            self.queued_events
+                .push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
+            self.selection_waiting_for_frame = false;
+            self.selection_ack_pending = true;
+            return;
+        }
+        let selected_target = self
+            .selection_targets
+            .iter()
+            .find(|target| output.contains(&format!("selected feature {target}")))
+            .cloned();
+        if let Some(target) = selected_target {
+            self.selection_targets.remove(&target);
+            self.selection_acknowledged_targets.insert(target);
+        }
+        if self.selection_targets.is_empty() {
+            self.queued_events.push(b"q".to_vec());
+            self.selection_quit_queued = true;
+            self.selection_active = false;
+            return;
+        }
+        if !output.contains("[selection-glyph] Commit: loft") {
+            return;
+        }
+        self.selection_output_cursor = self.writes.len();
+        self.queued_events.push(b"\x1b[B".to_vec());
+        self.selection_down_queued = true;
     }
 }
 
@@ -1570,4 +1782,236 @@ fn production_launch_creates_project_and_extrudes_typed_profile() {
     assert_eq!(snapshot_tree(&project_root), before_inspection);
 
     fs::remove_dir_all(workspace).expect("workflow workspace removes");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_creates_tapered_reinforcement_through_keyboard() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("keyboard tapered reinforcement requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("keyboard tapered reinforcement: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-keyboard-tapered-reinforcement-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "taper-seed-request",
+            vec![(24.0, 0.0), (34.0, 0.0), (34.0, 4.0), (24.0, 4.0)],
+            12.0,
+        )
+        .with_feature_id("taper-seed"),
+        &worker,
+    )
+    .expect("real seed extrusion commits");
+    let before = host
+        .identity(&root)
+        .expect("seed identity reads before keyboard draft");
+    let seeded_tree = snapshot_tree(&root);
+    let request = json!({
+        "feature_id": "tapered-reinforcement",
+        "base_feature_id": "taper-seed",
+        "angle": 0.05235987755982989,
+        "pull_direction": [0, 0, 1]
+    })
+    .to_string();
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"draft".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.bytes().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ]);
+    let loft_request = json!({
+        "feature_id": "lofted-gusset",
+        "profiles": [
+            [[8, 8, 8], [16, 8, 8], [16, 16, 8], [8, 16, 8]],
+            [[10, 10, 18], [14, 10, 18], [14, 14, 18], [10, 14, 18]]
+        ],
+        "is_solid": true,
+        "ruled": false
+    })
+    .to_string();
+    events.push(b"\x10".to_vec());
+    events.extend(b"loft".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(loft_request.bytes().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        skip_probe_replay: true,
+        selection_targets: BTreeSet::from([
+            "tapered-reinforcement".to_string(),
+            "lofted-gusset".to_string(),
+        ]),
+        selection_active: true,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("keyboard draft workflow succeeds");
+    let output = String::from_utf8_lossy(&terminal.writes);
+    let acknowledged_draft_revision = viewport_revision_between(
+        &output,
+        "[selection-glyph] Commit: draft",
+        "[outline] Draft: loft",
+    );
+
+    let final_identity = host
+        .identity(&root)
+        .expect("reinforcement identity reads after keyboard commits");
+    assert_eq!(
+        final_identity.transaction_count,
+        before.transaction_count + 2
+    );
+    assert_ne!(final_identity.revision_hash, before.revision_hash);
+    let final_bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement bundle opens read-only");
+    assert_ne!(snapshot_tree(&root), seeded_tree);
+    let draft_entry = final_bundle
+        .log
+        .entries()
+        .iter()
+        .find(|entry| entry.feature_id == "tapered-reinforcement")
+        .expect("draft transaction is retained");
+    let CanonicalIntent::Draft(intent) = draft_entry.intent.as_ref().expect("draft intent exists")
+    else {
+        panic!("keyboard draft retained a non-draft intent");
+    };
+    assert_authenticated_brep(&root, draft_entry);
+    assert_eq!(intent.base_feature_id, "taper-seed");
+    assert_eq!(intent.angle, 0.05235987755982989);
+    assert_eq!(intent.pull_direction, [0.0, 0.0, 1.0]);
+    assert_eq!(intent.source_revision, before.revision_hash);
+    let brep = root.join("brep/tapered-reinforcement.brep");
+    assert!(brep.is_file(), "keyboard draft BREP is persisted");
+    let loft_entry = final_bundle
+        .log
+        .entries()
+        .last()
+        .expect("loft transaction is retained");
+    let CanonicalIntent::Loft(loft_intent) =
+        loft_entry.intent.as_ref().expect("loft intent exists")
+    else {
+        panic!("keyboard loft retained a non-loft intent");
+    };
+    assert_authenticated_brep(&root, loft_entry);
+    assert_eq!(
+        loft_intent.profiles,
+        vec![
+            vec![
+                [8.0, 8.0, 8.0],
+                [16.0, 8.0, 8.0],
+                [16.0, 16.0, 8.0],
+                [8.0, 16.0, 8.0]
+            ],
+            vec![
+                [10.0, 10.0, 18.0],
+                [14.0, 10.0, 18.0],
+                [14.0, 14.0, 18.0],
+                [10.0, 14.0, 18.0]
+            ],
+        ]
+    );
+    assert!(loft_intent.is_solid);
+    assert!(!loft_intent.ruled);
+    assert_eq!(
+        loft_intent.source_revision,
+        final_bundle
+            .feature_brep_source_revision("tapered-reinforcement")
+            .expect("draft source revision derives from the canonical log")
+    );
+    assert_eq!(loft_intent.source_revision, acknowledged_draft_revision);
+    assert!(root.join("brep/lofted-gusset.brep").is_file());
+    assert_eq!(
+        terminal.selection_acknowledged_targets,
+        BTreeSet::from([
+            "tapered-reinforcement".to_string(),
+            "lofted-gusset".to_string(),
+        ])
+    );
+    assert!(!terminal.selection_ack_pending);
+
+    let before_inspection = snapshot_tree(&root);
+    let scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("reinforcement scene reads read-only");
+    assert_eq!(snapshot_tree(&root), before_inspection);
+    let tapered = scene_solid(&scene, "tapered-reinforcement");
+    let lofted = scene_solid(&scene, "lofted-gusset");
+    assert_closed_positive_mesh(tapered);
+    assert_closed_positive_mesh(lofted);
+    let tapered_bottom = section_bounds(tapered, 0.0).expect("tapered lower section exists");
+    let tapered_top = section_bounds(tapered, 12.0).expect("tapered upper section exists");
+    assert!(
+        (tapered_bottom[1] - tapered_bottom[0] - (tapered_top[1] - tapered_top[0])).abs()
+            > SECTION_TOLERANCE_MM
+            || (tapered_bottom[3] - tapered_bottom[2] - (tapered_top[3] - tapered_top[2])).abs()
+                > SECTION_TOLERANCE_MM,
+        "drafted sections must differ along the pull direction: bottom={tapered_bottom:?} top={tapered_top:?}"
+    );
+    let lofted_lower = section_bounds(lofted, 8.0).expect("loft lower section exists");
+    let lofted_upper = section_bounds(lofted, 18.0).expect("loft upper section exists");
+    for (actual, expected) in [
+        (lofted_lower, [8.0, 16.0, 8.0, 16.0]),
+        (lofted_upper, [10.0, 14.0, 10.0, 14.0]),
+    ] {
+        for (value, target) in actual.into_iter().zip(expected) {
+            assert!((value - target).abs() <= SECTION_TOLERANCE_MM);
+        }
+    }
+
+    for acknowledgement in [
+        "[outline] Draft: draft",
+        "[dashed-outline] Preview: draft",
+        "[selection-glyph] Commit: draft",
+        "tapered-reinforcement",
+        "[outline] Draft: loft",
+        "[dashed-outline] Preview: loft",
+        "[selection-glyph] Commit: loft",
+        "lofted-gusset",
+        "selected feature tapered-reinforcement",
+        "selected feature lofted-gusset",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(acknowledgement),
+            "missing keyboard draft acknowledgement: {acknowledgement}"
+        );
+    }
+    assert!(
+        terminal.read_events.iter().all(|event| !matches!(
+            decode_terminal_input(event),
+            Some(TerminalInput::Pick { .. })
+        )),
+        "tapered reinforcement does not depend on pointer selection"
+    );
+
+    fs::remove_dir_all(root).expect("keyboard draft project removes");
 }

@@ -1,9 +1,11 @@
 //! Production API coverage for exporting one validated current solid to STL.
 
 use std::fs;
+use std::str;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use threeterm_host::{Host, HostError, domain_execution_diagnostic};
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::DiagnosticCode;
@@ -120,10 +122,12 @@ fn export_validated_current_solid_to_stl_end_to_end() {
 
     let stl = fs::read(&stl_path).expect("published STL reads");
     assert!(!stl.is_empty(), "published STL is nonempty");
-    assert!(
-        String::from_utf8_lossy(&stl).contains("facet"),
-        "published STL contains ASCII facets"
-    );
+    let stl_text = str::from_utf8(&stl).expect("published STL is ASCII");
+    let facet_count = stl_text.matches("facet normal").count();
+    assert!(facet_count > 0, "published STL contains facets");
+    assert_eq!(stl_text.matches("vertex ").count(), facet_count * 3);
+    assert!(stl_text.starts_with("solid "));
+    assert!(stl_text.trim_end().ends_with("endsolid l-bracket"));
     let artifact = exported["derived_artifacts"]
         .as_array()
         .expect("derived artifacts are present")
@@ -135,7 +139,7 @@ fn export_validated_current_solid_to_stl_end_to_end() {
     assert_eq!(artifact["output_path"], stl_path.to_string_lossy().as_ref());
     assert_eq!(artifact["artifact_name"], "l-bracket.stl");
     assert_eq!(artifact["byte_count"], stl.len());
-    assert_eq!(artifact["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(artifact["sha256"], format!("{:x}", Sha256::digest(&stl)));
     assert_eq!(exported["artifacts"], json!([stl_path.to_string_lossy()]));
     assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), manifest);
     assert_eq!(fs::read(bundle.join("transactions.log")).unwrap(), log);

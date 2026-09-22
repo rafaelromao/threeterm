@@ -6,6 +6,10 @@ use threeterm_protocol::schema_validator::validate;
 #[test]
 fn export_response_schema_carries_validation_settings_and_output_identity() {
     let entry = find(EXPORT_COMMAND_ID).expect("export is registered");
+    assert_eq!(
+        entry.response_schema_version,
+        "threeterm.command.export.response/3"
+    );
     validate(
         &entry.response_schema,
         &serde_json::json!({
@@ -45,7 +49,7 @@ fn export_response_schema_carries_validation_settings_and_output_identity() {
                 "active_revision": "history-revision-1",
                 "stale_features": [],
             },
-            "schema_version": "threeterm.command.export.response/2",
+            "schema_version": "threeterm.command.export.response/3",
         }),
     )
     .expect("validated export response satisfies the registered schema");
@@ -64,7 +68,7 @@ fn export_response_schema_rejects_missing_validation_binding() {
             "active_revision": "history-revision-1",
             "stale_features": [],
         },
-        "schema_version": "threeterm.command.export.response/2",
+        "schema_version": "threeterm.command.export.response/3",
     });
     assert!(validate(&entry.response_schema, &response).is_err());
 }

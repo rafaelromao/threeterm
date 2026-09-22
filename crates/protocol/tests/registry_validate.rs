@@ -17,7 +17,7 @@ fn registry_contains_the_versioned_validate_contract() {
     );
     assert_eq!(
         entry.response_schema_version,
-        "threeterm.command.validate.response/1"
+        "threeterm.command.validate.response/2"
     );
     assert_eq!(
         entry.request_schema["required"],
@@ -80,7 +80,7 @@ fn validate_response_schema_binds_the_verdict_to_feature_plus_revision() {
             "brep_path": "/tmp/project/brep/l-bracket.brep",
             "brep_sha256": "a".repeat(64),
             "valid": true,
-            "schema_version": "threeterm.command.validate.response/1",
+            "schema_version": "threeterm.command.validate.response/2",
         }),
     )
     .expect("bound success verdict validates");
@@ -101,7 +101,7 @@ fn validate_response_schema_binds_the_verdict_to_feature_plus_revision() {
             "feature_graph_hash": "not-a-hash",
             "revision_hash": "f".repeat(64),
             "valid": true,
-            "schema_version": "threeterm.command.validate.response/1",
+            "schema_version": "threeterm.command.validate.response/2",
         }),
         serde_json::json!({
             "status": "ok",
@@ -109,7 +109,7 @@ fn validate_response_schema_binds_the_verdict_to_feature_plus_revision() {
             "feature_graph_hash": "0".repeat(64),
             "revision_hash": "f".repeat(64),
             "valid": true,
-            "schema_version": "threeterm.command.validate.response/1",
+            "schema_version": "threeterm.command.validate.response/2",
         }),
     ] {
         assert!(

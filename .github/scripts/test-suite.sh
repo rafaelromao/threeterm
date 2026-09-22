@@ -34,6 +34,7 @@ case "${1:-}" in
                 --skip production_tui_ghostty_session \
                 --skip production_tui_create_project_extrude \
                 --skip production_tui_keyboard_navigation \
+                --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation --test-threads=1
         ;;
     e2e)
@@ -42,6 +43,7 @@ case "${1:-}" in
                 --skip production_tui_ghostty_session \
                 --skip production_tui_create_project_extrude \
                 --skip production_tui_keyboard_navigation \
+                --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation --test-threads=1
         ;;
     graphical)

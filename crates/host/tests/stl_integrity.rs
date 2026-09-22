@@ -215,6 +215,31 @@ fn verifier_rejects_binary_declared_size_mismatch_without_repair() {
     let error = verify_bytes(&bytes).expect_err("wrong binary count must be rejected");
 
     assert_eq!(error.reason, IntegrityReason::Truncated);
+
+    let mut trailing = binary_tetrahedron(4);
+    trailing.push(0);
+    let error = verify_bytes(&trailing).expect_err("trailing binary data must be rejected");
+    assert_eq!(error.reason, IntegrityReason::SizeMismatch);
+}
+
+#[test]
+fn verifier_rejects_malformed_and_non_finite_ascii_records() {
+    let malformed = b"solid mesh\nfacet malformed\nendsolid mesh\n";
+    let error = verify_bytes(malformed).expect_err("malformed ASCII must be rejected");
+    assert_eq!(error.reason, IntegrityReason::Format);
+
+    let non_finite = b"solid mesh
+facet normal NaN 0 1
+ outer loop
+  vertex 0 0 0
+  vertex 1 0 0
+  vertex 0 1 0
+ endloop
+endfacet
+endsolid mesh
+";
+    let error = verify_bytes(non_finite).expect_err("non-finite ASCII must be rejected");
+    assert_eq!(error.reason, IntegrityReason::NonFinite);
 }
 
 #[test]
@@ -313,13 +338,17 @@ fn verifier_accepts_the_checked_in_production_stl_artifact() {
 
 #[test]
 fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
-    let Some(_worker) = threeterm_occt_worker::OcctWorker::locate().ok() else {
-        if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
-            panic!("STL integrity oracle requires the OCCT worker");
+    let worker = match threeterm_occt_worker::OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error) => {
+            if std::env::var("THREETERM_REQUIRE_OCCT").ok().as_deref() == Some("1") {
+                panic!("STL integrity oracle requires the OCCT worker: {error}");
+            }
+            eprintln!("stl_integrity: native oracle skipped because OCCT is unavailable: {error}");
+            return;
         }
-        eprintln!("stl_integrity: no OCCT worker binary found; native oracle skipped");
-        return;
     };
+    drop(worker);
     let parent = root("oracle");
     let bundle = parent.join("project");
     let output = parent.join("export");
@@ -364,8 +393,7 @@ fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
 
     let stl_path = output.join("l-bracket.stl");
     let before = fs::read(&stl_path).expect("production STL reads");
-    let report = threeterm_host::stl_integrity::verify_path(&stl_path)
-        .expect("production STL passes independent integrity oracle");
+    let report = verify_bytes(&before).expect("production STL passes independent integrity oracle");
     assert_eq!(report.format, StlFormat::Ascii);
     assert!(report.triangle_count > 0);
     assert_eq!(report.shell_count, 1);

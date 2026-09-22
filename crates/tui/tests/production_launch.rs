@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
+use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, WorkerError};
 use threeterm_persistence::{Bundle, CanonicalIntent};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
@@ -190,6 +190,24 @@ fn valid_probe_response(nonce: u64) -> Vec<u8> {
         nonce + 1
     )
     .into_bytes()
+}
+
+fn optional_occt_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("{test_name} requires OCCT worker: {error:?}");
+        }
+        Err(error) if matches!(&error, WorkerError::Spawn { detail, .. } if detail.contains("not found")) =>
+        {
+            eprintln!("{test_name}: OCCT worker unavailable: {error:?}");
+            None
+        }
+        Err(error) => panic!("{test_name}: OCCT worker failed to initialize: {error:?}"),
+    }
 }
 
 fn selected_edge(
@@ -1366,18 +1384,8 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
 
 #[test]
 fn production_launch_drives_boolean_fuse_through_palette_and_commit() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
-        {
-            panic!("interactive boolean fuse requires OCCT worker: {error}");
-        }
-        Err(error) => {
-            eprintln!("interactive command slice: OCCT worker unavailable: {error}");
-            return;
-        }
+    let Some(worker) = optional_occt_worker("interactive boolean fuse") else {
+        return;
     };
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1447,18 +1455,8 @@ fn production_launch_drives_boolean_fuse_through_palette_and_commit() {
 
 #[test]
 fn production_launch_assembles_bracket_foundation_through_tui_controls() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
-        {
-            panic!("interactive bracket foundation requires OCCT worker: {error}");
-        }
-        Err(error) => {
-            eprintln!("interactive bracket foundation: OCCT worker unavailable: {error}");
-            return;
-        }
+    let Some(worker) = optional_occt_worker("interactive bracket foundation") else {
+        return;
     };
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -4000,10 +4000,12 @@ impl<R: Renderer> TuiViewportSession<R> {
                         | VALIDATE_COMMAND_ID
                         | EXPORT_COMMAND_ID
                         | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID
                         | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+                        | threeterm_protocol::schema::HOLE_COMMAND_ID
                         | threeterm_protocol::schema::SHELL_COMMAND_ID
                         | threeterm_protocol::schema::DRAFT_COMMAND_ID
                         | threeterm_protocol::schema::LOFT_COMMAND_ID
@@ -4530,14 +4532,10 @@ impl<R: Renderer> TuiViewportSession<R> {
             );
         }
         if include_expected
-            && !matches!(
-                draft.command,
-                NEW_PROJECT_COMMAND_ID
-                    | SAVE_COMMAND_ID
-                    | LOAD_COMMAND_ID
-                    | VALIDATE_COMMAND_ID
-                    | EXPORT_COMMAND_ID
-            )
+            && draft.command != NEW_PROJECT_COMMAND_ID
+            && threeterm_protocol::schema::find(draft.command).is_some_and(|schema| {
+                schema.request_schema["properties"]["expected_revision"].is_object()
+            })
         {
             object.insert(
                 "expected_revision".to_string(),

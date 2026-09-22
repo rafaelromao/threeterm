@@ -1392,20 +1392,9 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_drives_one_revolve_draft_through_preview_and_commit() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
-        {
-            panic!("interactive revolve command requires OCCT worker: {error}")
-        }
-        Err(error) => {
-            eprintln!("interactive revolve command: OCCT worker unavailable: {error}");
-            return;
-        }
-    };
+    let worker = OcctWorker::locate().expect("interactive revolve command requires OCCT worker");
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after epoch")
@@ -1458,20 +1447,9 @@ fn production_launch_drives_one_revolve_draft_through_preview_and_commit() {
 }
 
 #[test]
+#[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
-        {
-            panic!("reinforcement recipe requires OCCT worker: {error}")
-        }
-        Err(error) => {
-            eprintln!("reinforcement recipe: OCCT worker unavailable: {error}");
-            return;
-        }
-    };
+    let worker = OcctWorker::locate().expect("reinforcement recipe requires OCCT worker");
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after epoch")
@@ -1550,6 +1528,23 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
             "TUI transcript omits commit acknowledgement for {command}"
         );
     }
+    let output = String::from_utf8_lossy(&terminal.writes);
+    let removed_volume = output
+        .split("removed_volume=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("TUI transcript includes the removed-volume measurement");
+    assert!((removed_volume - 58.90486225480863).abs() <= 0.001);
+    assert!(bundle.log.entries()[..18].iter().all(|entry| {
+        entry.brep_path.is_some() && entry.brep_sha256.is_some() && entry.intent.is_some()
+    }));
+    assert!(
+        bundle.log.entries()[..18]
+            .windows(2)
+            .all(|entries| entries[0].terminal_digest != entries[1].terminal_digest)
+    );
+    assert!(bundle.log.entries()[18].intent.is_none());
 
     let mut breps = BTreeMap::new();
     for feature_id in expected_features.iter().filter(|feature_id| {
@@ -1620,6 +1615,18 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
                 .into_iter()
                 .zip([49.5, 10.0, 20.0])
                 .all(|(actual, expected)| (actual - expected).abs() <= 1e-3)
+    }));
+    for expected_length in [10.0_f64, 7.0_f64] {
+        assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - expected_length).abs() <= 1e-3
+        }));
+    }
+    assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && candidate.length > 1e-3
+            && (28.0..=32.0).contains(&candidate.midpoint[1])
+            && candidate.midpoint[0] >= 20.0
     }));
 
     fs::remove_dir_all(root.join("brep")).expect("derived BREPs remove");

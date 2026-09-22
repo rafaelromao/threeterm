@@ -701,16 +701,22 @@ fn production_tui_reinforcement() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("transcript line is JSON"))
         .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 7);
     assert_eq!(
         stages
             .iter()
-            .map(|stage| stage["stage"].as_str())
+            .map(|stage| stage["feature_id"].as_str())
             .collect::<Vec<_>>(),
-        [Some("collar"), Some("opening"), Some("final")]
+        [
+            Some("revolved-collar"),
+            Some("hollow-detail-seed"),
+            Some("hollow-detail"),
+            Some("hollow-detail-open"),
+            Some("foundation-with-collar"),
+            Some("reinforced-foundation"),
+            Some("reinforcement-snapshot"),
+        ]
     );
-    assert_eq!(stages[0]["feature_id"], "revolved-collar");
-    assert_eq!(stages[1]["feature_id"], "hollow-detail-open");
-    assert_eq!(stages[2]["feature_id"], "reinforced-foundation");
 
     let pty_output =
         fs::read_to_string(evidence.join("pty-output.log")).expect("PTY output exists");

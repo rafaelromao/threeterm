@@ -4115,9 +4115,18 @@ impl<R: Renderer> TuiViewportSession<R> {
                     .unwrap_or_default()
             )
         } else {
+            let measurements = ["material_volume", "removed_volume"]
+                .into_iter()
+                .filter_map(|field| {
+                    response
+                        .get(field)
+                        .and_then(Value::as_f64)
+                        .map(|value| format!(" {field}={value}"))
+                })
+                .collect::<String>();
             format!(
-                "[selection-glyph] Commit: {} revision={revision}",
-                command.0
+                "[selection-glyph] Commit: {} revision={revision}{measurements}",
+                command.0,
             )
         };
         Ok(KeyboardInputOutcome {

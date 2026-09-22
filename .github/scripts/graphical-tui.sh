@@ -1129,6 +1129,26 @@ capture_reinforcement_stage() {
     fi
 }
 
+record_reinforcement_action() {
+    local stage="$1"
+    local command_name="$2"
+    local feature_id="$3"
+    local request="$4"
+    local marker="$5"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$feature_id" ||
+        die reinforcement_viewport_invalid "${stage} viewport evidence was invalid: ${viewport_evidence}"
+    jq -n \
+        --arg schema_version "$SCHEMA_VERSION" \
+        --arg stage "$stage" \
+        --arg command "$command_name" \
+        --arg feature_id "$feature_id" \
+        --arg request "$request" \
+        --arg marker "$marker" \
+        --argjson viewport "$viewport_evidence" \
+        '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,acknowledgement:{marker:$marker},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:null}' \
+        >>"$WORKFLOW_TRANSCRIPT"
+}
+
 run_reinforcement_command() {
     local command_name="$1"
     local feature_id="$2"
@@ -1147,27 +1167,42 @@ run_reinforcement_command() {
     if [[ -n "$screenshot" ]]; then
         capture_reinforcement_stage "$stage" "$command_name" "$feature_id" "$request" \
             "[selection-glyph] Commit: ${command_name}" "$screenshot"
+    else
+        record_reinforcement_action "$stage" "$command_name" "$feature_id" "$request" \
+            "[selection-glyph] Commit: ${command_name}"
     fi
+}
+
+reinforcement_recipe_step() {
+    local index="$1"
+    jq -c --argjson index "$index" '.steps[] | select(.index == $index)' \
+        "$ROOT/crates/host/tests/data/bracket_reinforcement_recipe.v1.json"
+}
+
+run_reinforcement_step() {
+    local index="$1"
+    local screenshot="$2"
+    local stage="$3"
+    local commit_count="$4"
+    local step command_name feature_id request
+    step="$(reinforcement_recipe_step "$index")"
+    command_name="$(jq -r '.command' <<<"$step")"
+    feature_id="$(jq -r '.feature_id' <<<"$step")"
+    request="$(jq -c '.request' <<<"$step")"
+    run_reinforcement_command "$command_name" "$feature_id" "$request" "$screenshot" \
+        "$stage" "$commit_count"
 }
 
 run_reinforcement_workflow() {
     [[ "$TEST_ID" == 'production_tui_reinforcement' ]] || return 0
     : >"$WORKFLOW_TRANSCRIPT"
-    local revolve_request='{"feature_id":"revolved-collar","profile":[[20,28],[22,28],[22,32],[20,32]],"axis_point":[10,0,0],"axis_direction":[0,-1,0],"angle":1.5707963267948966}'
-    local hollow_seed_request='{"feature_id":"hollow-detail-seed","profile":[[42,5],[52,5],[52,15],[42,15]],"height":20,"mode":"additive"}'
-    local shell_request='{"feature_id":"hollow-detail","base_feature_id":"hollow-detail-seed","thickness":1.5}'
-    local opening_request='{"feature_id":"hollow-detail-open","base_feature_id":"hollow-detail","position":[47,10,0],"direction":[0,0,1],"diameter":5,"hole_kind":"drilled","measure_removed_volume":true}'
-    local collar_fuse_request='{"feature_id":"foundation-with-collar","base_feature_id":"bracket-foundation","tool_feature_id":"revolved-collar"}'
-    local final_fuse_request='{"feature_id":"reinforced-foundation","base_feature_id":"foundation-with-collar","tool_feature_id":"hollow-detail-open"}'
-    local save_request='{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}'
-
-    run_reinforcement_command revolve revolved-collar "$revolve_request" "$COLLAR_SCREENSHOT" collar 1
-    run_reinforcement_command extrude hollow-detail-seed "$hollow_seed_request" '' '' 1
-    run_reinforcement_command shell hollow-detail "$shell_request" '' '' 1
-    run_reinforcement_command hole hollow-detail-open "$opening_request" "$OPENING_SCREENSHOT" opening 1
-    run_reinforcement_command boolean-fuse foundation-with-collar "$collar_fuse_request" '' '' 1
-    run_reinforcement_command boolean-fuse reinforced-foundation "$final_fuse_request" '' '' 2
-    run_reinforcement_command save reinforcement-snapshot "$save_request" "$REINFORCEMENT_SCREENSHOT" final 1
+    run_reinforcement_step 13 "$COLLAR_SCREENSHOT" collar 1
+    run_reinforcement_step 14 '' hollow-seed 1
+    run_reinforcement_step 15 '' shell 1
+    run_reinforcement_step 16 "$OPENING_SCREENSHOT" opening 1
+    run_reinforcement_step 17 '' collar-fuse 1
+    run_reinforcement_step 18 '' reinforced-fuse 2
+    run_reinforcement_step 19 "$REINFORCEMENT_SCREENSHOT" final 1
     EXPECTED_FEATURE_ID='reinforced-foundation'
     workflow_status='passed'
 }

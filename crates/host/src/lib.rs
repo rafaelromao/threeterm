@@ -3420,8 +3420,23 @@ impl Host {
                 }));
             }
             if command == SAVE_COMMAND_ID {
+                let bundle_path = string_field("bundle_path")?;
+                if let Some(expected_revision) = request
+                    .get("expected_revision")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    let current = self.load(bundle_path)?;
+                    if current.revision_hash != expected_revision {
+                        return Err(HostError::Validation {
+                            detail: format!(
+                                "save source revision {expected_revision:?} does not match current revision {:?}",
+                                current.revision_hash
+                            ),
+                        });
+                    }
+                }
                 let view = self.save(
-                    string_field("bundle_path")?,
+                    bundle_path,
                     string_field("feature_id")?,
                     string_field("kind")?,
                 )?;

@@ -71,6 +71,7 @@ viewport_pan_evidence='null'
 viewport_zoom_evidence='null'
 startup_image_id=''
 startup_revision=''
+workflow_source_revision=''
 final_image_id=''
 final_image_id_json='null'
 final_delete_image_id=''
@@ -577,6 +578,7 @@ readiness_viewport_ready() {
     [[ "$(jq -r '.camera.pan_y' <<<"$viewport_evidence")" == 0 ]] || return 1
     startup_image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     startup_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    workflow_source_revision="$startup_revision"
     evidence_wire_ready "$startup_image_id" || return 1
     viewport_startup_evidence="$viewport_evidence"
 }
@@ -1098,10 +1100,12 @@ capture_reinforcement_stage() {
     local stage="$1"
     local command_name="$2"
     local feature_id="$3"
-    local request="$4"
-    local marker="$5"
-    local screenshot="$6"
-    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$feature_id" ||
+    local viewport_feature="$4"
+    local request="$5"
+    local effective_request="$6"
+    local marker="$7"
+    local screenshot="$8"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$viewport_feature" ||
         die reinforcement_viewport_invalid "${stage} viewport evidence was invalid: ${viewport_evidence}"
     capture_screenshot "$screenshot" || die "${stage}_screenshot_failed" "${stage} screenshot was not fixed at 800x600"
     local ocr screenshot_sha
@@ -1114,15 +1118,17 @@ capture_reinforcement_stage() {
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
         --arg stage "$stage" \
-        --arg command "$command_name" \
-        --arg feature_id "$feature_id" \
-        --arg request "$request" \
-        --arg marker "$marker" \
-        --arg screenshot "$screenshot" \
-        --arg screenshot_sha256 "$screenshot_sha" \
-        --argjson viewport "$viewport_evidence" \
-        '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,acknowledgement:{marker:$marker},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
-        >>"$WORKFLOW_TRANSCRIPT"
+         --arg command "$command_name" \
+         --arg feature_id "$feature_id" \
+         --arg request "$request" \
+         --arg effective_request "$effective_request" \
+         --arg marker "$marker" \
+         --arg screenshot "$screenshot" \
+         --arg screenshot_sha256 "$screenshot_sha" \
+         --argjson viewport "$viewport_evidence" \
+         '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,effective_request:($effective_request|fromjson),acknowledgement:{preview_marker:("[dashed-outline] Preview: " + $command),commit_marker:$marker},response:{revision:$viewport.frame.revision},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+         >>"$WORKFLOW_TRANSCRIPT"
+    workflow_source_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
     if [[ "$stage" == final ]]; then
         viewport_workflow_evidence="$viewport_evidence"
         startup_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
@@ -1133,20 +1139,24 @@ record_reinforcement_action() {
     local stage="$1"
     local command_name="$2"
     local feature_id="$3"
-    local request="$4"
-    local marker="$5"
-    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$feature_id" ||
+    local viewport_feature="$4"
+    local request="$5"
+    local effective_request="$6"
+    local marker="$7"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$viewport_feature" ||
         die reinforcement_viewport_invalid "${stage} viewport evidence was invalid: ${viewport_evidence}"
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
         --arg stage "$stage" \
-        --arg command "$command_name" \
-        --arg feature_id "$feature_id" \
-        --arg request "$request" \
-        --arg marker "$marker" \
-        --argjson viewport "$viewport_evidence" \
-        '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,acknowledgement:{marker:$marker},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:null}' \
-        >>"$WORKFLOW_TRANSCRIPT"
+         --arg command "$command_name" \
+         --arg feature_id "$feature_id" \
+         --arg request "$request" \
+         --arg effective_request "$effective_request" \
+         --arg marker "$marker" \
+         --argjson viewport "$viewport_evidence" \
+         '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,effective_request:($effective_request|fromjson),acknowledgement:{preview_marker:("[dashed-outline] Preview: " + $command),commit_marker:$marker},response:{revision:$viewport.frame.revision},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:null}' \
+         >>"$WORKFLOW_TRANSCRIPT"
+    workflow_source_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
 }
 
 run_reinforcement_command() {
@@ -1156,6 +1166,13 @@ run_reinforcement_command() {
     local screenshot="$4"
     local stage="$5"
     local commit_count="$6"
+    local viewport_feature="$7"
+    local effective_request
+    if [[ "$command_name" == save ]]; then
+        effective_request="$(jq -c --arg bundle_path "$PROJECT_ROOT" '. + {bundle_path:$bundle_path}' <<<"$request")"
+    else
+        effective_request="$(jq -c --arg bundle_path "$PROJECT_ROOT" --arg expected_revision "$workflow_source_revision" '. + {bundle_path:$bundle_path,expected_revision:$expected_revision}' <<<"$request")"
+    fi
     wtype -M ctrl -k p -m ctrl || die input_injection_failed "compositor keyboard input could not open the ${command_name} palette"
     wtype "$command_name" || die input_injection_failed "compositor keyboard input could not type ${command_name}"
     wtype -k Return || die input_injection_failed "compositor keyboard input could not select ${command_name}"
@@ -1165,11 +1182,11 @@ run_reinforcement_command() {
     wtype -M ctrl -k Return -m ctrl || die input_injection_failed "compositor keyboard input could not commit ${command_name}"
     wait_for_output_marker_count "[selection-glyph] Commit: ${command_name}" "$commit_count"
     if [[ -n "$screenshot" ]]; then
-        capture_reinforcement_stage "$stage" "$command_name" "$feature_id" "$request" \
-            "[selection-glyph] Commit: ${command_name}" "$screenshot"
+        capture_reinforcement_stage "$stage" "$command_name" "$feature_id" "$viewport_feature" \
+            "$request" "$effective_request" "[selection-glyph] Commit: ${command_name}" "$screenshot"
     else
-        record_reinforcement_action "$stage" "$command_name" "$feature_id" "$request" \
-            "[selection-glyph] Commit: ${command_name}"
+        record_reinforcement_action "$stage" "$command_name" "$feature_id" "$viewport_feature" \
+            "$request" "$effective_request" "[selection-glyph] Commit: ${command_name}"
     fi
 }
 
@@ -1184,13 +1201,17 @@ run_reinforcement_step() {
     local screenshot="$2"
     local stage="$3"
     local commit_count="$4"
-    local step command_name feature_id request
+    local step command_name feature_id viewport_feature request
     step="$(reinforcement_recipe_step "$index")"
     command_name="$(jq -r '.command' <<<"$step")"
     feature_id="$(jq -r '.feature_id' <<<"$step")"
+    viewport_feature="$feature_id"
+    if [[ "$index" == 19 ]]; then
+        viewport_feature='reinforced-foundation'
+    fi
     request="$(jq -c '.request' <<<"$step")"
     run_reinforcement_command "$command_name" "$feature_id" "$request" "$screenshot" \
-        "$stage" "$commit_count"
+        "$stage" "$commit_count" "$viewport_feature"
 }
 
 run_reinforcement_workflow() {

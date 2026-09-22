@@ -78,7 +78,7 @@ const BASELINE_SCHEMA_CONTRACTS: [(&str, &str, &str, &str, &str, &str); 16] = [
         "threeterm.command.save/1",
         "threeterm.command.save.request/1",
         "threeterm.command.save.response/1",
-        "849b03bf4fbdbc5ff292252db290bf2320f8bfe5afbacbfe5141309ae1b60019",
+        "fb1b5a2fca369afbdf4db363d45662baebd0a437223a47efa59985f560704496",
         "127fedb41c0c183f5c79fddbf91a6ebab39d58ab454e9c3b403a16ec4839d0d9",
     ),
     (
@@ -308,6 +308,41 @@ fn root(label: &str) -> std::path::PathBuf {
         .expect("system clock is after the unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("threeterm-domain-executor-{label}-{suffix}"))
+}
+
+#[test]
+fn save_rejects_a_stale_expected_revision_without_mutation() {
+    let root = root("save-stale-revision");
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    let before = host.identity(&root).expect("seed identity reads");
+    let error = host
+        .execute_domain_command(
+            SAVE_COMMAND_ID,
+            json!({
+                "bundle_path": root,
+                "feature_id": "stale-save",
+                "kind": "checkpoint",
+                "expected_revision": "stale-revision"
+            }),
+        )
+        .expect_err("stale save revision is rejected");
+
+    assert!(format!("{error:?}").contains("save source revision"));
+    assert_eq!(
+        host.identity(&root).expect("identity remains readable"),
+        before
+    );
+    assert_eq!(
+        Bundle::at(&root)
+            .open()
+            .expect("bundle remains readable")
+            .log
+            .len(),
+        1
+    );
+    fs::remove_dir_all(root).expect("stale save fixture removes");
 }
 
 fn filesystem_snapshot(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {

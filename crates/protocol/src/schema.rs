@@ -353,7 +353,8 @@ pub static SAVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
-            "kind": { "type": "string", "minLength": 1 }
+            "kind": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false
     })

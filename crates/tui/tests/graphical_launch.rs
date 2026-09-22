@@ -702,6 +702,39 @@ fn production_tui_reinforcement() {
         .map(|line| serde_json::from_str::<Value>(line).expect("transcript line is JSON"))
         .collect::<Vec<_>>();
     assert_eq!(stages.len(), 7);
+    for stage in &stages {
+        assert_eq!(stage["response"]["revision"], stage["revision"]);
+        assert_eq!(
+            stage["acknowledgement"]["preview_marker"],
+            format!(
+                "[dashed-outline] Preview: {}",
+                stage["command"]
+                    .as_str()
+                    .expect("stage command is a string")
+            )
+        );
+        assert!(
+            stage["acknowledgement"]["commit_marker"]
+                .as_str()
+                .is_some_and(|marker| marker.starts_with("[selection-glyph] Commit: "))
+        );
+        assert_eq!(
+            stage["effective_request"]["bundle_path"],
+            root.to_string_lossy().as_ref()
+        );
+        if stage["command"] != "save" {
+            assert!(
+                stage["effective_request"]["expected_revision"]
+                    .as_str()
+                    .is_some_and(|revision| !revision.is_empty())
+            );
+        }
+    }
+    assert!(
+        stages
+            .windows(2)
+            .all(|window| window[0]["revision"] != window[1]["revision"])
+    );
     assert_eq!(
         stages
             .iter()

@@ -12,7 +12,8 @@ use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
-    InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
+    InteractiveTerminal, LaunchError, TerminalInput, TuiSession, decode_terminal_input, launch,
+    launch_command,
 };
 use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment, parse_ack};
 
@@ -1539,6 +1540,40 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
     assert!(bundle.log.entries()[..18].iter().all(|entry| {
         entry.brep_path.is_some() && entry.brep_sha256.is_some() && entry.intent.is_some()
     }));
+    let expected_commands = recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .take(18)
+        .map(|step| {
+            step["command"]
+                .as_str()
+                .expect("recipe command is a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bundle.log.entries()[..18]
+            .iter()
+            .map(|entry| entry
+                .intent
+                .as_ref()
+                .expect("geometry entry retains intent")
+                .command())
+            .collect::<Vec<_>>(),
+        expected_commands
+    );
+    assert!(bundle.log.entries()[..18].windows(2).all(|entries| {
+        entries[0]
+            .intent
+            .as_ref()
+            .expect("geometry entry retains intent")
+            .source_revision()
+            != entries[1]
+                .intent
+                .as_ref()
+                .expect("geometry entry retains intent")
+                .source_revision()
+    }));
     assert!(
         bundle.log.entries()[..18]
             .windows(2)
@@ -1630,7 +1665,8 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
     }));
 
     fs::remove_dir_all(root.join("brep")).expect("derived BREPs remove");
-    let replayed = Host::new()
+    let replay_host = Host::new();
+    let replayed = replay_host
         .load_with_geometry_replay(&root)
         .expect("reinforcement geometry replay succeeds");
     assert_eq!(replayed.revision_hash, identity.revision_hash);
@@ -1647,11 +1683,33 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
         );
     }
     assert!(
-        host.presentation_viewport_scene()
-            .expect("final viewport scene reads")
+        replay_host
+            .presentation_viewport_scene()
+            .expect("replayed viewport scene reads")
             .solids
             .iter()
             .any(|solid| solid.feature_id == "reinforced-foundation")
+    );
+    let replayed_bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("replayed bundle opens read-only");
+    let mut replay_selector =
+        TuiSession::from_feature_graph(&replayed_bundle.graph, replayed.revision_hash.clone());
+    let mut selected_final = false;
+    for _ in 0..=replayed_bundle.graph.features().count() * 2 {
+        if replay_selector.state().selected_target.as_deref() == Some("reinforced-foundation") {
+            selected_final = true;
+            break;
+        }
+        replay_selector
+            .process_terminal_input(b"\x1b[B")
+            .expect("replayed feature selection advances");
+    }
+    assert!(selected_final, "replayed final feature remains selectable");
+    assert!(
+        replayed_bundle
+            .graph
+            .contains_feature("reinforced-foundation")
     );
     let _ = fs::remove_dir_all(root);
 }

@@ -312,7 +312,6 @@ fn verifier_accepts_the_checked_in_production_stl_artifact() {
 }
 
 #[test]
-#[ignore = "native: requires the pinned real OCCT worker"]
 fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
     let Some(_worker) = threeterm_occt_worker::OcctWorker::locate().ok() else {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {

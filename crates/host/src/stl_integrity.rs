@@ -10,7 +10,30 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-const GEOMETRIC_EPSILON: f64 = 1.0e-10;
+/// Tolerance used only for robust containment/intersection predicates. Vertex
+/// identity, facet area, and signed volume remain exact decoded values.
+pub const GEOMETRIC_EPSILON: f64 = 1.0e-10;
+pub const MODEL_UNITS_POLICY: &str = "caller-declared source units; STL carries no unit metadata";
+pub const COORDINATE_IDENTITY_POLICY: &str =
+    "exact decoded STL coordinates with canonicalized negative zero; no welding";
+
+/// Explicit policy recorded with every successful verification report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StlIntegrityPolicy {
+    pub model_units: &'static str,
+    pub coordinate_identity: &'static str,
+    pub geometric_epsilon: f64,
+    pub area_squared_threshold: f64,
+    pub signed_volume_threshold: f64,
+}
+
+pub const VALIDATION_POLICY: StlIntegrityPolicy = StlIntegrityPolicy {
+    model_units: MODEL_UNITS_POLICY,
+    coordinate_identity: COORDINATE_IDENTITY_POLICY,
+    geometric_epsilon: GEOMETRIC_EPSILON,
+    area_squared_threshold: 0.0,
+    signed_volume_threshold: 0.0,
+};
 
 /// STL encoding selected by the strict parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +121,7 @@ pub struct IntegrityLocation {
 /// Summary of a verified STL mesh.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StlIntegrityReport {
+    pub policy: StlIntegrityPolicy,
     pub format: StlFormat,
     pub triangle_count: usize,
     pub unique_vertex_count: usize,
@@ -622,6 +646,7 @@ fn verify_mesh(parsed: ParsedStl) -> Result<StlIntegrityReport, StlIntegrityErro
         ));
     }
     Ok(StlIntegrityReport {
+        policy: VALIDATION_POLICY,
         format: parsed.format,
         triangle_count: triangles.len(),
         unique_vertex_count: vertices.len(),

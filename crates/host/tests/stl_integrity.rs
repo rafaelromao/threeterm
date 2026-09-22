@@ -305,72 +305,77 @@ fn verifier_accepts_the_checked_in_production_stl_artifact() {
     assert!(report.triangle_count > 0);
     assert_eq!(report.shell_count, 1);
     assert!(report.material_volume > 0.0);
+    assert_eq!(
+        report.policy,
+        threeterm_host::stl_integrity::VALIDATION_POLICY
+    );
 }
 
 #[test]
+#[ignore = "native: requires the pinned real OCCT worker"]
 fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
-    let checked_in_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
-    let (production_path, cleanup_root) = if threeterm_occt_worker::OcctWorker::locate().is_ok() {
-        let parent = root("oracle");
-        let bundle = parent.join("project");
-        let output = parent.join("export");
-        let host = Host::new();
-        command_response(
-            &host,
-            NEW_PROJECT_COMMAND_ID,
-            json!({"destination": bundle.to_string_lossy()}),
-        );
-        command_response(
-            &host,
-            BRACKET_COMMAND_ID,
-            json!({
-                "bundle_path": bundle.to_string_lossy(),
-                "bracket_id": "l-bracket",
-                "length": 60.0,
-                "width": 30.0,
-                "height": 40.0,
-                "thickness": 3.0,
-            }),
-        );
-        let reopened = Host::new();
-        command_response(
-            &reopened,
-            LOAD_COMMAND_ID,
-            json!({"bundle_path": bundle.to_string_lossy()}),
-        );
-        command_response(
-            &reopened,
-            VALIDATE_COMMAND_ID,
-            json!({
-                "bundle_path": bundle.to_string_lossy(),
-                "feature_id": "l-bracket",
-            }),
-        );
-        command_response(
-            &reopened,
-            EXPORT_COMMAND_ID,
-            export_request(&bundle, &output),
-        );
-        (output.join("l-bracket.stl"), Some(parent))
-    } else {
+    let Some(_worker) = threeterm_occt_worker::OcctWorker::locate().ok() else {
         if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() {
             panic!("STL integrity oracle requires the OCCT worker");
         }
-        eprintln!(
-            "stl_integrity: OCCT unavailable; verifying the checked-in production export and controls"
-        );
-        (checked_in_path.clone(), None)
+        eprintln!("stl_integrity: no OCCT worker binary found; native oracle skipped");
+        return;
     };
+    let parent = root("oracle");
+    let bundle = parent.join("project");
+    let output = parent.join("export");
+    let host = Host::new();
+    command_response(
+        &host,
+        NEW_PROJECT_COMMAND_ID,
+        json!({"destination": bundle.to_string_lossy()}),
+    );
+    command_response(
+        &host,
+        BRACKET_COMMAND_ID,
+        json!({
+            "bundle_path": bundle.to_string_lossy(),
+            "bracket_id": "l-bracket",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0,
+        }),
+    );
 
-    let before = fs::read(&production_path).expect("production STL reads");
-    let report = threeterm_host::stl_integrity::verify_path(&production_path)
+    let reopened = Host::new();
+    command_response(
+        &reopened,
+        LOAD_COMMAND_ID,
+        json!({"bundle_path": bundle.to_string_lossy()}),
+    );
+    command_response(
+        &reopened,
+        VALIDATE_COMMAND_ID,
+        json!({
+            "bundle_path": bundle.to_string_lossy(),
+            "feature_id": "l-bracket",
+        }),
+    );
+    command_response(
+        &reopened,
+        EXPORT_COMMAND_ID,
+        export_request(&bundle, &output),
+    );
+
+    let stl_path = output.join("l-bracket.stl");
+    let before = fs::read(&stl_path).expect("production STL reads");
+    let report = threeterm_host::stl_integrity::verify_path(&stl_path)
         .expect("production STL passes independent integrity oracle");
     assert_eq!(report.format, StlFormat::Ascii);
     assert!(report.triangle_count > 0);
     assert_eq!(report.shell_count, 1);
     assert!(report.material_volume > 0.0);
-    assert_eq!(fs::read(&production_path).expect("STL re-reads"), before);
+    assert_eq!(fs::read(&stl_path).expect("STL re-reads"), before);
+    assert_eq!(
+        report.policy,
+        threeterm_host::stl_integrity::VALIDATION_POLICY
+    );
 
     let empty = verify_bytes(b"").expect_err("empty control must be rejected");
     assert_eq!(empty.reason, IntegrityReason::Empty);
@@ -404,7 +409,5 @@ fn stl_integrity_oracle_accepts_production_export_and_rejects_controls() {
     .expect_err("degenerate control must be rejected");
     assert_eq!(degenerate.reason, IntegrityReason::Degenerate);
 
-    if let Some(root) = cleanup_root {
-        let _ = fs::remove_dir_all(root);
-    }
+    let _ = fs::remove_dir_all(parent);
 }

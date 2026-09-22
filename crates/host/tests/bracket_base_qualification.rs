@@ -601,6 +601,7 @@ fn horizontal_surface_span(
     expected_thickness: f64,
     tolerance: f64,
 ) -> Option<f64> {
+    let probe_radius = (expected_thickness * 0.05).max(tolerance * 4.0);
     let mut levels = Vec::new();
     for facet in &mesh.facets {
         let z_min = facet
@@ -636,7 +637,11 @@ fn horizontal_surface_span(
             .into_iter()
             .map(|vertex| vertex[1])
             .fold(f64::NEG_INFINITY, f64::max);
-        if !(x_min..=x_max).contains(&center[0]) || !(y_min..=y_max).contains(&center[1]) {
+        if x_max < center[0] - probe_radius
+            || x_min > center[0] + probe_radius
+            || y_max < center[1] - probe_radius
+            || y_min > center[1] + probe_radius
+        {
             continue;
         }
         let level = (z_min + z_max) / 2.0;

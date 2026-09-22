@@ -1756,13 +1756,30 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
             json!({"provenance": {"source_feature_id": "pad-b", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
         )
         .expect("chamfer landmarks inspect");
+    let pad_b_seed = worker
+        .inspect_edges(
+            "tui-pad-b-seed-measurement",
+            root.join("brep/pad-b-seed.brep"),
+            "pad-b-seed",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b-seed", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer seed landmarks inspect");
     let pad_b_outer_length: f64 = pad_b
         .edge_candidates
         .iter()
         .filter(|candidate| candidate.role == "outer-perimeter")
         .map(|candidate| candidate.length)
         .sum();
-    assert!((pad_b_outer_length - 48.0).abs() > 0.01);
+    let pad_b_seed_outer_length: f64 = pad_b_seed
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!(pad_b_outer_length > 0.0);
+    assert!(pad_b_seed_outer_length > 0.0);
+    assert!((pad_b_outer_length - pad_b_seed_outer_length).abs() > 0.01);
 
     let final_edges = worker
         .inspect_edges(

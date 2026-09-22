@@ -214,9 +214,13 @@ validate_bracket_viewport_evidence() {
     jq -e --arg expected_feature "$expected_feature" '
         .schema_version == "threeterm.viewport-evidence/1" and
         .acknowledgement == "viewport-presented" and
+        (.frame.frame_token | type == "number" and . > 0) and
         (.frame.image_id | type == "number" and . > 0) and
+        (.frame.generation | type == "number") and
+        .frame.width == 800 and .frame.height == 480 and
         (.frame.revision | type == "string" and length > 0) and
         (.scene.solids | type == "array" and length == 1 and .[0].feature_id == $expected_feature and .[0].triangle_count > 0) and
+        (.scene.triangle_count == (.scene.solids | map(.triangle_count) | add)) and
         (.scene.triangle_count | type == "number" and . > 0) and
         (.scene.body_pixels | type == "number" and . > 0) and
         (.scene.edge_pixels | type == "number" and . > 0) and
@@ -230,7 +234,10 @@ validate_bracket_startup_viewport_evidence() {
     jq -e '
         .schema_version == "threeterm.viewport-evidence/1" and
         .acknowledgement == "viewport-presented" and
+        (.frame.frame_token | type == "number" and . > 0) and
         (.frame.image_id | type == "number" and . > 0) and
+        (.frame.generation | type == "number") and
+        .frame.width == 800 and .frame.height == 480 and
         (.frame.revision | type == "string" and length > 0) and
         (.scene.solids | type == "array" and length == 0) and
         .scene.triangle_count == 0 and
@@ -819,7 +826,7 @@ wait_for_tui_readiness() {
     ocr="$(tesseract "$STARTUP_SCREENSHOT" stdout 2>/dev/null || true)"
     grep -Fq 'Interactive Modeling ready' <<<"$ocr" || die visible_readiness_failed 'readiness marker was not visible in the startup screenshot'
     grep -Fq 'Viewport presented' <<<"$ocr" || die viewport_marker_not_visible 'viewport evidence marker was not visible in the startup screenshot'
-    if [[ "$TEST_ID" != 'production_tui_create_project_extrude' ]]; then
+    if [[ "$TEST_ID" != 'production_tui_create_project_extrude' && "$TEST_ID" != 'production_tui_bracket_foundation' ]]; then
         rendered_viewport_ready "$STARTUP_SCREENSHOT" || die viewport_not_rendered 'startup screenshot does not contain palette-bound rendered geometry'
     fi
     wait_for_probe_stimulus
@@ -1159,11 +1166,13 @@ bracket_step() {
     local screenshot ocr image_id revision marker screenshot_sha
     local before_preview_count before_commit_count
     local preview_response commit_response commit_revision
+    local input_start_offset input_end_offset input_sha256
     local -a marker_lines
     bracket_step_index=$((bracket_step_index + 1))
     screenshot="${BRACKET_STEPS_DIR}/$(printf '%02d' "$bracket_step_index")-${step_id}.png"
     before_preview_count="$(grep -aFc "[dashed-outline] Preview: ${command}" "$PTY_OUTPUT" 2>/dev/null || true)"
     before_commit_count="$(grep -aFc "[selection-glyph] Commit: ${command}" "$PTY_OUTPUT" 2>/dev/null || true)"
+    input_start_offset="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
     wtype -M ctrl -k p -m ctrl || die input_injection_failed "could not open the palette for ${step_id}"
     wtype "$command" || die input_injection_failed "could not type ${command} for ${step_id}"
     wtype -k Return || die input_injection_failed "could not select ${command} for ${step_id}"
@@ -1194,6 +1203,10 @@ bracket_step() {
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     [[ "$commit_revision" == "$revision" ]] ||
         die "${step_id}_revision_mismatch" "commit acknowledgement revision ${commit_revision} differs from viewport revision ${revision}"
+    input_end_offset="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
+    ((input_end_offset > input_start_offset)) ||
+        die "${step_id}_keyboard_input_missing" "no scoped keyboard input was recorded for ${step_id}"
+    input_sha256="$(sha256sum "$PTY_INPUT" | cut -d' ' -f1)"
     screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
@@ -1204,12 +1217,16 @@ bracket_step() {
         --arg preview_response "$preview_response" \
         --arg commit_response "$commit_response" \
         --arg commit_revision "$commit_revision" \
+        --arg pty_log "$PTY_INPUT" \
+        --argjson input_start_offset "$input_start_offset" \
+        --argjson input_end_offset "$input_end_offset" \
+        --arg input_sha256 "$input_sha256" \
         --arg marker "$marker" \
         --arg revision "$revision" \
         --arg screenshot "$screenshot" \
         --arg screenshot_sha256 "$screenshot_sha" \
         --argjson viewport "$viewport_evidence" \
-        '{schema_version:$schema_version,step:$step,command:$command,feature_id:$feature_id,input:$input,acknowledgement:{preview:$preview_response,commit:$commit_response,marker:$marker},revision:$revision,commit_revision:$commit_revision,frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+        '{schema_version:$schema_version,step:$step,command:$command,feature_id:$feature_id,input:$input,keyboard_input:{pty_log:$pty_log,start_offset:$input_start_offset,end_offset:$input_end_offset,log_sha256:$input_sha256},acknowledgement:{preview:$preview_response,commit:$commit_response,marker:$marker},revision:$revision,commit_revision:$commit_revision,frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
         >>"$BRACKET_TRANSCRIPT"
 }
 
@@ -1437,7 +1454,7 @@ write_manifest() {
              --arg bracket_steps_dir "$BRACKET_STEPS_DIR" \
              --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end)' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest

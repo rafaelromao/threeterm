@@ -661,6 +661,21 @@ fn production_tui_bracket_foundation() {
                 .is_some_and(|marker| marker.contains("Commit:"))
             && entry["commit_revision"] == entry["revision"]
             && entry["commit_revision"] == entry["viewport_evidence"]["frame"]["revision"]
+            && entry["keyboard_input"]["pty_log"]
+                == evidence.join("pty-input.log").to_string_lossy().as_ref()
+            && entry["keyboard_input"]["start_offset"]
+                .as_u64()
+                .is_some_and(|offset| offset > 0)
+            && entry["keyboard_input"]["end_offset"]
+                .as_u64()
+                .is_some_and(|offset| offset > 0)
+            && entry["keyboard_input"]["end_offset"]
+                .as_u64()
+                .zip(entry["keyboard_input"]["start_offset"].as_u64())
+                .is_some_and(|(end, start)| end > start)
+            && entry["keyboard_input"]["log_sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
             && entry["viewport_evidence"]["frame"]["image_id"]
                 .as_u64()
                 .is_some_and(|image_id| image_id > 0)
@@ -668,10 +683,29 @@ fn production_tui_bracket_foundation() {
                 .as_u64()
                 .is_some_and(|triangles| triangles > 0)
     }));
+    let input_ranges = transcript
+        .lines()
+        .map(|line| {
+            let entry: Value = serde_json::from_str(line).expect("transcript line is JSON");
+            (
+                entry["keyboard_input"]["start_offset"]
+                    .as_u64()
+                    .expect("keyboard input start offset"),
+                entry["keyboard_input"]["end_offset"]
+                    .as_u64()
+                    .expect("keyboard input end offset"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        input_ranges
+            .windows(2)
+            .all(|ranges| ranges[0].1 <= ranges[1].0)
+    );
 
     let bundle = Bundle::at(&root)
-        .open_read_only()
-        .expect("retained bracket project opens read-only");
+        .open()
+        .expect("retained bracket project opens");
     assert_eq!(bundle.log.len(), 11);
     assert_eq!(
         bundle
@@ -687,6 +721,24 @@ fn production_tui_bracket_foundation() {
     );
 
     let revision = bundle.revision_hash_hex().to_string();
+    let baseline_entries = bundle.log.entries().to_vec();
+    let before_read_only = snapshot_tree(&root);
+    let before_scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("retained bracket scene loads before reopen");
+    assert_eq!(snapshot_tree(&root), before_read_only);
+    drop(bundle);
+    let reopened = Bundle::at(&root)
+        .open_read_only()
+        .expect("retained bracket project reopens read-only");
+    assert_eq!(reopened.revision_hash_hex(), revision);
+    assert_eq!(reopened.log.entries(), baseline_entries);
+    let reopened_scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("retained bracket scene loads after reopen");
+    assert_eq!(reopened_scene, before_scene);
+    assert_eq!(snapshot_tree(&root), before_read_only);
+
     let worker = OcctWorker::locate().expect("graphical bracket worker exists");
     let pad_a = worker
         .inspect_edges(
@@ -710,13 +762,30 @@ fn production_tui_bracket_foundation() {
             serde_json::json!({"provenance":{"source_feature_id":"pad-b","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
         )
         .expect("graphical chamfer landmarks inspect");
+    let pad_b_seed = worker
+        .inspect_edges(
+            "graphical-bracket-pad-b-seed-measurement",
+            root.join("brep/pad-b-seed.brep"),
+            "pad-b-seed",
+            &revision,
+            serde_json::json!({"provenance":{"source_feature_id":"pad-b-seed","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
+        )
+        .expect("graphical chamfer seed landmarks inspect");
     let pad_b_outer_length: f64 = pad_b
         .edge_candidates
         .iter()
         .filter(|candidate| candidate.role == "outer-perimeter")
         .map(|candidate| candidate.length)
         .sum();
-    assert!((pad_b_outer_length - 48.0).abs() > 0.01);
+    let pad_b_seed_outer_length: f64 = pad_b_seed
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!(pad_b_outer_length > 0.0);
+    assert!(pad_b_seed_outer_length > 0.0);
+    assert!((pad_b_outer_length - pad_b_seed_outer_length).abs() > 0.01);
 
     let final_edges = worker
         .inspect_edges(
@@ -744,17 +813,12 @@ fn production_tui_bracket_foundation() {
         }));
     }
 
-    let before_read_only = snapshot_tree(&root);
-    let scene = Host::new()
-        .read_only_viewport_scene(&root)
-        .expect("retained bracket scene loads read-only");
-    assert_eq!(scene.solids.len(), 1);
+    assert_eq!(before_scene.solids.len(), 1);
     assert!(
-        scene.solids.iter().any(|solid| {
+        before_scene.solids.iter().any(|solid| {
             solid.feature_id == "bracket-foundation" && !solid.triangles.is_empty()
         })
     );
-    assert_eq!(snapshot_tree(&root), before_read_only);
 
     fs::remove_dir_all(root).expect("graphical bracket project removes");
     fs::remove_dir_all(evidence).expect("graphical bracket evidence removes");

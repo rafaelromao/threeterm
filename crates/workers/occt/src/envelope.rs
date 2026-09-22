@@ -14,6 +14,9 @@ use threeterm_protocol::artifact::Layer1ArtifactRequest;
 /// Pinned worker schema. The host refuses envelopes that do not match
 /// this string.
 pub const SCHEMA_VERSION: &str = "threeterm.workers.occt/1";
+/// OCCT angular deflection is expressed in radians. ThreeTerm's canonical
+/// model coordinates and linear tessellation deflection are millimetres.
+pub const DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS: f64 = 0.5;
 
 fn is_schema_version(value: &str) -> bool {
     value == SCHEMA_VERSION
@@ -369,7 +372,10 @@ pub struct ExportRequest {
     pub output_dir: PathBuf,
     pub output_filename: String,
     pub feature_id: String,
+    /// Absolute chordal deflection in ThreeTerm's millimetre model units.
     pub tessellation_deflection: f64,
+    /// Angular deflection passed explicitly to OCCT, in radians.
+    pub tessellation_angular_deflection_radians: f64,
 }
 impl ExportRequest {
     pub fn new(
@@ -386,6 +392,8 @@ impl ExportRequest {
             output_filename: String::new(),
             feature_id: String::new(),
             tessellation_deflection: deflection,
+            tessellation_angular_deflection_radians:
+                DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS,
         }
     }
     pub fn with_output_path(mut self, dir: impl Into<PathBuf>, name: impl Into<String>) -> Self {
@@ -407,6 +415,8 @@ impl ExportRequest {
             || self.output_filename.contains('/')
             || !self.tessellation_deflection.is_finite()
             || self.tessellation_deflection <= 0.0
+            || !self.tessellation_angular_deflection_radians.is_finite()
+            || self.tessellation_angular_deflection_radians <= 0.0
         {
             return Err("invalid export request".to_string());
         }
@@ -425,6 +435,8 @@ pub struct ExportResult {
     pub brep_bytes: usize,
     pub step_path: PathBuf,
     pub feature_id: String,
+    pub tessellation_deflection: f64,
+    pub tessellation_angular_deflection_radians: f64,
 }
 impl ExportResult {
     pub fn is_success(&self) -> bool {
@@ -2913,6 +2925,24 @@ mod tests {
     fn validate_envelope_rejects_missing_identity() {
         let request = ValidateRequest::new("req-1", "/tmp/box-1.brep", "");
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn export_envelope_carries_explicit_millimetre_tessellation_settings() {
+        let request = ExportRequest::new("req-1", "/tmp/box-1.brep", 0.1)
+            .with_output_path("/tmp", "box-1.stl")
+            .with_feature_id("box-1");
+        request.validate().expect("export envelope is valid");
+        let encoded = serde_json::to_value(&request).expect("export envelope serializes");
+        assert_eq!(encoded["tessellation_deflection"], 0.1);
+        assert_eq!(
+            encoded["tessellation_angular_deflection_radians"],
+            DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS
+        );
+
+        let mut invalid = request;
+        invalid.tessellation_angular_deflection_radians = 0.0;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

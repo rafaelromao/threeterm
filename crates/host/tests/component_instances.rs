@@ -286,6 +286,13 @@ fn independent_copy_materializes_its_own_definition_and_geometry() {
         )
         .expect("component geometry exports");
     assert_eq!(exported.artifacts.len(), 2);
+    assert_eq!(exported.validation.feature_id, "copy-instance");
+    assert!(exported.validation.valid);
+    assert_eq!(
+        exported.validation.revision_hash,
+        exported.source_snapshot.revision_hash
+    );
+    assert_eq!(exported.tessellation_angular_deflection_radians, 0.5);
     assert!(rendered_component(&host));
 
     let transaction_log_before_reload =
@@ -303,6 +310,23 @@ fn independent_copy_materializes_its_own_definition_and_geometry() {
         fs::read(root.join("transactions.log")).expect("transaction log rereads"),
         transaction_log_before_reload
     );
+
+    let replay_export_dir = root.join("replay-export");
+    let replayed_export = Host::new()
+        .export(
+            &root,
+            "copy-instance",
+            &["stl".to_string()],
+            &replay_export_dir,
+            0.1,
+            false,
+            false,
+            &[],
+        )
+        .expect("replayed component geometry exports");
+    assert_eq!(replayed_export.artifacts.len(), 1);
+    assert_eq!(replayed_export.validation.feature_id, "copy-instance");
+    assert!(replay_export_dir.join("copy-instance.stl").is_file());
     let _ = fs::remove_dir_all(root);
 }
 

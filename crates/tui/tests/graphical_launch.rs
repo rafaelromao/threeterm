@@ -200,6 +200,166 @@ fn production_tui_ghostty_session() {
 
 #[test]
 #[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_keyboard_navigation() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-graphical-navigation-{}-{suffix}",
+        std::process::id()
+    ));
+    let evidence = std::env::temp_dir().join(format!(
+        "threeterm-graphical-navigation-evidence-{}-{suffix}",
+        std::process::id()
+    ));
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("graphical navigation requires the OCCT worker: {error}"));
+    Host::new()
+        .create_bracket(
+            &root,
+            BracketRequest::new("graphical-navigation", 60.0, 30.0, 40.0, 3.0)
+                .with_feature_id("l-bracket"),
+            &worker,
+        )
+        .expect("the graphical navigation starts from a real L-bracket Project Generation");
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_keyboard_navigation")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical navigation runner starts");
+    assert!(
+        output.status.success(),
+        "graphical navigation runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("graphical navigation manifest exists"),
+    )
+    .expect("graphical navigation manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.keyboard-navigation/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["test"], "production_tui_keyboard_navigation");
+    assert_eq!(manifest["events"]["probe"], "passed");
+    assert_eq!(manifest["events"]["readiness"], "passed");
+    assert_eq!(manifest["events"]["navigation"], "passed");
+    assert_eq!(manifest["events"]["cleanup"], "passed");
+    assert_eq!(manifest["configuration"]["locale"], "C.UTF-8");
+    assert_eq!(manifest["configuration"]["palette"], "catppuccin");
+    assert_eq!(manifest["configuration"]["compositor"]["width"], 800);
+    assert_eq!(manifest["configuration"]["compositor"]["height"], 600);
+    assert_eq!(manifest["configuration"]["terminal"]["columns"], 80);
+    assert_eq!(manifest["configuration"]["terminal"]["rows"], 24);
+
+    let selection = &manifest["viewport"]["selection"];
+    assert_eq!(selection["selected_feature_id"], "l-bracket");
+    assert_eq!(selection["camera"]["yaw_degrees"], 0);
+    assert_eq!(selection["camera"]["pitch_degrees"], 25);
+    assert_eq!(selection["camera"]["zoom_percent"], 100);
+    assert_eq!(selection["camera"]["pan_x"], 0);
+    assert_eq!(selection["camera"]["pan_y"], 0);
+    assert_eq!(manifest["viewport"]["orbit"]["camera"]["yaw_degrees"], 5);
+    assert_eq!(manifest["viewport"]["pan"]["camera"]["pan_y"], -5);
+    assert_eq!(manifest["viewport"]["zoom"]["camera"]["zoom_percent"], 105);
+    for viewport_name in ["selection", "orbit", "pan", "zoom"] {
+        let viewport = &manifest["viewport"][viewport_name];
+        assert!(viewport["scene"]["body_pixels"].as_u64().unwrap_or(0) > 0);
+        assert!(viewport["frame"]["image_id"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(viewport["palette"]["name"], "catppuccin");
+    }
+    assert_eq!(
+        manifest["navigation"]["project_generation_digest_before"],
+        manifest["navigation"]["project_generation_digest_after"]
+    );
+    let startup_revision = manifest["viewport"]["startup"]["frame"]["revision"].clone();
+    for viewport_name in ["selection", "orbit", "pan", "zoom"] {
+        assert_eq!(
+            manifest["viewport"][viewport_name]["frame"]["revision"], startup_revision,
+            "{viewport_name} must remain bound to the saved project revision"
+        );
+    }
+    assert_eq!(
+        manifest["cleanup_evidence"]["final_image_id"],
+        manifest["cleanup_evidence"]["final_delete_image_id"]
+    );
+    for kind in [
+        "pty_output",
+        "pty_input",
+        "navigation_transcript",
+        "startup_viewport_crop",
+        "selection_screenshot",
+        "orbit_screenshot",
+        "pan_screenshot",
+        "zoom_screenshot",
+        "selection_viewport_crop",
+        "orbit_viewport_crop",
+        "pan_viewport_crop",
+        "zoom_viewport_crop",
+        "cleanup_screenshot",
+    ] {
+        assert!(
+            manifest["artifacts"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|item| item["kind"] == kind && item["sha256"].as_str().is_some())),
+            "navigation evidence is missing artifact {kind}"
+        );
+    }
+    let transcript = fs::read_to_string(evidence.join("navigation-transcript.jsonl"))
+        .expect("navigation transcript exists");
+    let transcript_actions = transcript
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect("navigation transcript line is JSON")
+        })
+        .map(|entry| {
+            entry["action"]
+                .as_str()
+                .expect("navigation transcript action is a string")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transcript_actions,
+        vec!["selection", "orbit", "pan", "zoom"]
+    );
+    let pty_output =
+        fs::read_to_string(evidence.join("pty-output.log")).expect("PTY output exists");
+    for marker in [
+        "selected feature l-bracket",
+        "Orbit right",
+        "Pan up",
+        "Zoom in",
+    ] {
+        assert!(
+            pty_output.contains(marker),
+            "PTY output is missing {marker}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("graphical navigation project root removes");
+    eprintln!(
+        "retained graphical navigation evidence: {}",
+        evidence.display()
+    );
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
 fn production_tui_create_project_extrude() {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

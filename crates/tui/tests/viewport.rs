@@ -489,6 +489,70 @@ fn host_backed_tui_submits_arrows_as_newest_camera_frames() {
 }
 
 #[test]
+fn acknowledged_viewport_evidence_keeps_selection_bound_to_its_frame() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("first feature is persisted");
+    host.save(&root, "feature-b", "fillet")
+        .expect("second feature is persisted");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed viewport accepts the renderer");
+
+    let initial = session
+        .render_current()
+        .expect("initial frame submits")
+        .started
+        .expect("initial frame starts");
+    session
+        .acknowledge(FrameAcknowledgement::from(&initial))
+        .expect("initial frame acknowledges");
+
+    let first = session
+        .process_terminal_input(b"\x1b[B")
+        .expect("first arrow selects the first feature")
+        .submission
+        .started
+        .expect("first selection frame starts");
+    let _second = session
+        .process_terminal_input(b"\x1b[C")
+        .expect("second arrow selects the next feature")
+        .submission
+        .queued
+        .expect("second selection frame queues");
+
+    let first_ack = session
+        .acknowledge(FrameAcknowledgement::from(&first))
+        .expect("first selection frame acknowledges");
+    let first_evidence = session
+        .presentation_evidence()
+        .expect("first selection evidence is visible");
+    assert_eq!(
+        first_evidence.selected_feature_id.as_deref(),
+        Some("feature-a")
+    );
+    assert_eq!(first_evidence.camera.pitch_degrees, 25);
+
+    let second = first_ack
+        .started
+        .expect("queued selection frame starts after the first acknowledgement");
+    session
+        .acknowledge(FrameAcknowledgement::from(&second))
+        .expect("second selection frame acknowledges");
+    let second_evidence = session
+        .presentation_evidence()
+        .expect("second selection evidence is visible");
+    assert_eq!(
+        second_evidence.selected_feature_id.as_deref(),
+        Some("feature-b")
+    );
+    assert_eq!(second_evidence.camera.yaw_degrees, 5);
+
+    std::fs::remove_dir_all(root).expect("test bundle is removed");
+}
+
+#[test]
 fn production_viewport_renders_a_committed_loft_tessellation() {
     let Ok(worker) = OcctWorker::locate() else {
         eprintln!(

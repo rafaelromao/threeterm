@@ -30,6 +30,7 @@ struct ScriptedTerminal {
     eof_after_events: bool,
     read_fails_after_events: bool,
     panic_after_events: bool,
+    skip_probe_replay: bool,
     fail_writes_on_read: Option<usize>,
     write_failures_remaining: usize,
     prepare_calls: usize,
@@ -109,7 +110,7 @@ fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
 impl InteractiveTerminal for ScriptedTerminal {
     fn replay_probe_input(&mut self, bytes: &[u8]) {
         self.replayed_probe_input.extend_from_slice(bytes);
-        if !bytes.is_empty() {
+        if !self.skip_probe_replay && !bytes.is_empty() {
             self.queued_events.push(bytes.to_vec());
         }
     }
@@ -397,6 +398,82 @@ fn production_launch_binds_orbit_evidence_to_the_new_acknowledged_frame() {
     );
     assert_eq!(orbit["camera"]["yaw_degrees"], 5);
     assert_eq!(orbit["camera"]["pitch_degrees"], 20);
+
+    std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_routes_keyboard_navigation_to_acknowledged_viewport_frames() {
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-navigation-{}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("project is persisted");
+    let before = host.current().expect("canonical state exists");
+    let before_tree = snapshot_tree(&root);
+    let mut terminal = ScriptedTerminal {
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+            b"+".to_vec(),
+            b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+            b"w".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b[C".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b[B".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
+        skip_probe_replay: true,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("keyboard navigation completes the production event loop");
+
+    let output = String::from_utf8_lossy(&terminal.writes);
+    for marker in [
+        "selected feature feature-a",
+        "Orbit right",
+        "Pan up",
+        "Zoom in",
+    ] {
+        assert!(
+            output.contains(marker),
+            "production output is missing {marker}"
+        );
+    }
+    let evidence = output
+        .lines()
+        .filter(|line| line.contains("[viewport-status] Viewport presented "))
+        .map(|line| {
+            serde_json::from_str::<Value>(
+                line.split_once("Viewport presented ")
+                    .expect("viewport marker contains JSON")
+                    .1,
+            )
+            .expect("viewport marker is JSON")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        evidence.len() >= 5,
+        "each navigation frame emits viewport evidence"
+    );
+    let selection = evidence
+        .iter()
+        .find(|evidence| evidence["selected_feature_id"] == "feature-a")
+        .expect("selection evidence binds the selected feature");
+    assert_eq!(selection["camera"]["pitch_degrees"], 25);
+    let final_frame = evidence.last().expect("zoom evidence exists");
+    assert_eq!(final_frame["camera"]["yaw_degrees"], 5);
+    assert_eq!(final_frame["camera"]["pitch_degrees"], 25);
+    assert_eq!(final_frame["camera"]["pan_y"], -5);
+    assert_eq!(final_frame["camera"]["zoom_percent"], 105);
+    assert_eq!(final_frame["selected_feature_id"], "feature-a");
+    assert_eq!(host.current(), Some(before));
+    assert_eq!(snapshot_tree(&root), before_tree);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }

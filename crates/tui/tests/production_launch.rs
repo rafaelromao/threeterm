@@ -645,6 +645,8 @@ fn production_launch_saves_reopens_loads_validates_and_exports_through_keyboard_
             &worker,
         )
         .expect("finished L-bracket project persists");
+    let l_bracket_brep = root.join("brep/l-bracket.brep");
+    let initial_l_bracket_brep = fs::read(&l_bracket_brep).expect("initial L-bracket BREP reads");
 
     let append_text = |events: &mut Vec<Vec<u8>>, text: &[u8]| {
         events.extend(text.iter().map(|byte| vec![*byte]));
@@ -692,6 +694,11 @@ fn production_launch_saves_reopens_loads_validates_and_exports_through_keyboard_
     let saved = Bundle::at(&root).open().expect("saved project reopens");
     assert!(saved.graph.contains_feature("l-bracket"));
     assert!(saved.graph.contains_feature("lifecycle-save-marker"));
+    assert_eq!(
+        fs::read(&l_bracket_brep).expect("saved L-bracket BREP reads"),
+        initial_l_bracket_brep,
+        "keyboard save preserves the finished L-bracket BREP"
+    );
     assert!(String::from_utf8_lossy(&first_terminal.writes).contains("Save completed"));
 
     let mut second_events = vec![
@@ -734,6 +741,11 @@ fn production_launch_saves_reopens_loads_validates_and_exports_through_keyboard_
         .expect("reopened identity reads");
     assert_eq!(loaded.feature_graph_hash, saved.feature_graph_hash_hex());
     assert_eq!(loaded.revision_hash, saved.revision_hash_hex());
+    assert_eq!(
+        fs::read(&l_bracket_brep).expect("reloaded L-bracket BREP reads"),
+        initial_l_bracket_brep,
+        "keyboard relaunch and load preserve the finished L-bracket BREP"
+    );
     let output_text = String::from_utf8_lossy(&second_terminal.writes);
     assert!(output_text.contains("Load completed"));
     assert!(output_text.contains("[validation-status] Validation passed"));

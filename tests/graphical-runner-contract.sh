@@ -152,6 +152,10 @@ for lifecycle_required in \
     'export_destination_exists' \
     'project_fixture_missing' \
     'stl_integrity_preflight_failed' \
+    'evidence_root_cleanup_failed' \
+    'LIFECYCLE_REVISION' \
+    'threeterm-stl-integrity' \
+    'timeout --kill-after=5s' \
     'tui-export/l-bracket.stl' \
     'threeterm_host::stl_integrity::verify_path' \
     '--append'; do

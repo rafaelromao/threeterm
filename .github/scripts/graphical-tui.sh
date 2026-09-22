@@ -51,6 +51,7 @@ VALIDATION_SCREENSHOT=''
 EXPORT_SCREENSHOT=''
 STL_PATH=''
 STL_INTEGRITY_EVIDENCE=''
+LIFECYCLE_REVISION=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
 PROJECT_IDENTITY=''
@@ -289,6 +290,17 @@ mkdir -p "$EVIDENCE_ROOT" || {
     exit 1
 }
 EVIDENCE_ROOT="$(cd "$EVIDENCE_ROOT" && pwd)"
+[[ "$EVIDENCE_ROOT" != '/' ]] || {
+    printf '{"schema_version":"%s","result":"failed","integrity":"unavailable","failure":{"code":"evidence_root_unsafe"}}\n' "$SCHEMA_VERSION" >&2
+    exit 1
+}
+for stale_entry in "$EVIDENCE_ROOT"/* "$EVIDENCE_ROOT"/.[!.]* "$EVIDENCE_ROOT"/..?*; do
+    [[ -e "$stale_entry" || -L "$stale_entry" ]] || continue
+    rm -rf -- "$stale_entry" || {
+        printf '{"schema_version":"%s","result":"failed","integrity":"unavailable","failure":{"code":"evidence_root_cleanup_failed"}}\n' "$SCHEMA_VERSION" >&2
+        exit 1
+    }
+done
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     project_parent=''
     if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
@@ -1128,11 +1140,26 @@ capture_lifecycle_screenshot() {
     ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
     grep -Fq "$marker" <<<"$ocr" || die "${failure_code_name}_marker_not_visible" "lifecycle marker was not visible in the screenshot"
     grep -Fq 'Viewport presented' <<<"$ocr" || die "${failure_code_name}_viewport_marker_not_visible" "viewport evidence was not visible in the lifecycle screenshot"
+    extract_viewport_evidence || die "${failure_code_name}_viewport_evidence_missing" 'lifecycle screenshot had no versioned viewport evidence'
+    validate_viewport_evidence "$viewport_evidence" || die "${failure_code_name}_viewport_invalid" 'lifecycle viewport evidence failed its contract'
+    [[ "$(jq -r '.scene.solids[0].feature_id' <<<"$viewport_evidence")" == "$EXPECTED_FEATURE_ID" ]] ||
+        die "${failure_code_name}_feature_missing" 'lifecycle viewport evidence did not contain the expected L-bracket'
+    rendered_viewport_ready "$screenshot" || die "${failure_code_name}_not_rendered" 'lifecycle screenshot did not contain rendered L-bracket geometry'
+    local revision image_id
+    revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    if [[ -z "$LIFECYCLE_REVISION" ]]; then
+        LIFECYCLE_REVISION="$revision"
+    else
+        [[ "$revision" == "$LIFECYCLE_REVISION" ]] ||
+            die "${failure_code_name}_revision_changed" 'lifecycle viewport revision changed across save/reopen/load'
+    fi
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    evidence_wire_ready "$image_id" || die "${failure_code_name}_viewport_not_acknowledged" 'lifecycle viewport frame was not acknowledged'
 }
 
 run_save_reopen_validate_export() {
     [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]] || return 0
-    [[ ! -e "$STL_PATH" ]] || die export_destination_exists 'STL destination existed before the UI export'
+    [[ ! -e "$STL_PATH" && ! -L "$STL_PATH" ]] || die export_destination_exists 'STL destination existed before the UI export'
 
     local save_request='{"feature_id":"lifecycle-save-marker","kind":"box"}'
     wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the save palette'
@@ -1188,7 +1215,8 @@ run_save_reopen_validate_export() {
     capture_lifecycle_screenshot "$EXPORT_SCREENSHOT" 'Export completed' export
 
     local checker_output sha256
-    if ! checker_output="$(cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
+    if ! checker_output="$(timeout --kill-after=5s "${RUNNER_TIMEOUT_SECONDS}s" \
+        cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
         -p threeterm-host --bin threeterm-stl-integrity -- "$STL_PATH")"; then
         die stl_integrity_preflight_failed 'shared STL integrity checker rejected the exported STL'
     fi

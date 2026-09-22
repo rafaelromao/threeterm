@@ -81,6 +81,8 @@ const LAYER1_CACHE_DIR: &str = "cache";
 const LAYER1_CACHE_RECORD: &str = "layer1.json";
 const LAYER1_CACHE_SCHEMA: &str = "threeterm.host.layer1-cache/1";
 
+pub mod stl_integrity;
+
 struct ThreeMfBody {
     label: String,
     stl: PathBuf,

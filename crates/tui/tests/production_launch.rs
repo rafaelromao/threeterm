@@ -1574,6 +1574,82 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
                 .expect("geometry entry retains intent")
                 .source_revision()
     }));
+    for (step, entry) in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .skip(12)
+        .take(6)
+        .zip(bundle.log.entries()[12..18].iter())
+    {
+        let intent = entry
+            .intent
+            .as_ref()
+            .expect("recipe geometry entry retains intent");
+        let canonical = serde_json::to_value(intent).expect("canonical intent serializes");
+        let request = &step["request"];
+        assert_eq!(
+            canonical["affected_semantic_ids"],
+            json!([step["feature_id"].clone()])
+        );
+        match step["command"]
+            .as_str()
+            .expect("recipe command is a string")
+        {
+            "revolve" => {
+                assert_eq!(
+                    canonical["deterministic_inputs"]["profile"],
+                    request["profile"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["axis_point"],
+                    request["axis_point"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["axis_direction"],
+                    request["axis_direction"]
+                );
+                assert_eq!(canonical["deterministic_inputs"]["angle"], request["angle"]);
+            }
+            "extrude" => {
+                assert_eq!(
+                    canonical["deterministic_inputs"]["profile"],
+                    request["profile"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["height"],
+                    request["height"]
+                );
+                assert_eq!(canonical["mode"], request["mode"]);
+            }
+            "shell" => {
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["thickness"], request["thickness"]);
+            }
+            "hole" => {
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["hole_kind"], request["hole_kind"]);
+                assert_eq!(
+                    canonical["deterministic_inputs"]["position"],
+                    request["position"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["direction"],
+                    request["direction"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["diameter"],
+                    request["diameter"]
+                );
+            }
+            "boolean-fuse" => {
+                assert_eq!(canonical["operation"], "fuse");
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["tool_feature_id"], request["tool_feature_id"]);
+            }
+            command => panic!("unexpected frozen recipe command: {command}"),
+        }
+    }
     assert!(
         bundle.log.entries()[..18]
             .windows(2)

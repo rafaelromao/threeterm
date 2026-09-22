@@ -1126,7 +1126,7 @@ capture_reinforcement_stage() {
          --arg screenshot "$screenshot" \
          --arg screenshot_sha256 "$screenshot_sha" \
          --argjson viewport "$viewport_evidence" \
-         '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,effective_request:($effective_request|fromjson),acknowledgement:{preview_marker:("[dashed-outline] Preview: " + $command),commit_marker:$marker},response:{revision:$viewport.frame.revision},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+         '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,effective_request:($effective_request|fromjson),acknowledgement:{preview_marker:("[dashed-outline] Preview: " + $command),commit_marker:$marker},response:{revision:$viewport.frame.revision},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256,frame_image_id:$viewport.frame.image_id}}' \
          >>"$WORKFLOW_TRANSCRIPT"
     workflow_source_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
     if [[ "$stage" == final ]]; then
@@ -1168,11 +1168,7 @@ run_reinforcement_command() {
     local commit_count="$6"
     local viewport_feature="$7"
     local effective_request
-    if [[ "$command_name" == save ]]; then
-        effective_request="$(jq -c --arg bundle_path "$PROJECT_ROOT" '. + {bundle_path:$bundle_path}' <<<"$request")"
-    else
-        effective_request="$(jq -c --arg bundle_path "$PROJECT_ROOT" --arg expected_revision "$workflow_source_revision" '. + {bundle_path:$bundle_path,expected_revision:$expected_revision}' <<<"$request")"
-    fi
+    effective_request="$(jq -c --arg bundle_path "$PROJECT_ROOT" --arg expected_revision "$workflow_source_revision" '. + {bundle_path:$bundle_path,expected_revision:$expected_revision}' <<<"$request")"
     wtype -M ctrl -k p -m ctrl || die input_injection_failed "compositor keyboard input could not open the ${command_name} palette"
     wtype "$command_name" || die input_injection_failed "compositor keyboard input could not type ${command_name}"
     wtype -k Return || die input_injection_failed "compositor keyboard input could not select ${command_name}"

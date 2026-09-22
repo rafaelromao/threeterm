@@ -722,19 +722,38 @@ fn production_tui_reinforcement() {
             stage["effective_request"]["bundle_path"],
             root.to_string_lossy().as_ref()
         );
-        if stage["command"] != "save" {
-            assert!(
-                stage["effective_request"]["expected_revision"]
-                    .as_str()
-                    .is_some_and(|revision| !revision.is_empty())
+        assert!(
+            stage["effective_request"]["expected_revision"]
+                .as_str()
+                .is_some_and(|revision| !revision.is_empty())
+        );
+        let expected_viewport_feature = if stage["feature_id"] == "reinforcement-snapshot" {
+            "reinforced-foundation"
+        } else {
+            stage["feature_id"]
+                .as_str()
+                .expect("stage feature ID is a string")
+        };
+        assert_eq!(
+            stage["viewport_evidence"]["scene"]["solids"][0]["feature_id"],
+            expected_viewport_feature
+        );
+        if stage["screenshot"].is_object() {
+            assert_eq!(
+                stage["screenshot"]["frame_image_id"],
+                stage["viewport_evidence"]["frame"]["image_id"]
             );
         }
     }
-    assert!(
-        stages
-            .windows(2)
-            .all(|window| window[0]["revision"] != window[1]["revision"])
+    assert_eq!(
+        stages[0]["effective_request"]["expected_revision"],
+        manifest["viewport"]["startup"]["frame"]["revision"]
     );
+    assert!(stages.windows(2).all(|window| {
+        window[0]["revision"] != window[1]["revision"]
+            && window[1]["effective_request"]["expected_revision"]
+                == window[0]["response"]["revision"]
+    }));
     assert_eq!(
         stages
             .iter()

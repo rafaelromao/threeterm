@@ -37,7 +37,7 @@ fn registry_hash_is_a_64_char_lowercase_hex_sha256() {
 fn registry_hash_matches_the_published_constant() {
     assert_eq!(
         registry_hash(),
-        "a3ad0afa93e254f862b8fedd7ca5b8577928c98e14106356edf30a4eeab34773",
+        "ea0df71c477f87d3bd75eb520084f0bb5e333a3b17b53eccf08b07bdc710d4b3",
         "registry_hash drifted from the published constant. If the registry \
          changed intentionally, update the constant in this test and rerun."
     );
@@ -87,7 +87,7 @@ fn registry_contains_versioned_save_and_load_contracts() {
     );
     assert_eq!(
         save.request_schema["required"],
-        serde_json::json!(["bundle_path", "feature_id", "kind"])
+        serde_json::json!(["bundle_path", "feature_id", "kind", "expected_revision"])
     );
     assert_eq!(
         save.request_schema["properties"]["expected_revision"],

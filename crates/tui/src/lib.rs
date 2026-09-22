@@ -3841,12 +3841,16 @@ impl<R: Renderer> TuiViewportSession<R> {
                 if !matches!(
                     command,
                     NEW_PROJECT_COMMAND_ID
+                        | threeterm_protocol::schema::SAVE_COMMAND_ID
                         | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::REVOLVE_COMMAND_ID
+                        | threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID
                         | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID
                         | threeterm_protocol::schema::SHELL_COMMAND_ID
+                        | threeterm_protocol::schema::HOLE_COMMAND_ID
                         | threeterm_protocol::schema::DRAFT_COMMAND_ID
                         | threeterm_protocol::schema::LOFT_COMMAND_ID
                 ) {

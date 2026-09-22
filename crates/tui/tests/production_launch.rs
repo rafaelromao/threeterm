@@ -1315,6 +1315,72 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
 }
 
 #[test]
+fn production_launch_drives_one_revolve_draft_through_preview_and_commit() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive revolve command requires OCCT worker: {error}")
+        }
+        Err(error) => {
+            eprintln!("interactive revolve command: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-revolve-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+
+    let request = br#"{"feature_id":"revolved-collar","profile":[[20,28],[22,28],[22,32],[20,32]],"axis_point":[10,0,0],"axis_direction":[0,-1,0],"angle":1.5707963267948966}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"revolve".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.push(b"\x16".to_vec());
+    script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production revolve palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 2);
+    assert!(root.join("brep/revolved-collar.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("command committed"));
+    assert!(output.contains("[selection-glyph]"));
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("committed bundle opens read-only");
+    assert!(matches!(
+        bundle
+            .log
+            .entries()
+            .last()
+            .and_then(|entry| entry.intent.as_ref()),
+        Some(CanonicalIntent::Revolve(_))
+    ));
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 #[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_cancels_typed_extrusion_without_mutation() {
     OcctWorker::locate().expect("extrusion cancellation requires the OCCT worker");

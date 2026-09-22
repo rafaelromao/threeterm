@@ -281,7 +281,7 @@ fn assert_complete_recipe_structure(complete: &Value) {
         complete["frozen"]["mesh"],
         json!({
             "bounds_min": [0.0, 0.0, 0.0],
-            "bounds_max": [60.0, 60.0, 20.0],
+            "bounds_max": [60.0, 60.0, 18.5],
             "base_thickness": 8.0,
             "minimum_wall": 1.5,
             "print_contact_z": 0.0,

@@ -1,12 +1,17 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeSet;
+use std::f64::consts::TAU;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
+use threeterm_host::stl_integrity::{
+    StlIntegrityReport, StlMeshObservation, observe_path, verify_path,
+};
 use threeterm_occt_worker::{EdgeCandidateEvidence, EdgeInspectionResult, OcctWorker};
 use threeterm_persistence::{Bundle, LoadedBundle};
 use threeterm_protocol::artifact::sha256_hex;
@@ -77,6 +82,23 @@ fn command_response(host: &Host, command_name: &str, request: Value) -> Value {
         );
     }
     response
+}
+
+fn export_request(
+    bundle_path: &Path,
+    feature_id: &str,
+    output_dir: &Path,
+    tessellation_deflection: f64,
+) -> Value {
+    json!({
+        "bundle_path": bundle_path.to_string_lossy(),
+        "feature_id": feature_id,
+        "formats": ["stl"],
+        "output_dir": output_dir.to_string_lossy(),
+        "tessellation_deflection": tessellation_deflection,
+        "override_warnings": false,
+        "accept_stale_geometry": false,
+    })
 }
 
 fn recipe_steps(recipe: &Value) -> &[Value] {
@@ -253,6 +275,19 @@ fn assert_complete_recipe_structure(complete: &Value) {
             "placement_mm": 0.10,
             "angular_rad": 0.000001,
             "volume_fraction": 0.05
+        })
+    );
+    assert_eq!(
+        complete["frozen"]["mesh"],
+        json!({
+            "bounds_min": [0.0, 0.0, 0.0],
+            "bounds_max": [60.0, 60.0, 20.0],
+            "base_thickness": 8.0,
+            "minimum_wall": 1.5,
+            "print_contact_z": 0.0,
+            "minimum_contact_area": 1000.0,
+            "probe_clearance": 0.1,
+            "export_deflection": 0.02
         })
     );
     assert_eq!(
@@ -457,6 +492,500 @@ fn number(value: &Value, field: &str) -> f64 {
     value[field]
         .as_f64()
         .unwrap_or_else(|| panic!("recipe field {field} is a number"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeshGeometryFailure {
+    landmark: &'static str,
+    detail: String,
+}
+
+impl fmt::Display for MeshGeometryFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.landmark, self.detail)
+    }
+}
+
+fn mesh_failure(landmark: &'static str, detail: impl Into<String>) -> MeshGeometryFailure {
+    MeshGeometryFailure {
+        landmark,
+        detail: detail.into(),
+    }
+}
+
+fn require_mesh(
+    condition: bool,
+    landmark: &'static str,
+    detail: impl Into<String>,
+) -> Result<(), MeshGeometryFailure> {
+    condition
+        .then_some(())
+        .ok_or_else(|| mesh_failure(landmark, detail))
+}
+
+fn mesh_number(value: &Value, field: &str) -> f64 {
+    value[field]
+        .as_f64()
+        .unwrap_or_else(|| panic!("mesh recipe field {field} is numeric"))
+}
+
+fn mesh_vector3(value: &Value, field: &str) -> [f64; 3] {
+    serde_json::from_value(value[field].clone())
+        .unwrap_or_else(|error| panic!("mesh recipe field {field} is a 3-vector: {error}"))
+}
+
+fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
+    let direction = [0.0, 0.0, 1.0];
+    let mut crossings = 0;
+    for facet in &mesh.facets {
+        let [a, b, c] = facet.vertices;
+        let edge1 = subtract(b, a);
+        let edge2 = subtract(c, a);
+        let pvec = cross(direction, edge2);
+        let determinant = dot(edge1, pvec);
+        if determinant.abs() <= 1e-9 {
+            continue;
+        }
+        let inverse = 1.0 / determinant;
+        let tvec = subtract(point, a);
+        let u = dot(tvec, pvec) * inverse;
+        let qvec = cross(tvec, edge1);
+        let v = dot(direction, qvec) * inverse;
+        let t = dot(edge2, qvec) * inverse;
+        if t > 1e-8 && u > 1e-9 && v > 1e-9 && u + v < 1.0 - 1e-9 {
+            crossings += 1;
+        }
+    }
+    crossings % 2 == 1
+}
+
+fn sampled_span<F>(start: f64, end: f64, step: f64, target: f64, probe: F) -> Option<f64>
+where
+    F: Fn(f64) -> bool,
+{
+    let mut run_start = None;
+    let mut coordinate = start + step / 2.0;
+    while coordinate < end {
+        if probe(coordinate) {
+            run_start.get_or_insert(coordinate);
+        } else if let Some(begin) = run_start.take()
+            && (begin..=coordinate).contains(&target)
+        {
+            return Some(coordinate - begin);
+        }
+        coordinate += step;
+    }
+    run_start.and_then(|begin| (begin..=end).contains(&target).then_some(end - begin))
+}
+
+fn projected_area(facet: [[f64; 3]; 3]) -> f64 {
+    let first = [facet[1][0] - facet[0][0], facet[1][1] - facet[0][1], 0.0];
+    let second = [facet[2][0] - facet[0][0], facet[2][1] - facet[0][1], 0.0];
+    cross(first, second)[2].abs() / 2.0
+}
+
+fn circular_surface_vertices(
+    mesh: &StlMeshObservation,
+    center: [f64; 2],
+    radius: f64,
+    surface_z: f64,
+    tolerance: f64,
+) -> Vec<[f64; 3]> {
+    mesh.facets
+        .iter()
+        .flat_map(|facet| facet.vertices)
+        .filter(|vertex| {
+            let distance =
+                ((vertex[0] - center[0]).powi(2) + (vertex[1] - center[1]).powi(2)).sqrt();
+            (vertex[2] - surface_z).abs() <= tolerance
+                && (distance - radius).abs() <= tolerance * 3.0
+        })
+        .collect()
+}
+
+fn assert_circular_landmark(
+    mesh: &StlMeshObservation,
+    center: [f64; 2],
+    radius: f64,
+    surface_z: f64,
+    tolerance: f64,
+    landmark: &'static str,
+) -> Result<(), MeshGeometryFailure> {
+    let vertices = circular_surface_vertices(mesh, center, radius, surface_z, tolerance);
+    require_mesh(
+        vertices.len() >= 8,
+        landmark,
+        format!(
+            "expected a tessellated circular boundary near ({}, {}, {}) with radius {radius}, found {} vertices",
+            center[0],
+            center[1],
+            surface_z,
+            vertices.len()
+        ),
+    )?;
+    let mean = vertices
+        .iter()
+        .map(|vertex| ((vertex[0] - center[0]).powi(2) + (vertex[1] - center[1]).powi(2)).sqrt())
+        .sum::<f64>()
+        / vertices.len() as f64;
+    require_mesh(
+        (mean - radius).abs() <= tolerance * 2.0,
+        landmark,
+        format!("circular boundary radius {mean:.4} differs from frozen {radius:.4}"),
+    )
+}
+
+fn assert_open_path(
+    mesh: &StlMeshObservation,
+    center: [f64; 2],
+    z_range: [f64; 2],
+    landmark: &'static str,
+) -> Result<(), MeshGeometryFailure> {
+    for fraction in [0.1, 0.5, 0.9] {
+        let z = z_range[0] + (z_range[1] - z_range[0]) * fraction;
+        require_mesh(
+            !point_inside(mesh, [center[0], center[1], z]),
+            landmark,
+            format!(
+                "empty-space probe at ({}, {}, {z}) is occupied",
+                center[0], center[1]
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_region_has_material(
+    mesh: &StlMeshObservation,
+    x: [f64; 2],
+    y: [f64; 2],
+    z: [f64; 2],
+    landmark: &'static str,
+) -> Result<(), MeshGeometryFailure> {
+    let mut found = false;
+    for x_index in 1..=4 {
+        let x_value = x[0] + (x[1] - x[0]) * x_index as f64 / 5.0;
+        for y_index in 1..=4 {
+            let y_value = y[0] + (y[1] - y[0]) * y_index as f64 / 5.0;
+            for z_index in 1..=4 {
+                let z_value = z[0] + (z[1] - z[0]) * z_index as f64 / 5.0;
+                found |= point_inside(mesh, [x_value, y_value, z_value]);
+            }
+        }
+    }
+    require_mesh(
+        found,
+        landmark,
+        "no material probe landed in the frozen region",
+    )
+}
+
+fn assert_bracket_mesh(
+    recipe: &Value,
+    report: &StlIntegrityReport,
+    mesh: &StlMeshObservation,
+) -> Result<(), MeshGeometryFailure> {
+    let frozen = &recipe["frozen"];
+    let mesh_recipe = &frozen["mesh"];
+    let linear_tolerance = mesh_number(&frozen["tolerances"], "linear_mm");
+    let probe_clearance = mesh_number(mesh_recipe, "probe_clearance");
+    let bounds_min = mesh_vector3(mesh_recipe, "bounds_min");
+    let bounds_max = mesh_vector3(mesh_recipe, "bounds_max");
+
+    require_mesh(
+        mesh.bounds_min
+            .into_iter()
+            .zip(bounds_min)
+            .all(|(actual, expected)| (actual - expected).abs() <= linear_tolerance),
+        "envelope",
+        format!(
+            "minimum bounds {:?} do not match frozen {:?}",
+            mesh.bounds_min, bounds_min
+        ),
+    )?;
+    require_mesh(
+        mesh.bounds_max
+            .into_iter()
+            .zip(bounds_max)
+            .all(|(actual, expected)| (actual - expected).abs() <= linear_tolerance),
+        "envelope",
+        format!(
+            "maximum bounds {:?} do not match frozen {:?}",
+            mesh.bounds_max, bounds_max
+        ),
+    )?;
+    require_mesh(
+        report.shell_count.saturating_sub(report.cavity_shell_count) == 1,
+        "material-body",
+        format!("expected one material shell, found report {report:?}"),
+    )?;
+    let volume_band = &frozen["volume_band_mm3"];
+    require_mesh(
+        (mesh_number(volume_band, "minimum")..=mesh_number(volume_band, "maximum"))
+            .contains(&report.material_volume),
+        "volume",
+        format!(
+            "material volume {:.3} is outside frozen band",
+            report.material_volume
+        ),
+    )?;
+
+    let contact_z = mesh_number(mesh_recipe, "print_contact_z");
+    require_mesh(
+        mesh.facets.iter().any(|facet| {
+            facet
+                .vertices
+                .into_iter()
+                .all(|vertex| (vertex[2] - contact_z).abs() <= linear_tolerance)
+        }),
+        "print-contact",
+        "no coplanar underside facets found",
+    )?;
+    let contact_area: f64 = mesh
+        .facets
+        .iter()
+        .filter(|facet| {
+            facet
+                .vertices
+                .into_iter()
+                .all(|vertex| (vertex[2] - contact_z).abs() <= linear_tolerance)
+        })
+        .map(|facet| projected_area(facet.vertices))
+        .sum();
+    require_mesh(
+        contact_area >= mesh_number(mesh_recipe, "minimum_contact_area"),
+        "print-contact",
+        format!("coplanar contact area {contact_area:.3} is too small"),
+    )?;
+
+    let thickness = mesh_number(mesh_recipe, "base_thickness");
+    for (center, label) in [
+        ([15.0, 2.0], "horizontal base thickness"),
+        ([2.0, 30.0], "vertical base thickness"),
+    ] {
+        let measured = sampled_span(0.0, bounds_max[2], 0.05, thickness / 2.0, |z| {
+            point_inside(mesh, [center[0], center[1], z])
+        })
+        .ok_or_else(|| mesh_failure("thickness", format!("{label} has no material section")))?;
+        require_mesh(
+            (measured - thickness).abs() <= linear_tolerance * 3.0,
+            "thickness",
+            format!("{label} measured {measured:.3}, expected {thickness:.3}"),
+        )?;
+    }
+
+    let hole_expectations = [
+        ("bracket-hole-1", [50.0, 10.0], 8.0),
+        ("bracket-foundation", [10.0, 50.0], 8.0),
+    ];
+    let hole_radius = mesh_number(&recipe["expectations"], "hole_diameter") / 2.0;
+    for (feature_id, center, top_z) in hole_expectations {
+        for angle_index in 0..16 {
+            let angle = TAU * angle_index as f64 / 16.0;
+            let inner = [
+                center[0] + (hole_radius - probe_clearance) * angle.cos(),
+                center[1] + (hole_radius - probe_clearance) * angle.sin(),
+                top_z / 2.0,
+            ];
+            let outer = [
+                center[0] + (hole_radius + probe_clearance) * angle.cos(),
+                center[1] + (hole_radius + probe_clearance) * angle.sin(),
+                top_z / 2.0,
+            ];
+            require_mesh(
+                !point_inside(mesh, inner),
+                "mounting-holes",
+                format!("{feature_id} inner probe is occupied at angle {angle}"),
+            )?;
+            require_mesh(
+                point_inside(mesh, outer),
+                "mounting-holes",
+                format!("{feature_id} outer probe is empty at angle {angle}"),
+            )?;
+        }
+        assert_open_path(
+            mesh,
+            center,
+            [probe_clearance, top_z - probe_clearance],
+            "mounting-holes",
+        )?;
+        assert_circular_landmark(
+            mesh,
+            center,
+            hole_radius,
+            contact_z,
+            linear_tolerance,
+            "mounting-holes",
+        )?;
+        assert_circular_landmark(
+            mesh,
+            center,
+            hole_radius,
+            top_z,
+            linear_tolerance,
+            "mounting-holes",
+        )?;
+    }
+
+    let opening_step = step_for_feature(recipe, "hollow-detail-open");
+    let opening_center = {
+        let position = mesh_vector3(&opening_step["request"], "position");
+        [position[0], position[1]]
+    };
+    let opening_radius = mesh_number(&opening_step["request"], "diameter") / 2.0;
+    assert_open_path(
+        mesh,
+        opening_center,
+        [1.5, bounds_max[2] - probe_clearance],
+        "cavity-opening",
+    )?;
+    assert_circular_landmark(
+        mesh,
+        opening_center,
+        opening_radius,
+        bounds_max[2],
+        linear_tolerance,
+        "cavity-opening",
+    )?;
+    let wall = mesh_number(mesh_recipe, "minimum_wall");
+    let shell_seed = step_for_feature(recipe, "hollow-detail-seed");
+    let (outer_min_x, outer_max_x, outer_min_y, outer_max_y) = profile_bounds(recipe, shell_seed);
+    for point in [
+        [outer_min_x + wall / 2.0, opening_center[1], 10.0],
+        [outer_max_x - wall / 2.0, opening_center[1], 10.0],
+        [opening_center[0], outer_min_y + wall / 2.0, 10.0],
+        [opening_center[0], outer_max_y - wall / 2.0, 10.0],
+    ] {
+        require_mesh(
+            point_inside(mesh, point),
+            "cavity-walls",
+            format!("wall probe {point:?} is empty"),
+        )?;
+    }
+    require_mesh(
+        !point_inside(mesh, [opening_center[0], opening_center[1], 10.0]),
+        "cavity-walls",
+        "cavity center probe is occupied",
+    )?;
+
+    for (feature_id, x, y) in [
+        ("revolved-collar", [10.0, 22.0], [28.0, 32.0]),
+        ("mirrored-collar", [28.0, 32.0], [10.0, 22.0]),
+    ] {
+        assert_region_has_material(
+            mesh,
+            x,
+            y,
+            [8.5, bounds_max[2] - probe_clearance],
+            feature_id,
+        )?;
+    }
+
+    let linear_centers = recipe["frozen"]["placements"]["linear_pad_centers"]
+        .as_array()
+        .expect("linear pad centers are an array");
+    for center in linear_centers {
+        let center: [f64; 2] = serde_json::from_value(center.clone()).expect("linear center is 2D");
+        require_mesh(
+            point_inside(mesh, [center[0], center[1], 10.0]),
+            "linear-pattern",
+            format!("linear pad center {center:?} is empty"),
+        )?;
+    }
+    require_mesh(
+        !point_inside(mesh, [8.0, 50.0, 10.0]),
+        "linear-pattern",
+        "unrequested linear-pattern gap is occupied",
+    )?;
+
+    let circular_centers = recipe["frozen"]["placements"]["circular_lug_centers"]
+        .as_array()
+        .expect("circular lug centers are an array");
+    require_mesh(
+        circular_centers.len() == 3,
+        "circular-pattern",
+        "frozen lug count is not three",
+    )?;
+    for center in circular_centers {
+        let center: [f64; 2] =
+            serde_json::from_value(center.clone()).expect("circular center is 2D");
+        require_mesh(
+            point_inside(mesh, [center[0], center[1], 10.0]),
+            "circular-pattern",
+            format!("circular lug center {center:?} is empty"),
+        )?;
+    }
+    require_mesh(
+        !point_inside(mesh, [47.0, 10.0, 10.0]),
+        "circular-pattern",
+        "pattern axis void is occupied",
+    )?;
+
+    let taper_bottom = sampled_span(20.0, 40.0, 0.05, 29.0, |x| {
+        point_inside(mesh, [x, 2.0, 8.5])
+    })
+    .ok_or_else(|| mesh_failure("taper", "no lower tapered section found"))?;
+    let taper_top = sampled_span(20.0, 40.0, 0.05, 29.0, |x| {
+        point_inside(mesh, [x, 2.0, 11.5])
+    })
+    .ok_or_else(|| mesh_failure("taper", "no upper tapered section found"))?;
+    require_mesh(
+        taper_bottom > taper_top + 0.25,
+        "taper",
+        format!("section widths {taper_bottom:.3} and {taper_top:.3} are not distinct"),
+    )?;
+
+    let loft_lower = sampled_span(0.0, 20.0, 0.05, 12.0, |x| {
+        point_inside(mesh, [x, 12.0, 8.5])
+    })
+    .ok_or_else(|| mesh_failure("loft", "no lower loft section found"))?;
+    let loft_upper = sampled_span(0.0, 20.0, 0.05, 12.0, |x| {
+        point_inside(mesh, [x, 12.0, 17.5])
+    })
+    .ok_or_else(|| mesh_failure("loft", "no upper loft section found"))?;
+    let loft_transition = sampled_span(0.0, 20.0, 0.05, 12.0, |x| {
+        point_inside(mesh, [x, 12.0, 13.0])
+    })
+    .ok_or_else(|| mesh_failure("loft", "no loft transition found"))?;
+    require_mesh(
+        loft_lower > loft_upper + 2.0
+            && loft_upper > 2.5
+            && loft_transition > loft_upper
+            && loft_transition < loft_lower,
+        "loft",
+        format!(
+            "sections lower={loft_lower:.3}, transition={loft_transition:.3}, upper={loft_upper:.3} are not distinct"
+        ),
+    )
+}
+
+#[test]
+fn bracket_mesh_oracle_rejects_a_valid_closed_mesh_of_the_wrong_part() {
+    let recipe: Value = serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
+    let report = verify_path(&path).expect("wrong-part control is a valid closed mesh");
+    let mesh = observe_path(&path).expect("wrong-part control observations parse");
+
+    let failure = assert_bracket_mesh(&recipe, &report, &mesh)
+        .expect_err("valid closed mesh of the wrong part must be rejected");
+    assert_eq!(failure.landmark, "envelope");
 }
 
 fn vector3(value: &Value, field: &str) -> [f64; 3] {
@@ -1797,7 +2326,7 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
 
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
-fn bracket_complete_recipe_qualifies_through_public_commands() {
+fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
     let reinforcement: Value =
@@ -2074,4 +2603,79 @@ fn bracket_complete_recipe_qualifies_through_public_commands() {
     .expect("pinned worker reports replayed final material volume");
     let band = &recipe["frozen"]["volume_band_mm3"];
     assert!((number(band, "minimum")..=number(band, "maximum")).contains(&replayed_volume));
+
+    let export_root = workspace.parent.join("complete-export");
+    let stl_path = export_root.join("complete-bracket.stl");
+    assert!(!stl_path.exists(), "complete STL destination starts absent");
+    let delivery_host = Host::new();
+    let loaded = command_response(
+        &delivery_host,
+        "load",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    let validated = command_response(
+        &delivery_host,
+        "validate",
+        json!({
+            "bundle_path": workspace.root.to_string_lossy(),
+            "feature_id": "complete-bracket",
+        }),
+    );
+    assert_eq!(validated["status"], "ok");
+    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["revision_hash"], loaded["revision_hash"]);
+    let exported = command_response(
+        &delivery_host,
+        "export",
+        export_request(
+            &workspace.root,
+            "complete-bracket",
+            &export_root,
+            mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
+        ),
+    );
+    assert_eq!(exported["status"], "ok");
+    assert_eq!(exported["feature_id"], "complete-bracket");
+    assert_eq!(exported["source_revision_id"], validated["revision_hash"]);
+    assert_eq!(exported["artifacts"], json!([stl_path.to_string_lossy()]));
+    let report =
+        verify_path(&stl_path).expect("complete bracket STL passes integrity verification");
+    let mesh = observe_path(&stl_path).expect("complete bracket STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "complete bracket mesh failed landmark {}: {failure}",
+            failure.landmark
+        )
+    });
+
+    let wrong = QualificationWorkspace::new();
+    Host::new()
+        .save_bracket(&wrong.root, "wrong-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("wrong-part control saves through the production host");
+    let wrong_export_root = wrong.parent.join("export");
+    let wrong_host = Host::new();
+    command_response(
+        &wrong_host,
+        "load",
+        json!({"bundle_path": wrong.root.to_string_lossy()}),
+    );
+    command_response(
+        &wrong_host,
+        "validate",
+        json!({
+            "bundle_path": wrong.root.to_string_lossy(),
+            "feature_id": "wrong-bracket",
+        }),
+    );
+    command_response(
+        &wrong_host,
+        "export",
+        export_request(&wrong.root, "wrong-bracket", &wrong_export_root, 0.02),
+    );
+    let wrong_stl = wrong_export_root.join("wrong-bracket.stl");
+    let wrong_report = verify_path(&wrong_stl).expect("wrong-part control is a valid closed mesh");
+    let wrong_mesh = observe_path(&wrong_stl).expect("wrong-part control observations parse");
+    let failure = assert_bracket_mesh(&recipe, &wrong_report, &wrong_mesh)
+        .expect_err("valid closed mesh of the wrong part must be rejected");
+    assert_eq!(failure.landmark, "envelope");
 }

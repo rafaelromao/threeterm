@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_host::stl_integrity::{IntegrityReason, StlFormat, verify_bytes};
+use threeterm_host::stl_integrity::{IntegrityReason, StlFormat, observe_bytes, verify_bytes};
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
     VALIDATE_COMMAND_ID,
@@ -177,6 +177,16 @@ fn verifier_accepts_a_closed_ascii_tetrahedron() {
     assert_eq!(report.shell_count, 1);
     assert_eq!(report.cavity_shell_count, 0);
     assert!(report.material_volume > 0.0);
+}
+
+#[test]
+fn mesh_observation_exposes_decoded_facets_and_bounds_without_repair() {
+    let observation = observe_bytes(&tetrahedron()).expect("tetrahedron observations parse");
+
+    assert_eq!(observation.format, StlFormat::Ascii);
+    assert_eq!(observation.facets.len(), 4);
+    assert_eq!(observation.bounds_min, [0.0, 0.0, 0.0]);
+    assert_eq!(observation.bounds_max, [1.0, 1.0, 1.0]);
 }
 
 #[test]

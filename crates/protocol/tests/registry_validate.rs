@@ -77,6 +77,8 @@ fn validate_response_schema_binds_the_verdict_to_feature_plus_revision() {
             "revision_id": "history-revision-1",
             "feature_graph_hash": "0".repeat(64),
             "revision_hash": "f".repeat(64),
+            "brep_path": "/tmp/project/brep/l-bracket.brep",
+            "brep_sha256": "a".repeat(64),
             "valid": true,
             "schema_version": "threeterm.command.validate.response/1",
         }),

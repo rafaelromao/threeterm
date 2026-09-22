@@ -48,13 +48,14 @@ pub use envelope::{
     BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, EdgeInspectionResult,
-    ExportRequest, ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate,
-    PlanarFaceEvidenceRequest, PlanarFaceEvidenceResult, RevolveRequest, RevolveResult,
-    SCHEMA_VERSION, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
-    TranslateRequest, TranslateResult, ValidateRequest, ValidateResult,
+    CircularPatternResult, DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS, DraftRequest,
+    DraftResult, EdgeCandidateEvidence, EdgeInspectionResult, ExportRequest, ExportResult,
+    ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
+    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    MirrorResult, Operation, PlanarFaceEvidenceCandidate, PlanarFaceEvidenceRequest,
+    PlanarFaceEvidenceResult, RevolveRequest, RevolveResult, SCHEMA_VERSION, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, TranslateResult,
+    ValidateRequest, ValidateResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -941,6 +942,9 @@ impl OcctWorker {
         .into_loft()
     }
     pub fn export(&self, request: &ExportRequest) -> Result<ExportResult, WorkerError> {
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
         let bytes = bounded_serialize(request, "export", &request.request_id)?;
         self.invoke(
             &bytes,
@@ -2004,6 +2008,21 @@ mod tests {
         assert_eq!(value["code"], "request_malformed");
         assert_eq!(value["arg"], "empty profile");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn export_rejects_invalid_tessellation_before_worker_spawn() {
+        let request = ExportRequest::new("req-1", "/tmp/box-1.brep", 0.1)
+            .with_output_path("/tmp", "box-1.stl")
+            .with_feature_id("box-1");
+        let mut invalid = request;
+        invalid.tessellation_angular_deflection_radians = 0.0;
+
+        let error = OcctWorker::with_binary_path(PathBuf::from("/missing/occt-worker"))
+            .export(&invalid)
+            .expect_err("invalid export settings must fail before spawn");
+
+        assert!(matches!(error, WorkerError::Malformed { .. }));
     }
 
     #[test]

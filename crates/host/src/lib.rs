@@ -889,6 +889,13 @@ fn export_response_value(view: &ExportCommitView, schema_version: &str) -> serde
         "feature_id": view.stale_last_valid_geometry_acceptance.feature_id,
         "artifacts": view.artifacts,
         "source_revision_id": view.source_snapshot.revision_hash,
+        "validation": view.validation,
+        "tessellation": {
+            "units": "millimetres",
+            "deflection": view.tessellation_deflection,
+            "relative": false,
+            "angular_deflection_radians": view.tessellation_angular_deflection_radians,
+        },
         "derived_artifacts": view.derived_artifacts,
         "accepted_stale_last_valid_geometry": false,
         "stale_last_valid_geometry": view.stale_last_valid_geometry_acceptance,
@@ -906,6 +913,8 @@ fn validate_response_value(
         "revision_id": view.revision_id,
         "feature_graph_hash": view.feature_graph_hash,
         "revision_hash": view.revision_hash,
+        "brep_path": view.brep_path,
+        "brep_sha256": view.brep_sha256,
         "valid": view.valid,
         "schema_version": schema_version,
     })
@@ -1094,10 +1103,13 @@ pub struct Layer1CacheRebuild {
     pub recomputations: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportCommitView {
     pub source_snapshot: SnapshotView,
     pub artifacts: Vec<PathBuf>,
+    pub validation: SelectedSolidValidationView,
+    pub tessellation_deflection: f64,
+    pub tessellation_angular_deflection_radians: f64,
     pub derived_artifacts: Vec<ExportDerivedArtifact>,
     pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
 }
@@ -1106,12 +1118,14 @@ pub struct ExportCommitView {
 /// bound to the selected feature plus the active Revision Snapshot so a
 /// later export gate can refuse anything that is not this exact
 /// feature at this exact revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SelectedSolidValidationView {
     pub feature_id: String,
     pub revision_id: String,
     pub feature_graph_hash: String,
     pub revision_hash: String,
+    pub brep_path: PathBuf,
+    pub brep_sha256: String,
     pub valid: bool,
 }
 
@@ -1123,6 +1137,7 @@ pub struct ExportDerivedArtifact {
     pub feature_id: String,
     pub artifact_kind: String,
     pub artifact_name: String,
+    pub output_path: PathBuf,
     pub byte_count: u64,
     pub sha256: String,
 }
@@ -2252,11 +2267,52 @@ impl Host {
                 detail: "duplicate or empty 3MF body ID".to_string(),
             });
         }
+        // Validate the exact current BREP before creating any export stage.
+        // Component instances do not have ordinary feature-log provenance, so
+        // they use the same OCCT shape check with a revision-bound host view.
+        let validation = if instance_export {
+            let request = ValidateRequest::new(new_request_id(), &brep, feature_id);
+            let worker = OcctWorker::locate()
+                .map_err(HostError::from)?
+                .with_revision_id(prior.revision_hash_hex());
+            let result = worker.validate(&request).map_err(|error| {
+                let error = HostError::from(error);
+                match error {
+                    HostError::BrepInvalid { request_id, detail } => HostError::BrepInvalid {
+                        request_id,
+                        detail: format!("selected feature {feature_id}: {detail}"),
+                    },
+                    error => error,
+                }
+            })?;
+            if !result.is_success() {
+                return Err(HostError::BrepInvalid {
+                    request_id: Some(request.request_id),
+                    detail: format!(
+                        "validate worker did not confirm the selected solid: {feature_id}"
+                    ),
+                });
+            }
+            let brep_sha256 = sha256_path(&brep).map_err(|error| HostError::BrepIo {
+                detail: format!("hash validated BREP failed: {error}"),
+            })?;
+            SelectedSolidValidationView {
+                feature_id: feature_id.to_string(),
+                revision_id: prior.history.active_snapshot().revision_id.clone(),
+                feature_graph_hash: prior.feature_graph_hash_hex().to_string(),
+                revision_hash: prior.revision_hash_hex().to_string(),
+                brep_path: brep.clone(),
+                brep_sha256,
+                valid: true,
+            }
+        } else {
+            self.validate_selected_current_solid(root, feature_id)?
+        };
         let stage = output_dir.join(format!(".threeterm-export-{}", std::process::id()));
         fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
             detail: error.to_string(),
         })?;
-        let request = ExportRequest::new("export", brep, deflection)
+        let request = ExportRequest::new("export", brep.clone(), deflection)
             .with_output_path(&stage, format!("{feature_id}.stl"))
             .with_feature_id(feature_id);
         let worker = OcctWorker::locate()
@@ -2274,6 +2330,22 @@ impl Host {
             return Err(HostError::BrepInvalid {
                 request_id: Some("export".to_string()),
                 detail: "export worker did not produce validated artifacts".to_string(),
+            });
+        }
+        let current_brep_sha256 = sha256_path(&brep).map_err(|error| {
+            let _ = fs::remove_dir_all(&stage);
+            HostError::BrepIo {
+                detail: format!("hash exported BREP failed: {error}"),
+            }
+        })?;
+        if current_brep_sha256 != validation.brep_sha256 {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id),
+                detail: format!(
+                    "validated BREP changed during export for {feature_id}: expected sha256 {}, found {current_brep_sha256}",
+                    validation.brep_sha256
+                ),
             });
         }
         let bodies = if formats.iter().any(|format| format == "3mf") {
@@ -2350,6 +2422,7 @@ impl Host {
                         .and_then(|name| name.to_str())
                         .unwrap_or_default()
                         .to_string(),
+                    output_path: destination.clone(),
                     byte_count,
                     sha256,
                 })
@@ -2362,6 +2435,10 @@ impl Host {
         Ok(ExportCommitView {
             source_snapshot: SnapshotView::from(&prior),
             artifacts,
+            validation,
+            tessellation_deflection: request.tessellation_deflection,
+            tessellation_angular_deflection_radians: request
+                .tessellation_angular_deflection_radians,
             derived_artifacts,
             stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance {
                 feature_id: feature_id.to_string(),
@@ -2463,7 +2540,16 @@ impl Host {
         }
         let worker = OcctWorker::locate().map_err(HostError::from)?;
         let request = ValidateRequest::new(new_request_id(), &brep, feature_id);
-        let result = worker.validate(&request).map_err(HostError::from)?;
+        let result = worker.validate(&request).map_err(|error| {
+            let error = HostError::from(error);
+            match error {
+                HostError::BrepInvalid { request_id, detail } => HostError::BrepInvalid {
+                    request_id,
+                    detail: format!("selected feature {feature_id}: {detail}"),
+                },
+                error => error,
+            }
+        })?;
         if !result.is_success() {
             return Err(HostError::BrepInvalid {
                 request_id: Some(request.request_id.clone()),
@@ -2486,6 +2572,8 @@ impl Host {
             revision_id: snapshot.revision_id.clone(),
             feature_graph_hash: loaded.feature_graph_hash_hex().to_string(),
             revision_hash: loaded.revision_hash_hex().to_string(),
+            brep_path: brep,
+            brep_sha256: actual_brep_sha256,
             valid: true,
         })
     }

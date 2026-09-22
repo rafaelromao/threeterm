@@ -1480,13 +1480,13 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
         serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
 
     let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
-    let mut image_id = 2;
-    for step in recipe["steps"]
-        .as_array()
-        .expect("recipe steps are an array")
-        .iter()
-        .skip(12)
-    {
+    for (image_id, step) in (2..).zip(
+        recipe["steps"]
+            .as_array()
+            .expect("recipe steps are an array")
+            .iter()
+            .skip(12),
+    ) {
         let command = step["command"]
             .as_str()
             .expect("recipe command is a string");
@@ -1498,7 +1498,6 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
         script.push(b"\x16".to_vec());
         script.push(b"\x1b[13;5u".to_vec());
         script.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
-        image_id += 1;
     }
     script.push(b"q".to_vec());
     script.reverse();

@@ -790,10 +790,11 @@ fn assert_bracket_mesh(
         )?;
     }
 
-    let hole_expectations = [
-        ("bracket-hole-1", [50.0, 10.0], 8.0),
-        ("bracket-foundation", [10.0, 50.0], 8.0),
-    ];
+    let hole_expectations = ["bracket-hole-1", "bracket-foundation"].map(|feature_id| {
+        let step = step_for_feature(recipe, feature_id);
+        let position = mesh_vector3(&step["request"], "position");
+        (feature_id, [position[0], position[1]], thickness)
+    });
     let hole_radius = mesh_number(&recipe["expectations"], "hole_diameter") / 2.0;
     for (feature_id, center, top_z) in hole_expectations {
         for angle_index in 0..16 {
@@ -866,6 +867,54 @@ fn assert_bracket_mesh(
     let wall = mesh_number(mesh_recipe, "minimum_wall");
     let shell_seed = step_for_feature(recipe, "hollow-detail-seed");
     let (outer_min_x, outer_max_x, outer_min_y, outer_max_y) = profile_bounds(recipe, shell_seed);
+    for (start, end, target, label) in [
+        (
+            outer_min_x,
+            outer_min_x + wall * 2.0,
+            outer_min_x + wall / 2.0,
+            "left",
+        ),
+        (
+            outer_max_x - wall * 2.0,
+            outer_max_x,
+            outer_max_x - wall / 2.0,
+            "right",
+        ),
+    ] {
+        let measured = sampled_span(start, end, 0.02, target, |x| {
+            point_inside(mesh, [x, opening_center[1], 10.0])
+        })
+        .ok_or_else(|| mesh_failure("cavity-walls", format!("{label} wall has no material")))?;
+        require_mesh(
+            measured >= wall - linear_tolerance * 2.0,
+            "cavity-walls",
+            format!("{label} wall measured {measured:.3}, minimum is {wall:.3}"),
+        )?;
+    }
+    for (start, end, target, label) in [
+        (
+            outer_min_y,
+            outer_min_y + wall * 2.0,
+            outer_min_y + wall / 2.0,
+            "front",
+        ),
+        (
+            outer_max_y - wall * 2.0,
+            outer_max_y,
+            outer_max_y - wall / 2.0,
+            "back",
+        ),
+    ] {
+        let measured = sampled_span(start, end, 0.02, target, |y| {
+            point_inside(mesh, [opening_center[0], y, 10.0])
+        })
+        .ok_or_else(|| mesh_failure("cavity-walls", format!("{label} wall has no material")))?;
+        require_mesh(
+            measured >= wall - linear_tolerance * 2.0,
+            "cavity-walls",
+            format!("{label} wall measured {measured:.3}, minimum is {wall:.3}"),
+        )?;
+    }
     for point in [
         [outer_min_x + wall / 2.0, opening_center[1], 10.0],
         [outer_max_x - wall / 2.0, opening_center[1], 10.0],

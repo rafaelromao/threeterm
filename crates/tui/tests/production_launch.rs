@@ -117,6 +117,16 @@ fn solid_has_triangle_centroid_in_xy_window(
     })
 }
 
+fn committed_revision(output: &str, command: &str) -> String {
+    let marker = format!("[selection-glyph] Commit: {command} revision=");
+    output
+        .split(&marker)
+        .last()
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .unwrap_or_else(|| panic!("terminal output has no committed revision for {command}"))
+        .to_string()
+}
+
 impl Write for ScriptedTerminal {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.write_failures_remaining > 0 {
@@ -1703,24 +1713,87 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
         );
     }
 
+    let viewport_evidence = json!({
+        "acknowledgement": "viewport-presented",
+        "revision": scene.revision.clone(),
+        "scene": {
+            "solids": scene
+                .solids
+                .iter()
+                .map(|solid| json!({
+                    "feature_id": &solid.feature_id,
+                    "triangle_count": solid.triangles.len(),
+                }))
+                .collect::<Vec<_>>(),
+        },
+    });
     let transcript = root.join("reinforcing-transcript.jsonl");
+    let transcript_entries = [
+        json!({
+            "command": "mirror",
+            "request": serde_json::from_slice::<Value>(mirror_request).expect("mirror request JSON"),
+            "preview_marker": "[dashed-outline] Preview: mirror",
+            "commit_marker": "[selection-glyph] Commit: mirror",
+            "response": {
+                "feature_id": "tui-mirror-pad",
+                "revision": committed_revision(&output, "mirror"),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "linear-pattern",
+            "request": serde_json::from_slice::<Value>(linear_request).expect("linear request JSON"),
+            "preview_marker": "[dashed-outline] Preview: linear-pattern",
+            "commit_marker": "[selection-glyph] Commit: linear-pattern",
+            "response": {
+                "feature_id": "tui-linear-pads",
+                "revision": committed_revision(&output, "linear-pattern"),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "circular-pattern",
+            "request": serde_json::from_slice::<Value>(circular_request).expect("circular request JSON"),
+            "preview_marker": "[dashed-outline] Preview: circular-pattern",
+            "commit_marker": "[selection-glyph] Commit: circular-pattern",
+            "response": {
+                "feature_id": "tui-circular-lugs",
+                "revision": committed_revision(&output, "circular-pattern"),
+            },
+            "viewport_evidence": viewport_evidence,
+        }),
+    ];
     fs::write(
         &transcript,
-        [
-            serde_json::json!({"command":"mirror","request":serde_json::from_slice::<Value>(mirror_request).expect("mirror request JSON"),"feature_id":"tui-mirror-pad","viewport":true}),
-            serde_json::json!({"command":"linear-pattern","request":serde_json::from_slice::<Value>(linear_request).expect("linear request JSON"),"feature_id":"tui-linear-pads","viewport":true}),
-            serde_json::json!({"command":"circular-pattern","request":serde_json::from_slice::<Value>(circular_request).expect("circular request JSON"),"feature_id":"tui-circular-lugs","viewport":true}),
-        ]
-        .into_iter()
-        .map(|entry| serde_json::to_string(&entry).expect("transcript entry serializes"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        transcript_entries
+            .into_iter()
+            .map(|entry| serde_json::to_string(&entry).expect("transcript entry serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
             + "\n",
     )
     .expect("reinforcing transcript writes");
     let transcript_text = fs::read_to_string(&transcript).expect("reinforcing transcript reads");
     for feature_id in ["tui-mirror-pad", "tui-linear-pads", "tui-circular-lugs"] {
         assert!(transcript_text.contains(feature_id));
+    }
+    for line in transcript_text.lines() {
+        let entry: Value = serde_json::from_str(line).expect("production transcript line is JSON");
+        assert!(entry["request"].is_object());
+        assert!(entry["preview_marker"].as_str().is_some());
+        assert!(entry["commit_marker"].as_str().is_some());
+        assert!(entry["response"]["revision"].as_str().is_some());
+        assert_eq!(
+            entry["viewport_evidence"]["acknowledgement"],
+            "viewport-presented"
+        );
+        assert!(
+            entry["viewport_evidence"]["scene"]["solids"]
+                .as_array()
+                .is_some_and(|solids| solids
+                    .iter()
+                    .all(|solid| { solid["triangle_count"].as_u64().unwrap_or(0) > 0 }))
+        );
     }
 
     let identity_before_replay = host.identity(&root).expect("pre-replay identity reads");

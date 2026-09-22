@@ -370,6 +370,35 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static VALIDATE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static VALIDATE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["status", "feature_id", "revision_id", "feature_graph_hash", "revision_hash", "valid", "schema_version"],
+        "properties": {
+            "status": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "revision_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "valid": { "type": "boolean" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -2705,6 +2734,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: EXPORT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        VALIDATE_COMMAND_ID,
+        CommandSchema {
+            id: VALIDATE_COMMAND_ID,
+            name: "validate",
+            schema_version: "threeterm.command.validate/1",
+            request_schema_version: "threeterm.command.validate.request/1",
+            request_schema: VALIDATE_REQUEST_SCHEMA.clone(),
+            response_schema_version: VALIDATE_RESPONSE_SCHEMA_VERSION,
+            response_schema: VALIDATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -2751,6 +2792,7 @@ pub const SHELL_COMMAND_ID: CommandId = CommandId("shell");
 pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
 pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
+pub const VALIDATE_COMMAND_ID: CommandId = CommandId("validate");
 pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const IDENTITY_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.identity.response/1";
@@ -2785,6 +2827,7 @@ pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.respons
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
 pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/2";
+pub const VALIDATE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.validate.response/1";
 pub const SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.sketch-solve.response/1";
 pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/3";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =

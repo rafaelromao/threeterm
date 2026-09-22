@@ -32,7 +32,7 @@ use threeterm_occt_worker::{
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
     OcctWorker, Operation, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult,
     SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest,
-    TranslateResult, WorkerError, new_request_id,
+    TranslateResult, ValidateRequest, WorkerError, new_request_id,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION,
@@ -68,7 +68,7 @@ use threeterm_protocol::schema::{
     MIRROR_COMMAND_ID, NEW_PROJECT_COMMAND_ID, REDO_COMMAND_ID, REPLAY_VERIFY_COMMAND_ID,
     RESTORE_REVISION_COMMAND_ID, REVOLVE_COMMAND_ID, SAVE_COMMAND_ID, SHELL_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, TRANSFORM_COMPONENT_INSTANCE_COMMAND_ID,
-    UNDO_COMMAND_ID, find, iter,
+    UNDO_COMMAND_ID, VALIDATE_COMMAND_ID, find, iter,
 };
 use threeterm_protocol::supervisor::SupervisorOutcome;
 use threeterm_slvs_worker::{SketchSolveRequest, SketchSolveResponse, SlvsWorker};
@@ -896,6 +896,21 @@ fn export_response_value(view: &ExportCommitView, schema_version: &str) -> serde
     })
 }
 
+fn validate_response_value(
+    view: &SelectedSolidValidationView,
+    schema_version: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "feature_id": view.feature_id,
+        "revision_id": view.revision_id,
+        "feature_graph_hash": view.feature_graph_hash,
+        "revision_hash": view.revision_hash,
+        "valid": view.valid,
+        "schema_version": schema_version,
+    })
+}
+
 fn timeline_response_value(view: &HistoryTimelineView, schema_version: &str) -> serde_json::Value {
     let timeline = &view.timeline;
     let revisions = timeline
@@ -1085,6 +1100,19 @@ pub struct ExportCommitView {
     pub artifacts: Vec<PathBuf>,
     pub derived_artifacts: Vec<ExportDerivedArtifact>,
     pub stale_last_valid_geometry_acceptance: StaleLastValidGeometryAcceptance,
+}
+
+/// The structured verdict for one selected current solid. The verdict is
+/// bound to the selected feature plus the active Revision Snapshot so a
+/// later export gate can refuse anything that is not this exact
+/// feature at this exact revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedSolidValidationView {
+    pub feature_id: String,
+    pub revision_id: String,
+    pub feature_graph_hash: String,
+    pub revision_hash: String,
+    pub valid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2342,6 +2370,125 @@ impl Host {
             },
         })
     }
+
+    /// Validate one selected current solid against the active Revision
+    /// Snapshot and report fatal geometry errors before export. The
+    /// verdict carries the selected feature plus revision binding a
+    /// later export gate consumes.
+    ///
+    /// This is a pure read: validation never replays canonical intent,
+    /// stages worker output, or publishes artifacts, so a defect present
+    /// on disk cannot heal before the kernel shape check sees it, and a
+    /// refusal leaves the bundle and the filesystem untouched.
+    pub fn validate_selected_current_solid(
+        &self,
+        root: impl AsRef<Path>,
+        feature_id: &str,
+    ) -> Result<SelectedSolidValidationView, HostError> {
+        if feature_id.is_empty() {
+            return Err(HostError::Validation {
+                detail: "validate requires a selected feature id".to_string(),
+            });
+        }
+        let root = root.as_ref();
+        let loaded = Bundle::at(root).open()?;
+        let snapshot = loaded.history.active_snapshot();
+        // The stale gate runs before existence resolution, mirroring
+        // export: a degraded family refuses through its retained
+        // last-valid geometry even when only its member features are
+        // addressable in the snapshot.
+        let stale = stale_last_valid_geometry_for_export(&loaded.history, feature_id);
+        if !stale.is_empty() {
+            return Err(HostError::StaleLastValidGeometry {
+                feature_id: feature_id.to_string(),
+                active_revision: snapshot.revision_id.clone(),
+                stale_features: stale,
+            });
+        }
+        let in_history = snapshot.features.contains_key(feature_id);
+        let in_graph = loaded
+            .graph
+            .features()
+            .any(|feature| feature.id.as_str() == feature_id);
+        if !in_history && !in_graph {
+            return Err(HostError::Validation {
+                detail: format!("reference is lost: validate target {feature_id}"),
+            });
+        }
+        if let Some(feature) = snapshot.features.get(feature_id)
+            && feature.status != HistoryStatus::CurrentValid
+        {
+            let stale = stale_last_valid_geometry_for_export(&loaded.history, feature_id);
+            if !stale.is_empty() {
+                return Err(HostError::StaleLastValidGeometry {
+                    feature_id: feature_id.to_string(),
+                    active_revision: snapshot.revision_id.clone(),
+                    stale_features: stale,
+                });
+            }
+            return Err(HostError::Validation {
+                detail: format!("selected feature is not current-valid: {feature_id}"),
+            });
+        }
+        let Some(provenance) = loaded.log.entries().iter().rev().find(|entry| {
+            entry.feature_id == feature_id
+                && entry.brep_path.is_some()
+                && entry.brep_sha256.is_some()
+        }) else {
+            return Err(HostError::Validation {
+                detail: format!(
+                    "selected feature has no authenticated BREP provenance: {feature_id}"
+                ),
+            });
+        };
+        let expected_brep_path = format!("{BREP_SUBDIR}/{feature_id}.brep");
+        if provenance.brep_path.as_deref() != Some(expected_brep_path.as_str()) {
+            return Err(HostError::BrepInvalid {
+                request_id: None,
+                detail: format!(
+                    "authenticated BREP path mismatch for {feature_id}: expected {expected_brep_path}, found {}",
+                    provenance.brep_path.as_deref().unwrap_or("<missing>")
+                ),
+            });
+        }
+        let expected_brep_sha256 = provenance
+            .brep_sha256
+            .as_deref()
+            .expect("authenticated BREP provenance includes its fingerprint");
+        let brep = bundle_root(root)
+            .join(BREP_SUBDIR)
+            .join(format!("{feature_id}.brep"));
+        if !brep.is_file() {
+            return Err(HostError::BrepFileMissing { path: brep });
+        }
+        let worker = OcctWorker::locate().map_err(HostError::from)?;
+        let request = ValidateRequest::new(new_request_id(), &brep, feature_id);
+        let result = worker.validate(&request).map_err(HostError::from)?;
+        if !result.is_success() {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id.clone()),
+                detail: "validate worker did not confirm the selected solid".to_string(),
+            });
+        }
+        let actual_brep_sha256 = sha256_path(&brep).map_err(|error| HostError::BrepIo {
+            detail: format!("hash validated BREP failed: {error}"),
+        })?;
+        if actual_brep_sha256 != expected_brep_sha256 {
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id),
+                detail: format!(
+                    "authenticated BREP provenance mismatch for {feature_id}: expected sha256 {expected_brep_sha256}, found {actual_brep_sha256}"
+                ),
+            });
+        }
+        Ok(SelectedSolidValidationView {
+            feature_id: feature_id.to_string(),
+            revision_id: snapshot.revision_id.clone(),
+            feature_graph_hash: loaded.feature_graph_hash_hex().to_string(),
+            revision_hash: loaded.revision_hash_hex().to_string(),
+            valid: true,
+        })
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -3260,6 +3407,18 @@ impl Host {
                     &view,
                     find(command)
                         .expect("export is registered")
+                        .response_schema_version,
+                ));
+            }
+            if command == VALIDATE_COMMAND_ID {
+                let view = self.validate_selected_current_solid(
+                    string_field("bundle_path")?,
+                    string_field("feature_id")?,
+                )?;
+                return Ok(validate_response_value(
+                    &view,
+                    find(command)
+                        .expect("validate is registered")
                         .response_schema_version,
                 ));
             }

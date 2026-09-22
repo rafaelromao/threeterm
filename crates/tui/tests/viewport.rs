@@ -566,6 +566,37 @@ fn successful_validation_is_visible_and_allows_same_revision_export() {
 
     session
         .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
+        .expect("export palette opens for the missing feature check");
+    for character in "export".chars() {
+        session
+            .process_keyboard_input_with_gateway(&[character as u8], &host, &root, &gateway)
+            .expect("export command is searchable for the missing feature check");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\r", &host, &root, &gateway)
+        .expect("export draft opens for the missing feature check");
+    for character in br#"{"formats":["stl"],"output_dir":"/tmp/tui-export"}"#
+        .iter()
+        .copied()
+    {
+        session
+            .process_keyboard_input_with_gateway(&[character], &host, &root, &gateway)
+            .expect("missing feature export request accepts JSON");
+    }
+    let missing_feature = session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("missing feature export returns a visible gate rejection");
+    assert!(
+        missing_feature
+            .overlay
+            .contains("export requires a feature_id")
+    );
+    session
+        .process_keyboard_input_with_gateway(b"\x1b", &host, &root, &gateway)
+        .expect("missing feature export draft cancels");
+
+    session
+        .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
         .expect("export palette opens");
     for character in "export".chars() {
         session

@@ -625,20 +625,9 @@ fn production_launch_saves_closes_reopens_and_loads_through_keyboard_controls() 
 }
 
 #[test]
+#[ignore = "requires the native OCCT worker"]
 fn production_launch_saves_reopens_loads_validates_and_exports_through_keyboard_controls() {
-    let worker = match OcctWorker::locate() {
-        Ok(worker) => worker,
-        Err(error)
-            if std::env::var_os("THREETERM_REQUIRE_OCCT").is_some()
-                || std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some() =>
-        {
-            panic!("keyboard lifecycle requires the OCCT worker: {error}");
-        }
-        Err(error) => {
-            eprintln!("keyboard lifecycle: OCCT worker unavailable: {error}");
-            return;
-        }
-    };
+    let worker = OcctWorker::locate().expect("keyboard lifecycle requires the OCCT worker");
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after the unix epoch")

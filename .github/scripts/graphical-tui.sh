@@ -1187,22 +1187,23 @@ run_save_reopen_validate_export() {
     [[ -f "$STL_PATH" ]] || die exported_stl_missing 'validated export did not create l-bracket.stl'
     capture_lifecycle_screenshot "$EXPORT_SCREENSHOT" 'Export completed' export
 
-    local byte_count sha256 facet_count vertex_count
-    byte_count="$(wc -c <"$STL_PATH" | tr -d '[:space:]')"
-    sha256="$(sha256sum "$STL_PATH" | cut -d' ' -f1)"
-    facet_count="$(grep -aFc 'facet normal' "$STL_PATH" || true)"
-    vertex_count="$(grep -aFc 'vertex ' "$STL_PATH" || true)"
-    ((byte_count > 0 && facet_count > 0 && vertex_count == facet_count * 3)) ||
-        die stl_integrity_preflight_failed 'exported STL failed the graphical runner format preflight'
-    jq -n \
-        --arg checker 'threeterm_host::stl_integrity::verify_path' \
+    local checker_output sha256
+    if ! checker_output="$(cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
+        -p threeterm-host --bin threeterm-stl-integrity -- "$STL_PATH")"; then
+        die stl_integrity_preflight_failed 'shared STL integrity checker rejected the exported STL'
+    fi
+    sha256="$(sha256sum "$STL_PATH" | cut -d' ' -f1)" ||
+        die stl_integrity_preflight_failed 'exported STL digest could not be recorded'
+    jq -e \
         --arg path "$STL_PATH" \
         --arg sha256 "$sha256" \
-        --argjson byte_count "$byte_count" \
-        --argjson facet_count "$facet_count" \
-        --argjson vertex_count "$vertex_count" \
-        '{checker:$checker,path:$path,format:"ascii",byte_count:$byte_count,facet_count:$facet_count,vertex_count:$vertex_count,sha256:$sha256}' \
-        >"$STL_INTEGRITY_EVIDENCE"
+        'select(.checker == "threeterm_host::stl_integrity::verify_path" and
+                .result == "passed" and
+                .path == $path and
+                (.facet_count | type == "number" and . > 0))
+         | . + {sha256:$sha256}' \
+        <<<"$checker_output" >"$STL_INTEGRITY_EVIDENCE" ||
+        die stl_integrity_preflight_failed 'shared STL integrity checker returned invalid evidence'
     export_status='passed'
 
     extract_viewport_evidence || die export_viewport_evidence_missing 'final export viewport evidence was not emitted'

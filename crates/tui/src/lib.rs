@@ -4556,7 +4556,9 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     fn export_gate_failure(&self, request: &Value) -> Option<String> {
-        let feature_id = request.get("feature_id").and_then(Value::as_str)?;
+        let Some(feature_id) = request.get("feature_id").and_then(Value::as_str) else {
+            return Some("export requires a feature_id for visible validation".to_string());
+        };
         let revision = self.tui.state().canonical_revision.clone();
         match self.validated_solid.as_ref() {
             Some((validated_feature, validated_revision))

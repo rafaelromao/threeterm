@@ -4282,14 +4282,17 @@ impl<R: Renderer> TuiViewportSession<R> {
             .map(|preview| preview.geometry_fingerprint.clone());
         let request = match self.domain_request(root, true) {
             Ok(request) => request,
-            Err(detail) => return self.reject_commit(detail),
+            Err(detail) => return self.reject_commit(host, root, detail),
         };
         let active_project_root = if command == NEW_PROJECT_COMMAND_ID {
             match request.get("destination").and_then(Value::as_str) {
                 Some(destination) => Some(PathBuf::from(destination)),
                 None => {
-                    return self
-                        .reject_commit("new-project request has no destination".to_string());
+                    return self.reject_commit(
+                        host,
+                        root,
+                        "new-project request has no destination".to_string(),
+                    );
                 }
             }
         } else {
@@ -4297,32 +4300,48 @@ impl<R: Renderer> TuiViewportSession<R> {
         };
         let response = match gateway.commit(command, request) {
             Ok(response) => response,
-            Err(error) => return self.reject_commit(format!("{error:?}")),
+            Err(error) => return self.reject_commit(host, root, format!("{error:?}")),
         };
         if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID {
             if response["status"] == "invalid_request" {
-                return self.reject_commit(sketch_reattachment_acknowledgement(&response));
+                return self.reject_commit(
+                    host,
+                    root,
+                    sketch_reattachment_acknowledgement(&response),
+                );
             }
             if response["status"] != "solved" {
-                return self.reject_commit(format!(
-                    "sketch solve {}: {}",
-                    response["status"].as_str().unwrap_or("unknown"),
-                    response["diagnostics"]
-                ));
+                return self.reject_commit(
+                    host,
+                    root,
+                    format!(
+                        "sketch solve {}: {}",
+                        response["status"].as_str().unwrap_or("unknown"),
+                        response["diagnostics"]
+                    ),
+                );
             }
         }
         let revision = if let Some(project_root) = active_project_root.as_ref() {
             match host.load_with_geometry_replay(project_root) {
                 Ok(snapshot) => snapshot.revision_hash,
                 Err(error) => {
-                    return self.reject_commit(format!("created project could not load: {error}"));
+                    return self.reject_commit(
+                        host,
+                        root,
+                        format!("created project could not load: {error}"),
+                    );
                 }
             }
         } else {
             match response.get("revision_hash").and_then(Value::as_str) {
                 Some(revision) => revision.to_string(),
                 None => {
-                    return self.reject_commit("commit response has no revision_hash".to_string());
+                    return self.reject_commit(
+                        host,
+                        root,
+                        "commit response has no revision_hash".to_string(),
+                    );
                 }
             }
         };
@@ -4378,10 +4397,19 @@ impl<R: Renderer> TuiViewportSession<R> {
         })
     }
 
-    fn reject_commit(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+    fn reject_commit(
+        &mut self,
+        host: &Host,
+        root: &Path,
+        detail: String,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         let had_transient_scene = self.scene.revision != self.canonical_scene.revision;
         self.draft.cancel();
-        self.restore_canonical_scene();
+        if root.exists() && host.load_with_geometry_replay(root).is_ok() {
+            self.refresh_scene_from_host(host)?;
+        } else {
+            self.restore_canonical_scene();
+        }
         self.tui
             .transition_command(CommandEvent::CommitRejected {
                 detail: detail.clone(),

@@ -10288,14 +10288,28 @@ impl Host {
         source_revision: &str,
         worker: &OcctWorker,
     ) -> Result<SceneSolid, HostError> {
-        let stage = std::env::temp_dir().join(format!(
-            "threeterm-preview-tessellation-{}-{}",
-            std::process::id(),
-            TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&stage).map_err(|error| HostError::BrepIo {
-            detail: format!("create preview tessellation stage failed: {error}"),
-        })?;
+        let temp_root = std::env::temp_dir();
+        let stage = (0..8)
+            .find_map(|_| {
+                let candidate = temp_root.join(format!(
+                    "threeterm-preview-tessellation-{}-{}",
+                    std::process::id(),
+                    TESSELLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(Ok(candidate)),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(HostError::BrepIo {
+                        detail: format!("create preview tessellation stage failed: {error}"),
+                    })),
+                }
+            })
+            .unwrap_or_else(|| {
+                Err(HostError::BrepIo {
+                    detail: "create preview tessellation stage failed after path collisions"
+                        .to_string(),
+                })
+            })?;
         let result = (|| {
             let request = ExportRequest::new(
                 format!("preview-tessellation-{}", artifact.feature_id),

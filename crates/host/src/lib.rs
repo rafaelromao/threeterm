@@ -2332,22 +2332,6 @@ impl Host {
                 detail: "export worker did not produce validated artifacts".to_string(),
             });
         }
-        let current_brep_sha256 = sha256_path(&brep).map_err(|error| {
-            let _ = fs::remove_dir_all(&stage);
-            HostError::BrepIo {
-                detail: format!("hash exported BREP failed: {error}"),
-            }
-        })?;
-        if current_brep_sha256 != validation.brep_sha256 {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(HostError::BrepInvalid {
-                request_id: Some(request.request_id),
-                detail: format!(
-                    "validated BREP changed during export for {feature_id}: expected sha256 {}, found {current_brep_sha256}",
-                    validation.brep_sha256
-                ),
-            });
-        }
         let bodies = if formats.iter().any(|format| format == "3mf") {
             prepare_3mf_bodies(root, &prior, &body_ids, &stage, deflection, &worker).inspect_err(
                 |_| {
@@ -2428,6 +2412,25 @@ impl Host {
                 })
             })
             .collect::<Result<Vec<_>, HostError>>()?;
+        // Keep this check immediately adjacent to publication. The source
+        // BREP is authenticated before export and must still be unchanged
+        // when its derived bytes become visible to the caller.
+        let current_brep_sha256 = sha256_path(&brep).map_err(|error| {
+            let _ = fs::remove_dir_all(&stage);
+            HostError::BrepIo {
+                detail: format!("hash exported BREP failed: {error}"),
+            }
+        })?;
+        if current_brep_sha256 != validation.brep_sha256 {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(HostError::BrepInvalid {
+                request_id: Some(request.request_id),
+                detail: format!(
+                    "validated BREP changed during export for {feature_id}: expected sha256 {}, found {current_brep_sha256}",
+                    validation.brep_sha256
+                ),
+            });
+        }
         let artifacts = publish_export_artifacts(&staged_artifacts).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
         })?;

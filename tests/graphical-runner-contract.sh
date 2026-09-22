@@ -12,6 +12,7 @@ for expected in \
     'production_tui_ghostty_session' \
     'production_tui_create_project_extrude' \
     'production_tui_keyboard_navigation' \
+    'production_tui_tapered_lofted_reinforcements' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -61,6 +62,13 @@ jq -e '
     .test == "production_tui_keyboard_navigation"
 ' <<<"${navigation_plan}" >/dev/null
 
+reinforcement_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.tapered-lofted-reinforcements/1" and
+    .result == "not_run" and
+    .test == "production_tui_tapered_lofted_reinforcements"
+' <<<"${reinforcement_plan}" >/dev/null
+
 for required in \
     'LC_ALL=C.UTF-8' \
     'LANG=C.UTF-8' \
@@ -76,6 +84,7 @@ for required in \
     'threeterm.graphical-tui/1' \
     'threeterm.graphical-tui.create-project-extrude/1' \
     'threeterm.graphical-tui.keyboard-navigation/1' \
+    'threeterm.graphical-tui.tapered-lofted-reinforcements/1' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \
@@ -108,6 +117,14 @@ for required in \
     'final_delete_image_id' \
     'created_project_manifest' \
     'derived_brep' \
+    'validate_reinforcement_viewport_evidence' \
+    'tapered-reinforcement' \
+    'lofted-gusset' \
+    'tapered-committed.png' \
+    'lofted-committed.png' \
+    'reinforcement-transcript.jsonl' \
+    'expected_revision' \
+    'bundle_path' \
     '1.3.1-arch2' \
     'THREETERM_PALETTE=catppuccin' \
     'threeterm.viewport-evidence/1' \

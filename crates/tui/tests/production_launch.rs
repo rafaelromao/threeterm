@@ -1022,6 +1022,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         b"\x1b[B".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ];
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1029,9 +1030,9 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
-        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ]);
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1039,11 +1040,11 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\r".to_vec(),
         b"\x1b".to_vec(),
         b"\x1b[C".to_vec(),
-        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
         b"\x1b_Gi=6;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
+        b"w".to_vec(),
         b"\x1b_Gi=7;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=8;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1084,7 +1085,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         );
     }
     assert!(
-        output.contains("a=d,d=I,i=6"),
+        output.contains("a=d,d=I,i=8"),
         "normal close deletes the latest active Kitty image"
     );
     assert!(
@@ -1107,7 +1108,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .iter()
         .filter_map(|event| parse_ack(event).ok())
         .collect::<Vec<_>>();
-    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(
         terminal.read_events.iter().all(|event| !matches!(
             decode_terminal_input(event),

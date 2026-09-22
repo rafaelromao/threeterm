@@ -370,6 +370,37 @@ pub static LOAD_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static VALIDATE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["bundle_path", "feature_id"],
+        "properties": {
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "feature_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+    })
+});
+
+pub static VALIDATE_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["status", "feature_id", "revision_id", "feature_graph_hash", "revision_hash", "brep_path", "brep_sha256", "valid", "schema_version"],
+        "properties": {
+            "status": { "type": "string" },
+            "feature_id": { "type": "string" },
+            "revision_id": { "type": "string", "minLength": 1 },
+            "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "brep_path": { "type": "string", "minLength": 1 },
+            "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "valid": { "type": "boolean" },
+            "schema_version": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+});
+
 pub static EXTRUDE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
@@ -1602,12 +1633,37 @@ pub static EXPORT_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
-        "type": "object", "required": ["status", "feature_id", "artifacts", "accepted_stale_last_valid_geometry", "stale_last_valid_geometry", "schema_version"],
+        "type": "object", "required": ["status", "feature_id", "artifacts", "source_revision_id", "validation", "tessellation", "derived_artifacts", "accepted_stale_last_valid_geometry", "stale_last_valid_geometry", "schema_version"],
         "properties": {
             "status": { "type": "string" },
             "feature_id": { "type": "string" },
             "artifacts": { "type": "array" },
             "source_revision_id": { "type": "string", "minLength": 1 },
+            "validation": {
+                "type": "object",
+                "required": ["feature_id", "revision_id", "feature_graph_hash", "revision_hash", "brep_path", "brep_sha256", "valid"],
+                "properties": {
+                    "feature_id": { "type": "string", "minLength": 1 },
+                    "revision_id": { "type": "string", "minLength": 1 },
+                    "feature_graph_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "revision_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "brep_path": { "type": "string", "minLength": 1 },
+                    "brep_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                    "valid": { "const": true }
+                },
+                "additionalProperties": false
+            },
+            "tessellation": {
+                "type": "object",
+                "required": ["units", "deflection", "relative", "angular_deflection_radians"],
+                "properties": {
+                    "units": { "const": "millimetres" },
+                    "deflection": { "type": "number", "exclusiveMinimum": 0 },
+                    "relative": { "const": false },
+                    "angular_deflection_radians": { "type": "number", "exclusiveMinimum": 0 }
+                },
+                "additionalProperties": false
+            },
             "derived_artifacts": {
                 "type": "array",
                 "items": {
@@ -1619,6 +1675,7 @@ pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "feature_id",
                         "artifact_kind",
                         "artifact_name",
+                        "output_path",
                         "byte_count",
                         "sha256"
                     ],
@@ -1629,6 +1686,7 @@ pub static EXPORT_RESPONSE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                         "feature_id": { "type": "string", "minLength": 1 },
                         "artifact_kind": { "type": "string", "minLength": 1 },
                         "artifact_name": { "type": "string", "minLength": 1 },
+                        "output_path": { "type": "string", "minLength": 1 },
                         "byte_count": { "type": "integer", "minimum": 0 },
                         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
                     },
@@ -2705,6 +2763,18 @@ pub static COMMAND_REGISTRY: LazyLock<BTreeMap<CommandId, CommandSchema>> = Lazy
             response_schema: EXPORT_RESPONSE_SCHEMA.clone(),
         },
     );
+    map.insert(
+        VALIDATE_COMMAND_ID,
+        CommandSchema {
+            id: VALIDATE_COMMAND_ID,
+            name: "validate",
+            schema_version: "threeterm.command.validate/1",
+            request_schema_version: "threeterm.command.validate.request/1",
+            request_schema: VALIDATE_REQUEST_SCHEMA.clone(),
+            response_schema_version: VALIDATE_RESPONSE_SCHEMA_VERSION,
+            response_schema: VALIDATE_RESPONSE_SCHEMA.clone(),
+        },
+    );
     map
 });
 
@@ -2751,6 +2821,7 @@ pub const SHELL_COMMAND_ID: CommandId = CommandId("shell");
 pub const DRAFT_COMMAND_ID: CommandId = CommandId("draft");
 pub const LOFT_COMMAND_ID: CommandId = CommandId("loft");
 pub const EXPORT_COMMAND_ID: CommandId = CommandId("export");
+pub const VALIDATE_COMMAND_ID: CommandId = CommandId("validate");
 pub const SKETCH_SOLVE_COMMAND_ID: CommandId = CommandId("sketch-solve");
 pub const SAVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.save.response/1";
 pub const IDENTITY_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.identity.response/1";
@@ -2784,7 +2855,8 @@ pub const CIRCULAR_PATTERN_RESPONSE_SCHEMA_VERSION: &str =
 pub const SHELL_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.shell.response/1";
 pub const DRAFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.draft.response/1";
 pub const LOFT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.loft.response/1";
-pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/2";
+pub const EXPORT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.export.response/3";
+pub const VALIDATE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.validate.response/2";
 pub const SKETCH_SOLVE_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.sketch-solve.response/1";
 pub const HISTORY_COMMIT_RESPONSE_SCHEMA_VERSION: &str = "threeterm.command.history.response/3";
 pub const REPLAY_VERIFY_RESPONSE_SCHEMA_VERSION: &str =

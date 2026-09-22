@@ -13,10 +13,10 @@ use std::{
 };
 
 use threeterm_occt_worker::{
-    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest, ExtrudeMode,
-    ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest,
-    OcctDiagnostic, OcctWorker, Operation, RevolveRequest, SelectedEdgeContext, WorkerError,
-    schema_version,
+    BooleanFuseRequest, BooleanPatternRequest, ChamferRequest, CircularPatternRequest,
+    ExportRequest, ExtrudeMode, ExtrudeRequest, FilletRequest, HoleRequest, LinearPatternRequest,
+    LoftRequest, MirrorRequest, OcctDiagnostic, OcctWorker, Operation, RevolveRequest,
+    SelectedEdgeContext, WorkerError, schema_version,
 };
 
 fn unique_request_id(label: &str) -> String {
@@ -102,6 +102,36 @@ fn extrude_rectangle_returns_ok_with_real_brep() {
         "BREP must start with the OCCT DBRep_DrawableShape marker; got {prefix_str:?}"
     );
 
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn export_tessellates_a_real_brep_with_explicit_settings() {
+    let Some(worker) =
+        required_fixture_worker("export_tessellates_a_real_brep_with_explicit_settings")
+    else {
+        return;
+    };
+    let temp = std::env::temp_dir().join(format!("threeterm-occt-export-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("temp dir creates");
+    let base = worker
+        .extrude(&rectangle_extrude_request().with_output_path(&temp, "base.brep"))
+        .expect("base BREP builds");
+    let export = worker
+        .export(
+            &ExportRequest::new(unique_request_id("export"), &base.brep_path, 0.1)
+                .with_output_path(&temp, "base.stl")
+                .with_feature_id("box-rect"),
+        )
+        .expect("export returns");
+
+    assert_eq!(export.status, "ok");
+    assert_eq!(export.tessellation_deflection, 0.1);
+    assert_eq!(export.tessellation_angular_deflection_radians, 0.5);
+    let stl = std::fs::read(&export.brep_path).expect("STL reads");
+    let stl_text = std::str::from_utf8(&stl).expect("STL is ASCII");
+    assert!(stl_text.contains("facet normal"));
+    assert!(export.step_path.is_file());
     let _ = std::fs::remove_dir_all(temp);
 }
 

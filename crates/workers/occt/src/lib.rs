@@ -48,13 +48,14 @@ pub use envelope::{
     BooleanCommonRequest, BooleanCommonResult, BooleanCutRequest, BooleanCutResult,
     BooleanFuseRequest, BooleanFuseResult, BooleanPatternRequest, BooleanPatternResult,
     BracketRequest, BracketResult, ChamferRequest, ChamferResult, CircularPatternRequest,
-    CircularPatternResult, DraftRequest, DraftResult, EdgeCandidateEvidence, EdgeInspectionResult,
-    ExportRequest, ExportResult, ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest,
-    FilletResult, HoleRequest, HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest,
-    LoftResult, MirrorRequest, MirrorResult, Operation, PlanarFaceEvidenceCandidate,
-    PlanarFaceEvidenceRequest, PlanarFaceEvidenceResult, RevolveRequest, RevolveResult,
-    SCHEMA_VERSION, SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult,
-    TranslateRequest, TranslateResult,
+    CircularPatternResult, DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS, DraftRequest,
+    DraftResult, EdgeCandidateEvidence, EdgeInspectionResult, ExportRequest, ExportResult,
+    ExtrudeMode, ExtrudeRequest, ExtrudeResult, FilletRequest, FilletResult, HoleRequest,
+    HoleResult, LinearPatternRequest, LinearPatternResult, LoftRequest, LoftResult, MirrorRequest,
+    MirrorResult, Operation, PlanarFaceEvidenceCandidate, PlanarFaceEvidenceRequest,
+    PlanarFaceEvidenceResult, RevolveRequest, RevolveResult, SCHEMA_VERSION, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, TranslateResult,
+    ValidateRequest, ValidateResult,
 };
 
 pub fn schema_version() -> &'static str {
@@ -941,12 +942,23 @@ impl OcctWorker {
         .into_loft()
     }
     pub fn export(&self, request: &ExportRequest) -> Result<ExportResult, WorkerError> {
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
         let bytes = bounded_serialize(request, "export", &request.request_id)?;
         self.invoke(
             &bytes,
             expected_output_path(&request.output_dir, &request.output_filename),
         )?
         .into_export()
+    }
+
+    pub fn validate(&self, request: &ValidateRequest) -> Result<ValidateResult, WorkerError> {
+        let bytes = bounded_serialize(request, "validate", &request.request_id)?;
+        request
+            .validate()
+            .map_err(|detail| WorkerError::Malformed { detail })?;
+        self.invoke(&bytes, None)?.into_validate(request)
     }
 
     pub fn planar_face_evidence(
@@ -1818,6 +1830,19 @@ impl RawResult {
         self.bounded()
     }
 
+    fn into_validate(self, request: &ValidateRequest) -> Result<ValidateResult, WorkerError> {
+        let result: ValidateResult = serde_json::from_value(self.value).map_err(|error| {
+            malformed_for_request(
+                &self.request_id,
+                format!("validate response could not be parsed: {error}"),
+            )
+        })?;
+        result
+            .validate_for(request)
+            .map_err(|detail| malformed_for_request(&self.request_id, detail))?;
+        Ok(result)
+    }
+
     fn into_planar_face_evidence(
         self,
         request: &PlanarFaceEvidenceRequest,
@@ -1914,6 +1939,10 @@ pub fn parse_loft_request(raw: &str) -> Result<LoftRequest, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
+pub fn parse_validate_request(raw: &str) -> Result<ValidateRequest, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
 /// Stable ThreeTerm worker fingerprint for the OCCT kernel. Matches
 /// the convention in the protocol's `Layer1` envelope so the host can
 /// route OCCT-emitted artifacts through the same promotion path.
@@ -1979,6 +2008,21 @@ mod tests {
         assert_eq!(value["code"], "request_malformed");
         assert_eq!(value["arg"], "empty profile");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn export_rejects_invalid_tessellation_before_worker_spawn() {
+        let request = ExportRequest::new("req-1", "/tmp/box-1.brep", 0.1)
+            .with_output_path("/tmp", "box-1.stl")
+            .with_feature_id("box-1");
+        let mut invalid = request;
+        invalid.tessellation_angular_deflection_radians = 0.0;
+
+        let error = OcctWorker::with_binary_path(PathBuf::from("/missing/occt-worker"))
+            .export(&invalid)
+            .expect_err("invalid export settings must fail before spawn");
+
+        assert!(matches!(error, WorkerError::Malformed { .. }));
     }
 
     #[test]

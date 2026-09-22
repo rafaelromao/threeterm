@@ -114,6 +114,9 @@ constexpr const char* kProtocolSchemaVersion = "threeterm.protocol/1";
 /// Mirrors the host's `MAX_FRAME_BUFFER`; oversized input fails closed.
 constexpr std::size_t kMaxEnvelopeBytes = 4 * 1024 * 1024;
 constexpr std::uintmax_t kMaxArtifactBytes = 1 * 1024 * 1024;
+// ThreeTerm model coordinates are millimetres. Linear deflection is an
+// absolute chordal value in those units; OCCT's angular value is radians.
+constexpr double kDefaultTessellationAngularDeflectionRadians = 0.5;
 
 /// Reads exactly ONE newline-terminated line from stdin, bounded by
 /// `kMaxEnvelopeBytes`. The returned `terminated` flag is false when stdin
@@ -1621,7 +1624,9 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::string output_dir = get_string(request, "output_dir");
     std::string output_filename = get_string(request, "output_filename");
     double deflection = get_number(request, "tessellation_deflection");
-    if (request_id.empty() || feature_id.empty() || base_path.empty() || output_dir.empty() || output_filename.empty() || !(deflection > 0.0) || !std::isfinite(deflection)) { error = "export request is missing required fields"; return false; }
+    double angular_deflection = get_number(request, "tessellation_angular_deflection_radians");
+    if (angular_deflection == 0.0) angular_deflection = kDefaultTessellationAngularDeflectionRadians;
+    if (request_id.empty() || feature_id.empty() || base_path.empty() || output_dir.empty() || output_filename.empty() || !(deflection > 0.0) || !std::isfinite(deflection) || !(angular_deflection > 0.0) || !std::isfinite(angular_deflection)) { error = "export request is missing required fields"; return false; }
     TopoDS_Shape shape; BRep_Builder builder;
     if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) { error = "could not read export BREP"; return false; }
     if (!analyze_brep(shape)) { error = "brep_invalid: BRepCheck_Analyzer failed"; return false; }
@@ -1629,13 +1634,24 @@ bool handle_export(const JsonParser::Value& request, std::string& error) {
     std::filesystem::path step_path = stl_path; step_path.replace_extension("step");
     std::error_code ec; std::filesystem::create_directories(stl_path.parent_path(), ec);
     try {
-        BRepMesh_IncrementalMesh mesh(shape, deflection);
+        BRepMesh_IncrementalMesh mesh(shape, deflection, Standard_False, angular_deflection, Standard_False);
         StlAPI_Writer stl; stl.ASCIIMode() = Standard_True; stl.Write(shape, stl_path.string().c_str());
         STEPControl_Writer step; if (step.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone || step.Write(step_path.string().c_str()) != IFSelect_RetDone) { error = "STEP writer failed"; return false; }
     } catch (const Standard_Failure& exception) { error = std::string("OCCT export failed: ") + exception.GetMessageString(); return false; }
     std::ifstream stream(stl_path, std::ios::binary); std::ostringstream bytes; bytes << stream.rdbuf();
     if (bytes.str().empty() || !std::filesystem::is_regular_file(step_path)) { error = "export writer produced no artifact"; return false; }
-    std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
+    std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"export\",\"status\":\"ok\",\"brep_path\":\"" << json_escape(stl_path.string()) << "\",\"brep_sha256\":\"" << sha256_hex(bytes.str()) << "\",\"brep_bytes\":" << bytes.str().size() << ",\"step_path\":\"" << json_escape(step_path.string()) << "\",\"feature_id\":\"" << json_escape(feature_id) << "\",\"tessellation_deflection\":" << deflection << ",\"tessellation_angular_deflection_radians\":" << angular_deflection << "}"; g_result_json = out.str(); return true;
+}
+
+bool handle_validate(const JsonParser::Value& request, std::string& error) {
+    std::string request_id = get_string(request, "request_id");
+    std::string feature_id = get_string(request, "feature_id");
+    std::string base_path = get_string(request, "base_path");
+    if (request_id.empty() || feature_id.empty() || base_path.empty()) { error = "validate request is missing required fields"; return false; }
+    TopoDS_Shape shape; BRep_Builder builder;
+    if (!BRepTools::Read(shape, base_path.c_str(), builder) || shape.IsNull()) { error = "could not read validation BREP"; return false; }
+    if (!analyze_brep(shape)) { error = "brep_invalid: BRepCheck_Analyzer failed"; return false; }
+    std::ostringstream out; out << "{\"schema_version\":\"" << kSchemaVersion << "\",\"request_id\":\"" << json_escape(request_id) << "\",\"operation\":\"validate\",\"status\":\"ok\",\"feature_id\":\"" << json_escape(feature_id) << "\"}"; g_result_json = out.str(); return true;
 }
 
 std::string edge_role(const TopoDS_Edge& edge) {
@@ -3887,6 +3903,8 @@ int main() {
         success = handle_loft(*args, error);
     } else if (command_id == "export") {
         success = handle_export(*args, error);
+    } else if (command_id == "validate") {
+        success = handle_validate(*args, error);
     } else if (command_id == "planar_face_evidence") {
         success = handle_planar_face_evidence(*args, error);
     } else {

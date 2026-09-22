@@ -14,6 +14,9 @@ use threeterm_protocol::artifact::Layer1ArtifactRequest;
 /// Pinned worker schema. The host refuses envelopes that do not match
 /// this string.
 pub const SCHEMA_VERSION: &str = "threeterm.workers.occt/1";
+/// OCCT angular deflection is expressed in radians. ThreeTerm's canonical
+/// model coordinates and linear tessellation deflection are millimetres.
+pub const DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS: f64 = 0.5;
 
 fn is_schema_version(value: &str) -> bool {
     value == SCHEMA_VERSION
@@ -58,6 +61,7 @@ pub enum Operation {
     Loft,
     BooleanPattern,
     Export,
+    Validate,
     PlanarFaceEvidence,
     InspectEdges,
 }
@@ -101,6 +105,7 @@ impl Operation {
             Self::Loft => "loft",
             Self::BooleanPattern => "boolean_pattern",
             Self::Export => "export",
+            Self::Validate => "validate",
             Self::PlanarFaceEvidence => "planar_face_evidence",
             Self::InspectEdges => "inspect_edges",
         }
@@ -367,7 +372,10 @@ pub struct ExportRequest {
     pub output_dir: PathBuf,
     pub output_filename: String,
     pub feature_id: String,
+    /// Absolute chordal deflection in ThreeTerm's millimetre model units.
     pub tessellation_deflection: f64,
+    /// Angular deflection passed explicitly to OCCT, in radians.
+    pub tessellation_angular_deflection_radians: f64,
 }
 impl ExportRequest {
     pub fn new(
@@ -384,6 +392,8 @@ impl ExportRequest {
             output_filename: String::new(),
             feature_id: String::new(),
             tessellation_deflection: deflection,
+            tessellation_angular_deflection_radians:
+                DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS,
         }
     }
     pub fn with_output_path(mut self, dir: impl Into<PathBuf>, name: impl Into<String>) -> Self {
@@ -405,6 +415,8 @@ impl ExportRequest {
             || self.output_filename.contains('/')
             || !self.tessellation_deflection.is_finite()
             || self.tessellation_deflection <= 0.0
+            || !self.tessellation_angular_deflection_radians.is_finite()
+            || self.tessellation_angular_deflection_radians <= 0.0
         {
             return Err("invalid export request".to_string());
         }
@@ -423,10 +435,78 @@ pub struct ExportResult {
     pub brep_bytes: usize,
     pub step_path: PathBuf,
     pub feature_id: String,
+    pub tessellation_deflection: f64,
+    pub tessellation_angular_deflection_radians: f64,
 }
 impl ExportResult {
     pub fn is_success(&self) -> bool {
         self.status == "ok"
+    }
+}
+
+/// Validate request: run `BRepCheck_Analyzer` over one committed BREP
+/// without tessellating or writing export artifacts. The host resolves
+/// the selected feature to its committed path; the path is disposable
+/// worker input, never canonical intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateRequest {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub base_path: PathBuf,
+    pub feature_id: String,
+}
+impl ValidateRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        base_path: impl Into<PathBuf>,
+        feature_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: request_id.into(),
+            operation: Operation::Validate,
+            base_path: base_path.into(),
+            feature_id: feature_id.into(),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_schema_version(&self.schema_version)
+            || !is_request_id(&self.request_id)
+            || !is_feature_id(&self.feature_id)
+            || self.operation != Operation::Validate
+            || self.base_path.as_os_str().is_empty()
+        {
+            return Err("invalid validate request".to_string());
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateResult {
+    pub schema_version: String,
+    pub request_id: String,
+    pub operation: Operation,
+    pub status: String,
+    pub feature_id: String,
+}
+impl ValidateResult {
+    pub fn is_success(&self) -> bool {
+        self.status == "ok"
+    }
+
+    pub fn validate_for(&self, request: &ValidateRequest) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION
+            || self.request_id != request.request_id
+            || self.operation != Operation::Validate
+            || self.feature_id != request.feature_id
+            || self.status != "ok"
+        {
+            return Err("validate response identity is invalid".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -2808,6 +2888,62 @@ impl BooleanPatternResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_operation_serializes_to_the_worker_command_id() {
+        assert_eq!(
+            serde_json::to_value(Operation::Validate).expect("operation serializes"),
+            serde_json::json!("validate")
+        );
+    }
+
+    #[test]
+    fn validate_envelope_accepts_a_committed_brep_and_binds_the_response() {
+        let request = ValidateRequest::new("req-1", "/tmp/box-1.brep", "box-1");
+        request.validate().expect("validate envelope is valid");
+
+        let result = ValidateResult {
+            schema_version: SCHEMA_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            operation: Operation::Validate,
+            status: "ok".to_string(),
+            feature_id: "box-1".to_string(),
+        };
+        assert!(result.is_success());
+        result
+            .validate_for(&request)
+            .expect("validate response binds request identity");
+
+        let mismatched = ValidateResult {
+            feature_id: "other".to_string(),
+            ..result.clone()
+        };
+        assert!(mismatched.validate_for(&request).is_err());
+    }
+
+    #[test]
+    fn validate_envelope_rejects_missing_identity() {
+        let request = ValidateRequest::new("req-1", "/tmp/box-1.brep", "");
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn export_envelope_carries_explicit_millimetre_tessellation_settings() {
+        let request = ExportRequest::new("req-1", "/tmp/box-1.brep", 0.1)
+            .with_output_path("/tmp", "box-1.stl")
+            .with_feature_id("box-1");
+        request.validate().expect("export envelope is valid");
+        let encoded = serde_json::to_value(&request).expect("export envelope serializes");
+        assert_eq!(encoded["tessellation_deflection"], 0.1);
+        assert_eq!(
+            encoded["tessellation_angular_deflection_radians"],
+            DEFAULT_TESSELLATION_ANGULAR_DEFLECTION_RADIANS
+        );
+
+        let mut invalid = request;
+        invalid.tessellation_angular_deflection_radians = 0.0;
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn validate_accepts_canonical_extrude() {

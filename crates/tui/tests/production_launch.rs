@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
@@ -189,6 +190,55 @@ fn valid_probe_response(nonce: u64) -> Vec<u8> {
         nonce + 1
     )
     .into_bytes()
+}
+
+fn selected_edge(
+    base_feature_id: &str,
+    revision: &str,
+    source_edge_id: &str,
+    midpoint: [f64; 3],
+    length: f64,
+) -> Value {
+    let tangent = [1.0, 0.0, 0.0];
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": base_feature_id,
+            "source_revision_id": revision,
+            "source_edge_id": source_edge_id
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": midpoint,
+            "tangent": tangent,
+            "length": length
+        }
+    })
+}
+
+fn run_palette_command(host: &Host, root: &Path, command: &str, request: Value) -> Value {
+    let request = serde_json::to_vec(&request).expect("TUI request serializes");
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(command.bytes().map(|byte| vec![byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.into_iter().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+    launch(host, root, &mut terminal, official_environment())
+        .unwrap_or_else(|error| panic!("TUI {command} workflow succeeds: {error:?}"))
+        .last_response
+        .unwrap_or_else(|| panic!("TUI {command} workflow produced no response"))
 }
 
 #[test]
@@ -1310,6 +1360,354 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     assert!(output.contains("command preview ready"));
     assert!(output.contains("command committed"));
     assert!(output.contains("[selection-glyph]"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_drives_boolean_fuse_through_palette_and_commit() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive boolean fuse requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive command slice: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-fuse-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-x",
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            3.0,
+        )
+        .with_feature_id("arm-x"),
+        &worker,
+    )
+    .expect("first arm extrudes");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-z",
+            vec![(0.0, 0.0), (5.0, 0.0), (5.0, 10.0), (0.0, 10.0)],
+            3.0,
+        )
+        .with_feature_id("arm-z"),
+        &worker,
+    )
+    .expect("second arm extrudes");
+
+    let request =
+        br#"{"feature_id":"interactive-fuse","base_feature_id":"arm-x","tool_feature_id":"arm-z"}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"boolean-fuse".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production boolean fuse palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 4);
+    assert!(root.join("brep/interactive-fuse.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("Commit: boolean-fuse"));
+    assert!(output.contains("[viewport-status] Viewport presented"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_assembles_bracket_foundation_through_tui_controls() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive bracket foundation requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive bracket foundation: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-bracket-foundation-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+
+    let assert_commit = |response: &Value, operation: &str, feature_id: &str| {
+        assert_eq!(response["status"], "ok", "{feature_id} commits");
+        assert_eq!(response["operation"], operation);
+        assert_eq!(response["feature_id"], feature_id);
+        assert!(response["revision_hash"].as_str().is_some());
+        assert!(root.join(format!("brep/{feature_id}.brep")).is_file());
+    };
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-x",
+            "profile": [[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-x");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-z",
+            "profile": [[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-z");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-a-seed",
+            "profile": [[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-a-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-a source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "fillet",
+        json!({
+            "feature_id": "pad-a",
+            "base_feature_id": "pad-a-seed",
+            "radius": 0.5,
+            "selected_edge": selected_edge(
+                "pad-a-seed",
+                &revision,
+                "pad-a-edge",
+                [30.0, 4.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "fillet", "pad-a");
+
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-b-seed",
+            "profile": [[4.0, 24.0], [16.0, 24.0], [16.0, 36.0], [4.0, 36.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-b-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-b source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "chamfer",
+        json!({
+            "feature_id": "pad-b",
+            "base_feature_id": "pad-b-seed",
+            "distance": 0.25,
+            "selected_edge": selected_edge(
+                "pad-b-seed",
+                &revision,
+                "pad-b-edge",
+                [10.0, 24.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "chamfer", "pad-b");
+
+    for (feature_id, base_feature_id, tool_feature_id) in [
+        ("bracket-l", "arm-x", "arm-z"),
+        ("bracket-lp1", "bracket-l", "pad-a"),
+        ("bracket-base", "bracket-lp1", "pad-b"),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "boolean-fuse",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "tool_feature_id": tool_feature_id
+            }),
+        );
+        assert_commit(&response, "boolean_fuse", feature_id);
+    }
+
+    for (feature_id, base_feature_id, position) in [
+        ("bracket-hole-1", "bracket-base", [50.0, 10.0, 0.0]),
+        ("bracket-foundation", "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "hole",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "position": position,
+                "direction": [0.0, 0.0, 1.0],
+                "diameter": 4.5,
+                "hole_kind": "drilled"
+            }),
+        );
+        assert_commit(&response, "hole", feature_id);
+    }
+
+    let bundle = Bundle::at(&root).open().expect("interactive bundle opens");
+    let feature_ids = bundle
+        .log
+        .entries()
+        .iter()
+        .map(|entry| entry.feature_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &feature_ids[feature_ids.len() - 11..],
+        [
+            "arm-x",
+            "arm-z",
+            "pad-a-seed",
+            "pad-a",
+            "pad-b-seed",
+            "pad-b",
+            "bracket-l",
+            "bracket-lp1",
+            "bracket-base",
+            "bracket-hole-1",
+            "bracket-foundation"
+        ]
+    );
+
+    let revision = bundle.revision_hash_hex().to_string();
+    let pad_a = worker
+        .inspect_edges(
+            "tui-pad-a-measurement",
+            root.join("brep/pad-a.brep"),
+            "pad-a",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-a", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("fillet landmarks inspect");
+    assert!(pad_a.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - 0.7853981633974483).abs() < 1e-3
+    }));
+    let pad_b = worker
+        .inspect_edges(
+            "tui-pad-b-measurement",
+            root.join("brep/pad-b.brep"),
+            "pad-b",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer landmarks inspect");
+    let pad_b_outer_length: f64 = pad_b
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!((pad_b_outer_length - 48.0).abs() > 0.01);
+
+    let final_edges = worker
+        .inspect_edges(
+            "tui-final-measurement",
+            root.join("brep/bracket-foundation.brep"),
+            "bracket-foundation",
+            &revision,
+            json!({"provenance": {"source_feature_id": "bracket-foundation", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("final hole landmarks inspect");
+    for midpoint in [
+        [52.25, 10.0, 0.0],
+        [52.25, 10.0, 8.0],
+        [12.25, 50.0, 0.0],
+        [12.25, 50.0, 8.0],
+    ] {
+        assert!(final_edges.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - 14.137166941154069).abs() < 1e-3
+                && candidate
+                    .midpoint
+                    .into_iter()
+                    .zip(midpoint)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+        }));
+    }
+
+    let scene = host
+        .read_only_viewport_scene(&root)
+        .expect("final project renders read-only");
+    let final_solid = scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == "bracket-foundation")
+        .expect("final fused body is visible");
+    assert!(!final_solid.triangles.is_empty());
+    let before_read_only = snapshot_tree(&root);
+    let _ = Bundle::at(&root)
+        .open_read_only()
+        .expect("retained project reopens read-only");
+    assert_eq!(snapshot_tree(&root), before_read_only);
 
     let _ = fs::remove_dir_all(root);
 }

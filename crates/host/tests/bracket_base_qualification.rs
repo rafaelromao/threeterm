@@ -594,6 +594,61 @@ where
     run_start.and_then(|begin| (begin..=end).contains(&target).then_some(end - begin))
 }
 
+fn horizontal_surface_span(
+    mesh: &StlMeshObservation,
+    center: [f64; 2],
+    contact_z: f64,
+    expected_thickness: f64,
+    tolerance: f64,
+) -> Option<f64> {
+    let mut levels = Vec::new();
+    for facet in &mesh.facets {
+        let z_min = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[2])
+            .fold(f64::INFINITY, f64::min);
+        let z_max = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        if z_max - z_min > tolerance * 2.0 {
+            continue;
+        }
+        let x_min = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[0])
+            .fold(f64::INFINITY, f64::min);
+        let x_max = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[0])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_min = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[1])
+            .fold(f64::INFINITY, f64::min);
+        let y_max = facet
+            .vertices
+            .into_iter()
+            .map(|vertex| vertex[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !(x_min..=x_max).contains(&center[0]) || !(y_min..=y_max).contains(&center[1]) {
+            continue;
+        }
+        let level = (z_min + z_max) / 2.0;
+        if (contact_z - tolerance..=contact_z + expected_thickness + tolerance).contains(&level) {
+            levels.push(level);
+        }
+    }
+    let minimum = levels.iter().copied().reduce(f64::min)?;
+    let maximum = levels.into_iter().reduce(f64::max)?;
+    Some(maximum - minimum)
+}
+
 fn projected_area(facet: [[f64; 3]; 3]) -> f64 {
     let first = [facet[1][0] - facet[0][0], facet[1][1] - facet[0][1], 0.0];
     let second = [facet[2][0] - facet[0][0], facet[2][1] - facet[0][1], 0.0];
@@ -779,10 +834,11 @@ fn assert_bracket_mesh(
         ([15.0, 2.0], "horizontal base thickness"),
         ([10.0, 30.0], "vertical base thickness"),
     ] {
-        let measured = sampled_span(0.0, bounds_max[2], 0.05, thickness / 2.0, |z| {
-            point_inside(mesh, [center[0], center[1], z])
-        })
-        .ok_or_else(|| mesh_failure("thickness", format!("{label} has no material section")))?;
+        let measured =
+            horizontal_surface_span(mesh, center, contact_z, thickness, linear_tolerance)
+                .ok_or_else(|| {
+                    mesh_failure("thickness", format!("{label} has no material section"))
+                })?;
         require_mesh(
             (measured - thickness).abs() <= linear_tolerance * 3.0,
             "thickness",

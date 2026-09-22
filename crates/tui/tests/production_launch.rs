@@ -6,8 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
+use threeterm_occt_worker::{
+    BracketRequest, ExtrudeRequest, OcctWorker, WorkerError, new_request_id,
+};
 use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
@@ -255,6 +258,73 @@ fn valid_probe_response(nonce: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+fn optional_occt_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("{test_name} requires OCCT worker: {error:?}");
+        }
+        Err(error) if matches!(&error, WorkerError::Spawn { detail, .. } if detail.contains("not found")) =>
+        {
+            eprintln!("{test_name}: OCCT worker unavailable: {error:?}");
+            None
+        }
+        Err(error) => panic!("{test_name}: OCCT worker failed to initialize: {error:?}"),
+    }
+}
+
+fn selected_edge(
+    base_feature_id: &str,
+    revision: &str,
+    source_edge_id: &str,
+    midpoint: [f64; 3],
+    length: f64,
+) -> Value {
+    let tangent = [1.0, 0.0, 0.0];
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": base_feature_id,
+            "source_revision_id": revision,
+            "source_edge_id": source_edge_id
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": midpoint,
+            "tangent": tangent,
+            "length": length
+        }
+    })
+}
+
+fn run_palette_command(host: &Host, root: &Path, command: &str, request: Value) -> Value {
+    let request = serde_json::to_vec(&request).expect("TUI request serializes");
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(command.bytes().map(|byte| vec![byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.into_iter().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+    launch(host, root, &mut terminal, official_environment())
+        .unwrap_or_else(|error| panic!("TUI {command} workflow succeeds: {error:?}"))
+        .last_response
+        .unwrap_or_else(|| panic!("TUI {command} workflow produced no response"))
+}
+
 #[test]
 fn sgr_pick_coordinates_are_zero_based_and_reject_zero() {
     assert_eq!(
@@ -330,6 +400,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         probe_response: None,
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b[<0;33;25M".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
@@ -401,7 +472,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 5);
+    assert_eq!(terminal.events_read, 6);
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
@@ -553,6 +624,7 @@ fn production_launch_executes_registered_noninteractive_command() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         ],
@@ -575,7 +647,7 @@ fn production_launch_executes_registered_noninteractive_command() {
         "threeterm.command.load.response/2"
     );
     assert!(response["feature_graph_hash"].is_string());
-    assert_eq!(terminal.events_read, 4);
+    assert_eq!(terminal.events_read, 5);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }
@@ -590,7 +662,11 @@ fn interactive_capability_gate() {
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
     let mut terminal = ScriptedTerminal {
-        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
         ..Default::default()
     };
 
@@ -619,6 +695,8 @@ fn production_launch_acknowledges_focus_recovery_and_resize() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b[8;30;100t".to_vec(),
             b"\x1b[I".to_vec(),
             b"\x1b[O".to_vec(),
@@ -985,7 +1063,9 @@ fn shared_extrude_execution_accepts_deterministic_tui_input() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1076,6 +1156,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         b"\x1b[B".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ];
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1083,8 +1164,9 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
         b"\x1b[13;5u".to_vec(),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ]);
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1092,11 +1174,11 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\r".to_vec(),
         b"\x1b".to_vec(),
         b"\x1b[C".to_vec(),
-        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
-        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
         b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"w".to_vec(),
+        b"\x1b_Gi=7;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=8;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1137,7 +1219,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         );
     }
     assert!(
-        output.contains("a=d,d=I,i=6"),
+        output.contains("a=d,d=I,i=8"),
         "normal close deletes the latest active Kitty image"
     );
     assert!(
@@ -1160,7 +1242,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .iter()
         .filter_map(|event| parse_ack(event).ok())
         .collect::<Vec<_>>();
-    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(
         terminal.read_events.iter().all(|event| !matches!(
             decode_terminal_input(event),
@@ -1217,14 +1299,15 @@ fn interactive_production_event_loop() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
-        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
-        b"\x1b[B".to_vec(),
+        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=3;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
+        b"\x1b[B".to_vec(),
         b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
+        b"w".to_vec(),
         b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1356,7 +1439,9 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1857,6 +1942,586 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
 }
 
 #[test]
+fn production_launch_drives_boolean_fuse_through_palette_and_commit() {
+    let Some(worker) = optional_occt_worker("interactive boolean fuse") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-fuse-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-x",
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            3.0,
+        )
+        .with_feature_id("arm-x"),
+        &worker,
+    )
+    .expect("first arm extrudes");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-z",
+            vec![(0.0, 0.0), (5.0, 0.0), (5.0, 10.0), (0.0, 10.0)],
+            3.0,
+        )
+        .with_feature_id("arm-z"),
+        &worker,
+    )
+    .expect("second arm extrudes");
+
+    let request =
+        br#"{"feature_id":"interactive-fuse","base_feature_id":"arm-x","tool_feature_id":"arm-z"}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"boolean-fuse".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production boolean fuse palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 4);
+    assert!(root.join("brep/interactive-fuse.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("Commit: boolean-fuse"));
+    assert!(output.contains("[viewport-status] Viewport presented"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_assembles_bracket_foundation_through_tui_controls() {
+    let Some(worker) = optional_occt_worker("interactive bracket foundation") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-bracket-foundation-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+
+    let assert_commit = |response: &Value, operation: &str, feature_id: &str| {
+        assert_eq!(response["status"], "ok", "{feature_id} commits");
+        assert_eq!(response["operation"], operation);
+        assert_eq!(response["feature_id"], feature_id);
+        assert!(response["revision_hash"].as_str().is_some());
+        assert!(root.join(format!("brep/{feature_id}.brep")).is_file());
+    };
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-x",
+            "profile": [[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-x");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-z",
+            "profile": [[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-z");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-a-seed",
+            "profile": [[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-a-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-a source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "fillet",
+        json!({
+            "feature_id": "pad-a",
+            "base_feature_id": "pad-a-seed",
+            "radius": 0.5,
+            "selected_edge": selected_edge(
+                "pad-a-seed",
+                &revision,
+                "pad-a-edge",
+                [30.0, 4.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "fillet", "pad-a");
+
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-b-seed",
+            "profile": [[4.0, 24.0], [16.0, 24.0], [16.0, 36.0], [4.0, 36.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-b-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-b source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "chamfer",
+        json!({
+            "feature_id": "pad-b",
+            "base_feature_id": "pad-b-seed",
+            "distance": 0.25,
+            "selected_edge": selected_edge(
+                "pad-b-seed",
+                &revision,
+                "pad-b-edge",
+                [10.0, 24.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "chamfer", "pad-b");
+
+    for (feature_id, base_feature_id, tool_feature_id) in [
+        ("bracket-l", "arm-x", "arm-z"),
+        ("bracket-lp1", "bracket-l", "pad-a"),
+        ("bracket-base", "bracket-lp1", "pad-b"),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "boolean-fuse",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "tool_feature_id": tool_feature_id
+            }),
+        );
+        assert_commit(&response, "boolean_fuse", feature_id);
+    }
+
+    for (feature_id, base_feature_id, position) in [
+        ("bracket-hole-1", "bracket-base", [50.0, 10.0, 0.0]),
+        ("bracket-foundation", "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "hole",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "position": position,
+                "direction": [0.0, 0.0, 1.0],
+                "diameter": 4.5,
+                "hole_kind": "drilled"
+            }),
+        );
+        assert_commit(&response, "hole", feature_id);
+    }
+
+    let bundle = Bundle::at(&root).open().expect("interactive bundle opens");
+    let entries = bundle.log.entries();
+    assert_eq!(entries.len(), 11);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.log_index, index);
+        assert!(!entry.terminal_digest.is_empty());
+        assert!(
+            entry.intent.is_some(),
+            "{feature_id} retains its canonical intent",
+            feature_id = entry.feature_id
+        );
+    }
+    let feature_ids = entries
+        .iter()
+        .map(|entry| entry.feature_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        feature_ids,
+        [
+            "arm-x",
+            "arm-z",
+            "pad-a-seed",
+            "pad-a",
+            "pad-b-seed",
+            "pad-b",
+            "bracket-l",
+            "bracket-lp1",
+            "bracket-base",
+            "bracket-hole-1",
+            "bracket-foundation"
+        ]
+    );
+
+    let intent_value = |index: usize| {
+        serde_json::to_value(
+            entries[index]
+                .intent
+                .as_ref()
+                .expect("transaction retains canonical intent"),
+        )
+        .expect("canonical intent serializes")
+    };
+    for (index, command, operation) in [
+        (0, "extrude", "extrude"),
+        (1, "extrude", "extrude"),
+        (2, "extrude", "extrude"),
+        (3, "fillet", "fillet"),
+        (4, "extrude", "extrude"),
+        (5, "chamfer", "chamfer"),
+        (6, "boolean", "fuse"),
+        (7, "boolean", "fuse"),
+        (8, "boolean", "fuse"),
+        (9, "hole", "hole"),
+        (10, "hole", "hole"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(
+            intent["command"], command,
+            "intent command at index {index}"
+        );
+        assert_eq!(
+            intent["operation"], operation,
+            "intent operation at index {index}"
+        );
+        assert!(
+            intent["source_revision"]
+                .as_str()
+                .is_some_and(|revision| !revision.is_empty())
+        );
+    }
+    assert_eq!(
+        intent_value(0)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]])
+    );
+    assert_eq!(intent_value(0)["deterministic_inputs"]["height"], 8.0);
+    assert_eq!(
+        intent_value(1)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]])
+    );
+    assert_eq!(
+        intent_value(2)["deterministic_inputs"]["profile"],
+        json!([[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]])
+    );
+    assert_eq!(intent_value(3)["base_feature_id"], "pad-a-seed");
+    assert_eq!(intent_value(3)["radius"], 0.5);
+    assert_eq!(
+        intent_value(3)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-a-seed"
+    );
+    assert_eq!(intent_value(4)["deterministic_inputs"]["height"], 12.0);
+    assert_eq!(intent_value(5)["base_feature_id"], "pad-b-seed");
+    assert_eq!(intent_value(5)["distance"], 0.25);
+    assert_eq!(
+        intent_value(5)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-b-seed"
+    );
+    for (index, base_feature_id, tool_feature_id) in [
+        (6, "arm-x", "arm-z"),
+        (7, "bracket-l", "pad-a"),
+        (8, "bracket-lp1", "pad-b"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["tool_feature_id"], tool_feature_id);
+    }
+    for (index, base_feature_id, position) in [
+        (9, "bracket-base", [50.0, 10.0, 0.0]),
+        (10, "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["hole_kind"], "drilled");
+        assert_eq!(intent["deterministic_inputs"]["position"], json!(position));
+        assert_eq!(
+            intent["deterministic_inputs"]["direction"],
+            json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(intent["deterministic_inputs"]["diameter"], 4.5);
+    }
+
+    let revision = bundle.revision_hash_hex().to_string();
+    let pad_a = worker
+        .inspect_edges(
+            "tui-pad-a-measurement",
+            root.join("brep/pad-a.brep"),
+            "pad-a",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-a", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("fillet landmarks inspect");
+    assert!(pad_a.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - std::f64::consts::FRAC_PI_4).abs() < 1e-3
+    }));
+    let pad_b = worker
+        .inspect_edges(
+            "tui-pad-b-measurement",
+            root.join("brep/pad-b.brep"),
+            "pad-b",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer landmarks inspect");
+    let pad_b_seed = worker
+        .inspect_edges(
+            "tui-pad-b-seed-measurement",
+            root.join("brep/pad-b-seed.brep"),
+            "pad-b-seed",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b-seed", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer seed landmarks inspect");
+    let pad_b_outer_length: f64 = pad_b
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    let pad_b_seed_outer_length: f64 = pad_b_seed
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!(pad_b_outer_length > 0.0);
+    assert!(pad_b_seed_outer_length > 0.0);
+    assert!((pad_b_outer_length - pad_b_seed_outer_length).abs() > 0.01);
+
+    let final_edges = worker
+        .inspect_edges(
+            "tui-final-measurement",
+            root.join("brep/bracket-foundation.brep"),
+            "bracket-foundation",
+            &revision,
+            json!({"provenance": {"source_feature_id": "bracket-foundation", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("final hole landmarks inspect");
+    for midpoint in [
+        [52.25, 10.0, 0.0],
+        [52.25, 10.0, 8.0],
+        [12.25, 50.0, 0.0],
+        [12.25, 50.0, 8.0],
+    ] {
+        assert!(final_edges.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - 14.137166941154069).abs() < 1e-3
+                && candidate
+                    .midpoint
+                    .into_iter()
+                    .zip(midpoint)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+        }));
+    }
+
+    let before_read_only = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("final project renders read-only");
+    assert_eq!(snapshot_tree(&root), before_read_only);
+    assert_eq!(before_scene.solids.len(), 1);
+    let final_solid = before_scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == "bracket-foundation")
+        .expect("final fused body is visible");
+    assert!(!final_solid.triangles.is_empty());
+    let baseline_revision = bundle.revision_hash_hex().to_string();
+    let baseline_entries = entries.to_vec();
+    drop(bundle);
+    let reopened = Bundle::at(&root)
+        .open_read_only()
+        .expect("retained project reopens read-only");
+    assert_eq!(reopened.revision_hash_hex(), baseline_revision);
+    assert_eq!(reopened.log.entries(), baseline_entries);
+    let reopened_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("retained project renders read-only after reopen");
+    assert_eq!(reopened_scene, before_scene);
+    assert_eq!(snapshot_tree(&root), before_read_only);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_retains_preview_cancellation_and_recommit_evidence() {
+    OcctWorker::locate().expect("preview cancellation workflow requires the OCCT worker");
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-preview-cancel-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("preview cancellation fixture persists");
+    let before_identity = host.identity(&root).expect("canonical identity reads");
+    let before_tree = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("canonical scene reads");
+    let request = br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ]);
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    let outcome = launch(&host, &root, &mut terminal, official_environment())
+        .expect("preview cancellation and recommit workflow succeeds");
+
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity remains readable")
+            .transaction_count,
+        before_identity.transaction_count + 1
+    );
+    assert_ne!(
+        host.identity(&root).expect("committed identity reads"),
+        before_identity
+    );
+    assert_ne!(snapshot_tree(&root), before_tree);
+    assert_eq!(before_scene.revision, before_identity.revision_hash);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+    assert!(!root.join(".derived").exists());
+
+    let transcript = outcome.action_transcript;
+    let kinds = transcript
+        .entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "draft_opened",
+            "preview_ready",
+            "cancelled",
+            "draft_opened",
+            "preview_ready",
+            "committed"
+        ]
+    );
+    assert!(
+        transcript.entries[1]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_eq!(
+        transcript.entries[2].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(
+        transcript.entries[4]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_ne!(
+        transcript.entries[5].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(String::from_utf8_lossy(&terminal.writes).contains("[action-transcript]"));
+
+    let bundle = Bundle::at(&root).open().expect("committed bundle opens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref());
+    let Some(CanonicalIntent::Extrude(intent)) = intent else {
+        panic!("recommitted feature retains extrusion intent");
+    };
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+
+    fs::remove_dir_all(root).expect("preview cancellation fixture removes");
+}
+
+#[test]
 #[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_cancels_typed_extrusion_without_mutation() {
     OcctWorker::locate().expect("extrusion cancellation requires the OCCT worker");
@@ -1879,7 +2544,13 @@ fn production_launch_cancels_typed_extrusion_without_mutation() {
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
     events.push(b"\r".to_vec());
     events.extend(request.iter().map(|byte| vec![*byte]));
-    events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
     events.reverse();
     let mut terminal = ScriptedTerminal {
         events,
@@ -1945,23 +2616,26 @@ fn production_launch_creates_project_and_extrudes_typed_profile() {
     append_project_draft(&mut events, true);
     append_project_draft(&mut events, false);
 
-    let append_extrude_draft = |events: &mut Vec<Vec<u8>>, cancel: bool, image_id: u8| {
-        events.push(b"\x10".to_vec());
-        append_text(events, b"extrude");
-        events.push(b"\r".to_vec());
-        append_text(events, request);
-        events.push(b"\x16".to_vec());
-        if cancel {
-            events.push(b"\x1b".to_vec());
-        } else {
-            events.push(b"\x1b[13;5u".to_vec());
-            events.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
-        }
-    };
-    append_extrude_draft(&mut events, true, 0);
-    append_extrude_draft(&mut events, false, 3);
+    let append_extrude_draft =
+        |events: &mut Vec<Vec<u8>>, cancel: bool, preview_image_id: u8, commit_image_id: u8| {
+            events.push(b"\x10".to_vec());
+            append_text(events, b"extrude");
+            events.push(b"\r".to_vec());
+            append_text(events, request);
+            events.push(b"\x16".to_vec());
+            events.push(format!("\x1b_Gi={preview_image_id};OK\x1b\\").into_bytes());
+            if cancel {
+                events.push(b"\x1b".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            } else {
+                events.push(b"\x1b[13;5u".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            }
+        };
+    append_extrude_draft(&mut events, true, 3, 4);
+    append_extrude_draft(&mut events, false, 5, 6);
     events.push(b"\x1b[B".to_vec());
-    events.push(b"\x1b_Gi=4;OK\x1b\\".to_vec());
+    events.push(b"\x1b_Gi=7;OK\x1b\\".to_vec());
     events.push(b"q".to_vec());
     events.reverse();
     let mut terminal = ScriptedTerminal {

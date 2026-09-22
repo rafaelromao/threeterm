@@ -26,8 +26,8 @@ use threeterm_theme::{
 };
 use threeterm_viewport::{
     CameraState, CapabilityProbeResult, FrameAcknowledgement, FrameIdentity, PickResult,
-    ProtocolNeutralViewport, RenderCoordinator, Renderer, SubmitOutcome, ViewportColors,
-    ViewportDiagnostic, ViewportDiagnosticCode, ViewportRequest, ViewportScene,
+    ProtocolNeutralViewport, RenderCoordinator, Renderer, SceneFeature, SubmitOutcome,
+    ViewportColors, ViewportDiagnostic, ViewportDiagnosticCode, ViewportRequest, ViewportScene,
 };
 
 pub use launch::{
@@ -210,6 +210,7 @@ pub struct CommandPreview {
     pub source_revision: String,
     pub preview_revision: String,
     pub input_fingerprint: String,
+    pub geometry_fingerprint: String,
 }
 
 pub trait CommandGateway {
@@ -306,6 +307,36 @@ pub struct ViewportPresentationEvidence {
     pub camera: CameraState,
 }
 
+pub const ACTION_TRANSCRIPT_SCHEMA_VERSION: &str = "threeterm.action-transcript/1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActionTranscript {
+    pub schema_version: &'static str,
+    pub entries: Vec<ActionTranscriptEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActionTranscriptEntry {
+    pub sequence: u64,
+    pub kind: String,
+    pub command: String,
+    pub source_revision: String,
+    pub canonical_revision: String,
+    pub preview_revision: Option<String>,
+    pub geometry_fingerprint: Option<String>,
+    pub scene: Option<ViewportSceneEvidence>,
+    pub detail: Option<String>,
+}
+
+impl Default for ActionTranscript {
+    fn default() -> Self {
+        Self {
+            schema_version: ACTION_TRANSCRIPT_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
 impl CommandDraftSession {
     pub fn new() -> Self {
         Self::default()
@@ -377,14 +408,24 @@ impl CommandDraftSession {
         }
     }
 
-    pub fn set_preview(&mut self, preview_revision: String, input_fingerprint: String) {
+    pub fn set_preview(
+        &mut self,
+        preview_revision: String,
+        input_fingerprint: String,
+        geometry_fingerprint: String,
+    ) {
         if let Some(draft) = &self.draft {
             self.preview = Some(CommandPreview {
                 source_revision: draft.source_revision.clone(),
                 preview_revision,
                 input_fingerprint,
+                geometry_fingerprint,
             });
         }
+    }
+
+    pub fn invalidate_preview(&mut self) {
+        self.preview = None;
     }
 
     pub fn take_for_commit(&mut self) -> Result<CommandDraft, CommandDraftError> {
@@ -3265,6 +3306,9 @@ pub struct TuiViewportSession<R: Renderer> {
     tui: TuiSession,
     palette: CommandPalette,
     draft: CommandDraftSession,
+    action_transcript: ActionTranscript,
+    pending_evidence_sequence: Option<u64>,
+    canonical_scene: ViewportScene,
     scene: ViewportScene,
     camera: CameraState,
     width: u32,
@@ -3403,6 +3447,9 @@ impl<R: Renderer> TuiViewportSession<R> {
             tui,
             palette: CommandPalette::new(),
             draft: CommandDraftSession::new(),
+            action_transcript: ActionTranscript::default(),
+            pending_evidence_sequence: None,
+            canonical_scene: scene.clone(),
             scene,
             camera: CameraState::default(),
             width,
@@ -3661,6 +3708,93 @@ impl<R: Renderer> TuiViewportSession<R> {
         self.draft.preview()
     }
 
+    pub fn action_transcript(&self) -> &ActionTranscript {
+        &self.action_transcript
+    }
+
+    pub fn record_presentation_evidence(&mut self, evidence: &ViewportPresentationEvidence) {
+        if let Some(sequence) = self.pending_evidence_sequence.take()
+            && let Some(entry) = self
+                .action_transcript
+                .entries
+                .iter_mut()
+                .find(|entry| entry.sequence == sequence)
+        {
+            entry.scene = Some(evidence.scene.clone());
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_action(
+        &mut self,
+        kind: &str,
+        command: &str,
+        source_revision: impl Into<String>,
+        canonical_revision: impl Into<String>,
+        preview_revision: Option<String>,
+        geometry_fingerprint: Option<String>,
+        scene: bool,
+        detail: Option<String>,
+    ) {
+        let scene = scene.then(|| ViewportSceneEvidence {
+            solids: self
+                .scene
+                .solids
+                .iter()
+                .map(|solid| ViewportSolidEvidence {
+                    feature_id: solid.feature_id.clone(),
+                    triangle_count: solid.triangles.len(),
+                })
+                .collect(),
+            triangle_count: self
+                .scene
+                .solids
+                .iter()
+                .map(|solid| solid.triangles.len())
+                .sum(),
+            body_pixels: 0,
+            edge_pixels: 0,
+            non_background_pixels: 0,
+        });
+        let sequence = self.action_transcript.entries.len() as u64 + 1;
+        let has_scene = scene.is_some();
+        self.action_transcript.entries.push(ActionTranscriptEntry {
+            sequence,
+            kind: kind.to_string(),
+            command: command.to_string(),
+            source_revision: source_revision.into(),
+            canonical_revision: canonical_revision.into(),
+            preview_revision,
+            geometry_fingerprint,
+            scene,
+            detail,
+        });
+        self.pending_evidence_sequence = has_scene.then_some(sequence);
+    }
+
+    fn install_preview_scene(&mut self, preview: &DomainCommandPreview) {
+        self.scene = self.canonical_scene.clone();
+        self.scene.revision = preview.preview_revision.clone();
+        if let Some(solid) = preview.preview_solid.clone() {
+            self.scene
+                .features
+                .retain(|feature| feature.id != solid.feature_id);
+            self.scene.features.push(SceneFeature {
+                id: solid.feature_id.clone(),
+                kind: "preview-solid".to_string(),
+            });
+            self.scene
+                .solids
+                .retain(|existing| existing.feature_id != solid.feature_id);
+            self.scene.solids.push(solid);
+        }
+    }
+
+    fn restore_canonical_scene(&mut self) {
+        self.pending_evidence_sequence = None;
+        self.scene = self.canonical_scene.clone();
+    }
+
     pub fn command_input_active(&self) -> bool {
         self.palette.is_open() || self.draft.draft().is_some()
     }
@@ -3707,6 +3841,23 @@ impl<R: Renderer> TuiViewportSession<R> {
         if matches!(input, TerminalInput::Pick { .. }) && self.command_input_active() {
             return Ok(self.keyboard_overlay(
                 "[focus-glyph] Pick ignored while command input is active".to_string(),
+            ));
+        }
+        if self.command_input_active()
+            && self.coordinator.in_flight().is_some()
+            && matches!(
+                input,
+                TerminalInput::Character(_)
+                    | TerminalInput::Backspace
+                    | TerminalInput::Escape
+                    | TerminalInput::Preview
+                    | TerminalInput::Commit
+                    | TerminalInput::Enter
+                    | TerminalInput::OpenPalette
+            )
+        {
+            return Ok(self.keyboard_overlay(
+                "[ready-status] Keyboard input waits for viewport acknowledgement".to_string(),
             ));
         }
         if let TerminalInput::Arrow(key) = input
@@ -3842,10 +3993,12 @@ impl<R: Renderer> TuiViewportSession<R> {
                     command,
                     NEW_PROJECT_COMMAND_ID
                         | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID
                         | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID
+                        | threeterm_protocol::schema::HOLE_COMMAND_ID
                         | threeterm_protocol::schema::SHELL_COMMAND_ID
                         | threeterm_protocol::schema::DRAFT_COMMAND_ID
                         | threeterm_protocol::schema::LOFT_COMMAND_ID
@@ -3872,6 +4025,16 @@ impl<R: Renderer> TuiViewportSession<R> {
                         command: command.0.to_string(),
                     })
                     .map_err(TuiViewportError::Tui)?;
+                self.record_action(
+                    "draft_opened",
+                    command.0,
+                    revision.clone(),
+                    self.tui.state().canonical_revision,
+                    None,
+                    None,
+                    false,
+                    None,
+                );
                 Ok(self.keyboard_overlay(format!(
                     "[outline] Draft: {} (Command Draft) source_revision={revision} input={{}}",
                     command.0
@@ -3909,36 +4072,79 @@ impl<R: Renderer> TuiViewportSession<R> {
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         match input {
             TerminalInput::Escape => {
+                let draft = self.draft.draft().expect("draft remains").clone();
+                let had_transient_scene = self.scene.revision != self.canonical_scene.revision;
                 self.tui
                     .transition_command(CommandEvent::CancelRequested)
                     .map_err(TuiViewportError::Tui)?;
                 self.draft.cancel();
+                let submission = if had_transient_scene {
+                    self.restore_canonical_scene();
+                    self.tui.presentation_generation =
+                        self.tui.presentation_generation.saturating_add(1);
+                    Some(self.render_current().map_err(TuiViewportError::Viewport)?)
+                } else {
+                    None
+                };
                 self.tui
                     .transition_command(CommandEvent::CancellationCompleted {
                         detail: "user cancelled the command draft".to_string(),
                     })
                     .map_err(TuiViewportError::Tui)?;
-                Ok(self.keyboard_overlay(
-                    "[cancellation-glyph] Cancellation: command draft discarded".to_string(),
-                ))
+                self.record_action(
+                    "cancelled",
+                    draft.command.0,
+                    draft.source_revision.clone(),
+                    self.tui.state().canonical_revision.clone(),
+                    None,
+                    None,
+                    false,
+                    Some("user cancelled the command draft".to_string()),
+                );
+                Ok(KeyboardInputOutcome {
+                    rendered: None,
+                    submission,
+                    overlay: "[cancellation-glyph] Cancellation: command draft discarded"
+                        .to_string(),
+                    response: None,
+                    active_project_root: None,
+                })
             }
             TerminalInput::Character(character) => {
+                let had_preview = self.draft.preview().is_some();
                 self.draft.push_input_char(character);
+                self.draft.invalidate_preview();
+                let submission = self.invalidate_preview_scene(had_preview)?;
                 self.transition_draft_update()?;
-                Ok(self.keyboard_overlay(format!(
-                    "[outline] Draft: {} (Command Draft) input={}",
-                    self.draft.draft().expect("draft remains").command.0,
-                    self.draft.input_text()
-                )))
+                Ok(KeyboardInputOutcome {
+                    rendered: None,
+                    submission,
+                    overlay: format!(
+                        "[outline] Draft: {} (Command Draft) input={}",
+                        self.draft.draft().expect("draft remains").command.0,
+                        self.draft.input_text()
+                    ),
+                    response: None,
+                    active_project_root: None,
+                })
             }
             TerminalInput::Backspace => {
+                let had_preview = self.draft.preview().is_some();
                 self.draft.pop_input_char();
+                self.draft.invalidate_preview();
+                let submission = self.invalidate_preview_scene(had_preview)?;
                 self.transition_draft_update()?;
-                Ok(self.keyboard_overlay(format!(
-                    "[outline] Draft: {} (Command Draft) input={}",
-                    self.draft.draft().expect("draft remains").command.0,
-                    self.draft.input_text()
-                )))
+                Ok(KeyboardInputOutcome {
+                    rendered: None,
+                    submission,
+                    overlay: format!(
+                        "[outline] Draft: {} (Command Draft) input={}",
+                        self.draft.draft().expect("draft remains").command.0,
+                        self.draft.input_text()
+                    ),
+                    response: None,
+                    active_project_root: None,
+                })
             }
             TerminalInput::Preview => self.preview_draft(gateway, root),
             TerminalInput::Commit => self.commit_draft(host, gateway, root),
@@ -3990,26 +4196,70 @@ impl<R: Renderer> TuiViewportSession<R> {
         };
         match gateway.preview(self.draft.draft().expect("draft remains").command, request) {
             Ok(preview) => {
+                let has_transient_scene = preview.preview_solid.is_some();
                 self.draft.set_preview(
                     preview.preview_revision.clone(),
                     preview.input_fingerprint.clone(),
+                    preview.geometry_fingerprint.clone(),
                 );
+                if has_transient_scene {
+                    self.install_preview_scene(&preview);
+                }
+                self.tui.presentation_generation =
+                    self.tui.presentation_generation.saturating_add(1);
                 self.tui
                     .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Ready))
                     .map_err(TuiViewportError::Tui)?;
-                Ok(self.keyboard_overlay(format_preview(&preview)))
+                let draft = self.draft.draft().expect("draft remains").clone();
+                let submission = if has_transient_scene {
+                    Some(self.render_current().map_err(TuiViewportError::Viewport)?)
+                } else {
+                    None
+                };
+                self.record_action(
+                    "preview_ready",
+                    draft.command.0,
+                    preview.source_revision.clone(),
+                    self.tui.state().canonical_revision.clone(),
+                    Some(preview.preview_revision.clone()),
+                    Some(preview.geometry_fingerprint.clone()),
+                    has_transient_scene,
+                    None,
+                );
+                Ok(KeyboardInputOutcome {
+                    rendered: None,
+                    submission,
+                    overlay: format_preview(&preview),
+                    response: None,
+                    active_project_root: None,
+                })
             }
             Err(error) => self.reject_preview(format!("{error:?}")),
         }
     }
 
     fn reject_preview(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        let had_transient_scene = self.scene.revision != self.canonical_scene.revision;
+        self.draft.invalidate_preview();
+        self.restore_canonical_scene();
         self.tui
             .transition_command(CommandEvent::PreviewCompleted(PreviewResult::Rejected {
                 detail: detail.clone(),
             }))
             .map_err(TuiViewportError::Tui)?;
-        Ok(self.keyboard_overlay(format!("[error-glyph] Failure: preview rejected: {detail}")))
+        let submission = if had_transient_scene {
+            self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+            Some(self.render_current().map_err(TuiViewportError::Viewport)?)
+        } else {
+            None
+        };
+        Ok(KeyboardInputOutcome {
+            rendered: None,
+            submission,
+            overlay: format!("[error-glyph] Failure: preview rejected: {detail}"),
+            response: None,
+            active_project_root: None,
+        })
     }
 
     fn commit_draft<G: CommandGateway>(
@@ -4019,17 +4269,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         root: &Path,
     ) -> Result<KeyboardInputOutcome, TuiViewportError> {
         if self.draft.preview().is_none() {
-            let command = self.draft.draft().expect("draft remains").command;
-            let request = match self.domain_request(root, false) {
-                Ok(request) => request,
-                Err(detail) => return self.reject_commit(detail),
-            };
-            let preview = match gateway.preview(command, request) {
-                Ok(preview) => preview,
-                Err(error) => return self.reject_commit(format!("preview failed: {error}")),
-            };
-            self.draft
-                .set_preview(preview.preview_revision, preview.input_fingerprint);
+            return self.preview_draft(gateway, root);
         }
         self.tui
             .transition_command(CommandEvent::CommitRequested)
@@ -4041,16 +4281,27 @@ impl<R: Renderer> TuiViewportSession<R> {
             .source_revision
             .clone();
         let command = self.draft.draft().expect("draft remains").command;
+        let preview_revision = self
+            .draft
+            .preview()
+            .map(|preview| preview.preview_revision.clone());
+        let geometry_fingerprint = self
+            .draft
+            .preview()
+            .map(|preview| preview.geometry_fingerprint.clone());
         let request = match self.domain_request(root, true) {
             Ok(request) => request,
-            Err(detail) => return self.reject_commit(detail),
+            Err(detail) => return self.reject_commit(host, root, detail),
         };
         let active_project_root = if command == NEW_PROJECT_COMMAND_ID {
             match request.get("destination").and_then(Value::as_str) {
                 Some(destination) => Some(PathBuf::from(destination)),
                 None => {
-                    return self
-                        .reject_commit("new-project request has no destination".to_string());
+                    return self.reject_commit(
+                        host,
+                        root,
+                        "new-project request has no destination".to_string(),
+                    );
                 }
             }
         } else {
@@ -4058,45 +4309,62 @@ impl<R: Renderer> TuiViewportSession<R> {
         };
         let response = match gateway.commit(command, request) {
             Ok(response) => response,
-            Err(error) => return self.reject_commit(format!("{error:?}")),
+            Err(error) => return self.reject_commit(host, root, format!("{error:?}")),
         };
         if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID {
             if response["status"] == "invalid_request" {
-                return self.reject_commit(sketch_reattachment_acknowledgement(&response));
+                return self.reject_commit(
+                    host,
+                    root,
+                    sketch_reattachment_acknowledgement(&response),
+                );
             }
             if response["status"] != "solved" {
-                return self.reject_commit(format!(
-                    "sketch solve {}: {}",
-                    response["status"].as_str().unwrap_or("unknown"),
-                    response["diagnostics"]
-                ));
+                return self.reject_commit(
+                    host,
+                    root,
+                    format!(
+                        "sketch solve {}: {}",
+                        response["status"].as_str().unwrap_or("unknown"),
+                        response["diagnostics"]
+                    ),
+                );
             }
         }
         let revision = if let Some(project_root) = active_project_root.as_ref() {
             match host.load_with_geometry_replay(project_root) {
                 Ok(snapshot) => snapshot.revision_hash,
                 Err(error) => {
-                    return self.reject_commit(format!("created project could not load: {error}"));
+                    return self.reject_commit(
+                        host,
+                        root,
+                        format!("created project could not load: {error}"),
+                    );
                 }
             }
         } else {
             match response.get("revision_hash").and_then(Value::as_str) {
                 Some(revision) => revision.to_string(),
                 None => {
-                    return self.reject_commit("commit response has no revision_hash".to_string());
+                    return self.reject_commit(
+                        host,
+                        root,
+                        "commit response has no revision_hash".to_string(),
+                    );
                 }
             }
         };
         self.tui
             .transition_command(CommandEvent::CommitAccepted {
                 source_revision: source_revision.clone(),
-                validated_revision: source_revision,
+                validated_revision: source_revision.clone(),
                 revision: revision.clone(),
             })
             .map_err(TuiViewportError::Tui)?;
         self.draft.cancel();
         self.refresh_scene_from_host(host)?;
         let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
+        let committed_scene = true;
         let overlay = if command == NEW_PROJECT_COMMAND_ID {
             let project_root = active_project_root
                 .as_ref()
@@ -4119,6 +4387,16 @@ impl<R: Renderer> TuiViewportSession<R> {
                 command.0
             )
         };
+        self.record_action(
+            "committed",
+            command.0,
+            source_revision,
+            revision.clone(),
+            preview_revision,
+            geometry_fingerprint,
+            committed_scene,
+            None,
+        );
         Ok(KeyboardInputOutcome {
             rendered: None,
             submission: Some(submission),
@@ -4128,14 +4406,51 @@ impl<R: Renderer> TuiViewportSession<R> {
         })
     }
 
-    fn reject_commit(&mut self, detail: String) -> Result<KeyboardInputOutcome, TuiViewportError> {
+    fn reject_commit(
+        &mut self,
+        host: &Host,
+        root: &Path,
+        detail: String,
+    ) -> Result<KeyboardInputOutcome, TuiViewportError> {
+        let had_transient_scene = self.scene.revision != self.canonical_scene.revision;
         self.draft.cancel();
+        if root.exists() && host.load_with_geometry_replay(root).is_ok() {
+            self.refresh_scene_from_host(host)?;
+        } else {
+            self.restore_canonical_scene();
+        }
         self.tui
             .transition_command(CommandEvent::CommitRejected {
                 detail: detail.clone(),
             })
             .map_err(TuiViewportError::Tui)?;
-        Ok(self.keyboard_overlay(format!("[error-glyph] Failure: commit rejected: {detail}")))
+        let submission = if had_transient_scene {
+            self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+            Some(self.render_current().map_err(TuiViewportError::Viewport)?)
+        } else {
+            None
+        };
+        Ok(KeyboardInputOutcome {
+            rendered: None,
+            submission,
+            overlay: format!("[error-glyph] Failure: commit rejected: {detail}"),
+            response: None,
+            active_project_root: None,
+        })
+    }
+
+    fn invalidate_preview_scene(
+        &mut self,
+        had_preview: bool,
+    ) -> Result<Option<SubmitOutcome>, TuiViewportError> {
+        if !had_preview || self.scene.revision == self.canonical_scene.revision {
+            return Ok(None);
+        }
+        self.restore_canonical_scene();
+        self.tui.presentation_generation = self.tui.presentation_generation.saturating_add(1);
+        self.render_current()
+            .map(Some)
+            .map_err(TuiViewportError::Viewport)
     }
 
     fn domain_request(&self, root: &Path, include_expected: bool) -> Result<Value, String> {
@@ -4156,7 +4471,12 @@ impl<R: Renderer> TuiViewportSession<R> {
                 Value::String(root.to_string_lossy().into_owned()),
             );
         }
-        if include_expected && draft.command != NEW_PROJECT_COMMAND_ID {
+        if include_expected
+            && draft.command != NEW_PROJECT_COMMAND_ID
+            && threeterm_protocol::schema::find(draft.command).is_some_and(|schema| {
+                schema.request_schema["properties"]["expected_revision"].is_object()
+            })
+        {
             object.insert(
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),
@@ -4186,6 +4506,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
         self.tui
             .refresh_canonical_presentation(&graph, scene.revision.clone());
+        self.canonical_scene = scene.clone();
         self.scene = scene;
         Ok(())
     }
@@ -4305,6 +4626,7 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     pub fn report_acknowledgement_timeout(&mut self) -> Result<StateTransition, TuiDiagnostic> {
+        self.restore_canonical_scene();
         let diagnostic = self.coordinator.acknowledgement_timeout();
         let transition = self
             .tui
@@ -4318,6 +4640,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         &mut self,
         detail: impl Into<String>,
     ) -> Result<StateTransition, TuiDiagnostic> {
+        self.restore_canonical_scene();
         let diagnostic = self.coordinator.terminal_reset(detail);
         let transition = self
             .tui
@@ -4328,6 +4651,7 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     pub fn cleanup(&mut self) -> Result<(), ViewportDiagnostic> {
+        self.restore_canonical_scene();
         self.visible_frame_identity = None;
         self.coordinator.cleanup()
     }
@@ -4352,6 +4676,7 @@ impl<R: Renderer> TuiViewportSession<R> {
     }
 
     fn handle_exit_signal(&mut self, detail: &str) -> Result<StateTransition, TuiDiagnostic> {
+        self.restore_canonical_scene();
         self.tui
             .transition_lifecycle(LifecycleEvent::CloseRequested)?;
         let signal = match detail {
@@ -4390,6 +4715,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         &mut self,
         diagnostic: &ViewportDiagnostic,
     ) -> Result<StateTransition, TuiDiagnostic> {
+        self.restore_canonical_scene();
         self.coordinator.invalidate();
         let transition = self
             .tui

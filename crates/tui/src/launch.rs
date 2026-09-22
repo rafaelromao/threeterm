@@ -18,8 +18,8 @@ use threeterm_viewport::{
 };
 
 use crate::{
-    FocusCaptureEvent, InteractionEvent, InteractionMode, TerminalInput, TerminalInputDecoder,
-    TuiViewportSession, decode_terminal_input,
+    ActionTranscript, FocusCaptureEvent, InteractionEvent, InteractionMode, TerminalInput,
+    TerminalInputDecoder, TuiViewportSession, decode_terminal_input,
 };
 
 pub const LAUNCH_SCHEMA_VERSION: &str = "threeterm.tui.launch/1";
@@ -55,6 +55,7 @@ pub trait InteractiveTerminal: CapabilityProbeIo + Write {
 pub struct LaunchOutcome {
     pub event_loop_entered: bool,
     pub last_response: Option<Value>,
+    pub action_transcript: ActionTranscript,
 }
 
 #[derive(Debug)]
@@ -269,11 +270,12 @@ fn launch_inner<W: InteractiveTerminal>(
         initial_command,
     );
     let launch_result = with_restore_result(launch_result, terminal.restore());
-    let last_response = launch_result?;
+    let (last_response, action_transcript) = launch_result?;
 
     Ok(LaunchOutcome {
         event_loop_entered: true,
         last_response,
+        action_transcript,
     })
 }
 
@@ -297,9 +299,9 @@ fn with_restore_error(source: LaunchError, restore: io::Result<()>) -> LaunchErr
 }
 
 fn with_restore_result(
-    result: Result<Option<Value>, LaunchError>,
+    result: Result<(Option<Value>, ActionTranscript), LaunchError>,
     restore: io::Result<()>,
-) -> Result<Option<Value>, LaunchError> {
+) -> Result<(Option<Value>, ActionTranscript), LaunchError> {
     match restore {
         Ok(_) => result,
         Err(error) => match result {
@@ -325,7 +327,7 @@ fn run_session<W: InteractiveTerminal>(
     probe: &CapabilityProbeResult,
     theme: ThemeContext,
     initial_command: Option<(CommandId, Value)>,
-) -> Result<Option<Value>, LaunchError> {
+) -> Result<(Option<Value>, ActionTranscript), LaunchError> {
     let session_result = TuiViewportSession::from_host_with_probe_and_theme(
         host,
         width,
@@ -353,9 +355,10 @@ fn run_session<W: InteractiveTerminal>(
                 ))),
             };
             let cleanup = session.cleanup();
+            let transcript = session.action_transcript().clone();
             drop(session);
             match (result, cleanup) {
-                (Ok(response), Ok(())) => Ok(response),
+                (Ok(response), Ok(())) => Ok((response, transcript)),
                 (Ok(_), Err(error)) => Err(LaunchError::Viewport(error)),
                 (Err(error), Ok(())) => Err(error),
                 (Err(error), Err(cleanup)) => Err(LaunchError::Cleanup {
@@ -450,6 +453,7 @@ fn run_event_loop<W: InteractiveTerminal>(
             .cleanup_signal()
         {
             handle_cleanup_signal(session, signal)?;
+            write_action_transcript(session)?;
             return Ok(last_response);
         }
         let bytes = match session
@@ -467,6 +471,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                     .cleanup_signal()
                 {
                     handle_cleanup_signal(session, signal)?;
+                    write_action_transcript(session)?;
                     return Ok(last_response);
                 }
                 return Err(LaunchError::Runtime(format!(
@@ -480,9 +485,22 @@ fn run_event_loop<W: InteractiveTerminal>(
         }
         for event in events {
             if (event == b"q" || event == b"\x03") && !session.command_input_active() {
+                if session.coordinator().in_flight().is_some() {
+                    let revision = session.state().canonical_revision;
+                    session
+                        .coordinator_mut()
+                        .renderer_mut()
+                        .write_control(
+                            b"\r\n[ready-status] Close waits for viewport acknowledgement\r\n",
+                            &revision,
+                        )
+                        .map_err(LaunchError::Viewport)?;
+                    continue;
+                }
                 session
                     .handle_close()
                     .map_err(|error| LaunchError::Runtime(format!("{error:?}")))?;
+                write_action_transcript(session)?;
                 return Ok(last_response);
             }
             if let Some((image_id, _)) = acknowledgement(&event) {
@@ -671,6 +689,7 @@ fn run_event_loop<W: InteractiveTerminal>(
                                 &revision,
                             )
                             .map_err(LaunchError::Viewport)?;
+                        write_action_transcript(session)?;
                         return Ok(last_response);
                     }
                     _ => {
@@ -760,6 +779,7 @@ fn write_viewport_evidence<W: InteractiveTerminal>(
             "discard the frame and rebuild the presentation from the current scene",
         ))
     })?;
+    session.record_presentation_evidence(&evidence);
     let payload =
         serde_json::to_string(&evidence).expect("viewport presentation evidence is serializable");
     let revision = session.state().canonical_revision;
@@ -768,6 +788,22 @@ fn write_viewport_evidence<W: InteractiveTerminal>(
         .renderer_mut()
         .write_control(
             format!("\r\n[viewport-status] Viewport presented {payload}\r\n").as_bytes(),
+            &revision,
+        )
+        .map_err(LaunchError::Viewport)
+}
+
+fn write_action_transcript<W: InteractiveTerminal>(
+    session: &mut TuiViewportSession<threeterm_viewport::GhosttyRenderer<&mut W>>,
+) -> Result<(), LaunchError> {
+    let payload = serde_json::to_string(session.action_transcript())
+        .expect("action transcript is serializable");
+    let revision = session.state().canonical_revision;
+    session
+        .coordinator_mut()
+        .renderer_mut()
+        .write_control(
+            format!("\r\n[action-transcript] {payload}\r\n").as_bytes(),
             &revision,
         )
         .map_err(LaunchError::Viewport)

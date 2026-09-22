@@ -777,7 +777,7 @@ fn assert_bracket_mesh(
     let thickness = mesh_number(mesh_recipe, "base_thickness");
     for (center, label) in [
         ([15.0, 2.0], "horizontal base thickness"),
-        ([2.0, 30.0], "vertical base thickness"),
+        ([10.0, 30.0], "vertical base thickness"),
     ] {
         let measured = sampled_span(0.0, bounds_max[2], 0.05, thickness / 2.0, |z| {
             point_inside(mesh, [center[0], center[1], z])

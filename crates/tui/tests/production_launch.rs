@@ -1569,6 +1569,10 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
         &worker,
     )
     .expect("pattern reinforcing pad fixture persists");
+    let initial_revision = host
+        .identity(&root)
+        .expect("initial pattern identity reads")
+        .revision_hash;
 
     let mirror_request = br#"{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}"#;
     let linear_request = br#"{"feature_id":"tui-linear-pads","base_feature_id":"reinforce-pad","direction":[1,0,0],"count":3,"spacing":12}"#;
@@ -1699,6 +1703,9 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
     }
     let output = String::from_utf8_lossy(&terminal.writes);
     for marker in [
+        "[dashed-outline] Preview: mirror",
+        "[dashed-outline] Preview: linear-pattern",
+        "[dashed-outline] Preview: circular-pattern",
         "[selection-glyph] Commit: mirror",
         "[selection-glyph] Commit: linear-pattern",
         "[selection-glyph] Commit: circular-pattern",
@@ -1712,6 +1719,13 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
             "missing pattern evidence marker: {marker}"
         );
     }
+    let mirror_revision = committed_revision(&output, "mirror");
+    let linear_revision = committed_revision(&output, "linear-pattern");
+    let circular_revision = committed_revision(&output, "circular-pattern");
+    assert_ne!(mirror_revision, initial_revision);
+    assert_ne!(linear_revision, mirror_revision);
+    assert_ne!(circular_revision, linear_revision);
+    assert_eq!(circular_revision, identity.revision_hash);
 
     let viewport_evidence = json!({
         "acknowledgement": "viewport-presented",
@@ -1736,7 +1750,7 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
             "commit_marker": "[selection-glyph] Commit: mirror",
             "response": {
                 "feature_id": "tui-mirror-pad",
-                "revision": committed_revision(&output, "mirror"),
+                "revision": mirror_revision.clone(),
             },
             "viewport_evidence": viewport_evidence.clone(),
         }),
@@ -1747,7 +1761,7 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
             "commit_marker": "[selection-glyph] Commit: linear-pattern",
             "response": {
                 "feature_id": "tui-linear-pads",
-                "revision": committed_revision(&output, "linear-pattern"),
+                "revision": linear_revision.clone(),
             },
             "viewport_evidence": viewport_evidence.clone(),
         }),
@@ -1758,7 +1772,7 @@ fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
             "commit_marker": "[selection-glyph] Commit: circular-pattern",
             "response": {
                 "feature_id": "tui-circular-lugs",
-                "revision": committed_revision(&output, "circular-pattern"),
+                "revision": circular_revision,
             },
             "viewport_evidence": viewport_evidence,
         }),

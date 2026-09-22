@@ -4917,6 +4917,33 @@ impl Host {
                 geometry_fingerprint,
             });
         }
+        if command == SAVE_COMMAND_ID {
+            let bundle_path = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ExecutionError::InvalidRequest("missing bundle_path".to_string()))?;
+            let current = self.load(bundle_path).map_err(ExecutionError::Handler)?;
+            if let Some(expected_revision) = request
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_str)
+                && current.revision_hash != expected_revision
+            {
+                return Err(ExecutionError::Handler(HostError::Validation {
+                    detail: format!(
+                        "save source revision {expected_revision:?} does not match current revision {:?}",
+                        current.revision_hash
+                    ),
+                }));
+            }
+            let input_fingerprint = sha256_hex(request.to_string().as_bytes());
+            return Ok(DomainCommandPreview {
+                command,
+                source_revision: current.revision_hash.clone(),
+                preview_revision: current.revision_hash,
+                input_fingerprint,
+                geometry_fingerprint: sha256_hex(b"save-checkpoint"),
+            });
+        }
         if command == BRACKET_COMMAND_ID {
             let bundle_path = request
                 .get("bundle_path")

@@ -47,6 +47,10 @@ ZOOM_VIEWPORT_CROP=''
 NAVIGATION_TRANSCRIPT=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
+COLLAR_SCREENSHOT=''
+OPENING_SCREENSHOT=''
+REINFORCEMENT_SCREENSHOT=''
+WORKFLOW_TRANSCRIPT=''
 PROJECT_IDENTITY=''
 CLEANUP_SCREENSHOT=''
 FAILURE_SCREENSHOT=''
@@ -101,6 +105,7 @@ Usage:
   graphical-tui.sh production_tui_ghostty_session --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_create_project_extrude --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_keyboard_navigation --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_reinforcement --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
   graphical-tui.sh --validate-viewport-evidence PATH
 
@@ -233,7 +238,7 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation)
+        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_reinforcement)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
             if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
@@ -242,6 +247,10 @@ while (($# > 0)); do
             elif [[ "$TEST_NAME" == 'production_tui_keyboard_navigation' ]]; then
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.keyboard-navigation/1'
+            elif [[ "$TEST_NAME" == 'production_tui_reinforcement' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.reinforcement/1'
+                EXPECTED_FEATURE_ID='bracket-foundation'
             fi
             shift
             ;;
@@ -314,6 +323,17 @@ else
     STARTUP_SCREENSHOT="${EVIDENCE_ROOT}/startup.png"
     PROJECT_CREATED_SCREENSHOT=''
     EXTRUSION_COMMITTED_SCREENSHOT=''
+fi
+if [[ "$TEST_ID" == 'production_tui_reinforcement' ]]; then
+    COLLAR_SCREENSHOT="${EVIDENCE_ROOT}/collar.png"
+    OPENING_SCREENSHOT="${EVIDENCE_ROOT}/opening.png"
+    REINFORCEMENT_SCREENSHOT="${EVIDENCE_ROOT}/reinforcement.png"
+    WORKFLOW_TRANSCRIPT="${EVIDENCE_ROOT}/reinforcement-transcript.jsonl"
+else
+    COLLAR_SCREENSHOT=''
+    OPENING_SCREENSHOT=''
+    REINFORCEMENT_SCREENSHOT=''
+    WORKFLOW_TRANSCRIPT=''
 fi
 ORBIT_SCREENSHOT="${EVIDENCE_ROOT}/orbit.png"
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
@@ -433,7 +453,7 @@ check_prerequisites() {
     [[ "$backend" == 'headless-backend.so' ]] ||
         die toolchain_contract_invalid "unsupported Weston backend: $backend"
 
-    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
+    if [[ "$TEST_ID" == 'production_tui_create_project_extrude' || "$TEST_ID" == 'production_tui_reinforcement' ]]; then
         OCCT_WORKER="${THREETERM_OCCTBUILD_WORKER:-}"
         if [[ -z "$OCCT_WORKER" ]]; then
             local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"
@@ -1064,6 +1084,94 @@ run_create_project_extrude() {
     workflow_status='passed'
 }
 
+reinforcement_viewport_ready() {
+    local feature_id="$1"
+    EXPECTED_FEATURE_ID="$feature_id"
+    extract_viewport_evidence || return 1
+    validate_viewport_evidence || return 1
+    jq -e --arg feature "$feature_id" \
+        '.scene.solids | length == 1 and .[0].feature_id == $feature and .[0].triangle_count > 0' \
+        <<<"$viewport_evidence" >/dev/null 2>&1
+}
+
+capture_reinforcement_stage() {
+    local stage="$1"
+    local command_name="$2"
+    local feature_id="$3"
+    local request="$4"
+    local marker="$5"
+    local screenshot="$6"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcement_viewport_ready "$feature_id" ||
+        die reinforcement_viewport_invalid "${stage} viewport evidence was invalid: ${viewport_evidence}"
+    capture_screenshot "$screenshot" || die "${stage}_screenshot_failed" "${stage} screenshot was not fixed at 800x600"
+    local ocr screenshot_sha
+    ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
+    grep -Fq 'Viewport presented' <<<"$ocr" ||
+        die "${stage}_viewport_marker_not_visible" "${stage} viewport evidence was not visible in the screenshot"
+    grep -Fq "Commit: ${command_name}" <<<"$ocr" ||
+        die "${stage}_acknowledgement_not_visible" "${stage} commit acknowledgement was not visible in the screenshot"
+    screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
+    jq -n \
+        --arg schema_version "$SCHEMA_VERSION" \
+        --arg stage "$stage" \
+        --arg command "$command_name" \
+        --arg feature_id "$feature_id" \
+        --arg request "$request" \
+        --arg marker "$marker" \
+        --arg screenshot "$screenshot" \
+        --arg screenshot_sha256 "$screenshot_sha" \
+        --argjson viewport "$viewport_evidence" \
+        '{schema_version:$schema_version,stage:$stage,command:$command,feature_id:$feature_id,request:$request,acknowledgement:{marker:$marker},revision:$viewport.frame.revision,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+        >>"$WORKFLOW_TRANSCRIPT"
+    if [[ "$stage" == final ]]; then
+        viewport_workflow_evidence="$viewport_evidence"
+        startup_revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    fi
+}
+
+run_reinforcement_command() {
+    local command_name="$1"
+    local feature_id="$2"
+    local request="$3"
+    local screenshot="$4"
+    local stage="$5"
+    local commit_count="$6"
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed "compositor keyboard input could not open the ${command_name} palette"
+    wtype "$command_name" || die input_injection_failed "compositor keyboard input could not type ${command_name}"
+    wtype -k Return || die input_injection_failed "compositor keyboard input could not select ${command_name}"
+    wtype "$request" || die input_injection_failed "compositor keyboard input could not type the ${command_name} request"
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed "compositor keyboard input could not preview ${command_name}"
+    wait_for_output_marker_count "[dashed-outline] Preview: ${command_name}" "$commit_count"
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed "compositor keyboard input could not commit ${command_name}"
+    wait_for_output_marker_count "[selection-glyph] Commit: ${command_name}" "$commit_count"
+    if [[ -n "$screenshot" ]]; then
+        capture_reinforcement_stage "$stage" "$command_name" "$feature_id" "$request" \
+            "[selection-glyph] Commit: ${command_name}" "$screenshot"
+    fi
+}
+
+run_reinforcement_workflow() {
+    [[ "$TEST_ID" == 'production_tui_reinforcement' ]] || return 0
+    : >"$WORKFLOW_TRANSCRIPT"
+    local revolve_request='{"feature_id":"revolved-collar","profile":[[20,28],[22,28],[22,32],[20,32]],"axis_point":[10,0,0],"axis_direction":[0,-1,0],"angle":1.5707963267948966}'
+    local hollow_seed_request='{"feature_id":"hollow-detail-seed","profile":[[42,5],[52,5],[52,15],[42,15]],"height":20,"mode":"additive"}'
+    local shell_request='{"feature_id":"hollow-detail","base_feature_id":"hollow-detail-seed","thickness":1.5}'
+    local opening_request='{"feature_id":"hollow-detail-open","base_feature_id":"hollow-detail","position":[47,10,0],"direction":[0,0,1],"diameter":5,"hole_kind":"drilled","measure_removed_volume":true}'
+    local collar_fuse_request='{"feature_id":"foundation-with-collar","base_feature_id":"bracket-foundation","tool_feature_id":"revolved-collar"}'
+    local final_fuse_request='{"feature_id":"reinforced-foundation","base_feature_id":"foundation-with-collar","tool_feature_id":"hollow-detail-open"}'
+    local save_request='{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}'
+
+    run_reinforcement_command revolve revolved-collar "$revolve_request" "$COLLAR_SCREENSHOT" collar 1
+    run_reinforcement_command extrude hollow-detail-seed "$hollow_seed_request" '' '' 1
+    run_reinforcement_command shell hollow-detail "$shell_request" '' '' 1
+    run_reinforcement_command hole hollow-detail-open "$opening_request" "$OPENING_SCREENSHOT" opening 1
+    run_reinforcement_command boolean-fuse foundation-with-collar "$collar_fuse_request" '' '' 1
+    run_reinforcement_command boolean-fuse reinforced-foundation "$final_fuse_request" '' '' 2
+    run_reinforcement_command save reinforcement-snapshot "$save_request" "$REINFORCEMENT_SCREENSHOT" final 1
+    EXPECTED_FEATURE_ID='reinforced-foundation'
+    workflow_status='passed'
+}
+
 read_tui_status() {
     [[ -s "$TUI_STATUS_FILE" ]] || return 1
     local status
@@ -1147,6 +1255,7 @@ write_manifest() {
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
         "$STARTUP_SCREENSHOT" "$PROJECT_CREATED_SCREENSHOT" "$EXTRUSION_COMMITTED_SCREENSHOT"
+        "$COLLAR_SCREENSHOT" "$OPENING_SCREENSHOT" "$REINFORCEMENT_SCREENSHOT" "$WORKFLOW_TRANSCRIPT"
         "$ORBIT_SCREENSHOT" "$SELECTION_SCREENSHOT" "$PAN_SCREENSHOT" "$ZOOM_SCREENSHOT"
         "$STARTUP_VIEWPORT_CROP" "$SELECTION_VIEWPORT_CROP" "$ORBIT_VIEWPORT_CROP"
         "$PAN_VIEWPORT_CROP" "$ZOOM_VIEWPORT_CROP" "$NAVIGATION_TRANSCRIPT"
@@ -1156,6 +1265,7 @@ write_manifest() {
     local -a evidence_kinds=(
         pty_output pty_input tui_stderr compositor_log tool_versions
         startup_screenshot project_created_screenshot extrusion_committed_screenshot
+        collar_screenshot opening_screenshot reinforcement_screenshot reinforcement_transcript
         orbit_screenshot selection_screenshot pan_screenshot zoom_screenshot
         startup_viewport_crop selection_viewport_crop orbit_viewport_crop
         pan_viewport_crop zoom_viewport_crop navigation_transcript
@@ -1235,13 +1345,14 @@ write_manifest() {
             --argjson final_delete_image_id "$final_delete_image_id_json" \
              --argjson cleanup_deletions "$cleanup_deletions" \
              --arg navigation_transcript "$NAVIGATION_TRANSCRIPT" \
+             --arg workflow_transcript "$WORKFLOW_TRANSCRIPT" \
               --arg navigation_before "$navigation_project_generation_digest_before" \
               --arg navigation_after "$navigation_project_generation_digest_after" \
              --arg navigation_status "$navigation_status" \
              --arg workflow_status "$workflow_status" \
             --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts}' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -1294,6 +1405,9 @@ start_probe_stimulus
 wait_for_tui_readiness
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     run_create_project_extrude
+fi
+if [[ "$TEST_ID" == 'production_tui_reinforcement' ]]; then
+    run_reinforcement_workflow
 fi
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
     run_keyboard_navigation

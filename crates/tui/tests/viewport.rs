@@ -458,6 +458,51 @@ fn revolve_draft_accepts_json_preview_and_commit() {
 }
 
 #[test]
+fn save_draft_previews_and_commits_through_the_host_gateway() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("seed host creates a viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "save".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the save query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("save draft opens");
+    let request = r#"{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}"#;
+    for byte in request.bytes() {
+        session
+            .process_keyboard_input(&[byte], &host, &root)
+            .expect("save draft accepts JSON");
+    }
+
+    let preview = session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("save preview succeeds");
+    assert!(preview.overlay.contains("[dashed-outline] Preview: save"));
+    let committed = session
+        .process_keyboard_input(b"\x1b[13;5u", &host, &root)
+        .expect("save commit succeeds");
+    assert!(committed.overlay.contains("[selection-glyph] Commit: save"));
+    assert_eq!(
+        host.identity(&root)
+            .expect("saved identity reads")
+            .transaction_count,
+        2
+    );
+    fs::remove_dir_all(root).expect("save fixture removes");
+}
+
+#[test]
 fn existing_new_project_destination_is_rejected_without_mutation() {
     let root = temporary_bundle_root();
     write_fresh(&root, ProjectGeneration::fresh()).expect("existing empty project creates");

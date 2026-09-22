@@ -4157,7 +4157,10 @@ impl<R: Renderer> TuiViewportSession<R> {
                 Value::String(root.to_string_lossy().into_owned()),
             );
         }
-        if include_expected && draft.command != NEW_PROJECT_COMMAND_ID {
+        if include_expected
+            && draft.command != NEW_PROJECT_COMMAND_ID
+            && draft.command != threeterm_protocol::schema::SAVE_COMMAND_ID
+        {
             object.insert(
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),

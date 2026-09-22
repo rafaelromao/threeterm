@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
 use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::schema;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
@@ -35,6 +37,81 @@ struct ScriptedTerminal {
     write_failures_remaining: usize,
     prepare_calls: usize,
     restore_calls: usize,
+}
+
+const REINFORCEMENT_RECIPE: &str =
+    include_str!("../../host/tests/data/bracket_reinforcement_recipe.v1.json");
+
+fn selected_edge_for_recipe(step: &Value, revision: &str) -> Value {
+    let selection = &step["edge_selection"];
+    let midpoint: [f64; 3] = serde_json::from_value(selection["midpoint"].clone())
+        .expect("recipe edge midpoint is a 3-vector");
+    let tangent: [f64; 3] = serde_json::from_value(selection["tangent"].clone())
+        .expect("recipe edge tangent is a 3-vector");
+    let length = selection["length"]
+        .as_f64()
+        .expect("recipe edge length is numeric");
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("recipe edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": step["request"]["base_feature_id"],
+            "source_revision_id": revision,
+            "source_edge_id": selection["source_edge_id"]
+        },
+        "role": selection["role"],
+        "evidence": {
+            "midpoint": midpoint,
+            "tangent": tangent,
+            "length": length
+        }
+    })
+}
+
+fn prepare_reinforcement_foundation(host: &Host, root: &Path) -> String {
+    let recipe: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+    host.execute_domain_command(
+        schema::NEW_PROJECT_COMMAND_ID,
+        json!({"destination": root.to_string_lossy()}),
+    )
+    .expect("foundation project creates");
+    let mut revision = host
+        .identity(root)
+        .expect("foundation identity reads")
+        .revision_hash;
+
+    for step in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .take(12)
+    {
+        let command_name = step["command"]
+            .as_str()
+            .expect("recipe command is a string");
+        let command = schema::find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe command is registered: {command_name}"));
+        let mut request = step["request"].clone();
+        request["bundle_path"] = root.to_string_lossy().into_owned().into();
+        if matches!(command_name, "extrude" | "fillet" | "chamfer" | "hole") {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_for_recipe(step, &revision);
+        }
+        let response = host
+            .execute_domain_command(command.id, request)
+            .unwrap_or_else(|error| {
+                panic!("foundation step {} succeeds: {error:?}", step["index"])
+            });
+        revision = response["revision_hash"]
+            .as_str()
+            .expect("foundation response has a revision")
+            .to_string();
+    }
+    revision
 }
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -1377,6 +1454,198 @@ fn production_launch_drives_one_revolve_draft_through_preview_and_commit() {
         Some(CanonicalIntent::Revolve(_))
     ));
     drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("reinforcement recipe requires OCCT worker: {error}")
+        }
+        Err(error) => {
+            eprintln!("reinforcement recipe: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-reinforcement-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    prepare_reinforcement_foundation(&host, &root);
+    let recipe: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
+    let mut image_id = 2;
+    for step in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .skip(12)
+    {
+        let command = step["command"]
+            .as_str()
+            .expect("recipe command is a string");
+        let request = serde_json::to_vec(&step["request"]).expect("recipe request serializes");
+        script.push(b"\x10".to_vec());
+        script.extend(command.bytes().map(|byte| vec![byte]));
+        script.push(b"\r".to_vec());
+        script.extend(request.iter().map(|byte| vec![*byte]));
+        script.push(b"\x16".to_vec());
+        script.push(b"\x1b[13;5u".to_vec());
+        script.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
+        image_id += 1;
+    }
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("reinforcement recipe keyboard workflow succeeds");
+
+    let identity = host.identity(&root).expect("reinforcement identity reads");
+    assert_eq!(identity.transaction_count, 19);
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement bundle opens read-only");
+    let expected_features = recipe["expectations"]["final_feature_ids"]
+        .as_array()
+        .expect("recipe final feature IDs are an array")
+        .iter()
+        .map(|feature| feature.as_str().expect("recipe feature ID is a string"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bundle
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_features
+    );
+    for command in [
+        "revolve",
+        "extrude",
+        "shell",
+        "hole",
+        "boolean-fuse",
+        "save",
+    ] {
+        assert!(
+            String::from_utf8_lossy(&terminal.writes)
+                .contains(&format!("[selection-glyph] Commit: {command}")),
+            "TUI transcript omits commit acknowledgement for {command}"
+        );
+    }
+
+    let mut breps = BTreeMap::new();
+    for feature_id in expected_features.iter().filter(|feature_id| {
+        **feature_id != "foundation-snapshot" && **feature_id != "reinforcement-snapshot"
+    }) {
+        let path = root.join("brep").join(format!("{feature_id}.brep"));
+        assert!(path.is_file(), "committed BREP is missing for {feature_id}");
+        breps.insert(
+            (*feature_id).to_string(),
+            fs::read(path).expect("committed BREP reads"),
+        );
+    }
+    let log_before_replay = fs::read(root.join("transactions.log")).expect("transaction log reads");
+
+    let collar_measurements = worker
+        .inspect_edges(
+            "revolved-collar-measurement",
+            root.join("brep/revolved-collar.brep"),
+            "revolved-collar",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"revolved-collar","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("collar edges inspect");
+    for expected_length in [15.707963267948966_f64, 18.84955592153876_f64] {
+        assert!(collar_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - expected_length).abs() <= 1e-3
+                && (28.0..=32.0).contains(&candidate.midpoint[1])
+        }));
+    }
+    let shell_measurements = worker
+        .inspect_edges(
+            "hollow-detail-measurement",
+            root.join("brep/hollow-detail.brep"),
+            "hollow-detail",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"hollow-detail","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("shell edges inspect");
+    assert!(
+        (shell_measurements
+            .material_volume
+            .expect("shell material volume")
+            - 1167.0)
+            .abs()
+            <= 0.001
+    );
+    for expected_length in [10.0_f64, 7.0_f64] {
+        assert!(shell_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - expected_length).abs() <= 1e-3
+        }));
+    }
+    let final_measurements = worker
+        .inspect_edges(
+            "reinforced-foundation-measurement",
+            root.join("brep/reinforced-foundation.brep"),
+            "reinforced-foundation",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"reinforced-foundation","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("final edges inspect");
+    assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - 15.707963267948966).abs() <= 1e-3
+            && candidate
+                .midpoint
+                .into_iter()
+                .zip([49.5, 10.0, 20.0])
+                .all(|(actual, expected)| (actual - expected).abs() <= 1e-3)
+    }));
+
+    fs::remove_dir_all(root.join("brep")).expect("derived BREPs remove");
+    let replayed = Host::new()
+        .load_with_geometry_replay(&root)
+        .expect("reinforcement geometry replay succeeds");
+    assert_eq!(replayed.revision_hash, identity.revision_hash);
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("replayed log reads"),
+        log_before_replay
+    );
+    for (feature_id, original) in breps {
+        assert_eq!(
+            fs::read(root.join("brep").join(format!("{feature_id}.brep")))
+                .expect("replayed BREP reads"),
+            original,
+            "replayed geometry for {feature_id}"
+        );
+    }
+    assert!(
+        host.presentation_viewport_scene()
+            .expect("final viewport scene reads")
+            .solids
+            .iter()
+            .any(|solid| solid.feature_id == "reinforced-foundation")
+    );
     let _ = fs::remove_dir_all(root);
 }
 

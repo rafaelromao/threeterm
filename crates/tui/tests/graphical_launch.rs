@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_occt_worker::{BracketRequest, OcctWorker};
 use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::schema;
 use threeterm_tui::TuiSession;
 use threeterm_viewport::ViewportScene;
 
@@ -35,6 +37,75 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
     visit(root, root, &mut snapshot);
     snapshot
+}
+
+const REINFORCEMENT_RECIPE: &str =
+    include_str!("../../host/tests/data/bracket_reinforcement_recipe.v1.json");
+
+fn selected_edge_for_recipe(step: &Value, revision: &str) -> Value {
+    let selection = &step["edge_selection"];
+    let midpoint: [f64; 3] = serde_json::from_value(selection["midpoint"].clone())
+        .expect("recipe edge midpoint is a 3-vector");
+    let tangent: [f64; 3] = serde_json::from_value(selection["tangent"].clone())
+        .expect("recipe edge tangent is a 3-vector");
+    let length = selection["length"]
+        .as_f64()
+        .expect("recipe edge length is numeric");
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("recipe edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": step["request"]["base_feature_id"],
+            "source_revision_id": revision,
+            "source_edge_id": selection["source_edge_id"]
+        },
+        "role": selection["role"],
+        "evidence": {"midpoint": midpoint, "tangent": tangent, "length": length}
+    })
+}
+
+fn prepare_reinforcement_foundation(host: &Host, root: &Path) {
+    let recipe: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+    host.execute_domain_command(
+        schema::NEW_PROJECT_COMMAND_ID,
+        json!({"destination": root.to_string_lossy()}),
+    )
+    .expect("foundation project creates");
+    let mut revision = host
+        .identity(root)
+        .expect("foundation identity reads")
+        .revision_hash;
+    for step in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .take(12)
+    {
+        let command_name = step["command"]
+            .as_str()
+            .expect("recipe command is a string");
+        let command = schema::find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe command is registered: {command_name}"));
+        let mut request = step["request"].clone();
+        request["bundle_path"] = root.to_string_lossy().into_owned().into();
+        if matches!(command_name, "extrude" | "fillet" | "chamfer" | "hole") {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_for_recipe(step, &revision);
+        }
+        let response = host
+            .execute_domain_command(command.id, request)
+            .unwrap_or_else(|error| {
+                panic!("foundation step {} succeeds: {error:?}", step["index"])
+            });
+        revision = response["revision_hash"]
+            .as_str()
+            .expect("foundation response has a revision")
+            .to_string();
+    }
 }
 
 fn assert_prism_geometry(scene: &ViewportScene) {
@@ -535,4 +606,132 @@ fn production_tui_create_project_extrude() {
     );
 
     fs::remove_dir_all(workspace).expect("fresh graphical workspace removes");
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_reinforcement() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "threeterm-graphical-reinforcement-{}-{suffix}",
+        std::process::id()
+    ));
+    let root = workspace.join("project");
+    let evidence = workspace.join("evidence");
+    fs::create_dir_all(&workspace).expect("graphical reinforcement workspace creates");
+    let _worker = OcctWorker::locate().unwrap_or_else(|error| {
+        panic!("graphical reinforcement requires the OCCT worker: {error}")
+    });
+    prepare_reinforcement_foundation(&Host::new(), &root);
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_reinforcement")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical reinforcement runner starts");
+    assert!(
+        output.status.success(),
+        "graphical reinforcement runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("reinforcement manifest exists"),
+    )
+    .expect("reinforcement manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.reinforcement/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["test"], "production_tui_reinforcement");
+    for event in ["probe", "readiness", "workflow", "orbit", "cleanup"] {
+        assert_eq!(
+            manifest["events"][event], "passed",
+            "event {event} did not pass"
+        );
+    }
+    assert_eq!(
+        manifest["viewport"]["startup"]["scene"]["solids"][0]["feature_id"],
+        "bracket-foundation"
+    );
+    assert_eq!(
+        manifest["viewport"]["workflow"]["scene"]["solids"][0]["feature_id"],
+        "reinforced-foundation"
+    );
+    assert_eq!(
+        manifest["viewport"]["workflow"]["frame"]["revision"],
+        manifest["viewport"]["orbit"]["frame"]["revision"]
+    );
+    assert_ne!(
+        manifest["viewport"]["workflow"]["frame"]["image_id"],
+        manifest["viewport"]["orbit"]["frame"]["image_id"]
+    );
+    for kind in [
+        "collar_screenshot",
+        "opening_screenshot",
+        "reinforcement_screenshot",
+        "reinforcement_transcript",
+        "orbit_screenshot",
+        "cleanup_screenshot",
+    ] {
+        assert!(
+            manifest["artifacts"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|item| item["kind"] == kind && item["sha256"].as_str().is_some())),
+            "reinforcement evidence is missing artifact {kind}"
+        );
+    }
+    let transcript = fs::read_to_string(evidence.join("reinforcement-transcript.jsonl"))
+        .expect("reinforcement transcript exists");
+    let stages = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("transcript line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stages
+            .iter()
+            .map(|stage| stage["stage"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("collar"), Some("opening"), Some("final")]
+    );
+    assert_eq!(stages[0]["feature_id"], "revolved-collar");
+    assert_eq!(stages[1]["feature_id"], "hollow-detail-open");
+    assert_eq!(stages[2]["feature_id"], "reinforced-foundation");
+
+    let pty_output =
+        fs::read_to_string(evidence.join("pty-output.log")).expect("PTY output exists");
+    for marker in [
+        "Commit: revolve",
+        "Commit: extrude",
+        "Commit: shell",
+        "Commit: hole",
+        "Commit: boolean-fuse",
+        "Commit: save",
+    ] {
+        assert!(pty_output.contains(marker), "PTY output omits {marker}");
+    }
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement project opens read-only");
+    assert_eq!(bundle.log.len(), 19);
+    assert!(root.join("brep/reinforced-foundation.brep").is_file());
+    assert_eq!(
+        manifest["cleanup_evidence"]["final_image_id"],
+        manifest["cleanup_evidence"]["final_delete_image_id"]
+    );
+    fs::remove_dir_all(workspace).expect("graphical reinforcement workspace removes");
 }

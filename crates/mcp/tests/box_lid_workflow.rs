@@ -915,6 +915,14 @@ fn viewport_shape(scene: &ViewportScene) -> Value {
     })
 }
 
+fn portable_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn portable_export_response(value: &Value) -> Value {
     let mut portable = value.clone();
     if let Some(object) = portable.as_object_mut() {
@@ -922,21 +930,28 @@ fn portable_export_response(value: &Value) -> Value {
     }
     if let Some(artifacts) = portable["artifacts"].as_array_mut() {
         for artifact in artifacts {
-            let path = artifact
-                .as_str()
-                .and_then(|path| Path::new(path).file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
+            let path = artifact.as_str().map(portable_path).unwrap_or_default();
             *artifact = json!(path);
         }
     }
     if let Some(derived) = portable["derived_artifacts"].as_array_mut() {
         for artifact in derived {
-            artifact
+            let object = artifact
                 .as_object_mut()
-                .expect("derived export artifact is an object")
-                .remove("request_id");
+                .expect("derived export artifact is an object");
+            object.remove("request_id");
+            if let Some(path) = object.get_mut("output_path")
+                && let Some(value) = path.as_str()
+            {
+                *path = json!(portable_path(value));
+            }
         }
+    }
+    if let Some(validation) = portable["validation"].as_object_mut()
+        && let Some(path) = validation.get_mut("brep_path")
+        && let Some(value) = path.as_str()
+    {
+        *path = json!(portable_path(value));
     }
     portable
 }

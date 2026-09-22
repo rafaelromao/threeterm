@@ -468,6 +468,14 @@ fn normalize_step_timestamp(bytes: &[u8]) -> Vec<u8> {
     normalized
 }
 
+fn portable_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn portable_export_response(value: &Value, root: &Path) -> Value {
     let mut portable = value.clone();
     if let Some(object) = portable.as_object_mut() {
@@ -475,13 +483,15 @@ fn portable_export_response(value: &Value, root: &Path) -> Value {
     }
     if let Some(artifacts) = portable["artifacts"].as_array_mut() {
         for artifact in artifacts {
-            let path = artifact
-                .as_str()
-                .and_then(|path| Path::new(path).file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
+            let path = artifact.as_str().map(portable_path).unwrap_or_default();
             *artifact = json!(path);
         }
+    }
+    if let Some(validation) = portable["validation"].as_object_mut()
+        && let Some(path) = validation.get_mut("brep_path")
+        && let Some(value) = path.as_str()
+    {
+        *path = json!(portable_path(value));
     }
     if let Some(derived) = portable["derived_artifacts"].as_array_mut() {
         for artifact in derived {
@@ -489,6 +499,11 @@ fn portable_export_response(value: &Value, root: &Path) -> Value {
                 .as_object_mut()
                 .expect("derived export artifact is an object");
             object.remove("request_id");
+            if let Some(path) = object.get_mut("output_path")
+                && let Some(value) = path.as_str()
+            {
+                *path = json!(portable_path(value));
+            }
             if object["artifact_kind"] == "step"
                 && let Some(name) = object["artifact_name"].as_str()
             {
@@ -502,6 +517,32 @@ fn portable_export_response(value: &Value, root: &Path) -> Value {
         }
     }
     portable
+}
+
+#[test]
+fn portable_export_response_normalizes_adapter_paths() {
+    let value = json!({
+        "generation_id": "adapter-generation",
+        "artifacts": ["/adapter/exports/l-bracket.stl"],
+        "validation": {
+            "brep_path": "/adapter/brep/l-bracket.brep"
+        },
+        "derived_artifacts": [{
+            "request_id": "adapter-request",
+            "artifact_kind": "stl",
+            "artifact_name": "l-bracket.stl",
+            "output_path": "/adapter/exports/l-bracket.stl"
+        }]
+    });
+
+    let portable = portable_export_response(&value, Path::new("/adapter"));
+
+    assert_eq!(portable["artifacts"][0], "l-bracket.stl");
+    assert_eq!(portable["validation"]["brep_path"], "l-bracket.brep");
+    assert_eq!(
+        portable["derived_artifacts"][0]["output_path"],
+        "l-bracket.stl"
+    );
 }
 
 fn portable_edit_response(value: &Value) -> Value {

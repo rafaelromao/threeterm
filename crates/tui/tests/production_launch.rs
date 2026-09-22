@@ -344,6 +344,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         probe_response: None,
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b[<0;33;25M".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
@@ -415,7 +416,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 5);
+    assert_eq!(terminal.events_read, 6);
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
@@ -567,6 +568,7 @@ fn production_launch_executes_registered_noninteractive_command() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         ],
@@ -589,7 +591,7 @@ fn production_launch_executes_registered_noninteractive_command() {
         "threeterm.command.load.response/2"
     );
     assert!(response["feature_graph_hash"].is_string());
-    assert_eq!(terminal.events_read, 4);
+    assert_eq!(terminal.events_read, 5);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }
@@ -604,7 +606,11 @@ fn interactive_capability_gate() {
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
     let mut terminal = ScriptedTerminal {
-        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
         ..Default::default()
     };
 
@@ -633,6 +639,8 @@ fn production_launch_acknowledges_focus_recovery_and_resize() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b[8;30;100t".to_vec(),
             b"\x1b[I".to_vec(),
             b"\x1b[O".to_vec(),
@@ -999,7 +1007,9 @@ fn shared_extrude_execution_accepts_deterministic_tui_input() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1090,6 +1100,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         b"\x1b[B".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ];
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1097,8 +1108,9 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
         b"\x1b[13;5u".to_vec(),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ]);
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1106,11 +1118,11 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\r".to_vec(),
         b"\x1b".to_vec(),
         b"\x1b[C".to_vec(),
-        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
-        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
         b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"w".to_vec(),
+        b"\x1b_Gi=7;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=8;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1151,7 +1163,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         );
     }
     assert!(
-        output.contains("a=d,d=I,i=6"),
+        output.contains("a=d,d=I,i=8"),
         "normal close deletes the latest active Kitty image"
     );
     assert!(
@@ -1174,7 +1186,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .iter()
         .filter_map(|event| parse_ack(event).ok())
         .collect::<Vec<_>>();
-    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(
         terminal.read_events.iter().all(|event| !matches!(
             decode_terminal_input(event),
@@ -1231,14 +1243,15 @@ fn interactive_production_event_loop() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
-        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
-        b"\x1b[B".to_vec(),
+        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=3;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
+        b"\x1b[B".to_vec(),
         b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
+        b"w".to_vec(),
         b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1370,7 +1383,9 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1792,6 +1807,134 @@ fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
 
 #[test]
 #[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_retains_preview_cancellation_and_recommit_evidence() {
+    OcctWorker::locate().expect("preview cancellation workflow requires the OCCT worker");
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-preview-cancel-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("preview cancellation fixture persists");
+    let before_identity = host.identity(&root).expect("canonical identity reads");
+    let before_tree = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("canonical scene reads");
+    let request = br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ]);
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    let outcome = launch(&host, &root, &mut terminal, official_environment())
+        .expect("preview cancellation and recommit workflow succeeds");
+
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity remains readable")
+            .transaction_count,
+        before_identity.transaction_count + 1
+    );
+    assert_ne!(
+        host.identity(&root).expect("committed identity reads"),
+        before_identity
+    );
+    assert_ne!(snapshot_tree(&root), before_tree);
+    assert_eq!(before_scene.revision, before_identity.revision_hash);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+    assert!(!root.join(".derived").exists());
+
+    let transcript = outcome.action_transcript;
+    let kinds = transcript
+        .entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "draft_opened",
+            "preview_ready",
+            "cancelled",
+            "draft_opened",
+            "preview_ready",
+            "committed"
+        ]
+    );
+    assert!(
+        transcript.entries[1]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_eq!(
+        transcript.entries[2].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(
+        transcript.entries[4]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_ne!(
+        transcript.entries[5].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(String::from_utf8_lossy(&terminal.writes).contains("[action-transcript]"));
+
+    let bundle = Bundle::at(&root).open().expect("committed bundle opens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref());
+    let Some(CanonicalIntent::Extrude(intent)) = intent else {
+        panic!("recommitted feature retains extrusion intent");
+    };
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+
+    fs::remove_dir_all(root).expect("preview cancellation fixture removes");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
 fn production_launch_cancels_typed_extrusion_without_mutation() {
     OcctWorker::locate().expect("extrusion cancellation requires the OCCT worker");
     let suffix = SystemTime::now()
@@ -1813,7 +1956,13 @@ fn production_launch_cancels_typed_extrusion_without_mutation() {
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
     events.push(b"\r".to_vec());
     events.extend(request.iter().map(|byte| vec![*byte]));
-    events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
     events.reverse();
     let mut terminal = ScriptedTerminal {
         events,
@@ -1879,23 +2028,26 @@ fn production_launch_creates_project_and_extrudes_typed_profile() {
     append_project_draft(&mut events, true);
     append_project_draft(&mut events, false);
 
-    let append_extrude_draft = |events: &mut Vec<Vec<u8>>, cancel: bool, image_id: u8| {
-        events.push(b"\x10".to_vec());
-        append_text(events, b"extrude");
-        events.push(b"\r".to_vec());
-        append_text(events, request);
-        events.push(b"\x16".to_vec());
-        if cancel {
-            events.push(b"\x1b".to_vec());
-        } else {
-            events.push(b"\x1b[13;5u".to_vec());
-            events.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
-        }
-    };
-    append_extrude_draft(&mut events, true, 0);
-    append_extrude_draft(&mut events, false, 3);
+    let append_extrude_draft =
+        |events: &mut Vec<Vec<u8>>, cancel: bool, preview_image_id: u8, commit_image_id: u8| {
+            events.push(b"\x10".to_vec());
+            append_text(events, b"extrude");
+            events.push(b"\r".to_vec());
+            append_text(events, request);
+            events.push(b"\x16".to_vec());
+            events.push(format!("\x1b_Gi={preview_image_id};OK\x1b\\").into_bytes());
+            if cancel {
+                events.push(b"\x1b".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            } else {
+                events.push(b"\x1b[13;5u".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            }
+        };
+    append_extrude_draft(&mut events, true, 3, 4);
+    append_extrude_draft(&mut events, false, 5, 6);
     events.push(b"\x1b[B".to_vec());
-    events.push(b"\x1b_Gi=4;OK\x1b\\".to_vec());
+    events.push(b"\x1b_Gi=7;OK\x1b\\".to_vec());
     events.push(b"q".to_vec());
     events.reverse();
     let mut terminal = ScriptedTerminal {

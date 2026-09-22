@@ -59,6 +59,7 @@ fn one_draft_replaces_transient_input_and_cancels_without_mutation() {
     drafts.set_preview(
         "preview-revision".to_string(),
         "preview-fingerprint".to_string(),
+        "geometry-fingerprint".to_string(),
     );
     assert!(drafts.preview().is_some());
     drafts.cancel();

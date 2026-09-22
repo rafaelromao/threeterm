@@ -4000,8 +4000,8 @@ impl<R: Renderer> TuiViewportSession<R> {
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
                         | threeterm_protocol::schema::FILLET_COMMAND_ID
                         | threeterm_protocol::schema::CHAMFER_COMMAND_ID
-                        | threeterm_protocol::schema::SHELL_COMMAND_ID
                         | threeterm_protocol::schema::HOLE_COMMAND_ID
+                        | threeterm_protocol::schema::SHELL_COMMAND_ID
                         | threeterm_protocol::schema::DRAFT_COMMAND_ID
                         | threeterm_protocol::schema::LOFT_COMMAND_ID
                 ) {
@@ -4479,7 +4479,12 @@ impl<R: Renderer> TuiViewportSession<R> {
                 Value::String(root.to_string_lossy().into_owned()),
             );
         }
-        if include_expected && draft.command != NEW_PROJECT_COMMAND_ID {
+        if include_expected
+            && draft.command != NEW_PROJECT_COMMAND_ID
+            && threeterm_protocol::schema::find(draft.command).is_some_and(|schema| {
+                schema.request_schema["properties"]["expected_revision"].is_object()
+            })
+        {
             object.insert(
                 "expected_revision".to_string(),
                 Value::String(draft.source_revision.clone()),

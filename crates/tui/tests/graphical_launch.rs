@@ -793,3 +793,290 @@ fn production_tui_reinforcement() {
     );
     fs::remove_dir_all(workspace).expect("graphical reinforcement workspace removes");
 }
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_bracket_foundation() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-graphical-bracket-foundation-{}-{suffix}",
+        std::process::id()
+    ));
+    let evidence = std::env::temp_dir().join(format!(
+        "threeterm-graphical-bracket-foundation-evidence-{}-{suffix}",
+        std::process::id()
+    ));
+    Bundle::create(&root).expect("empty bracket project creates");
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_bracket_foundation")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical bracket runner starts");
+    assert!(
+        output.status.success(),
+        "graphical bracket runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("bracket manifest exists"),
+    )
+    .expect("bracket manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.bracket-foundation/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["test"], "production_tui_bracket_foundation");
+    assert_eq!(manifest["events"]["workflow"], "passed");
+    assert_eq!(manifest["events"]["orbit"], "passed");
+    assert_eq!(manifest["events"]["cleanup"], "passed");
+    assert_eq!(
+        manifest["bracket"]["transcript"],
+        evidence
+            .join("bracket-transcript.jsonl")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(manifest["artifacts"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["kind"] == "bracket_transcript")
+            && items
+                .iter()
+                .filter(|item| item["kind"] == "bracket_step_screenshot")
+                .count()
+                == 11
+            && items
+                .iter()
+                .any(|item| item["kind"] == "startup_screenshot")
+            && items.iter().any(|item| item["kind"] == "orbit_screenshot")
+    }));
+
+    let expected_steps = [
+        ("arm-x", "extrude"),
+        ("arm-z", "extrude"),
+        ("pad-a-seed", "extrude"),
+        ("pad-a", "fillet"),
+        ("pad-b-seed", "extrude"),
+        ("pad-b", "chamfer"),
+        ("bracket-l", "boolean-fuse"),
+        ("bracket-lp1", "boolean-fuse"),
+        ("bracket-base", "boolean-fuse"),
+        ("bracket-hole-1", "hole"),
+        ("bracket-foundation", "hole"),
+    ];
+    let transcript = fs::read_to_string(evidence.join("bracket-transcript.jsonl"))
+        .expect("bracket transcript exists");
+    let observed_steps = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("bracket transcript line is JSON"))
+        .map(|entry| {
+            (
+                entry["feature_id"]
+                    .as_str()
+                    .expect("bracket transcript feature ID")
+                    .to_owned(),
+                entry["command"]
+                    .as_str()
+                    .expect("bracket transcript command")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_steps,
+        expected_steps
+            .iter()
+            .map(|(feature_id, command)| ((*feature_id).to_owned(), (*command).to_owned()))
+            .collect::<Vec<_>>()
+    );
+    assert!(transcript.lines().all(|line| {
+        let entry: Value = serde_json::from_str(line).expect("transcript remains JSON");
+        entry["screenshot"]["path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).is_file())
+            && entry["acknowledgement"]["preview"]
+                .as_str()
+                .is_some_and(|marker| marker.contains("Preview:"))
+            && entry["acknowledgement"]["commit"]
+                .as_str()
+                .is_some_and(|marker| marker.contains("Commit:"))
+            && entry["commit_revision"] == entry["revision"]
+            && entry["commit_revision"] == entry["viewport_evidence"]["frame"]["revision"]
+            && entry["keyboard_input"]["pty_log"]
+                == evidence.join("pty-input.log").to_string_lossy().as_ref()
+            && entry["keyboard_input"]["start_offset"]
+                .as_u64()
+                .is_some_and(|offset| offset > 0)
+            && entry["keyboard_input"]["end_offset"]
+                .as_u64()
+                .is_some_and(|offset| offset > 0)
+            && entry["keyboard_input"]["end_offset"]
+                .as_u64()
+                .zip(entry["keyboard_input"]["start_offset"].as_u64())
+                .is_some_and(|(end, start)| end > start)
+            && entry["keyboard_input"]["log_sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+            && entry["viewport_evidence"]["frame"]["image_id"]
+                .as_u64()
+                .is_some_and(|image_id| image_id > 0)
+            && entry["viewport_evidence"]["scene"]["triangle_count"]
+                .as_u64()
+                .is_some_and(|triangles| triangles > 0)
+    }));
+    let input_ranges = transcript
+        .lines()
+        .map(|line| {
+            let entry: Value = serde_json::from_str(line).expect("transcript line is JSON");
+            (
+                entry["keyboard_input"]["start_offset"]
+                    .as_u64()
+                    .expect("keyboard input start offset"),
+                entry["keyboard_input"]["end_offset"]
+                    .as_u64()
+                    .expect("keyboard input end offset"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        input_ranges
+            .windows(2)
+            .all(|ranges| ranges[0].1 <= ranges[1].0)
+    );
+
+    let bundle = Bundle::at(&root)
+        .open()
+        .expect("retained bracket project opens");
+    assert_eq!(bundle.log.len(), 11);
+    assert_eq!(
+        bundle
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_steps
+            .iter()
+            .map(|(feature_id, _)| *feature_id)
+            .collect::<Vec<_>>()
+    );
+
+    let revision = bundle.revision_hash_hex().to_string();
+    let baseline_entries = bundle.log.entries().to_vec();
+    let before_read_only = snapshot_tree(&root);
+    let before_scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("retained bracket scene loads before reopen");
+    assert_eq!(snapshot_tree(&root), before_read_only);
+    drop(bundle);
+    let reopened = Bundle::at(&root)
+        .open_read_only()
+        .expect("retained bracket project reopens read-only");
+    assert_eq!(reopened.revision_hash_hex(), revision);
+    assert_eq!(reopened.log.entries(), baseline_entries);
+    let reopened_scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("retained bracket scene loads after reopen");
+    assert_eq!(reopened_scene, before_scene);
+    assert_eq!(snapshot_tree(&root), before_read_only);
+
+    let worker = OcctWorker::locate().expect("graphical bracket worker exists");
+    let pad_a = worker
+        .inspect_edges(
+            "graphical-bracket-pad-a-measurement",
+            root.join("brep/pad-a.brep"),
+            "pad-a",
+            &revision,
+            serde_json::json!({"provenance":{"source_feature_id":"pad-a","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
+        )
+        .expect("graphical fillet landmarks inspect");
+    assert!(pad_a.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - std::f64::consts::FRAC_PI_4).abs() < 1e-3
+    }));
+    let pad_b = worker
+        .inspect_edges(
+            "graphical-bracket-pad-b-measurement",
+            root.join("brep/pad-b.brep"),
+            "pad-b",
+            &revision,
+            serde_json::json!({"provenance":{"source_feature_id":"pad-b","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
+        )
+        .expect("graphical chamfer landmarks inspect");
+    let pad_b_seed = worker
+        .inspect_edges(
+            "graphical-bracket-pad-b-seed-measurement",
+            root.join("brep/pad-b-seed.brep"),
+            "pad-b-seed",
+            &revision,
+            serde_json::json!({"provenance":{"source_feature_id":"pad-b-seed","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
+        )
+        .expect("graphical chamfer seed landmarks inspect");
+    let pad_b_outer_length: f64 = pad_b
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    let pad_b_seed_outer_length: f64 = pad_b_seed
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!(pad_b_outer_length > 0.0);
+    assert!(pad_b_seed_outer_length > 0.0);
+    assert!((pad_b_outer_length - pad_b_seed_outer_length).abs() > 0.01);
+
+    let final_edges = worker
+        .inspect_edges(
+            "graphical-bracket-final-measurement",
+            root.join("brep/bracket-foundation.brep"),
+            "bracket-foundation",
+            &revision,
+            serde_json::json!({"provenance":{"source_feature_id":"bracket-foundation","source_revision_id":revision,"source_edge_id":"measurement-anchor"}}),
+        )
+        .expect("graphical hole landmarks inspect");
+    for midpoint in [
+        [52.25, 10.0, 0.0],
+        [52.25, 10.0, 8.0],
+        [12.25, 50.0, 0.0],
+        [12.25, 50.0, 8.0],
+    ] {
+        assert!(final_edges.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - 14.137166941154069).abs() < 1e-3
+                && candidate
+                    .midpoint
+                    .into_iter()
+                    .zip(midpoint)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+        }));
+    }
+
+    assert_eq!(before_scene.solids.len(), 1);
+    assert!(
+        before_scene.solids.iter().any(|solid| {
+            solid.feature_id == "bracket-foundation" && !solid.triangles.is_empty()
+        })
+    );
+
+    fs::remove_dir_all(root).expect("graphical bracket project removes");
+    fs::remove_dir_all(evidence).expect("graphical bracket evidence removes");
+}

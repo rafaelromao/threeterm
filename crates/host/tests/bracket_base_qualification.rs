@@ -950,10 +950,14 @@ fn assert_bracket_mesh(
         [position[0], position[1]]
     };
     let opening_radius = mesh_number(&opening_step["request"], "diameter") / 2.0;
+    let base_thickness = mesh_number(mesh_recipe, "base_thickness");
     assert_open_path(
         mesh,
         opening_center,
-        [1.5, bounds_max[2] - probe_clearance],
+        [
+            base_thickness + probe_clearance,
+            bounds_max[2] - probe_clearance,
+        ],
         "cavity-opening",
     )?;
     assert_circular_landmark(

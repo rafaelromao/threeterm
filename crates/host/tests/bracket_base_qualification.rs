@@ -1801,12 +1801,22 @@ fn assert_post_fusion_landmarks(
             number(&recipe["expectations"], "shell_outer_wall_length"),
             number(&recipe["expectations"], "shell_inner_wall_length"),
         ] {
+            let candidates = measurements
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.role.as_str(),
+                        candidate.midpoint,
+                        candidate.length,
+                    )
+                })
+                .collect::<Vec<_>>();
             assert!(
                 measurements.iter().any(|candidate| {
                     candidate.role == "outer-perimeter"
                         && (candidate.length - expected_length).abs() <= 1e-3
                 }),
-                "{feature_id} lost the retained wall edge of {expected_length}"
+                "{feature_id} lost the retained wall edge of {expected_length}; candidates: {candidates:?}"
             );
         }
     }

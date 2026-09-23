@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use threeterm_host::{Host, stl_integrity};
-use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker};
+use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_tui::TuiSession;
 use threeterm_viewport::{SceneSolid, ViewportScene};
@@ -404,6 +404,232 @@ fn production_tui_save_reopen_validate_export() {
     }));
 
     fs::remove_dir_all(root).expect("graphical lifecycle evidence removes");
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_mirror_pattern_reinforcing_features() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-graphical-reinforcing-{}-{suffix}",
+        std::process::id()
+    ));
+    let evidence = std::env::temp_dir().join(format!(
+        "threeterm-graphical-reinforcing-evidence-{}-{suffix}",
+        std::process::id()
+    ));
+    let worker = OcctWorker::locate().unwrap_or_else(|error| {
+        panic!("graphical reinforcing workflow requires the OCCT worker: {error}")
+    });
+    let host = Host::new();
+    host.create_bracket(
+        &root,
+        BracketRequest::new("graphical-reinforcing", 60.0, 30.0, 40.0, 3.0)
+            .with_feature_id("l-bracket"),
+        &worker,
+    )
+    .expect("graphical reinforcing workflow starts from an L-bracket");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(27.0, 12.0), (30.0, 12.0), (30.0, 15.0), (27.0, 15.0)],
+            5.0,
+        )
+        .with_output_path(root.join("stage"), "reinforce-pad.brep")
+        .with_feature_id("reinforce-pad"),
+        &worker,
+    )
+    .expect("graphical reinforcing workflow persists its pad fixture");
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_mirror_pattern_reinforcing_features")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical reinforcing runner starts");
+    assert!(
+        output.status.success(),
+        "graphical reinforcing runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("graphical reinforcing manifest exists"),
+    )
+    .expect("graphical reinforcing manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.mirror-pattern-reinforcing-features/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(
+        manifest["test"],
+        "production_tui_mirror_pattern_reinforcing_features"
+    );
+    assert_eq!(manifest["events"]["workflow"], "passed");
+    assert_eq!(manifest["events"]["orbit"], "passed");
+    assert_eq!(manifest["events"]["cleanup"], "passed");
+    let expected_features = vec![
+        "l-bracket",
+        "reinforce-pad",
+        "tui-circular-lugs",
+        "tui-linear-pads",
+        "tui-mirror-pad",
+    ];
+    let workflow_solids = manifest["viewport"]["workflow"]["scene"]["solids"]
+        .as_array()
+        .expect("workflow viewport contains solids");
+    let mut actual_features = workflow_solids
+        .iter()
+        .map(|solid| {
+            assert!(solid["triangle_count"].as_u64().unwrap_or(0) > 0);
+            solid["feature_id"]
+                .as_str()
+                .expect("workflow solid feature id is a string")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    actual_features.sort();
+    assert_eq!(
+        actual_features,
+        expected_features
+            .iter()
+            .map(|feature_id| (*feature_id).to_owned())
+            .collect::<Vec<_>>()
+    );
+    for kind in [
+        "pty_output",
+        "pty_input",
+        "mirror_screenshot",
+        "linear_pattern_screenshot",
+        "circular_pattern_screenshot",
+        "reinforcing_transcript",
+        "orbit_screenshot",
+        "cleanup_screenshot",
+    ] {
+        assert!(
+            manifest["artifacts"].as_array().is_some_and(|items| items
+                .iter()
+                .any(|item| item["kind"] == kind && item["sha256"].as_str().is_some())),
+            "graphical reinforcing evidence is missing artifact {kind}"
+        );
+    }
+
+    let transcript = fs::read_to_string(evidence.join("reinforcing-transcript.jsonl"))
+        .expect("reinforcing transcript exists");
+    let transcript_entries = transcript
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect("reinforcing transcript line is JSON")
+        })
+        .collect::<Vec<_>>();
+    let transcript_commands = transcript_entries
+        .iter()
+        .map(|entry| {
+            entry["command"]
+                .as_str()
+                .expect("reinforcing transcript command is a string")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transcript_commands,
+        vec!["mirror", "mirror", "linear-pattern", "circular-pattern"]
+    );
+    assert_eq!(
+        transcript_entries[0]["cancellation_marker"],
+        "[cancellation-glyph] Cancellation: command draft discarded"
+    );
+    for entry in transcript_entries.iter().skip(1) {
+        assert!(entry["request"].is_object());
+        assert!(entry["preview_marker"].as_str().is_some());
+        assert!(entry["commit_marker"].as_str().is_some());
+        assert!(entry["response"]["feature_id"].as_str().is_some());
+        assert!(entry["response"]["revision"].as_str().is_some());
+        assert!(entry["viewport_evidence"]["acknowledgement"] == "viewport-presented");
+        assert!(entry["screenshot"]["sha256"].as_str().is_some());
+    }
+    let pty_output =
+        fs::read_to_string(evidence.join("pty-output.log")).expect("reinforcing PTY output exists");
+    for marker in [
+        "[cancellation-glyph] Cancellation: command draft discarded",
+        "[selection-glyph] Commit: mirror",
+        "[selection-glyph] Commit: linear-pattern",
+        "[selection-glyph] Commit: circular-pattern",
+    ] {
+        assert!(
+            pty_output.contains(marker),
+            "PTY output is missing {marker}"
+        );
+    }
+
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("graphical reinforcing project opens read-only");
+    assert_eq!(bundle.log.len(), 5);
+    let before_manifest = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let before_log = fs::read(root.join("transactions.log")).expect("transaction log reads");
+    for feature_id in &expected_features {
+        assert!(
+            root.join("brep")
+                .join(format!("{feature_id}.brep"))
+                .is_file(),
+            "retained BREP missing for {feature_id}"
+        );
+    }
+    let identity = host.identity(&root).expect("reinforcing identity reads");
+    assert_eq!(identity.transaction_count, 5);
+    fs::remove_dir_all(root.join("brep")).expect("derived reinforcing BREP directory removes");
+    let replayed_host = Host::new();
+    replayed_host
+        .load_with_geometry_replay(&root)
+        .expect("fresh host replays graphical reinforcing geometry");
+    assert_eq!(
+        replayed_host
+            .identity(&root)
+            .expect("replay identity reads"),
+        identity
+    );
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("replayed manifest reads"),
+        before_manifest
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("replayed transaction log reads"),
+        before_log
+    );
+    let replayed_scene = replayed_host
+        .presentation_viewport_scene()
+        .expect("replayed reinforcing viewport scene reads");
+    let mut replayed_features = replayed_scene
+        .solids
+        .iter()
+        .map(|solid| {
+            assert!(!solid.triangles.is_empty());
+            solid.feature_id.as_str()
+        })
+        .collect::<Vec<_>>();
+    replayed_features.sort_unstable();
+    assert_eq!(replayed_features, expected_features);
+
+    fs::remove_dir_all(root).expect("graphical reinforcing project root removes");
+    eprintln!(
+        "retained graphical reinforcing evidence: {}",
+        evidence.display()
+    );
 }
 
 #[test]

@@ -4009,6 +4009,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                         | threeterm_protocol::schema::SHELL_COMMAND_ID
                         | threeterm_protocol::schema::DRAFT_COMMAND_ID
                         | threeterm_protocol::schema::LOFT_COMMAND_ID
+                        | threeterm_protocol::schema::MIRROR_COMMAND_ID
+                        | threeterm_protocol::schema::LINEAR_PATTERN_COMMAND_ID
+                        | threeterm_protocol::schema::CIRCULAR_PATTERN_COMMAND_ID
                 ) {
                     self.palette.open();
                     return Ok(self.keyboard_overlay(format!(

@@ -32,6 +32,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -1420,7 +1421,7 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    BRepAlgoAPI_Fuse fuse(tool, base);
+    BRepAlgoAPI_Fuse fuse(base, tool);
     fuse.SetFuzzyValue(1.0e-6);
     fuse.Build();
     if (!fuse.IsDone()) {
@@ -3314,6 +3315,7 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         TopoDS_Solid clean_solid = solid_rebuild.Solid();
+        BRepLib::OrientClosedSolid(clean_solid);
 
         // `MakeThickSolidByJoin` produces the hollow shell directly:
         // the negative offset shrinks every face inward by

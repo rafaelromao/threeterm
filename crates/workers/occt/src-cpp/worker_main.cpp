@@ -992,6 +992,13 @@ bool analyze_brep(const TopoDS_Shape& shape) {
     return analyzer.IsValid() != 0;
 }
 
+void orient_closed_solid(TopoDS_Shape& shape) {
+    if (shape.ShapeType() != TopAbs_SOLID) return;
+    TopoDS_Solid solid = TopoDS::Solid(shape);
+    BRepLib::OrientClosedSolid(solid);
+    shape = solid;
+}
+
 bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& error) {
     const std::string request_id = get_string(request, "request_id");
     const std::string feature_id = get_string(request, "feature_id");
@@ -1421,14 +1428,16 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    BRepAlgoAPI_Fuse fuse(base, tool);
+    BRepAlgoAPI_Fuse fuse(tool, base);
     fuse.SetFuzzyValue(1.0e-6);
+    fuse.SetRunParallel(Standard_False);
     fuse.Build();
     if (!fuse.IsDone()) {
         error = "BRepAlgoAPI_Fuse did not complete";
         return false;
     }
     TopoDS_Shape fused = fuse.Shape();
+    orient_closed_solid(fused);
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
@@ -1500,12 +1509,14 @@ bool handle_boolean_cut(const JsonParser::Value& request, std::string& error) {
 
     BRepAlgoAPI_Cut cut(base, tool);
     cut.SetFuzzyValue(1.0e-6);
+    cut.SetRunParallel(Standard_False);
     cut.Build();
     if (!cut.IsDone()) {
         error = "BRepAlgoAPI_Cut did not complete";
         return false;
     }
     TopoDS_Shape result = cut.Shape();
+    orient_closed_solid(result);
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
@@ -2380,12 +2391,14 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
 
         BRepAlgoAPI_Cut cut(base, tool);
         cut.SetFuzzyValue(1.0e-6);
+        cut.SetRunParallel(Standard_False);
         cut.Build();
         if (!cut.IsDone()) {
             error = "BRepAlgoAPI_Cut did not complete";
             return false;
         }
         TopoDS_Shape result = cut.Shape();
+        orient_closed_solid(result);
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {

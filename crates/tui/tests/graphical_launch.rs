@@ -6,12 +6,135 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{BracketRequest, OcctWorker};
-use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker};
+use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema;
 use threeterm_tui::TuiSession;
-use threeterm_viewport::ViewportScene;
+use threeterm_viewport::{SceneSolid, ViewportScene};
+
+fn solid_for<'a>(scene: &'a ViewportScene, feature_id: &str) -> &'a SceneSolid {
+    scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("scene has no solid for {feature_id}"))
+}
+
+fn positive_volume(solid: &SceneSolid) -> f64 {
+    solid
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices;
+            let cross = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+        })
+        .sum::<f64>()
+        .abs()
+}
+
+fn assert_authenticated_brep(root: &Path, entry: &LogEntry) {
+    let relative_path = entry
+        .brep_path
+        .as_deref()
+        .expect("graphical feature records its BREP path");
+    let path = root.join(relative_path);
+    let bytes = fs::read(&path).expect("graphical BREP reads");
+    assert_eq!(entry.brep_byte_count, Some(bytes.len() as u64));
+    let digest = threeterm_occt_worker::sha256_file(&path).expect("graphical BREP hashes");
+    assert_eq!(entry.brep_sha256.as_deref(), Some(digest.as_str()));
+}
+
+fn section_bounds(solid: &SceneSolid, z: f64) -> Option<[f64; 4]> {
+    let mut points = Vec::new();
+    for triangle in &solid.triangles {
+        let vertices = triangle.vertices;
+        for vertex in vertices {
+            if (vertex[2] - z).abs() <= 0.05 {
+                points.push([vertex[0], vertex[1]]);
+            }
+        }
+        for [a, b] in [
+            [vertices[0], vertices[1]],
+            [vertices[1], vertices[2]],
+            [vertices[2], vertices[0]],
+        ] {
+            let a_delta = a[2] - z;
+            let b_delta = b[2] - z;
+            if a_delta * b_delta < 0.0 {
+                let t = a_delta / (a_delta - b_delta);
+                points.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let mut bounds = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for [x, y] in points {
+        bounds[0] = bounds[0].min(x);
+        bounds[1] = bounds[1].max(x);
+        bounds[2] = bounds[2].min(y);
+        bounds[3] = bounds[3].max(y);
+    }
+    Some(bounds)
+}
+
+fn assert_reinforcement_geometry(scene: &ViewportScene) {
+    let tapered = solid_for(scene, "tapered-reinforcement");
+    let lofted = solid_for(scene, "lofted-gusset");
+    assert!(positive_volume(tapered) > 0.05);
+    assert!(positive_volume(lofted) > 0.05);
+    for solid in [tapered, lofted] {
+        let mut edges = BTreeMap::<([i64; 3], [i64; 3]), usize>::new();
+        let vertex_key = |vertex: [f64; 3]| {
+            [
+                (vertex[0] * 1000.0).round() as i64,
+                (vertex[1] * 1000.0).round() as i64,
+                (vertex[2] * 1000.0).round() as i64,
+            ]
+        };
+        for triangle in &solid.triangles {
+            let keys = triangle.vertices.map(vertex_key);
+            for [left, right] in [[keys[0], keys[1]], [keys[1], keys[2]], [keys[2], keys[0]]] {
+                let edge = if left <= right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                *edges.entry(edge).or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|count| *count == 2));
+    }
+    let tapered_bottom = section_bounds(tapered, 0.0).expect("tapered lower section exists");
+    let tapered_top = section_bounds(tapered, 12.0).expect("tapered upper section exists");
+    assert!(
+        (tapered_bottom[1] - tapered_bottom[0] - (tapered_top[1] - tapered_top[0])).abs() > 0.05
+            || (tapered_bottom[3] - tapered_bottom[2] - (tapered_top[3] - tapered_top[2])).abs()
+                > 0.05
+    );
+    let lofted_lower = section_bounds(lofted, 8.0).expect("loft lower section exists");
+    let lofted_upper = section_bounds(lofted, 18.0).expect("loft upper section exists");
+    for (actual, expected) in [
+        (lofted_lower, [8.0, 16.0, 8.0, 16.0]),
+        (lofted_upper, [10.0, 14.0, 10.0, 14.0]),
+    ] {
+        for (value, target) in actual.into_iter().zip(expected) {
+            assert!((value - target).abs() <= 0.05);
+        }
+    }
+}
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
@@ -791,6 +914,305 @@ fn production_tui_reinforcement() {
         manifest["cleanup_evidence"]["final_image_id"],
         manifest["cleanup_evidence"]["final_delete_image_id"]
     );
+    fs::remove_dir_all(workspace).expect("graphical reinforcement workspace removes");
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty toolchain"]
+fn production_tui_tapered_lofted_reinforcements() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "threeterm-graphical-tapered-lofted-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&workspace).expect("graphical reinforcement workspace creates");
+    let root = workspace.join("project");
+    let evidence = workspace.join("evidence");
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("graphical reinforcement requires OCCT worker: {error}"));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("graphical reinforcement seed project persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "taper-seed-request",
+            vec![(24.0, 0.0), (34.0, 0.0), (34.0, 4.0), (24.0, 4.0)],
+            12.0,
+        )
+        .with_feature_id("taper-seed"),
+        &worker,
+    )
+    .expect("graphical reinforcement seed extrusion commits");
+    let before = host
+        .identity(&root)
+        .expect("graphical reinforcement seed identity reads");
+    let seeded_tree = snapshot_tree(&root);
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_tapered_lofted_reinforcements")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical reinforcement runner starts");
+    assert!(
+        output.status.success(),
+        "graphical reinforcement runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("reinforcement manifest exists"),
+    )
+    .expect("reinforcement manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.tapered-lofted-reinforcements/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(
+        manifest["test"],
+        "production_tui_tapered_lofted_reinforcements"
+    );
+    assert_eq!(manifest["events"]["workflow"], "passed");
+    assert_eq!(manifest["events"]["orbit"], "passed");
+    assert_ne!(snapshot_tree(&root), seeded_tree);
+    for stage in ["tapered", "lofted", "orbit"] {
+        let scene = &manifest["viewport"][stage]["scene"];
+        assert!(scene["triangle_count"].as_u64().unwrap_or(0) > 0);
+        assert!(scene["body_pixels"].as_u64().unwrap_or(0) > 0);
+        assert!(scene["edge_pixels"].as_u64().unwrap_or(0) > 0);
+    }
+    assert!(
+        manifest["viewport"]["tapered"]["scene"]["solids"]
+            .as_array()
+            .is_some_and(|solids| {
+                solids
+                    .iter()
+                    .any(|solid| solid["feature_id"] == "tapered-reinforcement")
+            })
+    );
+    assert!(
+        manifest["viewport"]["lofted"]["scene"]["solids"]
+            .as_array()
+            .is_some_and(|solids| {
+                ["tapered-reinforcement", "lofted-gusset"]
+                    .iter()
+                    .all(|feature_id| {
+                        solids
+                            .iter()
+                            .any(|solid| solid["feature_id"] == *feature_id)
+                    })
+            })
+    );
+    for kind in [
+        "startup_screenshot",
+        "tapered_committed_screenshot",
+        "lofted_committed_screenshot",
+        "orbit_screenshot",
+        "cleanup_screenshot",
+        "reinforcement_transcript",
+        "tapered_reinforcement_brep",
+        "lofted_gusset_brep",
+    ] {
+        assert!(manifest["artifacts"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["kind"] == kind
+                    && item["bytes"].as_u64().unwrap_or(0) > 0
+                    && item["sha256"].as_str().is_some_and(|hash| hash.len() == 64)
+            })
+        }));
+    }
+
+    let transcript = fs::read_to_string(evidence.join("reinforcement-transcript.jsonl"))
+        .expect("reinforcement transcript exists");
+    let stages = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("reinforcement transcript JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["command"], "draft");
+    assert_eq!(stages[1]["command"], "loft");
+    let draft_keys = stages[0]["typed_request"]
+        .as_object()
+        .expect("draft request is an object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        draft_keys,
+        BTreeSet::from([
+            "angle".to_string(),
+            "base_feature_id".to_string(),
+            "feature_id".to_string(),
+            "pull_direction".to_string(),
+        ])
+    );
+    let loft_keys = stages[1]["typed_request"]
+        .as_object()
+        .expect("loft request is an object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        loft_keys,
+        BTreeSet::from([
+            "feature_id".to_string(),
+            "is_solid".to_string(),
+            "profiles".to_string(),
+            "ruled".to_string(),
+        ])
+    );
+    assert_eq!(stages[0]["typed_request"]["angle"], 0.05235987755982989);
+    assert_eq!(
+        stages[0]["effective_request"]["bundle_path"],
+        root.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        stages[0]["effective_request"]["expected_revision"],
+        before.revision_hash
+    );
+    assert_ne!(
+        stages[0]["effective_request"]["expected_revision"],
+        stages[1]["effective_request"]["expected_revision"]
+    );
+    assert_eq!(
+        stages[1]["effective_request"]["expected_revision"],
+        stages[0]["viewport_evidence"]["frame"]["revision"]
+    );
+    for stage in &stages {
+        assert_eq!(
+            stage["effective_request"]["expected_revision"],
+            stage["source_revision"]
+        );
+        assert!(
+            stage["acknowledgement"]["preview_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Preview:"))
+        );
+        assert!(
+            stage["acknowledgement"]["commit_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Commit:"))
+        );
+        assert!(
+            stage["acknowledgement"]["selection_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("selected feature"))
+        );
+    }
+    for stage in &stages {
+        assert_eq!(stage["acknowledgement"]["preview_count"].as_u64(), Some(1));
+        assert_eq!(stage["acknowledgement"]["commit_count"].as_u64(), Some(1));
+        assert_eq!(
+            stage["viewport_evidence"]["selected_feature_id"],
+            stage["feature_id"]
+        );
+        assert!(
+            !stage["viewport_evidence"]["frame"]["revision"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    let bundle_before_inspection = snapshot_tree(&root);
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement project opens read-only");
+    assert_eq!(
+        bundle.manifest.transaction_count,
+        before.transaction_count + 2
+    );
+    assert!(
+        bundle
+            .log
+            .entries()
+            .iter()
+            .any(|entry| entry.feature_id == "tapered-reinforcement")
+    );
+    assert!(
+        bundle
+            .log
+            .entries()
+            .iter()
+            .any(|entry| entry.feature_id == "lofted-gusset")
+    );
+    let draft_entry = bundle
+        .log
+        .entries()
+        .iter()
+        .find(|entry| entry.feature_id == "tapered-reinforcement")
+        .expect("graphical draft entry is retained");
+    let CanonicalIntent::Draft(draft_intent) = draft_entry.intent.as_ref().expect("draft intent")
+    else {
+        panic!("graphical draft entry retained a non-draft intent");
+    };
+    assert_eq!(draft_intent.base_feature_id, "taper-seed");
+    assert_eq!(draft_intent.angle, 0.05235987755982989);
+    assert_eq!(draft_intent.pull_direction, [0.0, 0.0, 1.0]);
+    assert_eq!(
+        draft_intent.source_revision,
+        stages[0]["source_revision"]
+            .as_str()
+            .expect("draft source revision")
+    );
+    assert_authenticated_brep(&root, draft_entry);
+    let loft_entry = bundle
+        .log
+        .entries()
+        .iter()
+        .find(|entry| entry.feature_id == "lofted-gusset")
+        .expect("graphical loft entry is retained");
+    let CanonicalIntent::Loft(loft_intent) = loft_entry.intent.as_ref().expect("loft intent")
+    else {
+        panic!("graphical loft entry retained a non-loft intent");
+    };
+    assert_eq!(
+        loft_intent.profiles,
+        vec![
+            vec![
+                [8.0, 8.0, 8.0],
+                [16.0, 8.0, 8.0],
+                [16.0, 16.0, 8.0],
+                [8.0, 16.0, 8.0]
+            ],
+            vec![
+                [10.0, 10.0, 18.0],
+                [14.0, 10.0, 18.0],
+                [14.0, 14.0, 18.0],
+                [10.0, 14.0, 18.0]
+            ],
+        ]
+    );
+    assert!(loft_intent.is_solid);
+    assert!(!loft_intent.ruled);
+    assert_eq!(
+        loft_intent.source_revision,
+        stages[1]["source_revision"]
+            .as_str()
+            .expect("loft source revision")
+    );
+    assert_authenticated_brep(&root, loft_entry);
+    let verifier = Host::new();
+    let scene = verifier
+        .read_only_viewport_scene(&root)
+        .expect("reinforcement scene reads read-only");
+    assert_reinforcement_geometry(&scene);
+    assert_eq!(snapshot_tree(&root), bundle_before_inspection);
+
     fs::remove_dir_all(workspace).expect("graphical reinforcement workspace removes");
 }
 

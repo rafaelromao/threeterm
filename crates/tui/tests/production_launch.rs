@@ -6,13 +6,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker};
-use threeterm_persistence::{Bundle, CanonicalIntent};
+use threeterm_occt_worker::{
+    BracketRequest, ExtrudeRequest, OcctWorker, WorkerError, new_request_id,
+};
+use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
+use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
     InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
 };
-use threeterm_viewport::{CapabilityProbeIo, CleanupSignal, TerminalEnvironment, parse_ack};
+use threeterm_viewport::{
+    CapabilityProbeIo, CleanupSignal, SceneSolid, TerminalEnvironment, ViewportScene, parse_ack,
+};
 
 #[derive(Debug, Default)]
 struct ScriptedTerminal {
@@ -35,6 +40,118 @@ struct ScriptedTerminal {
     write_failures_remaining: usize,
     prepare_calls: usize,
     restore_calls: usize,
+    selection_targets: BTreeSet<String>,
+    selection_active: bool,
+    selection_down_queued: bool,
+    selection_waiting_for_frame: bool,
+    selection_output_cursor: usize,
+    selection_acknowledged_targets: BTreeSet<String>,
+    selection_ack_pending: bool,
+    selection_quit_queued: bool,
+}
+
+const SECTION_TOLERANCE_MM: f64 = 0.05;
+
+fn scene_solid<'a>(scene: &'a ViewportScene, feature_id: &str) -> &'a SceneSolid {
+    scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("scene has no solid for {feature_id}"))
+}
+
+fn solid_volume(solid: &SceneSolid) -> f64 {
+    solid
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices;
+            let cross = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+        })
+        .sum::<f64>()
+        .abs()
+}
+
+fn section_bounds(solid: &SceneSolid, z: f64) -> Option<[f64; 4]> {
+    let mut points = Vec::new();
+    for triangle in &solid.triangles {
+        let vertices = triangle.vertices;
+        for vertex in vertices {
+            if (vertex[2] - z).abs() <= SECTION_TOLERANCE_MM {
+                points.push([vertex[0], vertex[1]]);
+            }
+        }
+        for [a, b] in [
+            [vertices[0], vertices[1]],
+            [vertices[1], vertices[2]],
+            [vertices[2], vertices[0]],
+        ] {
+            let a_delta = a[2] - z;
+            let b_delta = b[2] - z;
+            if a_delta * b_delta < 0.0 {
+                let t = a_delta / (a_delta - b_delta);
+                points.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let mut bounds = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for [x, y] in points {
+        bounds[0] = bounds[0].min(x);
+        bounds[1] = bounds[1].max(x);
+        bounds[2] = bounds[2].min(y);
+        bounds[3] = bounds[3].max(y);
+    }
+    Some(bounds)
+}
+
+fn assert_closed_positive_mesh(solid: &SceneSolid) {
+    assert!(!solid.triangles.is_empty());
+    assert!(solid_volume(solid) > SECTION_TOLERANCE_MM);
+    let mut edges = BTreeMap::<([i64; 3], [i64; 3]), usize>::new();
+    let vertex_key = |vertex: [f64; 3]| {
+        [
+            (vertex[0] * 1000.0).round() as i64,
+            (vertex[1] * 1000.0).round() as i64,
+            (vertex[2] * 1000.0).round() as i64,
+        ]
+    };
+    for triangle in &solid.triangles {
+        let keys = triangle.vertices.map(vertex_key);
+        for [left, right] in [[keys[0], keys[1]], [keys[1], keys[2]], [keys[2], keys[0]]] {
+            let edge = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *edges.entry(edge).or_default() += 1;
+        }
+    }
+    assert!(edges.values().all(|count| *count == 2));
+}
+
+fn assert_authenticated_brep(root: &Path, entry: &LogEntry) {
+    let relative_path = entry
+        .brep_path
+        .as_deref()
+        .expect("committed feature records its BREP path");
+    let path = root.join(relative_path);
+    let bytes = fs::read(&path).expect("committed BREP reads");
+    assert_eq!(entry.brep_byte_count, Some(bytes.len() as u64));
+    let digest = threeterm_occt_worker::sha256_file(&path).expect("committed BREP hashes");
+    assert_eq!(entry.brep_sha256.as_deref(), Some(digest.as_str()));
 }
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -61,6 +178,68 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
     visit(root, root, &mut snapshot);
     snapshot
+}
+
+fn solid_bounds(scene: &ViewportScene, feature_id: &str) -> ([f64; 3], [f64; 3]) {
+    let solid = scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("viewport scene has no solid {feature_id}"));
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    for triangle in &solid.triangles {
+        for vertex in triangle.vertices {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+    }
+    (minimum, maximum)
+}
+
+fn solid_has_triangle_centroid_in_xy_window(
+    scene: &ViewportScene,
+    feature_id: &str,
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+) -> bool {
+    let solid = scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("viewport scene has no solid {feature_id}"));
+    solid.triangles.iter().any(|triangle| {
+        let centroid = [
+            triangle
+                .vertices
+                .iter()
+                .map(|vertex| vertex[0])
+                .sum::<f64>()
+                / 3.0,
+            triangle
+                .vertices
+                .iter()
+                .map(|vertex| vertex[1])
+                .sum::<f64>()
+                / 3.0,
+        ];
+        centroid[0] > x_range.0
+            && centroid[0] < x_range.1
+            && centroid[1] > y_range.0
+            && centroid[1] < y_range.1
+    })
+}
+
+fn committed_revision(output: &str, command: &str) -> String {
+    let marker = format!("[selection-glyph] Commit: {command} revision=");
+    output
+        .split(&marker)
+        .last()
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .unwrap_or_else(|| panic!("terminal output has no committed revision for {command}"))
+        .to_string()
 }
 
 impl Write for ScriptedTerminal {
@@ -107,6 +286,52 @@ fn probe_nonce_from_writes(writes: &[u8]) -> u64 {
         .unwrap_or(1)
 }
 
+fn latest_kitty_image_id(bytes: &[u8], offset: usize) -> Option<u64> {
+    let suffix = &bytes[offset..];
+    let mut found = None;
+    for (index, window) in suffix.windows(2).enumerate() {
+        if window != b"i=" {
+            continue;
+        }
+        let digits = suffix[index + 2..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .copied()
+            .collect::<Vec<_>>();
+        if suffix.get(index + 2 + digits.len()..index + 6 + digits.len())
+            == Some(b",o=z".as_slice())
+        {
+            found = std::str::from_utf8(&digits)
+                .ok()
+                .and_then(|value| value.parse().ok());
+        }
+    }
+    found
+}
+
+fn viewport_revision_between(output: &str, start_marker: &str, end_marker: &str) -> String {
+    let start = output
+        .find(start_marker)
+        .expect("viewport revision start marker exists");
+    let end = output
+        .find(end_marker)
+        .expect("viewport revision end marker exists");
+    assert!(start < end, "viewport revision markers are ordered");
+    let marker = "[viewport-status] Viewport presented ";
+    let mut cursor = start + start_marker.len();
+    let mut revision = None;
+    while let Some(relative) = output[cursor..end].find(marker) {
+        let json_start = cursor + relative + marker.len();
+        let mut stream = serde_json::Deserializer::from_str(output[json_start..end].trim_start())
+            .into_iter::<Value>();
+        if let Some(Ok(value)) = stream.next() {
+            revision = value["frame"]["revision"].as_str().map(str::to_string);
+        }
+        cursor = json_start;
+    }
+    revision.expect("viewport revision exists between command acknowledgements")
+}
+
 impl InteractiveTerminal for ScriptedTerminal {
     fn replay_probe_input(&mut self, bytes: &[u8]) {
         self.replayed_probe_input.extend_from_slice(bytes);
@@ -116,12 +341,20 @@ impl InteractiveTerminal for ScriptedTerminal {
     }
 
     fn read_event(&mut self) -> io::Result<Vec<u8>> {
+        self.queue_selection_event();
         self.events_read += 1;
         let event = self
             .queued_events
             .pop()
             .or_else(|| self.events.pop())
             .unwrap_or_default();
+        if event == b"\x1b[B" && self.selection_down_queued {
+            self.selection_down_queued = false;
+            self.selection_waiting_for_frame = true;
+        }
+        if self.selection_ack_pending && event.starts_with(b"\x1b_G") {
+            self.selection_ack_pending = false;
+        }
         self.read_events.push(event.clone());
         if self.fail_writes_on_read == Some(self.events_read) {
             self.write_failures_remaining = 1;
@@ -170,6 +403,50 @@ impl InteractiveTerminal for ScriptedTerminal {
     }
 }
 
+impl ScriptedTerminal {
+    fn queue_selection_event(&mut self) {
+        if !self.selection_active || self.selection_quit_queued {
+            return;
+        }
+        let output = String::from_utf8_lossy(&self.writes);
+        if self.selection_down_queued {
+            return;
+        }
+        if self.selection_waiting_for_frame {
+            let Some(image_id) = latest_kitty_image_id(&self.writes, self.selection_output_cursor)
+            else {
+                return;
+            };
+            self.queued_events
+                .push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
+            self.selection_waiting_for_frame = false;
+            self.selection_ack_pending = true;
+            return;
+        }
+        let selected_target = self
+            .selection_targets
+            .iter()
+            .find(|target| output.contains(&format!("selected feature {target}")))
+            .cloned();
+        if let Some(target) = selected_target {
+            self.selection_targets.remove(&target);
+            self.selection_acknowledged_targets.insert(target);
+        }
+        if self.selection_targets.is_empty() {
+            self.queued_events.push(b"q".to_vec());
+            self.selection_quit_queued = true;
+            self.selection_active = false;
+            return;
+        }
+        if !output.contains("[selection-glyph] Commit: loft") {
+            return;
+        }
+        self.selection_output_cursor = self.writes.len();
+        self.queued_events.push(b"\x1b[B".to_vec());
+        self.selection_down_queued = true;
+    }
+}
+
 fn official_environment() -> TerminalEnvironment {
     TerminalEnvironment {
         term: Some("xterm-ghostty".to_string()),
@@ -189,6 +466,73 @@ fn valid_probe_response(nonce: u64) -> Vec<u8> {
         nonce + 1
     )
     .into_bytes()
+}
+
+fn optional_occt_worker(test_name: &str) -> Option<OcctWorker> {
+    match OcctWorker::locate() {
+        Ok(worker) => Some(worker),
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("{test_name} requires OCCT worker: {error:?}");
+        }
+        Err(error) if matches!(&error, WorkerError::Spawn { detail, .. } if detail.contains("not found")) =>
+        {
+            eprintln!("{test_name}: OCCT worker unavailable: {error:?}");
+            None
+        }
+        Err(error) => panic!("{test_name}: OCCT worker failed to initialize: {error:?}"),
+    }
+}
+
+fn selected_edge(
+    base_feature_id: &str,
+    revision: &str,
+    source_edge_id: &str,
+    midpoint: [f64; 3],
+    length: f64,
+) -> Value {
+    let tangent = [1.0, 0.0, 0.0];
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": base_feature_id,
+            "source_revision_id": revision,
+            "source_edge_id": source_edge_id
+        },
+        "role": "outer-perimeter",
+        "evidence": {
+            "midpoint": midpoint,
+            "tangent": tangent,
+            "length": length
+        }
+    })
+}
+
+fn run_palette_command(host: &Host, root: &Path, command: &str, request: Value) -> Value {
+    let request = serde_json::to_vec(&request).expect("TUI request serializes");
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(command.bytes().map(|byte| vec![byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.into_iter().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+    launch(host, root, &mut terminal, official_environment())
+        .unwrap_or_else(|error| panic!("TUI {command} workflow succeeds: {error:?}"))
+        .last_response
+        .unwrap_or_else(|| panic!("TUI {command} workflow produced no response"))
 }
 
 #[test]
@@ -266,6 +610,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
         probe_response: None,
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b[<0;33;25M".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
@@ -337,7 +682,7 @@ fn production_launch_enters_direct_ghostty_loop_after_initial_ack() {
             .any(|window| window == b"xterm"),
         "production viewport does not emit text fallback"
     );
-    assert_eq!(terminal.events_read, 5);
+    assert_eq!(terminal.events_read, 6);
     assert!(
         String::from_utf8_lossy(&terminal.writes).contains("Pick: semantic candidate validated")
     );
@@ -489,6 +834,7 @@ fn production_launch_executes_registered_noninteractive_command() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
             b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         ],
@@ -511,7 +857,7 @@ fn production_launch_executes_registered_noninteractive_command() {
         "threeterm.command.load.response/2"
     );
     assert!(response["feature_graph_hash"].is_string());
-    assert_eq!(terminal.events_read, 4);
+    assert_eq!(terminal.events_read, 5);
 
     std::fs::remove_dir_all(root).expect("project is removed");
 }
@@ -526,7 +872,11 @@ fn interactive_capability_gate() {
     host.save(&root, "feature-a", "box")
         .expect("project is persisted");
     let mut terminal = ScriptedTerminal {
-        events: vec![b"q".to_vec(), b"\x1b_Gi=1;OK\x1b\\".to_vec()],
+        events: vec![
+            b"q".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        ],
         ..Default::default()
     };
 
@@ -555,6 +905,8 @@ fn production_launch_acknowledges_focus_recovery_and_resize() {
     let mut terminal = ScriptedTerminal {
         events: vec![
             b"q".to_vec(),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+            b"\x1b_Gi=2;OK\x1b\\".to_vec(),
             b"\x1b[8;30;100t".to_vec(),
             b"\x1b[I".to_vec(),
             b"\x1b[O".to_vec(),
@@ -921,7 +1273,9 @@ fn shared_extrude_execution_accepts_deterministic_tui_input() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1012,6 +1366,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\x1b_Gi=1;OK\x1b\\".to_vec(),
         b"\x1b[B".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ];
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1019,8 +1374,9 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
         b"\x1b[13;5u".to_vec(),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
         b"\x10".to_vec(),
     ]);
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
@@ -1028,11 +1384,11 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         b"\r".to_vec(),
         b"\x1b".to_vec(),
         b"\x1b[C".to_vec(),
-        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
-        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
         b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"w".to_vec(),
+        b"\x1b_Gi=7;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=8;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1073,7 +1429,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         );
     }
     assert!(
-        output.contains("a=d,d=I,i=6"),
+        output.contains("a=d,d=I,i=8"),
         "normal close deletes the latest active Kitty image"
     );
     assert!(
@@ -1096,7 +1452,7 @@ fn production_launch_completes_keyboard_first_modeling_workflow_end_to_end() {
         .iter()
         .filter_map(|event| parse_ack(event).ok())
         .collect::<Vec<_>>();
-    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(acknowledgement_ids, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(
         terminal.read_events.iter().all(|event| !matches!(
             decode_terminal_input(event),
@@ -1153,14 +1509,15 @@ fn interactive_production_event_loop() {
     events.extend(request.iter().map(|byte| vec![*byte]));
     events.extend([
         b"\x16".to_vec(),
-        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=2;OK\x1b\\".to_vec(),
-        b"\x1b[B".to_vec(),
+        b"\x1b[13;5u".to_vec(),
         b"\x1b_Gi=3;OK\x1b\\".to_vec(),
-        b"w".to_vec(),
+        b"\x1b[B".to_vec(),
         b"\x1b_Gi=4;OK\x1b\\".to_vec(),
-        b"+".to_vec(),
+        b"w".to_vec(),
         b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"+".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
         b"q".to_vec(),
     ]);
     events.reverse();
@@ -1292,7 +1649,9 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     script.push(b"\r".to_vec());
     script.extend(request.iter().map(|byte| vec![*byte]));
     script.push(b"\x16".to_vec());
+    script.push(b"\x1b_Gi=2;OK\x1b\\".to_vec());
     script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"\x1b_Gi=3;OK\x1b\\".to_vec());
     script.push(b"q".to_vec());
     script.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1312,6 +1671,1064 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     assert!(output.contains("[selection-glyph]"));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_drives_mirror_through_keyboard_and_retains_both_pad_placements() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive mirror command requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive mirror command: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-mirror-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.create_bracket(
+        &root,
+        BracketRequest::new("keyboard-mirror-bracket", 60.0, 30.0, 40.0, 3.0)
+            .with_feature_id("l-bracket"),
+        &worker,
+    )
+    .expect("mirror bracket fixture persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(27.0, 12.0), (30.0, 12.0), (30.0, 15.0), (27.0, 15.0)],
+            5.0,
+        )
+        .with_output_path(root.join("stage"), "reinforce-pad.brep")
+        .with_feature_id("reinforce-pad"),
+        &worker,
+    )
+    .expect("reinforcing pad fixture persists");
+    let before_cancel = snapshot_tree(&root);
+    let request = br#"{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}"#;
+
+    let mut cancel_events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    cancel_events.extend(b"mirror".iter().map(|byte| vec![*byte]));
+    cancel_events.push(b"\r".to_vec());
+    cancel_events.extend(request.iter().map(|byte| vec![*byte]));
+    cancel_events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    cancel_events.reverse();
+    let mut cancel_terminal = ScriptedTerminal {
+        events: cancel_events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut cancel_terminal, official_environment())
+        .expect("mirror cancellation workflow succeeds");
+    assert_eq!(snapshot_tree(&root), before_cancel);
+    assert_eq!(
+        host.identity(&root)
+            .expect("cancel identity reads")
+            .transaction_count,
+        2
+    );
+    assert!(
+        String::from_utf8_lossy(&cancel_terminal.writes)
+            .contains("[cancellation-glyph] Cancellation: command draft discarded")
+    );
+
+    let mut commit_events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    commit_events.extend(b"mirror".iter().map(|byte| vec![*byte]));
+    commit_events.push(b"\r".to_vec());
+    commit_events.extend(request.iter().map(|byte| vec![*byte]));
+    commit_events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    commit_events.reverse();
+    let mut commit_terminal = ScriptedTerminal {
+        events: commit_events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut commit_terminal, official_environment())
+        .expect("mirror commit workflow succeeds");
+
+    let identity = host.identity(&root).expect("mirror identity reads");
+    assert_eq!(identity.transaction_count, 3);
+    for feature_id in ["reinforce-pad", "tui-mirror-pad"] {
+        assert!(
+            root.join("brep")
+                .join(format!("{feature_id}.brep"))
+                .is_file(),
+            "retained BREP missing for {feature_id}"
+        );
+    }
+    let bundle = Bundle::at(&root).open().expect("mirror bundle reopens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref())
+        .expect("mirror intent retained");
+    let CanonicalIntent::Mirror(intent) = intent else {
+        panic!("last intent is not mirror");
+    };
+    assert_eq!(intent.deterministic_inputs.base_feature_id, "reinforce-pad");
+    assert_eq!(intent.deterministic_inputs.plane_point, [0.0, 0.0, 0.0]);
+    assert_eq!(intent.deterministic_inputs.plane_normal, [1.0, -1.0, 0.0]);
+
+    let scene = host
+        .read_only_viewport_scene(&root)
+        .expect("mirror viewport scene reads");
+    let (minimum, maximum) = solid_bounds(&scene, "tui-mirror-pad");
+    for (axis, expected) in [(0, (12.0, 15.0)), (1, (27.0, 30.0)), (2, (0.0, 5.0))] {
+        assert!((minimum[axis] - expected.0).abs() < 0.1);
+        assert!((maximum[axis] - expected.1).abs() < 0.1);
+    }
+    assert!(
+        scene
+            .solids
+            .iter()
+            .any(|solid| solid.feature_id == "reinforce-pad")
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cancel_terminal.writes),
+        String::from_utf8_lossy(&commit_terminal.writes)
+    );
+    for marker in [
+        "[dashed-outline] Preview: mirror",
+        "[cancellation-glyph] Cancellation: command draft discarded",
+        "[selection-glyph] Commit: mirror",
+        "tui-mirror-pad",
+        "reinforce-pad",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(marker),
+            "missing mirror evidence marker: {marker}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("mirror fixture removes");
+}
+
+#[test]
+fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive pattern commands require OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive pattern commands: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-patterns-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.create_bracket(
+        &root,
+        BracketRequest::new("keyboard-pattern-bracket", 60.0, 30.0, 40.0, 3.0)
+            .with_feature_id("l-bracket"),
+        &worker,
+    )
+    .expect("pattern bracket fixture persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(27.0, 12.0), (30.0, 12.0), (30.0, 15.0), (27.0, 15.0)],
+            5.0,
+        )
+        .with_output_path(root.join("stage"), "reinforce-pad.brep")
+        .with_feature_id("reinforce-pad"),
+        &worker,
+    )
+    .expect("pattern reinforcing pad fixture persists");
+    let initial_revision = host
+        .identity(&root)
+        .expect("initial pattern identity reads")
+        .revision_hash;
+
+    let mirror_request = br#"{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}"#;
+    let linear_request = br#"{"feature_id":"tui-linear-pads","base_feature_id":"reinforce-pad","direction":[1,0,0],"count":3,"spacing":12}"#;
+    let circular_request = br#"{"feature_id":"tui-circular-lugs","base_feature_id":"reinforce-pad","axis_point":[30,15,0],"axis_normal":[0,0,1],"angle_step":1.5707963267948966,"count":4}"#;
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
+    let append_command =
+        |events: &mut Vec<Vec<u8>>, command: &[u8], request: &[u8], image_id: u8| {
+            events.push(b"\x10".to_vec());
+            events.extend(command.iter().map(|byte| vec![*byte]));
+            events.push(b"\r".to_vec());
+            events.extend(request.iter().map(|byte| vec![*byte]));
+            events.extend([
+                b"\x16".to_vec(),
+                b"\x1b[13;5u".to_vec(),
+                format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes(),
+            ]);
+        };
+    append_command(&mut events, b"mirror", mirror_request, 2);
+    append_command(&mut events, b"linear-pattern", linear_request, 3);
+    append_command(&mut events, b"circular-pattern", circular_request, 4);
+    events.push(b"q".to_vec());
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("linear and circular pattern workflow succeeds");
+
+    let identity = host.identity(&root).expect("pattern identity reads");
+    assert_eq!(identity.transaction_count, 5);
+    let bundle = Bundle::at(&root).open().expect("pattern bundle reopens");
+    let intents = bundle
+        .log
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.intent.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        intents
+            .iter()
+            .any(|intent| matches!(intent, CanonicalIntent::Mirror(_)))
+    );
+    let linear = intents
+        .iter()
+        .find_map(|intent| match intent {
+            CanonicalIntent::LinearPattern(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("linear pattern intent retained");
+    assert_eq!(linear.deterministic_inputs.base_feature_id, "reinforce-pad");
+    assert_eq!(linear.deterministic_inputs.direction, [1.0, 0.0, 0.0]);
+    assert_eq!(linear.deterministic_inputs.count, 3);
+    assert_eq!(linear.deterministic_inputs.spacing, 12.0);
+    let circular = intents
+        .iter()
+        .find_map(|intent| match intent {
+            CanonicalIntent::CircularPattern(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("circular pattern intent retained");
+    assert_eq!(
+        circular.deterministic_inputs.base_feature_id,
+        "reinforce-pad"
+    );
+    assert_eq!(circular.deterministic_inputs.axis_point, [30.0, 15.0, 0.0]);
+    assert_eq!(circular.deterministic_inputs.axis_normal, [0.0, 0.0, 1.0]);
+    assert_eq!(circular.deterministic_inputs.count, 4);
+    assert!((circular.deterministic_inputs.angle_step - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+
+    let scene = host
+        .read_only_viewport_scene(&root)
+        .expect("pattern viewport scene reads");
+    for (feature_id, expected) in [
+        ("tui-mirror-pad", [(12.0, 15.0), (27.0, 30.0), (0.0, 5.0)]),
+        ("tui-linear-pads", [(27.0, 54.0), (12.0, 15.0), (0.0, 5.0)]),
+        (
+            "tui-circular-lugs",
+            [(27.0, 33.0), (12.0, 18.0), (0.0, 5.0)],
+        ),
+    ] {
+        let (minimum, maximum) = solid_bounds(&scene, feature_id);
+        for (axis, (lower, upper)) in expected.into_iter().enumerate() {
+            assert!(
+                (minimum[axis] - lower).abs() < 0.1,
+                "{feature_id} minimum axis {axis}"
+            );
+            assert!(
+                (maximum[axis] - upper).abs() < 0.1,
+                "{feature_id} maximum axis {axis}"
+            );
+        }
+    }
+    for (lower, upper) in [(27.0, 30.0), (39.0, 42.0), (51.0, 54.0)] {
+        assert!(
+            solid_has_triangle_centroid_in_xy_window(
+                &scene,
+                "tui-linear-pads",
+                (lower, upper),
+                (12.0, 15.0)
+            ),
+            "linear pattern has no occupied band x=[{lower},{upper}]"
+        );
+    }
+    for (x_range, y_range) in [
+        ((27.0, 30.0), (12.0, 15.0)),
+        ((30.0, 33.0), (12.0, 15.0)),
+        ((30.0, 33.0), (15.0, 18.0)),
+        ((27.0, 30.0), (15.0, 18.0)),
+    ] {
+        assert!(
+            solid_has_triangle_centroid_in_xy_window(&scene, "tui-circular-lugs", x_range, y_range),
+            "circular pattern has no occupied sector x={x_range:?} y={y_range:?}"
+        );
+    }
+    for feature_id in [
+        "reinforce-pad",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+    ] {
+        assert!(
+            root.join("brep")
+                .join(format!("{feature_id}.brep"))
+                .is_file(),
+            "retained BREP missing for {feature_id}"
+        );
+    }
+    let output = String::from_utf8_lossy(&terminal.writes);
+    for marker in [
+        "[dashed-outline] Preview: mirror",
+        "[dashed-outline] Preview: linear-pattern",
+        "[dashed-outline] Preview: circular-pattern",
+        "[selection-glyph] Commit: mirror",
+        "[selection-glyph] Commit: linear-pattern",
+        "[selection-glyph] Commit: circular-pattern",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(marker),
+            "missing pattern evidence marker: {marker}"
+        );
+    }
+    let mirror_revision = committed_revision(&output, "mirror");
+    let linear_revision = committed_revision(&output, "linear-pattern");
+    let circular_revision = committed_revision(&output, "circular-pattern");
+    assert_ne!(mirror_revision, initial_revision);
+    assert_ne!(linear_revision, mirror_revision);
+    assert_ne!(circular_revision, linear_revision);
+    assert_eq!(circular_revision, identity.revision_hash);
+
+    let viewport_evidence = json!({
+        "acknowledgement": "viewport-presented",
+        "revision": scene.revision.clone(),
+        "scene": {
+            "solids": scene
+                .solids
+                .iter()
+                .map(|solid| json!({
+                    "feature_id": &solid.feature_id,
+                    "triangle_count": solid.triangles.len(),
+                }))
+                .collect::<Vec<_>>(),
+        },
+    });
+    let transcript = root.join("reinforcing-transcript.jsonl");
+    let transcript_entries = [
+        json!({
+            "command": "mirror",
+            "request": serde_json::from_slice::<Value>(mirror_request).expect("mirror request JSON"),
+            "preview_marker": "[dashed-outline] Preview: mirror",
+            "commit_marker": "[selection-glyph] Commit: mirror",
+            "response": {
+                "feature_id": "tui-mirror-pad",
+                "revision": mirror_revision.clone(),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "linear-pattern",
+            "request": serde_json::from_slice::<Value>(linear_request).expect("linear request JSON"),
+            "preview_marker": "[dashed-outline] Preview: linear-pattern",
+            "commit_marker": "[selection-glyph] Commit: linear-pattern",
+            "response": {
+                "feature_id": "tui-linear-pads",
+                "revision": linear_revision.clone(),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "circular-pattern",
+            "request": serde_json::from_slice::<Value>(circular_request).expect("circular request JSON"),
+            "preview_marker": "[dashed-outline] Preview: circular-pattern",
+            "commit_marker": "[selection-glyph] Commit: circular-pattern",
+            "response": {
+                "feature_id": "tui-circular-lugs",
+                "revision": circular_revision,
+            },
+            "viewport_evidence": viewport_evidence,
+        }),
+    ];
+    fs::write(
+        &transcript,
+        transcript_entries
+            .into_iter()
+            .map(|entry| serde_json::to_string(&entry).expect("transcript entry serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .expect("reinforcing transcript writes");
+    let transcript_text = fs::read_to_string(&transcript).expect("reinforcing transcript reads");
+    for feature_id in ["tui-mirror-pad", "tui-linear-pads", "tui-circular-lugs"] {
+        assert!(transcript_text.contains(feature_id));
+    }
+    for line in transcript_text.lines() {
+        let entry: Value = serde_json::from_str(line).expect("production transcript line is JSON");
+        assert!(entry["request"].is_object());
+        assert!(entry["preview_marker"].as_str().is_some());
+        assert!(entry["commit_marker"].as_str().is_some());
+        assert!(entry["response"]["revision"].as_str().is_some());
+        assert_eq!(
+            entry["viewport_evidence"]["acknowledgement"],
+            "viewport-presented"
+        );
+        assert!(
+            entry["viewport_evidence"]["scene"]["solids"]
+                .as_array()
+                .is_some_and(|solids| solids
+                    .iter()
+                    .all(|solid| { solid["triangle_count"].as_u64().unwrap_or(0) > 0 }))
+        );
+    }
+
+    let identity_before_replay = host.identity(&root).expect("pre-replay identity reads");
+    let manifest_before_replay = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before_replay = fs::read(root.join("transactions.log")).expect("log reads");
+    fs::remove_dir_all(root.join("brep")).expect("derived BREP directory removes");
+    let replayed_host = Host::new();
+    replayed_host
+        .load_with_geometry_replay(&root)
+        .expect("fresh host replays all reinforcing geometry");
+    assert_eq!(
+        replayed_host
+            .identity(&root)
+            .expect("replay identity reads"),
+        identity_before_replay
+    );
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("replayed manifest reads"),
+        manifest_before_replay
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("replayed log reads"),
+        log_before_replay
+    );
+    let replayed_scene = replayed_host
+        .presentation_viewport_scene()
+        .expect("replayed viewport scene reads");
+    for feature_id in [
+        "l-bracket",
+        "reinforce-pad",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+    ] {
+        let solid = replayed_scene
+            .solids
+            .iter()
+            .find(|solid| solid.feature_id == feature_id)
+            .unwrap_or_else(|| panic!("replayed viewport scene has no solid {feature_id}"));
+        assert!(
+            !solid.triangles.is_empty(),
+            "replayed solid is empty: {feature_id}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("pattern fixture removes");
+}
+
+#[test]
+fn production_launch_drives_boolean_fuse_through_palette_and_commit() {
+    let Some(worker) = optional_occt_worker("interactive boolean fuse") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-fuse-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-x",
+            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
+            3.0,
+        )
+        .with_feature_id("arm-x"),
+        &worker,
+    )
+    .expect("first arm extrudes");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "fuse-launch-arm-z",
+            vec![(0.0, 0.0), (5.0, 0.0), (5.0, 10.0), (0.0, 10.0)],
+            3.0,
+        )
+        .with_feature_id("arm-z"),
+        &worker,
+    )
+    .expect("second arm extrudes");
+
+    let request =
+        br#"{"feature_id":"interactive-fuse","base_feature_id":"arm-x","tool_feature_id":"arm-z"}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"boolean-fuse".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production boolean fuse palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 4);
+    assert!(root.join("brep/interactive-fuse.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("Commit: boolean-fuse"));
+    assert!(output.contains("[viewport-status] Viewport presented"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_assembles_bracket_foundation_through_tui_controls() {
+    let Some(worker) = optional_occt_worker("interactive bracket foundation") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-bracket-foundation-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+
+    let assert_commit = |response: &Value, operation: &str, feature_id: &str| {
+        assert_eq!(response["status"], "ok", "{feature_id} commits");
+        assert_eq!(response["operation"], operation);
+        assert_eq!(response["feature_id"], feature_id);
+        assert!(response["revision_hash"].as_str().is_some());
+        assert!(root.join(format!("brep/{feature_id}.brep")).is_file());
+    };
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-x",
+            "profile": [[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-x");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "arm-z",
+            "profile": [[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]],
+            "height": 8.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "arm-z");
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-a-seed",
+            "profile": [[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-a-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-a source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "fillet",
+        json!({
+            "feature_id": "pad-a",
+            "base_feature_id": "pad-a-seed",
+            "radius": 0.5,
+            "selected_edge": selected_edge(
+                "pad-a-seed",
+                &revision,
+                "pad-a-edge",
+                [30.0, 4.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "fillet", "pad-a");
+
+    let response = run_palette_command(
+        &host,
+        &root,
+        "extrude",
+        json!({
+            "feature_id": "pad-b-seed",
+            "profile": [[4.0, 24.0], [16.0, 24.0], [16.0, 36.0], [4.0, 36.0]],
+            "height": 12.0,
+            "mode": "additive"
+        }),
+    );
+    assert_commit(&response, "extrude", "pad-b-seed");
+
+    let revision = host
+        .identity(&root)
+        .expect("pad-b source identity")
+        .revision_hash;
+    let response = run_palette_command(
+        &host,
+        &root,
+        "chamfer",
+        json!({
+            "feature_id": "pad-b",
+            "base_feature_id": "pad-b-seed",
+            "distance": 0.25,
+            "selected_edge": selected_edge(
+                "pad-b-seed",
+                &revision,
+                "pad-b-edge",
+                [10.0, 24.0, 0.0],
+                12.0
+            )
+        }),
+    );
+    assert_commit(&response, "chamfer", "pad-b");
+
+    for (feature_id, base_feature_id, tool_feature_id) in [
+        ("bracket-l", "arm-x", "arm-z"),
+        ("bracket-lp1", "bracket-l", "pad-a"),
+        ("bracket-base", "bracket-lp1", "pad-b"),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "boolean-fuse",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "tool_feature_id": tool_feature_id
+            }),
+        );
+        assert_commit(&response, "boolean_fuse", feature_id);
+    }
+
+    for (feature_id, base_feature_id, position) in [
+        ("bracket-hole-1", "bracket-base", [50.0, 10.0, 0.0]),
+        ("bracket-foundation", "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let response = run_palette_command(
+            &host,
+            &root,
+            "hole",
+            json!({
+                "feature_id": feature_id,
+                "base_feature_id": base_feature_id,
+                "position": position,
+                "direction": [0.0, 0.0, 1.0],
+                "diameter": 4.5,
+                "hole_kind": "drilled"
+            }),
+        );
+        assert_commit(&response, "hole", feature_id);
+    }
+
+    let bundle = Bundle::at(&root).open().expect("interactive bundle opens");
+    let entries = bundle.log.entries();
+    assert_eq!(entries.len(), 11);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.log_index, index);
+        assert!(!entry.terminal_digest.is_empty());
+        assert!(
+            entry.intent.is_some(),
+            "{feature_id} retains its canonical intent",
+            feature_id = entry.feature_id
+        );
+    }
+    let feature_ids = entries
+        .iter()
+        .map(|entry| entry.feature_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        feature_ids,
+        [
+            "arm-x",
+            "arm-z",
+            "pad-a-seed",
+            "pad-a",
+            "pad-b-seed",
+            "pad-b",
+            "bracket-l",
+            "bracket-lp1",
+            "bracket-base",
+            "bracket-hole-1",
+            "bracket-foundation"
+        ]
+    );
+
+    let intent_value = |index: usize| {
+        serde_json::to_value(
+            entries[index]
+                .intent
+                .as_ref()
+                .expect("transaction retains canonical intent"),
+        )
+        .expect("canonical intent serializes")
+    };
+    for (index, command, operation) in [
+        (0, "extrude", "extrude"),
+        (1, "extrude", "extrude"),
+        (2, "extrude", "extrude"),
+        (3, "fillet", "fillet"),
+        (4, "extrude", "extrude"),
+        (5, "chamfer", "chamfer"),
+        (6, "boolean", "fuse"),
+        (7, "boolean", "fuse"),
+        (8, "boolean", "fuse"),
+        (9, "hole", "hole"),
+        (10, "hole", "hole"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(
+            intent["command"], command,
+            "intent command at index {index}"
+        );
+        assert_eq!(
+            intent["operation"], operation,
+            "intent operation at index {index}"
+        );
+        assert!(
+            intent["source_revision"]
+                .as_str()
+                .is_some_and(|revision| !revision.is_empty())
+        );
+    }
+    assert_eq!(
+        intent_value(0)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [60.0, 0.0], [60.0, 20.0], [0.0, 20.0]])
+    );
+    assert_eq!(intent_value(0)["deterministic_inputs"]["height"], 8.0);
+    assert_eq!(
+        intent_value(1)["deterministic_inputs"]["profile"],
+        json!([[0.0, 0.0], [20.0, 0.0], [20.0, 60.0], [0.0, 60.0]])
+    );
+    assert_eq!(
+        intent_value(2)["deterministic_inputs"]["profile"],
+        json!([[24.0, 4.0], [36.0, 4.0], [36.0, 16.0], [24.0, 16.0]])
+    );
+    assert_eq!(intent_value(3)["base_feature_id"], "pad-a-seed");
+    assert_eq!(intent_value(3)["radius"], 0.5);
+    assert_eq!(
+        intent_value(3)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-a-seed"
+    );
+    assert_eq!(intent_value(4)["deterministic_inputs"]["height"], 12.0);
+    assert_eq!(intent_value(5)["base_feature_id"], "pad-b-seed");
+    assert_eq!(intent_value(5)["distance"], 0.25);
+    assert_eq!(
+        intent_value(5)["selected_edge"]["provenance"]["source_feature_id"],
+        "pad-b-seed"
+    );
+    for (index, base_feature_id, tool_feature_id) in [
+        (6, "arm-x", "arm-z"),
+        (7, "bracket-l", "pad-a"),
+        (8, "bracket-lp1", "pad-b"),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["tool_feature_id"], tool_feature_id);
+    }
+    for (index, base_feature_id, position) in [
+        (9, "bracket-base", [50.0, 10.0, 0.0]),
+        (10, "bracket-hole-1", [10.0, 50.0, 0.0]),
+    ] {
+        let intent = intent_value(index);
+        assert_eq!(intent["base_feature_id"], base_feature_id);
+        assert_eq!(intent["hole_kind"], "drilled");
+        assert_eq!(intent["deterministic_inputs"]["position"], json!(position));
+        assert_eq!(
+            intent["deterministic_inputs"]["direction"],
+            json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(intent["deterministic_inputs"]["diameter"], 4.5);
+    }
+
+    let revision = bundle.revision_hash_hex().to_string();
+    let pad_a = worker
+        .inspect_edges(
+            "tui-pad-a-measurement",
+            root.join("brep/pad-a.brep"),
+            "pad-a",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-a", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("fillet landmarks inspect");
+    assert!(pad_a.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - std::f64::consts::FRAC_PI_4).abs() < 1e-3
+    }));
+    let pad_b = worker
+        .inspect_edges(
+            "tui-pad-b-measurement",
+            root.join("brep/pad-b.brep"),
+            "pad-b",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer landmarks inspect");
+    let pad_b_seed = worker
+        .inspect_edges(
+            "tui-pad-b-seed-measurement",
+            root.join("brep/pad-b-seed.brep"),
+            "pad-b-seed",
+            &revision,
+            json!({"provenance": {"source_feature_id": "pad-b-seed", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("chamfer seed landmarks inspect");
+    let pad_b_outer_length: f64 = pad_b
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    let pad_b_seed_outer_length: f64 = pad_b_seed
+        .edge_candidates
+        .iter()
+        .filter(|candidate| candidate.role == "outer-perimeter")
+        .map(|candidate| candidate.length)
+        .sum();
+    assert!(pad_b_outer_length > 0.0);
+    assert!(pad_b_seed_outer_length > 0.0);
+    assert!((pad_b_outer_length - pad_b_seed_outer_length).abs() > 0.01);
+
+    let final_edges = worker
+        .inspect_edges(
+            "tui-final-measurement",
+            root.join("brep/bracket-foundation.brep"),
+            "bracket-foundation",
+            &revision,
+            json!({"provenance": {"source_feature_id": "bracket-foundation", "source_revision_id": revision, "source_edge_id": "measurement-anchor"}}),
+        )
+        .expect("final hole landmarks inspect");
+    for midpoint in [
+        [52.25, 10.0, 0.0],
+        [52.25, 10.0, 8.0],
+        [12.25, 50.0, 0.0],
+        [12.25, 50.0, 8.0],
+    ] {
+        assert!(final_edges.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - 14.137166941154069).abs() < 1e-3
+                && candidate
+                    .midpoint
+                    .into_iter()
+                    .zip(midpoint)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+        }));
+    }
+
+    let before_read_only = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("final project renders read-only");
+    assert_eq!(snapshot_tree(&root), before_read_only);
+    assert_eq!(before_scene.solids.len(), 1);
+    let final_solid = before_scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == "bracket-foundation")
+        .expect("final fused body is visible");
+    assert!(!final_solid.triangles.is_empty());
+    let baseline_revision = bundle.revision_hash_hex().to_string();
+    let baseline_entries = entries.to_vec();
+    drop(bundle);
+    let reopened = Bundle::at(&root)
+        .open_read_only()
+        .expect("retained project reopens read-only");
+    assert_eq!(reopened.revision_hash_hex(), baseline_revision);
+    assert_eq!(reopened.log.entries(), baseline_entries);
+    let reopened_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("retained project renders read-only after reopen");
+    assert_eq!(reopened_scene, before_scene);
+    assert_eq!(snapshot_tree(&root), before_read_only);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_retains_preview_cancellation_and_recommit_evidence() {
+    OcctWorker::locate().expect("preview cancellation workflow requires the OCCT worker");
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-preview-cancel-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("preview cancellation fixture persists");
+    let before_identity = host.identity(&root).expect("canonical identity reads");
+    let before_tree = snapshot_tree(&root);
+    let before_scene = host
+        .read_only_viewport_scene(&root)
+        .expect("canonical scene reads");
+    let request = br#"{"feature_id":"keyboard-extrude","profile":[[0,0],[10,0],[10,5],[0,5]],"height":3,"mode":"additive"}"#;
+
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"\x10".to_vec(),
+    ]);
+    events.extend(b"extrude".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.iter().map(|byte| vec![*byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=4;OK\x1b\\".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=5;OK\x1b\\".to_vec(),
+        b"\x1b[B".to_vec(),
+        b"\x1b_Gi=6;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+
+    let outcome = launch(&host, &root, &mut terminal, official_environment())
+        .expect("preview cancellation and recommit workflow succeeds");
+
+    assert_eq!(
+        host.identity(&root)
+            .expect("identity remains readable")
+            .transaction_count,
+        before_identity.transaction_count + 1
+    );
+    assert_ne!(
+        host.identity(&root).expect("committed identity reads"),
+        before_identity
+    );
+    assert_ne!(snapshot_tree(&root), before_tree);
+    assert_eq!(before_scene.revision, before_identity.revision_hash);
+    assert!(root.join("brep/keyboard-extrude.brep").is_file());
+    assert!(!root.join(".derived").exists());
+
+    let transcript = outcome.action_transcript;
+    let kinds = transcript
+        .entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "draft_opened",
+            "preview_ready",
+            "cancelled",
+            "draft_opened",
+            "preview_ready",
+            "committed"
+        ]
+    );
+    assert!(
+        transcript.entries[1]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_eq!(
+        transcript.entries[2].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(
+        transcript.entries[4]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_ne!(
+        transcript.entries[5].canonical_revision,
+        before_identity.revision_hash
+    );
+    assert!(String::from_utf8_lossy(&terminal.writes).contains("[action-transcript]"));
+
+    let bundle = Bundle::at(&root).open().expect("committed bundle opens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref());
+    let Some(CanonicalIntent::Extrude(intent)) = intent else {
+        panic!("recommitted feature retains extrusion intent");
+    };
+    assert_eq!(intent.deterministic_inputs.height, 3.0);
+    assert_eq!(intent.mode, "additive");
+    assert_eq!(
+        intent.deterministic_inputs.profile,
+        vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+    );
+
+    fs::remove_dir_all(root).expect("preview cancellation fixture removes");
 }
 
 #[test]
@@ -1337,7 +2754,13 @@ fn production_launch_cancels_typed_extrusion_without_mutation() {
     events.extend(b"extrude".iter().map(|byte| vec![*byte]));
     events.push(b"\r".to_vec());
     events.extend(request.iter().map(|byte| vec![*byte]));
-    events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"\x1b".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
     events.reverse();
     let mut terminal = ScriptedTerminal {
         events,
@@ -1403,23 +2826,26 @@ fn production_launch_creates_project_and_extrudes_typed_profile() {
     append_project_draft(&mut events, true);
     append_project_draft(&mut events, false);
 
-    let append_extrude_draft = |events: &mut Vec<Vec<u8>>, cancel: bool, image_id: u8| {
-        events.push(b"\x10".to_vec());
-        append_text(events, b"extrude");
-        events.push(b"\r".to_vec());
-        append_text(events, request);
-        events.push(b"\x16".to_vec());
-        if cancel {
-            events.push(b"\x1b".to_vec());
-        } else {
-            events.push(b"\x1b[13;5u".to_vec());
-            events.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
-        }
-    };
-    append_extrude_draft(&mut events, true, 0);
-    append_extrude_draft(&mut events, false, 3);
+    let append_extrude_draft =
+        |events: &mut Vec<Vec<u8>>, cancel: bool, preview_image_id: u8, commit_image_id: u8| {
+            events.push(b"\x10".to_vec());
+            append_text(events, b"extrude");
+            events.push(b"\r".to_vec());
+            append_text(events, request);
+            events.push(b"\x16".to_vec());
+            events.push(format!("\x1b_Gi={preview_image_id};OK\x1b\\").into_bytes());
+            if cancel {
+                events.push(b"\x1b".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            } else {
+                events.push(b"\x1b[13;5u".to_vec());
+                events.push(format!("\x1b_Gi={commit_image_id};OK\x1b\\").into_bytes());
+            }
+        };
+    append_extrude_draft(&mut events, true, 3, 4);
+    append_extrude_draft(&mut events, false, 5, 6);
     events.push(b"\x1b[B".to_vec());
-    events.push(b"\x1b_Gi=4;OK\x1b\\".to_vec());
+    events.push(b"\x1b_Gi=7;OK\x1b\\".to_vec());
     events.push(b"q".to_vec());
     events.reverse();
     let mut terminal = ScriptedTerminal {
@@ -1570,4 +2996,236 @@ fn production_launch_creates_project_and_extrudes_typed_profile() {
     assert_eq!(snapshot_tree(&project_root), before_inspection);
 
     fs::remove_dir_all(workspace).expect("workflow workspace removes");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_creates_tapered_reinforcement_through_keyboard() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("keyboard tapered reinforcement requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("keyboard tapered reinforcement: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-keyboard-tapered-reinforcement-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            "taper-seed-request",
+            vec![(24.0, 0.0), (34.0, 0.0), (34.0, 4.0), (24.0, 4.0)],
+            12.0,
+        )
+        .with_feature_id("taper-seed"),
+        &worker,
+    )
+    .expect("real seed extrusion commits");
+    let before = host
+        .identity(&root)
+        .expect("seed identity reads before keyboard draft");
+    let seeded_tree = snapshot_tree(&root);
+    let request = json!({
+        "feature_id": "tapered-reinforcement",
+        "base_feature_id": "taper-seed",
+        "angle": 0.05235987755982989,
+        "pull_direction": [0, 0, 1]
+    })
+    .to_string();
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    events.extend(b"draft".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(request.bytes().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ]);
+    let loft_request = json!({
+        "feature_id": "lofted-gusset",
+        "profiles": [
+            [[8, 8, 8], [16, 8, 8], [16, 16, 8], [8, 16, 8]],
+            [[10, 10, 18], [14, 10, 18], [14, 14, 18], [10, 14, 18]]
+        ],
+        "is_solid": true,
+        "ruled": false
+    })
+    .to_string();
+    events.push(b"\x10".to_vec());
+    events.extend(b"loft".iter().map(|byte| vec![*byte]));
+    events.push(b"\r".to_vec());
+    events.extend(loft_request.bytes().map(|byte| vec![byte]));
+    events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=3;OK\x1b\\".to_vec(),
+    ]);
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        skip_probe_replay: true,
+        selection_targets: BTreeSet::from([
+            "tapered-reinforcement".to_string(),
+            "lofted-gusset".to_string(),
+        ]),
+        selection_active: true,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("keyboard draft workflow succeeds");
+    let output = String::from_utf8_lossy(&terminal.writes);
+    let acknowledged_draft_revision = viewport_revision_between(
+        &output,
+        "[selection-glyph] Commit: draft",
+        "[outline] Draft: loft",
+    );
+
+    let final_identity = host
+        .identity(&root)
+        .expect("reinforcement identity reads after keyboard commits");
+    assert_eq!(
+        final_identity.transaction_count,
+        before.transaction_count + 2
+    );
+    assert_ne!(final_identity.revision_hash, before.revision_hash);
+    let final_bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement bundle opens read-only");
+    assert_ne!(snapshot_tree(&root), seeded_tree);
+    let draft_entry = final_bundle
+        .log
+        .entries()
+        .iter()
+        .find(|entry| entry.feature_id == "tapered-reinforcement")
+        .expect("draft transaction is retained");
+    let CanonicalIntent::Draft(intent) = draft_entry.intent.as_ref().expect("draft intent exists")
+    else {
+        panic!("keyboard draft retained a non-draft intent");
+    };
+    assert_authenticated_brep(&root, draft_entry);
+    assert_eq!(intent.base_feature_id, "taper-seed");
+    assert_eq!(intent.angle, 0.05235987755982989);
+    assert_eq!(intent.pull_direction, [0.0, 0.0, 1.0]);
+    assert_eq!(intent.source_revision, before.revision_hash);
+    let brep = root.join("brep/tapered-reinforcement.brep");
+    assert!(brep.is_file(), "keyboard draft BREP is persisted");
+    let loft_entry = final_bundle
+        .log
+        .entries()
+        .last()
+        .expect("loft transaction is retained");
+    let CanonicalIntent::Loft(loft_intent) =
+        loft_entry.intent.as_ref().expect("loft intent exists")
+    else {
+        panic!("keyboard loft retained a non-loft intent");
+    };
+    assert_authenticated_brep(&root, loft_entry);
+    assert_eq!(
+        loft_intent.profiles,
+        vec![
+            vec![
+                [8.0, 8.0, 8.0],
+                [16.0, 8.0, 8.0],
+                [16.0, 16.0, 8.0],
+                [8.0, 16.0, 8.0]
+            ],
+            vec![
+                [10.0, 10.0, 18.0],
+                [14.0, 10.0, 18.0],
+                [14.0, 14.0, 18.0],
+                [10.0, 14.0, 18.0]
+            ],
+        ]
+    );
+    assert!(loft_intent.is_solid);
+    assert!(!loft_intent.ruled);
+    assert_eq!(
+        loft_intent.source_revision,
+        final_bundle
+            .feature_brep_source_revision("tapered-reinforcement")
+            .expect("draft source revision derives from the canonical log")
+    );
+    assert_eq!(loft_intent.source_revision, acknowledged_draft_revision);
+    assert!(root.join("brep/lofted-gusset.brep").is_file());
+    assert_eq!(
+        terminal.selection_acknowledged_targets,
+        BTreeSet::from([
+            "tapered-reinforcement".to_string(),
+            "lofted-gusset".to_string(),
+        ])
+    );
+    assert!(!terminal.selection_ack_pending);
+
+    let before_inspection = snapshot_tree(&root);
+    let scene = Host::new()
+        .read_only_viewport_scene(&root)
+        .expect("reinforcement scene reads read-only");
+    assert_eq!(snapshot_tree(&root), before_inspection);
+    let tapered = scene_solid(&scene, "tapered-reinforcement");
+    let lofted = scene_solid(&scene, "lofted-gusset");
+    assert_closed_positive_mesh(tapered);
+    assert_closed_positive_mesh(lofted);
+    let tapered_bottom = section_bounds(tapered, 0.0).expect("tapered lower section exists");
+    let tapered_top = section_bounds(tapered, 12.0).expect("tapered upper section exists");
+    assert!(
+        (tapered_bottom[1] - tapered_bottom[0] - (tapered_top[1] - tapered_top[0])).abs()
+            > SECTION_TOLERANCE_MM
+            || (tapered_bottom[3] - tapered_bottom[2] - (tapered_top[3] - tapered_top[2])).abs()
+                > SECTION_TOLERANCE_MM,
+        "drafted sections must differ along the pull direction: bottom={tapered_bottom:?} top={tapered_top:?}"
+    );
+    let lofted_lower = section_bounds(lofted, 8.0).expect("loft lower section exists");
+    let lofted_upper = section_bounds(lofted, 18.0).expect("loft upper section exists");
+    for (actual, expected) in [
+        (lofted_lower, [8.0, 16.0, 8.0, 16.0]),
+        (lofted_upper, [10.0, 14.0, 10.0, 14.0]),
+    ] {
+        for (value, target) in actual.into_iter().zip(expected) {
+            assert!((value - target).abs() <= SECTION_TOLERANCE_MM);
+        }
+    }
+
+    for acknowledgement in [
+        "[outline] Draft: draft",
+        "[dashed-outline] Preview: draft",
+        "[selection-glyph] Commit: draft",
+        "tapered-reinforcement",
+        "[outline] Draft: loft",
+        "[dashed-outline] Preview: loft",
+        "[selection-glyph] Commit: loft",
+        "lofted-gusset",
+        "selected feature tapered-reinforcement",
+        "selected feature lofted-gusset",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(acknowledgement),
+            "missing keyboard draft acknowledgement: {acknowledgement}"
+        );
+    }
+    assert!(
+        terminal.read_events.iter().all(|event| !matches!(
+            decode_terminal_input(event),
+            Some(TerminalInput::Pick { .. })
+        )),
+        "tapered reinforcement does not depend on pointer selection"
+    );
+
+    fs::remove_dir_all(root).expect("keyboard draft project removes");
 }

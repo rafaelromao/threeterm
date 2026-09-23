@@ -4,15 +4,18 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
 use threeterm_domain::ProjectGeneration;
-use threeterm_host::Host;
+use threeterm_host::{DomainCommandPreview, Host};
 use threeterm_occt_worker::{BracketRequest, LoftRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
 use threeterm_theme::{PaletteSources, SemanticToken, ThemeContext, resolve_palette};
-use threeterm_tui::{EMPTY_PROJECT_SOURCE_REVISION, TuiViewportError, TuiViewportSession};
+use threeterm_tui::{
+    CommandGateway, EMPTY_PROJECT_SOURCE_REVISION, TuiViewportError, TuiViewportSession,
+};
 use threeterm_viewport::{
     CapabilityProbeResult, CapabilityState, FrameAcknowledgement, GhosttyRenderer, PickCandidate,
-    PickResult, TerminalCapabilityVector, ViewportDiagnosticCode,
+    PickResult, SceneSolid, SceneTriangle, TerminalCapabilityVector, ViewportDiagnosticCode,
 };
 
 #[derive(Debug, Default)]
@@ -87,6 +90,55 @@ fn probe_result() -> CapabilityProbeResult {
         capabilities: valid_capabilities(),
         unrelated_input: Vec::new(),
         response_evidence: "test".to_string(),
+    }
+}
+
+struct PreviewOnlyGateway {
+    revision: String,
+}
+
+impl CommandGateway for PreviewOnlyGateway {
+    fn current_revision(&self, _root: &Path) -> Result<String, String> {
+        Ok(self.revision.clone())
+    }
+
+    fn preview(
+        &self,
+        command: threeterm_protocol::schema::CommandId,
+        _request: Value,
+    ) -> Result<DomainCommandPreview, String> {
+        Ok(DomainCommandPreview {
+            command,
+            source_revision: self.revision.clone(),
+            preview_revision: "b".repeat(64),
+            input_fingerprint: "c".repeat(64),
+            geometry_fingerprint: "d".repeat(64),
+            preview_solid: Some(SceneSolid::new(
+                "keyboard-extrude",
+                vec![
+                    SceneTriangle {
+                        vertices: [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 5.0, 0.0]],
+                    },
+                    SceneTriangle {
+                        vertices: [[0.0, 0.0, 0.0], [10.0, 5.0, 0.0], [0.0, 5.0, 0.0]],
+                    },
+                    SceneTriangle {
+                        vertices: [[0.0, 0.0, 3.0], [10.0, 5.0, 3.0], [10.0, 0.0, 3.0]],
+                    },
+                    SceneTriangle {
+                        vertices: [[0.0, 0.0, 3.0], [0.0, 5.0, 3.0], [10.0, 5.0, 3.0]],
+                    },
+                ],
+            )),
+        })
+    }
+
+    fn commit(
+        &self,
+        _command: threeterm_protocol::schema::CommandId,
+        _request: Value,
+    ) -> Result<Value, String> {
+        Err("commit is not part of preview-only fixture".to_string())
     }
 }
 
@@ -233,6 +285,97 @@ fn empty_host_session_can_create_a_project_from_the_command_palette() {
     assert_eq!(snapshot_tree(&root), before_inspection);
 
     let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn preview_geometry_is_transient_and_cancellation_is_retained_in_the_transcript() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("preview fixture persists");
+    let before = host.identity(&root).expect("canonical identity reads");
+    let gateway = PreviewOnlyGateway {
+        revision: before.revision_hash.clone(),
+    };
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("preview fixture creates a viewport session");
+
+    session
+        .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
+        .expect("palette opens");
+    for character in "extrude".chars() {
+        session
+            .process_keyboard_input_with_gateway(&[character as u8], &host, &root, &gateway)
+            .expect("palette accepts the extrusion command");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\r", &host, &root, &gateway)
+        .expect("extrusion draft opens");
+    for character in br#"{"feature_id":"keyboard-extrude"}"#.iter().copied() {
+        session
+            .process_keyboard_input_with_gateway(&[character], &host, &root, &gateway)
+            .expect("draft accepts semantic input");
+    }
+
+    let preview = session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("preview succeeds");
+    let preview_frame = preview
+        .submission
+        .as_ref()
+        .and_then(|submission| submission.started.as_ref())
+        .expect("preview submits a frame");
+    session
+        .acknowledge(FrameAcknowledgement::from(preview_frame))
+        .expect("preview frame acknowledges");
+    let preview_evidence = session
+        .presentation_evidence()
+        .expect("preview presentation evidence is visible");
+    assert!(preview_evidence.scene.triangle_count > 0);
+    assert!(preview_evidence.scene.body_pixels > 0);
+    session.record_presentation_evidence(&preview_evidence);
+    assert_eq!(
+        host.identity(&root).expect("identity after preview"),
+        before
+    );
+
+    let cancelled = session
+        .process_keyboard_input_with_gateway(b"\x1b", &host, &root, &gateway)
+        .expect("preview cancellation succeeds");
+    let cancelled_frame = cancelled
+        .submission
+        .as_ref()
+        .and_then(|submission| submission.started.as_ref())
+        .expect("cancellation restores a canonical frame");
+    session
+        .acknowledge(FrameAcknowledgement::from(cancelled_frame))
+        .expect("canonical frame acknowledges after cancellation");
+    assert_eq!(
+        host.identity(&root).expect("identity after cancellation"),
+        before
+    );
+    let transcript = session.action_transcript();
+    assert_eq!(
+        transcript
+            .entries
+            .iter()
+            .map(|entry| entry.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["draft_opened", "preview_ready", "cancelled"]
+    );
+    assert!(
+        transcript.entries[1]
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.triangle_count > 0 && scene.body_pixels > 0)
+    );
+    assert_eq!(
+        transcript.entries[2].canonical_revision,
+        before.revision_hash
+    );
+
+    fs::remove_dir_all(root).expect("preview fixture removes");
 }
 
 #[test]

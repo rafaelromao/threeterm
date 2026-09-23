@@ -8,10 +8,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
-use threeterm_protocol::schema::{EXTRUDE_COMMAND_ID, NEW_PROJECT_COMMAND_ID, find, iter};
+use threeterm_protocol::schema::{
+    BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID,
+    NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find, iter,
+};
 use threeterm_protocol::schema_validator::validate;
 
 const PINNED_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -23,6 +27,7 @@ type StreamLine = Result<Vec<u8>, String>;
 #[derive(Debug)]
 struct McpEvidence {
     protocol: Vec<Value>,
+    protocol_errors: Vec<Value>,
     server_diagnostics: String,
     domain_errors: Vec<Value>,
 }
@@ -35,6 +40,7 @@ struct McpProcess {
     stderr_thread: Option<JoinHandle<Result<Vec<u8>, String>>>,
     protocol: Vec<Value>,
     pending: BTreeMap<String, Value>,
+    protocol_errors: Vec<Value>,
     domain_errors: Vec<Value>,
 }
 
@@ -95,6 +101,7 @@ impl McpProcess {
             stderr_thread: Some(stderr_thread),
             protocol: Vec::new(),
             pending: BTreeMap::new(),
+            protocol_errors: Vec::new(),
             domain_errors: Vec::new(),
         }
     }
@@ -172,6 +179,9 @@ impl McpProcess {
             };
             let response_key = request_key(response_id);
             if response_key == expected_key {
+                if value.get("error").is_some_and(Value::is_object) {
+                    self.protocol_errors.push(value.clone());
+                }
                 if value["result"]["isError"] == true {
                     self.domain_errors.push(value.clone());
                 }
@@ -219,6 +229,7 @@ impl McpProcess {
 
         McpEvidence {
             protocol: std::mem::take(&mut self.protocol),
+            protocol_errors: std::mem::take(&mut self.protocol_errors),
             server_diagnostics: String::from_utf8_lossy(&stderr).into_owned(),
             domain_errors: std::mem::take(&mut self.domain_errors),
         }
@@ -420,6 +431,14 @@ fn revision_hash(root: &Path) -> String {
         .expect("MCP-created project has a revision")
         .revision_hash_hex()
         .to_string()
+}
+
+struct CleanupRoot(PathBuf);
+
+impl Drop for CleanupRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[test]
@@ -663,4 +682,307 @@ fn production_mcp_initializes_discovers_creates_project_and_extrudes_over_stdio(
     );
     assert_eq!(evidence.domain_errors[0]["id"], "invalid");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_independent_stl_check()
+{
+    require_native_worker(
+        "production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_independent_stl_check",
+    );
+    let root = fresh_root();
+    let _cleanup = CleanupRoot(root.clone());
+    let project = root.join("project");
+    let output = root.join("export");
+    let logs = root.join("logs");
+    let mut client = McpProcess::spawn();
+
+    let initialized = client.request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-lifecycle-test", "version": "1.0.0"}
+        }),
+    );
+    assert_protocol_success(&initialized, "initialize");
+    client.notify("notifications/initialized", json!({}));
+    let tools = advertised_tools(&mut client);
+    for command in [
+        NEW_PROJECT_COMMAND_ID,
+        BRACKET_COMMAND_ID,
+        SAVE_COMMAND_ID,
+        LOAD_COMMAND_ID,
+        VALIDATE_COMMAND_ID,
+        EXPORT_COMMAND_ID,
+    ] {
+        let schema = find(command).expect("lifecycle command is registered");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == schema.schema_version),
+            "MCP discovery omits {}",
+            schema.schema_version
+        );
+    }
+
+    let created = client.call_tool(
+        "create",
+        find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .schema_version,
+        json!({"destination": project.to_string_lossy()}),
+    );
+    let created = structured_tool_success(&created, "create");
+    validate(
+        &find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .response_schema,
+        &created,
+    )
+    .expect("MCP new-project response validates");
+
+    let bracket = client.call_tool(
+        "bracket",
+        find(BRACKET_COMMAND_ID)
+            .expect("bracket is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "bracket_id": "l-bracket",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0,
+        }),
+    );
+    let bracket = structured_tool_success(&bracket, "bracket");
+    validate(
+        &find(BRACKET_COMMAND_ID)
+            .expect("bracket is registered")
+            .response_schema,
+        &bracket,
+    )
+    .expect("MCP bracket response validates");
+    assert_eq!(bracket["feature_id"], "l-bracket");
+
+    let saved = client.call_tool(
+        "save",
+        find(SAVE_COMMAND_ID)
+            .expect("save is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "mcp-lifecycle-save-marker",
+            "kind": "lifecycle-marker",
+        }),
+    );
+    let saved = structured_tool_success(&saved, "save");
+    validate(
+        &find(SAVE_COMMAND_ID)
+            .expect("save is registered")
+            .response_schema,
+        &saved,
+    )
+    .expect("MCP save response validates");
+    assert_ne!(saved["revision_hash"], bracket["revision_hash"]);
+
+    let first_evidence = client.finish();
+    assert!(first_evidence.server_diagnostics.is_empty());
+    fs::create_dir_all(&logs).expect("MCP log directory creates");
+    fs::write(
+        logs.join("first-server.stderr"),
+        first_evidence.server_diagnostics.as_bytes(),
+    )
+    .expect("first MCP diagnostics are retained");
+
+    let mut restarted = McpProcess::spawn();
+    let initialized = restarted.request(
+        "restart-initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-lifecycle-test", "version": "1.0.0"}
+        }),
+    );
+    assert_protocol_success(&initialized, "restart-initialize");
+    restarted.notify("notifications/initialized", json!({}));
+
+    let loaded = restarted.call_tool(
+        "load",
+        find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let loaded = structured_tool_success(&loaded, "load");
+    validate(
+        &find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .response_schema,
+        &loaded,
+    )
+    .expect("MCP load response validates");
+    assert_eq!(loaded["feature_graph_hash"], saved["feature_graph_hash"]);
+    assert_eq!(loaded["revision_hash"], saved["revision_hash"]);
+
+    let validated = restarted.call_tool(
+        "validate",
+        find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "l-bracket",
+        }),
+    );
+    let validated = structured_tool_success(&validated, "validate");
+    validate(
+        &find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .response_schema,
+        &validated,
+    )
+    .expect("MCP validate response validates");
+    assert_eq!(validated["status"], "ok");
+    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["feature_id"], "l-bracket");
+    assert_eq!(validated["revision_hash"], loaded["revision_hash"]);
+
+    assert!(!output.exists(), "export destination starts absent");
+    let exported = restarted.call_tool(
+        "export",
+        find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "l-bracket",
+            "formats": ["stl"],
+            "output_dir": output.to_string_lossy(),
+            "tessellation_deflection": 0.1,
+            "override_warnings": false,
+            "accept_stale_geometry": false,
+        }),
+    );
+    let exported = structured_tool_success(&exported, "export");
+    validate(
+        &find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .response_schema,
+        &exported,
+    )
+    .expect("MCP export response validates");
+    assert_eq!(exported["status"], "ok");
+    assert_eq!(exported["feature_id"], validated["feature_id"]);
+    assert_eq!(exported["source_revision_id"], validated["revision_hash"]);
+    for field in [
+        "feature_id",
+        "revision_id",
+        "feature_graph_hash",
+        "revision_hash",
+        "brep_path",
+        "brep_sha256",
+        "valid",
+    ] {
+        assert_eq!(
+            exported["validation"][field], validated[field],
+            "export validation is not bound to MCP validation for {field}"
+        );
+    }
+
+    let protocol_failure = restarted.call_tool(
+        "protocol-invalid",
+        find(SAVE_COMMAND_ID)
+            .expect("save is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    assert_eq!(protocol_failure["id"], "protocol-invalid");
+    assert_eq!(protocol_failure["error"]["code"], -32602);
+    assert!(protocol_failure["result"].is_null());
+
+    let domain_failure = restarted.call_tool(
+        "domain-invalid",
+        find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "missing-solid",
+        }),
+    );
+    assert_eq!(domain_failure["id"], "domain-invalid");
+    assert!(domain_failure.get("error").is_none() || domain_failure["error"].is_null());
+    assert_eq!(domain_failure["result"]["isError"], true);
+    validate(
+        &domain_diagnostic_schema(),
+        &domain_failure["result"]["structuredContent"],
+    )
+    .expect("MCP domain diagnostic validates");
+
+    let stl_path = output.join("l-bracket.stl");
+    assert!(stl_path.is_file());
+    assert_eq!(
+        exported["artifacts"],
+        json!([stl_path.to_string_lossy().to_string()])
+    );
+    let report = stl_integrity::verify_path(&stl_path).expect("MCP STL passes independent check");
+    assert_eq!(report.format, StlFormat::Ascii);
+    assert!(report.triangle_count > 0);
+    assert!(report.unique_vertex_count > 0);
+    assert_eq!(report.shell_count, 1);
+    assert!(report.signed_volume > 0.0);
+    assert!(report.material_volume > 0.0);
+    assert_eq!(report.policy, stl_integrity::VALIDATION_POLICY);
+    let artifact = exported["derived_artifacts"]
+        .as_array()
+        .expect("MCP export includes derived artifact")
+        .first()
+        .expect("MCP export includes STL metadata");
+    let bytes = fs::read(&stl_path).expect("MCP STL reads");
+    assert_eq!(artifact["artifact_kind"], "stl");
+    assert_eq!(artifact["byte_count"], bytes.len());
+    assert_eq!(artifact["sha256"], sha256_hex(&bytes));
+    assert_eq!(artifact["source_revision_id"], validated["revision_hash"]);
+    assert_eq!(
+        fs::read_dir(&output)
+            .expect("export directory reads")
+            .map(|entry| entry.expect("export entry reads").file_name())
+            .collect::<Vec<_>>(),
+        vec![std::ffi::OsString::from("l-bracket.stl")]
+    );
+
+    let second_evidence = restarted.finish();
+    assert!(second_evidence.server_diagnostics.is_empty());
+    fs::write(
+        logs.join("second-server.stderr"),
+        second_evidence.server_diagnostics.as_bytes(),
+    )
+    .expect("second MCP diagnostics are retained");
+    assert!(
+        first_evidence
+            .protocol
+            .iter()
+            .chain(second_evidence.protocol.iter())
+            .all(|message| message["jsonrpc"] == "2.0")
+    );
+    assert_eq!(second_evidence.protocol_errors.len(), 1);
+    assert_eq!(second_evidence.protocol_errors[0]["id"], "protocol-invalid");
+    assert_eq!(second_evidence.domain_errors.len(), 1);
+    assert_eq!(second_evidence.domain_errors[0]["id"], "domain-invalid");
+    assert!(logs.join("first-server.stderr").is_file());
+    assert!(logs.join("second-server.stderr").is_file());
+    assert!(project.is_dir());
+    assert!(output.is_dir());
+
+    for path in [&project, &output, &logs] {
+        fs::remove_dir_all(path).expect("lifecycle directory cleans");
+        assert!(!path.exists(), "lifecycle directory remains: {path:?}");
+    }
+    drop(_cleanup);
+    assert!(!root.exists(), "lifecycle root remains after cleanup");
 }

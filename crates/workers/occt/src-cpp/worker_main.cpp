@@ -1420,7 +1420,7 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         return false;
     }
 
-    BRepAlgoAPI_Fuse fuse(base, tool);
+    BRepAlgoAPI_Fuse fuse(tool, base);
     fuse.SetFuzzyValue(1.0e-6);
     fuse.Build();
     if (!fuse.IsDone()) {

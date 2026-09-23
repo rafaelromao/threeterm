@@ -777,12 +777,33 @@ fn assert_open_path(
             !point_inside(mesh, [center[0], center[1], z]),
             landmark,
             format!(
-                "empty-space probe at ({}, {}, {z}) is occupied",
-                center[0], center[1]
+                "empty-space probe at ({}, {}, {z}) is occupied; nearby occupancy {}",
+                center[0],
+                center[1],
+                occupancy_grid(mesh, center, z),
             ),
         )?;
     }
     Ok(())
+}
+
+fn occupancy_grid(mesh: &StlMeshObservation, center: [f64; 2], z: f64) -> String {
+    [-1.0, -0.5, 0.0, 0.5, 1.0]
+        .into_iter()
+        .map(|y_offset| {
+            [-1.0, -0.5, 0.0, 0.5, 1.0]
+                .into_iter()
+                .map(|x_offset| {
+                    if point_inside(mesh, [center[0] + x_offset, center[1] + y_offset, z]) {
+                        '#'
+                    } else {
+                        '.'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn assert_region_has_material(
@@ -2782,6 +2803,11 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
     let report =
         verify_path(&stl_path).expect("complete bracket STL passes integrity verification");
     let mesh = observe_path(&stl_path).expect("complete bracket STL observations parse");
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let evidence_path = Path::new(&target_dir).join("bracket-complete.stl");
+        fs::copy(&stl_path, &evidence_path)
+            .unwrap_or_else(|error| panic!("copy final STL evidence: {error}"));
+    }
     assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
         panic!(
             "complete bracket mesh failed landmark {}: {failure}",

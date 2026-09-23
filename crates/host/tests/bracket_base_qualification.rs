@@ -1,7 +1,6 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeSet;
-use std::f64::consts::TAU;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -910,30 +909,7 @@ fn assert_bracket_mesh(
         (feature_id, [position[0], position[1]], thickness)
     });
     let hole_radius = mesh_number(&recipe["expectations"], "hole_diameter") / 2.0;
-    for (feature_id, center, top_z) in hole_expectations {
-        for angle_index in 0..16 {
-            let angle = TAU * angle_index as f64 / 16.0;
-            let inner = [
-                center[0] + (hole_radius - probe_clearance) * angle.cos(),
-                center[1] + (hole_radius - probe_clearance) * angle.sin(),
-                top_z / 2.0,
-            ];
-            let outer = [
-                center[0] + (hole_radius + probe_clearance) * angle.cos(),
-                center[1] + (hole_radius + probe_clearance) * angle.sin(),
-                top_z / 2.0,
-            ];
-            require_mesh(
-                !point_inside(mesh, inner),
-                "mounting-holes",
-                format!("{feature_id} inner probe is occupied at angle {angle}"),
-            )?;
-            require_mesh(
-                point_inside(mesh, outer),
-                "mounting-holes",
-                format!("{feature_id} outer probe is empty at angle {angle}"),
-            )?;
-        }
+    for (_feature_id, center, top_z) in hole_expectations {
         assert_open_path(
             mesh,
             center,

@@ -2590,10 +2590,14 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
         }
 
         match feature_id {
+            "reinforced-foundation" => {
+                assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
+            }
             "mirrored-collar" => {
                 assert_collar_landmark(&recipe, feature_id, &measurements, feature_id)
             }
             "foundation-with-mirrored-collar" => {
+                assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
                 assert_collar_landmark(
                     &recipe,
                     "revolved-collar",
@@ -2608,13 +2612,22 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
                 );
             }
             "linear-pads" | "foundation-with-linear-pads" => {
+                if feature_id == "foundation-with-linear-pads" {
+                    assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
+                }
                 assert_linear_pattern_landmarks(&recipe, &measurements);
             }
             "circular-lugs" | "foundation-with-circular-lugs" => {
+                if feature_id == "foundation-with-circular-lugs" {
+                    assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
+                }
                 assert_circular_landmarks(&recipe, &measurements);
             }
             "tapered-reinforcement" => assert_draft_sections(&recipe, &measurements),
-            "foundation-with-taper" => assert_taper_retained(&recipe, &measurements),
+            "foundation-with-taper" => {
+                assert_post_fusion_landmarks(&recipe, feature_id, &measurements, true);
+                assert_taper_retained(&recipe, &measurements);
+            }
             "lofted-gusset" => assert_loft_sections(&recipe, &measurements),
             "complete-bracket" => {
                 assert_collar_landmark(

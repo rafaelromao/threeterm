@@ -557,14 +557,16 @@ fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
     {
         return false;
     }
-    let directions = [
-        [1.0, 0.371_390_676_354_103_7, 0.173_205_080_756_887_7],
-        [0.219_871, 1.0, 0.414_213],
-        [0.137_503, 0.281_731, 1.0],
-    ];
-    directions
+    let offsets = [[0.0, 0.0], [0.017, 0.011], [-0.013, 0.019], [0.023, -0.017]];
+    offsets
         .into_iter()
-        .find_map(|direction| ray_parity(point, direction, mesh))
+        .find_map(|[x, y]| {
+            ray_parity(
+                [point[0] + x, point[1] + y, point[2]],
+                [0.0, 0.0, 1.0],
+                mesh,
+            )
+        })
         .unwrap_or(false)
 }
 

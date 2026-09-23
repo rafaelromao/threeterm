@@ -77,17 +77,18 @@ jq -e '
     .result == "not_run" and
     .test == "production_tui_reinforcement"
 ' <<<"${reinforcement_plan}" >/dev/null
+tapered_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.tapered-lofted-reinforcements/1" and
+    .result == "not_run" and
+    .test == "production_tui_tapered_lofted_reinforcements"
+' <<<"${tapered_plan}" >/dev/null
 reinforcing_plan="$(bash "${RUNNER}" production_tui_mirror_pattern_reinforcing_features --print-plan)"
 jq -e '
     .schema_version == "threeterm.graphical-tui.mirror-pattern-reinforcing-features/1" and
     .result == "not_run" and
     .test == "production_tui_mirror_pattern_reinforcing_features"
 ' <<<"${reinforcing_plan}" >/dev/null
-jq -e '
-    .schema_version == "threeterm.graphical-tui.tapered-lofted-reinforcements/1" and
-    .result == "not_run" and
-    .test == "production_tui_tapered_lofted_reinforcements"
-' <<<"${reinforcement_plan}" >/dev/null
 
 for required in \
     'LC_ALL=C.UTF-8' \

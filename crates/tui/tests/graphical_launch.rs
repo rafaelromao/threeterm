@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::Host;
+use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_protocol::artifact::sha256_hex;
@@ -390,6 +390,91 @@ fn production_tui_ghostty_session() {
                 .any(|item| item["kind"] == "cleanup_screenshot")
             && items.iter().all(|item| item["sha256"].as_str().is_some())
     }));
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty and OCCT toolchain"]
+fn production_tui_save_reopen_validate_export() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-graphical-lifecycle-{}-{suffix}",
+        std::process::id()
+    ));
+    let evidence = root.join("evidence");
+    let worker = OcctWorker::locate()
+        .unwrap_or_else(|error| panic!("graphical lifecycle requires the OCCT worker: {error}"));
+    Host::new()
+        .create_bracket(
+            &root,
+            BracketRequest::new("graphical-lifecycle", 60.0, 30.0, 40.0, 3.0)
+                .with_feature_id("l-bracket"),
+            &worker,
+        )
+        .expect("the graphical lifecycle starts from a real L-bracket Project Generation");
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_save_reopen_validate_export")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("graphical lifecycle runner starts");
+    assert!(
+        output.status.success(),
+        "graphical lifecycle runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("graphical lifecycle manifest exists"),
+    )
+    .expect("graphical lifecycle manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.save-reopen-validate-export/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["events"]["lifecycle"], "passed");
+    assert_eq!(manifest["events"]["validation"], "passed");
+    assert_eq!(manifest["events"]["export"], "passed");
+    assert_eq!(manifest["events"]["cleanup"], "passed");
+    assert_eq!(manifest["processes"]["owned"], "stopped");
+
+    let stl_path = root.join("tui-export/l-bracket.stl");
+    let report = stl_integrity::verify_path(&stl_path)
+        .expect("graphical TUI export passes the shared independent STL checker");
+    assert_eq!(report.format, stl_integrity::StlFormat::Ascii);
+    assert!(report.triangle_count > 0);
+    assert_eq!(report.shell_count, 1);
+    assert!(report.material_volume > 0.0);
+    assert!(manifest["artifacts"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["kind"] == "stl_integrity"
+                && item["path"]
+                    == evidence
+                        .join("stl-integrity.json")
+                        .to_string_lossy()
+                        .as_ref()
+                && item["sha256"].as_str().is_some()
+        }) && items.iter().any(|item| {
+            item["kind"] == "exported_stl"
+                && item["path"] == stl_path.to_string_lossy().as_ref()
+                && item["sha256"].as_str().is_some()
+        })
+    }));
+
+    fs::remove_dir_all(root).expect("graphical lifecycle evidence removes");
 }
 
 #[test]

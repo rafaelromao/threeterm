@@ -9,6 +9,7 @@ use threeterm_domain::ProjectGeneration;
 use threeterm_host::{DomainCommandPreview, Host};
 use threeterm_occt_worker::{BracketRequest, LoftRequest, OcctWorker};
 use threeterm_persistence::{Bundle, write_fresh};
+use threeterm_protocol::schema::{EXPORT_COMMAND_ID, VALIDATE_COMMAND_ID};
 use threeterm_theme::{PaletteSources, SemanticToken, ThemeContext, resolve_palette};
 use threeterm_tui::{
     CommandGateway, EMPTY_PROJECT_SOURCE_REVISION, TuiViewportError, TuiViewportSession,
@@ -139,6 +140,52 @@ impl CommandGateway for PreviewOnlyGateway {
         _request: Value,
     ) -> Result<Value, String> {
         Err("commit is not part of preview-only fixture".to_string())
+    }
+}
+
+struct LifecycleGateway {
+    revision: String,
+}
+
+impl CommandGateway for LifecycleGateway {
+    fn current_revision(&self, _root: &Path) -> Result<String, String> {
+        Ok(self.revision.clone())
+    }
+
+    fn preview(
+        &self,
+        command: threeterm_protocol::schema::CommandId,
+        _request: Value,
+    ) -> Result<DomainCommandPreview, String> {
+        Ok(DomainCommandPreview {
+            command,
+            source_revision: self.revision.clone(),
+            preview_revision: format!("preview-{}", command.0),
+            input_fingerprint: "input".to_string(),
+            geometry_fingerprint: "geometry".to_string(),
+            preview_solid: None,
+        })
+    }
+
+    fn commit(
+        &self,
+        command: threeterm_protocol::schema::CommandId,
+        _request: Value,
+    ) -> Result<Value, String> {
+        match command {
+            VALIDATE_COMMAND_ID => Ok(serde_json::json!({
+                "valid": true,
+                "feature_id": "feature-a",
+                "revision_hash": self.revision.clone(),
+            })),
+            EXPORT_COMMAND_ID => Ok(serde_json::json!({
+                "status": "ok",
+                "feature_id": "feature-a",
+                "source_revision_id": self.revision.clone(),
+                "artifacts": [],
+            })),
+            _ => Err(format!("unexpected lifecycle command: {}", command.0)),
+        }
     }
 }
 
@@ -679,6 +726,169 @@ fn existing_new_project_destination_is_rejected_without_mutation() {
     assert!(rejected.overlay.contains("preview rejected"));
     assert_eq!(host.current(), Some(before_host));
     assert_eq!(snapshot_tree(&root), before_tree);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn export_preview_requires_visible_current_revision_validation() {
+    let root = temporary_bundle_root();
+    let output = root.join("export");
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("fixture feature persists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed session creates");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "export".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("export command is searchable");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("export draft opens");
+    let request = format!(
+        r#"{{"feature_id":"feature-a","formats":["stl"],"output_dir":"{}","tessellation_deflection":0.1,"override_warnings":false,"accept_stale_geometry":false}}"#,
+        output.to_string_lossy()
+    );
+    for character in request.chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("export request accepts JSON");
+    }
+
+    let rejected = session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("export preview returns a visible gate rejection");
+    assert!(
+        rejected
+            .overlay
+            .contains("export requires visible validation")
+    );
+    assert!(
+        !output.exists(),
+        "export gate does not create a destination"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn successful_validation_is_visible_and_allows_same_revision_export() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "feature-a", "box")
+        .expect("fixture feature persists");
+    let revision = host
+        .identity(&root)
+        .expect("fixture identity reads")
+        .revision_hash;
+    let gateway = LifecycleGateway {
+        revision: revision.clone(),
+    };
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("host-backed session creates");
+
+    session
+        .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
+        .expect("validation palette opens");
+    for character in "validate".chars() {
+        session
+            .process_keyboard_input_with_gateway(&[character as u8], &host, &root, &gateway)
+            .expect("validation command is searchable");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\r", &host, &root, &gateway)
+        .expect("validation draft opens");
+    for character in br#"{"feature_id":"feature-a"}"#.iter().copied() {
+        session
+            .process_keyboard_input_with_gateway(&[character], &host, &root, &gateway)
+            .expect("validation request accepts JSON");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("validation preview succeeds");
+    let validated = session
+        .process_keyboard_input_with_gateway(b"\x1b[13;5u", &host, &root, &gateway)
+        .expect("validation commit succeeds");
+    assert!(
+        validated
+            .overlay
+            .contains("[validation-status] Validation passed")
+    );
+    let validation_frame = validated
+        .submission
+        .and_then(|submission| submission.started)
+        .expect("validation commit presents a frame");
+    session
+        .acknowledge(FrameAcknowledgement::from(&validation_frame))
+        .expect("validation frame acknowledges");
+
+    session
+        .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
+        .expect("export palette opens for the missing feature check");
+    for character in "export".chars() {
+        session
+            .process_keyboard_input_with_gateway(&[character as u8], &host, &root, &gateway)
+            .expect("export command is searchable for the missing feature check");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\r", &host, &root, &gateway)
+        .expect("export draft opens for the missing feature check");
+    for character in br#"{"formats":["stl"],"output_dir":"/tmp/tui-export"}"#
+        .iter()
+        .copied()
+    {
+        session
+            .process_keyboard_input_with_gateway(&[character], &host, &root, &gateway)
+            .expect("missing feature export request accepts JSON");
+    }
+    let missing_feature = session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("missing feature export returns a visible gate rejection");
+    assert!(
+        missing_feature
+            .overlay
+            .contains("export requires a feature_id")
+    );
+    session
+        .process_keyboard_input_with_gateway(b"\x1b", &host, &root, &gateway)
+        .expect("missing feature export draft cancels");
+
+    session
+        .process_keyboard_input_with_gateway(b"\x10", &host, &root, &gateway)
+        .expect("export palette opens");
+    for character in "export".chars() {
+        session
+            .process_keyboard_input_with_gateway(&[character as u8], &host, &root, &gateway)
+            .expect("export command is searchable");
+    }
+    session
+        .process_keyboard_input_with_gateway(b"\r", &host, &root, &gateway)
+        .expect("export draft opens");
+    for character in br#"{"feature_id":"feature-a","formats":["stl"],"output_dir":"/tmp/tui-export","tessellation_deflection":0.1,"override_warnings":false,"accept_stale_geometry":false}"#.iter().copied() {
+        session
+            .process_keyboard_input_with_gateway(&[character], &host, &root, &gateway)
+            .expect("export request accepts JSON");
+    }
+    let preview = session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("validated export preview succeeds");
+    assert!(preview.overlay.contains("[dashed-outline] Preview: export"));
+    let exported = session
+        .process_keyboard_input_with_gateway(b"\x1b[13;5u", &host, &root, &gateway)
+        .expect("validated export commit succeeds");
+    assert!(
+        exported
+            .overlay
+            .contains("[export-status] Export completed")
+    );
 
     let _ = fs::remove_dir_all(root);
 }

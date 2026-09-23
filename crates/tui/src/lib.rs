@@ -18,8 +18,9 @@ use threeterm_host::{
 };
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    CommandId, NEW_PROJECT_COMMAND_ID, REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID,
-    RESTORE_REVISION_COMMAND_ID, SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID,
+    CommandId, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
+    REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SAVE_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID, VALIDATE_COMMAND_ID,
 };
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
@@ -3319,6 +3320,7 @@ pub struct TuiViewportSession<R: Renderer> {
     visible_frame_identity: Option<FrameIdentity>,
     in_flight_presentation: Option<(u64, CameraState, Option<String>)>,
     pending_presentation: Option<(u64, CameraState, Option<String>)>,
+    validated_solid: Option<(String, String)>,
 }
 
 impl<R: Renderer> TuiViewportSession<R> {
@@ -3460,6 +3462,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             visible_frame_identity: None,
             in_flight_presentation: None,
             pending_presentation: None,
+            validated_solid: None,
         })
     }
 
@@ -3992,7 +3995,10 @@ impl<R: Renderer> TuiViewportSession<R> {
                 if !matches!(
                     command,
                     NEW_PROJECT_COMMAND_ID
-                        | threeterm_protocol::schema::SAVE_COMMAND_ID
+                        | SAVE_COMMAND_ID
+                        | LOAD_COMMAND_ID
+                        | VALIDATE_COMMAND_ID
+                        | EXPORT_COMMAND_ID
                         | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
                         | threeterm_protocol::schema::REVOLVE_COMMAND_ID
                         | threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID
@@ -4196,6 +4202,11 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(request) => request,
             Err(detail) => return self.reject_preview(detail),
         };
+        if self.draft.draft().expect("draft remains").command == EXPORT_COMMAND_ID
+            && let Some(detail) = self.export_gate_failure(&request)
+        {
+            return self.reject_preview(detail);
+        }
         match gateway.preview(self.draft.draft().expect("draft remains").command, request) {
             Ok(preview) => {
                 let has_transient_scene = preview.preview_solid.is_some();
@@ -4295,6 +4306,16 @@ impl<R: Renderer> TuiViewportSession<R> {
             Ok(request) => request,
             Err(detail) => return self.reject_commit(host, root, detail),
         };
+        if command == EXPORT_COMMAND_ID
+            && let Some(detail) = self.export_gate_failure(&request)
+        {
+            return self.reject_commit(host, root, detail);
+        }
+        let request_feature_id = request
+            .get("feature_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let active_project_root = if command == NEW_PROJECT_COMMAND_ID {
             match request.get("destination").and_then(Value::as_str) {
                 Some(destination) => Some(PathBuf::from(destination)),
@@ -4333,6 +4354,13 @@ impl<R: Renderer> TuiViewportSession<R> {
                 );
             }
         }
+        if command == VALIDATE_COMMAND_ID && response["valid"] != true {
+            return self.reject_commit(
+                host,
+                root,
+                "validation did not establish a valid current solid".to_string(),
+            );
+        }
         let revision = if let Some(project_root) = active_project_root.as_ref() {
             match host.load_with_geometry_replay(project_root) {
                 Ok(snapshot) => snapshot.revision_hash,
@@ -4345,7 +4373,11 @@ impl<R: Renderer> TuiViewportSession<R> {
                 }
             }
         } else {
-            match response.get("revision_hash").and_then(Value::as_str) {
+            match response
+                .get("revision_hash")
+                .or_else(|| response.get("source_revision_id"))
+                .and_then(Value::as_str)
+            {
                 Some(revision) => revision.to_string(),
                 None => {
                     return self.reject_commit(
@@ -4365,6 +4397,17 @@ impl<R: Renderer> TuiViewportSession<R> {
             .map_err(TuiViewportError::Tui)?;
         self.draft.cancel();
         self.refresh_scene_from_host(host)?;
+        if command == VALIDATE_COMMAND_ID {
+            self.validated_solid = Some((
+                response["feature_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                revision.clone(),
+            ));
+        } else if command != EXPORT_COMMAND_ID {
+            self.validated_solid = None;
+        }
         let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
         let committed_scene = true;
         let overlay = if command == NEW_PROJECT_COMMAND_ID {
@@ -4382,6 +4425,25 @@ impl<R: Renderer> TuiViewportSession<R> {
                 response["manifest"]["transaction_count"]
                     .as_u64()
                     .unwrap_or_default()
+            )
+        } else if command == SAVE_COMMAND_ID {
+            format!(
+                "[selection-glyph] Commit: save\n[selection-glyph] Save completed: feature_id={} revision={revision}",
+                request_feature_id
+            )
+        } else if command == LOAD_COMMAND_ID {
+            format!("[selection-glyph] Load completed: revision={revision}")
+        } else if command == VALIDATE_COMMAND_ID {
+            format!(
+                "[validation-status] Validation passed: feature_id={} revision={revision}",
+                response["feature_id"].as_str().unwrap_or("unknown")
+            )
+        } else if command == EXPORT_COMMAND_ID {
+            format!(
+                "[export-status] Export completed: feature_id={} status={} artifacts={}",
+                response["feature_id"].as_str().unwrap_or("unknown"),
+                response["status"].as_str().unwrap_or("unknown"),
+                response["artifacts"]
             )
         } else {
             let measurements = ["material_volume", "removed_volume"]
@@ -4502,6 +4564,26 @@ impl<R: Renderer> TuiViewportSession<R> {
             }
         }
         Ok(request)
+    }
+
+    fn export_gate_failure(&self, request: &Value) -> Option<String> {
+        let Some(feature_id) = request.get("feature_id").and_then(Value::as_str) else {
+            return Some("export requires a feature_id for visible validation".to_string());
+        };
+        let revision = self.tui.state().canonical_revision.clone();
+        match self.validated_solid.as_ref() {
+            Some((validated_feature, validated_revision))
+                if validated_feature == feature_id && validated_revision == &revision =>
+            {
+                None
+            }
+            Some((validated_feature, validated_revision)) => Some(format!(
+                "export requires validation for feature {feature_id} at revision {revision}; visible validation is for {validated_feature} at revision {validated_revision}"
+            )),
+            None => Some(format!(
+                "export requires visible validation for feature {feature_id} at revision {revision}"
+            )),
+        }
     }
 
     fn refresh_scene_from_host(&mut self, host: &Host) -> Result<(), TuiViewportError> {

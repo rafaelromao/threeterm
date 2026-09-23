@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::Host;
+use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{
     BracketRequest, ExtrudeRequest, OcctWorker, WorkerError, new_request_id,
 };
@@ -937,6 +937,251 @@ fn production_launch_executes_registered_noninteractive_command() {
     assert_eq!(terminal.events_read, 5);
 
     std::fs::remove_dir_all(root).expect("project is removed");
+}
+
+#[test]
+fn production_launch_saves_closes_reopens_and_loads_through_keyboard_controls() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-lifecycle-{suffix}-{}",
+        std::process::id()
+    ));
+    Host::new()
+        .save(&root, "l-bracket", "box")
+        .expect("finished L-bracket project persists");
+
+    let append_text = |events: &mut Vec<Vec<u8>>, text: &[u8]| {
+        events.extend(text.iter().map(|byte| vec![*byte]));
+    };
+    let append_lifecycle_command =
+        |events: &mut Vec<Vec<u8>>, command: &str, request: &str, commit_id: u8| {
+            events.push(b"\x10".to_vec());
+            append_text(events, command.as_bytes());
+            events.push(b"\r".to_vec());
+            append_text(events, request.as_bytes());
+            events.extend([
+                b"\x16".to_vec(),
+                b"\x1b[13;5u".to_vec(),
+                format!("\x1b_Gi={commit_id};OK\x1b\\").into_bytes(),
+            ]);
+        };
+
+    let mut first_events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ];
+    append_lifecycle_command(
+        &mut first_events,
+        "save",
+        r#"{"feature_id":"lifecycle-save-marker","kind":"box"}"#,
+        3,
+    );
+    first_events.push(b"q".to_vec());
+    first_events.reverse();
+    let mut first_terminal = ScriptedTerminal {
+        events: first_events,
+        ..Default::default()
+    };
+    let first_host = Host::new();
+    let first = launch(
+        &first_host,
+        &root,
+        &mut first_terminal,
+        official_environment(),
+    )
+    .expect("keyboard save and clean close succeed");
+    let saved = Bundle::at(&root).open().expect("saved project reopens");
+    assert!(saved.graph.contains_feature("l-bracket"));
+    assert!(saved.graph.contains_feature("lifecycle-save-marker"));
+    assert!(
+        first_terminal
+            .writes
+            .windows(b"Save completed".len())
+            .any(|window| window == b"Save completed")
+    );
+    assert!(
+        first_terminal
+            .writes
+            .windows(b"?1049l".len())
+            .any(|window| window == b"?1049l")
+    );
+    assert!(first.event_loop_entered);
+
+    let mut second_events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ];
+    append_lifecycle_command(&mut second_events, "load", r#"{}"#, 3);
+    second_events.push(b"q".to_vec());
+    second_events.reverse();
+    let mut second_terminal = ScriptedTerminal {
+        events: second_events,
+        ..Default::default()
+    };
+    let second_host = Host::new();
+    let second = launch(
+        &second_host,
+        &root,
+        &mut second_terminal,
+        official_environment(),
+    )
+    .expect("fresh host relaunch and keyboard load succeed");
+    let loaded = second_host
+        .identity(&root)
+        .expect("reopened project identity reads");
+    assert_eq!(loaded.feature_graph_hash, saved.feature_graph_hash_hex());
+    assert_eq!(loaded.revision_hash, saved.revision_hash_hex());
+    assert!(
+        second_terminal
+            .writes
+            .windows(b"Load completed".len())
+            .any(|window| window == b"Load completed")
+    );
+    assert!(second.event_loop_entered);
+
+    fs::remove_dir_all(root).expect("lifecycle project removes");
+}
+
+#[test]
+#[ignore = "requires the native OCCT worker"]
+fn production_launch_saves_reopens_loads_validates_and_exports_through_keyboard_controls() {
+    let worker = OcctWorker::locate().expect("keyboard lifecycle requires the OCCT worker");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-export-lifecycle-{suffix}-{}",
+        std::process::id()
+    ));
+    let output = root.join("export");
+    Host::new()
+        .create_bracket(
+            &root,
+            BracketRequest::new("keyboard-lifecycle-bracket", 60.0, 30.0, 40.0, 3.0)
+                .with_feature_id("l-bracket"),
+            &worker,
+        )
+        .expect("finished L-bracket project persists");
+    let l_bracket_brep = root.join("brep/l-bracket.brep");
+    let initial_l_bracket_brep = fs::read(&l_bracket_brep).expect("initial L-bracket BREP reads");
+
+    let append_text = |events: &mut Vec<Vec<u8>>, text: &[u8]| {
+        events.extend(text.iter().map(|byte| vec![*byte]));
+    };
+    let append_lifecycle_command =
+        |events: &mut Vec<Vec<u8>>, command: &str, request: &str, commit_id: u8| {
+            events.push(b"\x10".to_vec());
+            append_text(events, command.as_bytes());
+            events.push(b"\r".to_vec());
+            append_text(events, request.as_bytes());
+            events.extend([
+                b"\x16".to_vec(),
+                b"\x1b[13;5u".to_vec(),
+                format!("\x1b_Gi={commit_id};OK\x1b\\").into_bytes(),
+            ]);
+        };
+
+    let mut first_events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ];
+    append_lifecycle_command(
+        &mut first_events,
+        "save",
+        &format!(
+            r#"{{"feature_id":"lifecycle-save-marker","kind":"box","bundle_path":"{}"}}"#,
+            root.to_string_lossy()
+        ),
+        3,
+    );
+    first_events.push(b"q".to_vec());
+    first_events.reverse();
+    let mut first_terminal = ScriptedTerminal {
+        events: first_events,
+        ..Default::default()
+    };
+    launch(
+        &Host::new(),
+        &root,
+        &mut first_terminal,
+        official_environment(),
+    )
+    .expect("keyboard save and clean close succeed");
+
+    let saved = Bundle::at(&root).open().expect("saved project reopens");
+    assert!(saved.graph.contains_feature("l-bracket"));
+    assert!(saved.graph.contains_feature("lifecycle-save-marker"));
+    assert_eq!(
+        fs::read(&l_bracket_brep).expect("saved L-bracket BREP reads"),
+        initial_l_bracket_brep,
+        "keyboard save preserves the finished L-bracket BREP"
+    );
+    assert!(String::from_utf8_lossy(&first_terminal.writes).contains("Save completed"));
+
+    let mut second_events = vec![
+        b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+    ];
+    append_lifecycle_command(&mut second_events, "load", r#"{}"#, 3);
+    append_lifecycle_command(
+        &mut second_events,
+        "validate",
+        r#"{"feature_id":"l-bracket"}"#,
+        4,
+    );
+    append_lifecycle_command(
+        &mut second_events,
+        "export",
+        &format!(
+            r#"{{"feature_id":"l-bracket","formats":["stl"],"output_dir":"{}","tessellation_deflection":0.1,"override_warnings":false,"accept_stale_geometry":false}}"#,
+            output.to_string_lossy()
+        ),
+        5,
+    );
+    second_events.push(b"q".to_vec());
+    second_events.reverse();
+    let mut second_terminal = ScriptedTerminal {
+        events: second_events,
+        ..Default::default()
+    };
+    let second_host = Host::new();
+    let second = launch(
+        &second_host,
+        &root,
+        &mut second_terminal,
+        official_environment(),
+    )
+    .expect("fresh host relaunch and keyboard lifecycle succeed");
+
+    let loaded = second_host
+        .identity(&root)
+        .expect("reopened identity reads");
+    assert_eq!(loaded.feature_graph_hash, saved.feature_graph_hash_hex());
+    assert_eq!(loaded.revision_hash, saved.revision_hash_hex());
+    assert_eq!(
+        fs::read(&l_bracket_brep).expect("reloaded L-bracket BREP reads"),
+        initial_l_bracket_brep,
+        "keyboard relaunch and load preserve the finished L-bracket BREP"
+    );
+    let output_text = String::from_utf8_lossy(&second_terminal.writes);
+    assert!(output_text.contains("Load completed"));
+    assert!(output_text.contains("[validation-status] Validation passed"));
+    assert!(output_text.contains("[export-status] Export completed"));
+    assert_eq!(second.last_response.as_ref().unwrap()["status"], "ok");
+
+    let stl_path = output.join("l-bracket.stl");
+    assert!(stl_path.is_file(), "TUI export creates the requested STL");
+    let report = stl_integrity::verify_path(&stl_path).expect("TUI STL passes independent check");
+    assert_eq!(report.format, stl_integrity::StlFormat::Ascii);
+    assert!(report.triangle_count > 0);
+    assert_eq!(report.shell_count, 1);
+    assert!(report.material_volume > 0.0);
+
+    fs::remove_dir_all(root).expect("export lifecycle project removes");
 }
 
 #[test]

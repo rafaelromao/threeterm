@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
-use threeterm_occt_worker::{ExtrudeRequest, OcctWorker, WorkerError};
+use threeterm_occt_worker::{
+    BracketRequest, ExtrudeRequest, OcctWorker, WorkerError, new_request_id,
+};
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
@@ -176,6 +178,68 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
     visit(root, root, &mut snapshot);
     snapshot
+}
+
+fn solid_bounds(scene: &ViewportScene, feature_id: &str) -> ([f64; 3], [f64; 3]) {
+    let solid = scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("viewport scene has no solid {feature_id}"));
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    for triangle in &solid.triangles {
+        for vertex in triangle.vertices {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+    }
+    (minimum, maximum)
+}
+
+fn solid_has_triangle_centroid_in_xy_window(
+    scene: &ViewportScene,
+    feature_id: &str,
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+) -> bool {
+    let solid = scene
+        .solids
+        .iter()
+        .find(|solid| solid.feature_id == feature_id)
+        .unwrap_or_else(|| panic!("viewport scene has no solid {feature_id}"));
+    solid.triangles.iter().any(|triangle| {
+        let centroid = [
+            triangle
+                .vertices
+                .iter()
+                .map(|vertex| vertex[0])
+                .sum::<f64>()
+                / 3.0,
+            triangle
+                .vertices
+                .iter()
+                .map(|vertex| vertex[1])
+                .sum::<f64>()
+                / 3.0,
+        ];
+        centroid[0] > x_range.0
+            && centroid[0] < x_range.1
+            && centroid[1] > y_range.0
+            && centroid[1] < y_range.1
+    })
+}
+
+fn committed_revision(output: &str, command: &str) -> String {
+    let marker = format!("[selection-glyph] Commit: {command} revision=");
+    output
+        .split(&marker)
+        .last()
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .unwrap_or_else(|| panic!("terminal output has no committed revision for {command}"))
+        .to_string()
 }
 
 impl Write for ScriptedTerminal {
@@ -1607,6 +1671,484 @@ fn production_launch_drives_one_hole_draft_through_preview_and_commit() {
     assert!(output.contains("[selection-glyph]"));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn production_launch_drives_mirror_through_keyboard_and_retains_both_pad_placements() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive mirror command requires OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive mirror command: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-mirror-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.create_bracket(
+        &root,
+        BracketRequest::new("keyboard-mirror-bracket", 60.0, 30.0, 40.0, 3.0)
+            .with_feature_id("l-bracket"),
+        &worker,
+    )
+    .expect("mirror bracket fixture persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(27.0, 12.0), (30.0, 12.0), (30.0, 15.0), (27.0, 15.0)],
+            5.0,
+        )
+        .with_output_path(root.join("stage"), "reinforce-pad.brep")
+        .with_feature_id("reinforce-pad"),
+        &worker,
+    )
+    .expect("reinforcing pad fixture persists");
+    let before_cancel = snapshot_tree(&root);
+    let request = br#"{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}"#;
+
+    let mut cancel_events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    cancel_events.extend(b"mirror".iter().map(|byte| vec![*byte]));
+    cancel_events.push(b"\r".to_vec());
+    cancel_events.extend(request.iter().map(|byte| vec![*byte]));
+    cancel_events.extend([b"\x16".to_vec(), b"\x1b".to_vec(), b"q".to_vec()]);
+    cancel_events.reverse();
+    let mut cancel_terminal = ScriptedTerminal {
+        events: cancel_events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut cancel_terminal, official_environment())
+        .expect("mirror cancellation workflow succeeds");
+    assert_eq!(snapshot_tree(&root), before_cancel);
+    assert_eq!(
+        host.identity(&root)
+            .expect("cancel identity reads")
+            .transaction_count,
+        2
+    );
+    assert!(
+        String::from_utf8_lossy(&cancel_terminal.writes)
+            .contains("[cancellation-glyph] Cancellation: command draft discarded")
+    );
+
+    let mut commit_events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    commit_events.extend(b"mirror".iter().map(|byte| vec![*byte]));
+    commit_events.push(b"\r".to_vec());
+    commit_events.extend(request.iter().map(|byte| vec![*byte]));
+    commit_events.extend([
+        b"\x16".to_vec(),
+        b"\x1b[13;5u".to_vec(),
+        b"\x1b_Gi=2;OK\x1b\\".to_vec(),
+        b"q".to_vec(),
+    ]);
+    commit_events.reverse();
+    let mut commit_terminal = ScriptedTerminal {
+        events: commit_events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut commit_terminal, official_environment())
+        .expect("mirror commit workflow succeeds");
+
+    let identity = host.identity(&root).expect("mirror identity reads");
+    assert_eq!(identity.transaction_count, 3);
+    for feature_id in ["reinforce-pad", "tui-mirror-pad"] {
+        assert!(
+            root.join("brep")
+                .join(format!("{feature_id}.brep"))
+                .is_file(),
+            "retained BREP missing for {feature_id}"
+        );
+    }
+    let bundle = Bundle::at(&root).open().expect("mirror bundle reopens");
+    let intent = bundle
+        .log
+        .entries()
+        .last()
+        .and_then(|entry| entry.intent.as_ref())
+        .expect("mirror intent retained");
+    let CanonicalIntent::Mirror(intent) = intent else {
+        panic!("last intent is not mirror");
+    };
+    assert_eq!(intent.deterministic_inputs.base_feature_id, "reinforce-pad");
+    assert_eq!(intent.deterministic_inputs.plane_point, [0.0, 0.0, 0.0]);
+    assert_eq!(intent.deterministic_inputs.plane_normal, [1.0, -1.0, 0.0]);
+
+    let scene = host
+        .read_only_viewport_scene(&root)
+        .expect("mirror viewport scene reads");
+    let (minimum, maximum) = solid_bounds(&scene, "tui-mirror-pad");
+    for (axis, expected) in [(0, (12.0, 15.0)), (1, (27.0, 30.0)), (2, (0.0, 5.0))] {
+        assert!((minimum[axis] - expected.0).abs() < 0.1);
+        assert!((maximum[axis] - expected.1).abs() < 0.1);
+    }
+    assert!(
+        scene
+            .solids
+            .iter()
+            .any(|solid| solid.feature_id == "reinforce-pad")
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cancel_terminal.writes),
+        String::from_utf8_lossy(&commit_terminal.writes)
+    );
+    for marker in [
+        "[dashed-outline] Preview: mirror",
+        "[cancellation-glyph] Cancellation: command draft discarded",
+        "[selection-glyph] Commit: mirror",
+        "tui-mirror-pad",
+        "reinforce-pad",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(marker),
+            "missing mirror evidence marker: {marker}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("mirror fixture removes");
+}
+
+#[test]
+fn production_launch_drives_linear_and_circular_patterns_through_keyboard() {
+    let worker = match OcctWorker::locate() {
+        Ok(worker) => worker,
+        Err(error)
+            if std::env::var_os("THREETERM_REQUIRE_REAL_WORKER").is_some()
+                || std::env::var_os("THREETERM_REQUIRE_OCCT").is_some() =>
+        {
+            panic!("interactive pattern commands require OCCT worker: {error}");
+        }
+        Err(error) => {
+            eprintln!("interactive pattern commands: OCCT worker unavailable: {error}");
+            return;
+        }
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-patterns-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.create_bracket(
+        &root,
+        BracketRequest::new("keyboard-pattern-bracket", 60.0, 30.0, 40.0, 3.0)
+            .with_feature_id("l-bracket"),
+        &worker,
+    )
+    .expect("pattern bracket fixture persists");
+    host.extrude(
+        &root,
+        ExtrudeRequest::new(
+            new_request_id(),
+            vec![(27.0, 12.0), (30.0, 12.0), (30.0, 15.0), (27.0, 15.0)],
+            5.0,
+        )
+        .with_output_path(root.join("stage"), "reinforce-pad.brep")
+        .with_feature_id("reinforce-pad"),
+        &worker,
+    )
+    .expect("pattern reinforcing pad fixture persists");
+    let initial_revision = host
+        .identity(&root)
+        .expect("initial pattern identity reads")
+        .revision_hash;
+
+    let mirror_request = br#"{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}"#;
+    let linear_request = br#"{"feature_id":"tui-linear-pads","base_feature_id":"reinforce-pad","direction":[1,0,0],"count":3,"spacing":12}"#;
+    let circular_request = br#"{"feature_id":"tui-circular-lugs","base_feature_id":"reinforce-pad","axis_point":[30,15,0],"axis_normal":[0,0,1],"angle_step":1.5707963267948966,"count":4}"#;
+    let mut events = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
+    let append_command =
+        |events: &mut Vec<Vec<u8>>, command: &[u8], request: &[u8], image_id: u8| {
+            events.push(b"\x10".to_vec());
+            events.extend(command.iter().map(|byte| vec![*byte]));
+            events.push(b"\r".to_vec());
+            events.extend(request.iter().map(|byte| vec![*byte]));
+            events.extend([
+                b"\x16".to_vec(),
+                b"\x1b[13;5u".to_vec(),
+                format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes(),
+            ]);
+        };
+    append_command(&mut events, b"mirror", mirror_request, 2);
+    append_command(&mut events, b"linear-pattern", linear_request, 3);
+    append_command(&mut events, b"circular-pattern", circular_request, 4);
+    events.push(b"q".to_vec());
+    events.reverse();
+    let mut terminal = ScriptedTerminal {
+        events,
+        ..Default::default()
+    };
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("linear and circular pattern workflow succeeds");
+
+    let identity = host.identity(&root).expect("pattern identity reads");
+    assert_eq!(identity.transaction_count, 5);
+    let bundle = Bundle::at(&root).open().expect("pattern bundle reopens");
+    let intents = bundle
+        .log
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.intent.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        intents
+            .iter()
+            .any(|intent| matches!(intent, CanonicalIntent::Mirror(_)))
+    );
+    let linear = intents
+        .iter()
+        .find_map(|intent| match intent {
+            CanonicalIntent::LinearPattern(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("linear pattern intent retained");
+    assert_eq!(linear.deterministic_inputs.base_feature_id, "reinforce-pad");
+    assert_eq!(linear.deterministic_inputs.direction, [1.0, 0.0, 0.0]);
+    assert_eq!(linear.deterministic_inputs.count, 3);
+    assert_eq!(linear.deterministic_inputs.spacing, 12.0);
+    let circular = intents
+        .iter()
+        .find_map(|intent| match intent {
+            CanonicalIntent::CircularPattern(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("circular pattern intent retained");
+    assert_eq!(
+        circular.deterministic_inputs.base_feature_id,
+        "reinforce-pad"
+    );
+    assert_eq!(circular.deterministic_inputs.axis_point, [30.0, 15.0, 0.0]);
+    assert_eq!(circular.deterministic_inputs.axis_normal, [0.0, 0.0, 1.0]);
+    assert_eq!(circular.deterministic_inputs.count, 4);
+    assert!((circular.deterministic_inputs.angle_step - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+
+    let scene = host
+        .read_only_viewport_scene(&root)
+        .expect("pattern viewport scene reads");
+    for (feature_id, expected) in [
+        ("tui-mirror-pad", [(12.0, 15.0), (27.0, 30.0), (0.0, 5.0)]),
+        ("tui-linear-pads", [(27.0, 54.0), (12.0, 15.0), (0.0, 5.0)]),
+        (
+            "tui-circular-lugs",
+            [(27.0, 33.0), (12.0, 18.0), (0.0, 5.0)],
+        ),
+    ] {
+        let (minimum, maximum) = solid_bounds(&scene, feature_id);
+        for (axis, (lower, upper)) in expected.into_iter().enumerate() {
+            assert!(
+                (minimum[axis] - lower).abs() < 0.1,
+                "{feature_id} minimum axis {axis}"
+            );
+            assert!(
+                (maximum[axis] - upper).abs() < 0.1,
+                "{feature_id} maximum axis {axis}"
+            );
+        }
+    }
+    for (lower, upper) in [(27.0, 30.0), (39.0, 42.0), (51.0, 54.0)] {
+        assert!(
+            solid_has_triangle_centroid_in_xy_window(
+                &scene,
+                "tui-linear-pads",
+                (lower, upper),
+                (12.0, 15.0)
+            ),
+            "linear pattern has no occupied band x=[{lower},{upper}]"
+        );
+    }
+    for (x_range, y_range) in [
+        ((27.0, 30.0), (12.0, 15.0)),
+        ((30.0, 33.0), (12.0, 15.0)),
+        ((30.0, 33.0), (15.0, 18.0)),
+        ((27.0, 30.0), (15.0, 18.0)),
+    ] {
+        assert!(
+            solid_has_triangle_centroid_in_xy_window(&scene, "tui-circular-lugs", x_range, y_range),
+            "circular pattern has no occupied sector x={x_range:?} y={y_range:?}"
+        );
+    }
+    for feature_id in [
+        "reinforce-pad",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+    ] {
+        assert!(
+            root.join("brep")
+                .join(format!("{feature_id}.brep"))
+                .is_file(),
+            "retained BREP missing for {feature_id}"
+        );
+    }
+    let output = String::from_utf8_lossy(&terminal.writes);
+    for marker in [
+        "[dashed-outline] Preview: mirror",
+        "[dashed-outline] Preview: linear-pattern",
+        "[dashed-outline] Preview: circular-pattern",
+        "[selection-glyph] Commit: mirror",
+        "[selection-glyph] Commit: linear-pattern",
+        "[selection-glyph] Commit: circular-pattern",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+        "[viewport-status] Viewport presented",
+    ] {
+        assert!(
+            output.contains(marker),
+            "missing pattern evidence marker: {marker}"
+        );
+    }
+    let mirror_revision = committed_revision(&output, "mirror");
+    let linear_revision = committed_revision(&output, "linear-pattern");
+    let circular_revision = committed_revision(&output, "circular-pattern");
+    assert_ne!(mirror_revision, initial_revision);
+    assert_ne!(linear_revision, mirror_revision);
+    assert_ne!(circular_revision, linear_revision);
+    assert_eq!(circular_revision, identity.revision_hash);
+
+    let viewport_evidence = json!({
+        "acknowledgement": "viewport-presented",
+        "revision": scene.revision.clone(),
+        "scene": {
+            "solids": scene
+                .solids
+                .iter()
+                .map(|solid| json!({
+                    "feature_id": &solid.feature_id,
+                    "triangle_count": solid.triangles.len(),
+                }))
+                .collect::<Vec<_>>(),
+        },
+    });
+    let transcript = root.join("reinforcing-transcript.jsonl");
+    let transcript_entries = [
+        json!({
+            "command": "mirror",
+            "request": serde_json::from_slice::<Value>(mirror_request).expect("mirror request JSON"),
+            "preview_marker": "[dashed-outline] Preview: mirror",
+            "commit_marker": "[selection-glyph] Commit: mirror",
+            "response": {
+                "feature_id": "tui-mirror-pad",
+                "revision": mirror_revision.clone(),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "linear-pattern",
+            "request": serde_json::from_slice::<Value>(linear_request).expect("linear request JSON"),
+            "preview_marker": "[dashed-outline] Preview: linear-pattern",
+            "commit_marker": "[selection-glyph] Commit: linear-pattern",
+            "response": {
+                "feature_id": "tui-linear-pads",
+                "revision": linear_revision.clone(),
+            },
+            "viewport_evidence": viewport_evidence.clone(),
+        }),
+        json!({
+            "command": "circular-pattern",
+            "request": serde_json::from_slice::<Value>(circular_request).expect("circular request JSON"),
+            "preview_marker": "[dashed-outline] Preview: circular-pattern",
+            "commit_marker": "[selection-glyph] Commit: circular-pattern",
+            "response": {
+                "feature_id": "tui-circular-lugs",
+                "revision": circular_revision,
+            },
+            "viewport_evidence": viewport_evidence,
+        }),
+    ];
+    fs::write(
+        &transcript,
+        transcript_entries
+            .into_iter()
+            .map(|entry| serde_json::to_string(&entry).expect("transcript entry serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .expect("reinforcing transcript writes");
+    let transcript_text = fs::read_to_string(&transcript).expect("reinforcing transcript reads");
+    for feature_id in ["tui-mirror-pad", "tui-linear-pads", "tui-circular-lugs"] {
+        assert!(transcript_text.contains(feature_id));
+    }
+    for line in transcript_text.lines() {
+        let entry: Value = serde_json::from_str(line).expect("production transcript line is JSON");
+        assert!(entry["request"].is_object());
+        assert!(entry["preview_marker"].as_str().is_some());
+        assert!(entry["commit_marker"].as_str().is_some());
+        assert!(entry["response"]["revision"].as_str().is_some());
+        assert_eq!(
+            entry["viewport_evidence"]["acknowledgement"],
+            "viewport-presented"
+        );
+        assert!(
+            entry["viewport_evidence"]["scene"]["solids"]
+                .as_array()
+                .is_some_and(|solids| solids
+                    .iter()
+                    .all(|solid| { solid["triangle_count"].as_u64().unwrap_or(0) > 0 }))
+        );
+    }
+
+    let identity_before_replay = host.identity(&root).expect("pre-replay identity reads");
+    let manifest_before_replay = fs::read(root.join("manifest.json")).expect("manifest reads");
+    let log_before_replay = fs::read(root.join("transactions.log")).expect("log reads");
+    fs::remove_dir_all(root.join("brep")).expect("derived BREP directory removes");
+    let replayed_host = Host::new();
+    replayed_host
+        .load_with_geometry_replay(&root)
+        .expect("fresh host replays all reinforcing geometry");
+    assert_eq!(
+        replayed_host
+            .identity(&root)
+            .expect("replay identity reads"),
+        identity_before_replay
+    );
+    assert_eq!(
+        fs::read(root.join("manifest.json")).expect("replayed manifest reads"),
+        manifest_before_replay
+    );
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("replayed log reads"),
+        log_before_replay
+    );
+    let replayed_scene = replayed_host
+        .presentation_viewport_scene()
+        .expect("replayed viewport scene reads");
+    for feature_id in [
+        "l-bracket",
+        "reinforce-pad",
+        "tui-mirror-pad",
+        "tui-linear-pads",
+        "tui-circular-lugs",
+    ] {
+        let solid = replayed_scene
+            .solids
+            .iter()
+            .find(|solid| solid.feature_id == feature_id)
+            .unwrap_or_else(|| panic!("replayed viewport scene has no solid {feature_id}"));
+        assert!(
+            !solid.triangles.is_empty(),
+            "replayed solid is empty: {feature_id}"
+        );
+    }
+
+    fs::remove_dir_all(root).expect("pattern fixture removes");
 }
 
 #[test]

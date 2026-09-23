@@ -4000,6 +4000,7 @@ impl<R: Renderer> TuiViewportSession<R> {
                         | VALIDATE_COMMAND_ID
                         | EXPORT_COMMAND_ID
                         | threeterm_protocol::schema::EXTRUDE_COMMAND_ID
+                        | threeterm_protocol::schema::REVOLVE_COMMAND_ID
                         | threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID
                         | threeterm_protocol::schema::BRACKET_COMMAND_ID
                         | threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID
@@ -4427,7 +4428,7 @@ impl<R: Renderer> TuiViewportSession<R> {
             )
         } else if command == SAVE_COMMAND_ID {
             format!(
-                "[selection-glyph] Save completed: feature_id={} revision={revision}",
+                "[selection-glyph] Commit: save\n[selection-glyph] Save completed: feature_id={} revision={revision}",
                 request_feature_id
             )
         } else if command == LOAD_COMMAND_ID {
@@ -4445,9 +4446,18 @@ impl<R: Renderer> TuiViewportSession<R> {
                 response["artifacts"]
             )
         } else {
+            let measurements = ["material_volume", "removed_volume"]
+                .into_iter()
+                .filter_map(|field| {
+                    response
+                        .get(field)
+                        .and_then(Value::as_f64)
+                        .map(|value| format!(" {field}={value}"))
+                })
+                .collect::<String>();
             format!(
-                "[selection-glyph] Commit: {} revision={revision}",
-                command.0
+                "[selection-glyph] Commit: {} revision={revision}{measurements}",
+                command.0,
             )
         };
         self.record_action(

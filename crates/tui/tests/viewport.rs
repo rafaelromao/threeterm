@@ -335,6 +335,272 @@ fn empty_host_session_can_create_a_project_from_the_command_palette() {
 }
 
 #[test]
+fn command_palette_opens_a_revolve_draft() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "revolve".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the revolve query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("revolve draft opens");
+
+    assert_eq!(
+        session.draft().map(|draft| draft.command),
+        Some(threeterm_protocol::schema::REVOLVE_COMMAND_ID)
+    );
+}
+
+#[test]
+fn command_palette_opens_a_hole_draft() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "hole".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the hole query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("hole draft opens");
+
+    assert_eq!(
+        session.draft().map(|draft| draft.command),
+        Some(threeterm_protocol::schema::HOLE_COMMAND_ID)
+    );
+}
+
+#[test]
+fn command_palette_opens_a_boolean_fuse_draft() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "boolean-fuse".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the boolean-fuse query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("boolean-fuse draft opens");
+
+    assert_eq!(
+        session.draft().map(|draft| draft.command),
+        Some(threeterm_protocol::schema::BOOLEAN_FUSE_COMMAND_ID)
+    );
+}
+
+#[test]
+fn command_palette_opens_a_shell_draft() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "shell".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the shell query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("shell draft opens");
+
+    assert_eq!(
+        session.draft().map(|draft| draft.command),
+        Some(threeterm_protocol::schema::SHELL_COMMAND_ID)
+    );
+}
+
+#[test]
+fn command_palette_opens_a_save_draft() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "save".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the save query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("save draft opens");
+
+    assert_eq!(
+        session.draft().map(|draft| draft.command),
+        Some(threeterm_protocol::schema::SAVE_COMMAND_ID)
+    );
+}
+
+struct RecordingCommandGateway {
+    revision: String,
+}
+
+impl CommandGateway for RecordingCommandGateway {
+    fn current_revision(&self, _root: &Path) -> Result<String, String> {
+        Ok(self.revision.clone())
+    }
+
+    fn preview(
+        &self,
+        command: threeterm_protocol::schema::CommandId,
+        request: serde_json::Value,
+    ) -> Result<DomainCommandPreview, String> {
+        Ok(DomainCommandPreview {
+            command,
+            source_revision: self.revision.clone(),
+            preview_revision: self.revision.clone(),
+            input_fingerprint: request.to_string(),
+            geometry_fingerprint: "geometry-fingerprint".to_string(),
+            preview_solid: None,
+        })
+    }
+
+    fn commit(
+        &self,
+        _command: threeterm_protocol::schema::CommandId,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"revision_hash": "committed-revision"}))
+    }
+}
+
+#[test]
+fn revolve_draft_accepts_json_preview_and_commit() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    let gateway = RecordingCommandGateway {
+        revision: host
+            .identity(&root)
+            .expect("seed identity reads")
+            .revision_hash,
+    };
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("an empty host creates an empty viewport session");
+
+    for input in [
+        b"\x10".as_slice(),
+        b"r",
+        b"e",
+        b"v",
+        b"o",
+        b"l",
+        b"v",
+        b"e",
+        b"\r",
+    ] {
+        session
+            .process_keyboard_input_with_gateway(input, &host, &root, &gateway)
+            .expect("revolve draft input succeeds");
+    }
+    let request = r#"{"feature_id":"revolved-collar","profile":[[20,28],[22,28],[22,32],[20,32]],"axis_point":[10,0,0],"axis_direction":[0,-1,0],"angle":1.5707963267948966}"#;
+    for byte in request.bytes() {
+        session
+            .process_keyboard_input_with_gateway(&[byte], &host, &root, &gateway)
+            .expect("revolve draft accepts JSON");
+    }
+
+    let preview = session
+        .process_keyboard_input_with_gateway(b"\x16", &host, &root, &gateway)
+        .expect("revolve preview succeeds");
+    assert!(
+        preview
+            .overlay
+            .contains("[dashed-outline] Preview: revolve")
+    );
+    let committed = session
+        .process_keyboard_input_with_gateway(b"\x1b[13;5u", &host, &root, &gateway)
+        .expect("revolve commit succeeds");
+    assert!(
+        committed
+            .overlay
+            .contains("[selection-glyph] Commit: revolve")
+    );
+    assert!(session.draft().is_none());
+    fs::remove_dir_all(root).expect("revolve fixture removes");
+}
+
+#[test]
+fn save_draft_previews_and_commits_through_the_host_gateway() {
+    let root = temporary_bundle_root();
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    let mut session =
+        TuiViewportSession::from_host(&host, 64, 48, admitted_renderer(RecordingWriter::default()))
+            .expect("seed host creates a viewport session");
+
+    session
+        .process_keyboard_input(b"\x10", &host, &root)
+        .expect("palette opens");
+    for character in "save".chars() {
+        session
+            .process_keyboard_input(&[character as u8], &host, &root)
+            .expect("palette accepts the save query");
+    }
+    session
+        .process_keyboard_input(b"\r", &host, &root)
+        .expect("save draft opens");
+    let request = r#"{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}"#;
+    for byte in request.bytes() {
+        session
+            .process_keyboard_input(&[byte], &host, &root)
+            .expect("save draft accepts JSON");
+    }
+
+    let preview = session
+        .process_keyboard_input(b"\x16", &host, &root)
+        .expect("save preview succeeds");
+    assert!(preview.overlay.contains("[dashed-outline] Preview: save"));
+    let committed = session
+        .process_keyboard_input(b"\x1b[13;5u", &host, &root)
+        .expect("save commit succeeds");
+    assert!(committed.overlay.contains("[selection-glyph] Commit: save"));
+    assert_eq!(
+        host.identity(&root)
+            .expect("saved identity reads")
+            .transaction_count,
+        2
+    );
+    fs::remove_dir_all(root).expect("save fixture removes");
+}
+
+#[test]
 fn preview_geometry_is_transient_and_cancellation_is_retained_in_the_transcript() {
     let root = temporary_bundle_root();
     let host = Host::new();

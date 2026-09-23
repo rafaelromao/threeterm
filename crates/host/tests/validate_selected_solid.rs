@@ -291,6 +291,7 @@ fn validate_known_good_solid_reports_bound_success_after_reopen() {
             "bundle_path": bundle.to_string_lossy(),
             "feature_id": "validate-snapshot",
             "kind": "checkpoint",
+            "expected_revision": extruded["revision_hash"],
         }),
     );
 
@@ -520,10 +521,8 @@ fn validate_selected_current_solid_end_to_end() {
         "mode": "additive",
     });
     extrude["bundle_path"] = bundle.to_string_lossy().into_owned().into();
-    assert_eq!(
-        command_response(&host, EXTRUDE_COMMAND_ID, extrude)["status"],
-        "ok"
-    );
+    let extruded = command_response(&host, EXTRUDE_COMMAND_ID, extrude);
+    assert_eq!(extruded["status"], "ok");
     command_response(
         &host,
         SAVE_COMMAND_ID,
@@ -531,6 +530,7 @@ fn validate_selected_current_solid_end_to_end() {
             "bundle_path": bundle.to_string_lossy(),
             "feature_id": "validate-snapshot",
             "kind": "checkpoint",
+            "expected_revision": extruded["revision_hash"],
         }),
     );
     let reopened = Host::new();

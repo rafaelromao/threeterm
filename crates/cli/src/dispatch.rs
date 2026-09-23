@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 use threeterm_host::{Host, HostError};
 use threeterm_lua_bridge::{LuaBridge, LuaConfigWatcher, LuaReloadStatus};
+use threeterm_persistence::Bundle;
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::Diagnostic;
 pub use threeterm_protocol::schema::{
@@ -3815,7 +3816,23 @@ fn request_for(plan: &DispatchPlan) -> Result<Value, String> {
             bundle,
             feature_id,
             kind,
-        } => json!({ "bundle_path": bundle, "feature_id": feature_id, "kind": kind }),
+        } => {
+            let expected_revision = if std::path::Path::new(bundle).exists() {
+                Bundle::at(bundle)
+                    .open()
+                    .map_err(|error| format!("save bundle cannot be opened: {error}"))?
+                    .revision_hash_hex()
+                    .to_string()
+            } else {
+                "empty-project".to_string()
+            };
+            json!({
+                "bundle_path": bundle,
+                "feature_id": feature_id,
+                "kind": kind,
+                "expected_revision": expected_revision,
+            })
+        }
         DispatchPlan::Load { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Identity { bundle } => json!({ "bundle_path": bundle }),
         DispatchPlan::Apply {

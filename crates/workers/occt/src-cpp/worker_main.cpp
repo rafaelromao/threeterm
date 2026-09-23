@@ -3337,6 +3337,11 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
             error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
             return false;
         }
+        if (shelled.ShapeType() == TopAbs_SOLID) {
+            TopoDS_Solid oriented_shelled = TopoDS::Solid(shelled);
+            BRepLib::OrientClosedSolid(oriented_shelled);
+            shelled = oriented_shelled;
+        }
         GProp_GProps material_properties;
         BRepGProp::VolumeProperties(shelled, material_properties);
         const double material_volume = material_properties.Mass();

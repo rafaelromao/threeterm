@@ -551,7 +551,25 @@ fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 }
 
 fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
-    let direction = [0.0, 0.0, 1.0];
+    if mesh
+        .facets
+        .iter()
+        .any(|facet| point_on_triangle(point, facet.vertices))
+    {
+        return false;
+    }
+    let directions = [
+        [1.0, 0.371_390_676_354_103_7, 0.173_205_080_756_887_7],
+        [0.219_871, 1.0, 0.414_213],
+        [0.137_503, 0.281_731, 1.0],
+    ];
+    directions
+        .into_iter()
+        .find_map(|direction| ray_parity(point, direction, mesh))
+        .unwrap_or(false)
+}
+
+fn ray_parity(point: [f64; 3], direction: [f64; 3], mesh: &StlMeshObservation) -> Option<bool> {
     let mut crossings = 0;
     for facet in &mesh.facets {
         let [a, b, c] = facet.vertices;
@@ -568,11 +586,46 @@ fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
         let qvec = cross(tvec, edge1);
         let v = dot(direction, qvec) * inverse;
         let t = dot(edge2, qvec) * inverse;
-        if t > 1e-8 && u > 1e-9 && v > 1e-9 && u + v < 1.0 - 1e-9 {
-            crossings += 1;
+        if t <= 1e-9 {
+            continue;
         }
+        if u < -1e-9 || v < -1e-9 || u + v > 1.0 + 1e-9 {
+            continue;
+        }
+        if u <= 1e-9 || v <= 1e-9 || (1.0 - u - v) <= 1e-9 {
+            return None;
+        }
+        crossings += 1;
     }
-    crossings % 2 == 1
+    Some(crossings % 2 == 1)
+}
+
+fn point_on_triangle(point: [f64; 3], vertices: [[f64; 3]; 3]) -> bool {
+    let [a, b, c] = vertices;
+    let normal = cross(subtract(b, a), subtract(c, a));
+    let normal_length = dot(normal, normal).sqrt();
+    if normal_length == 0.0 {
+        return false;
+    }
+    if dot(subtract(point, a), normal).abs() > 1e-9 * normal_length {
+        return false;
+    }
+    let v0 = subtract(b, a);
+    let v1 = subtract(c, a);
+    let v2 = subtract(point, a);
+    let dot00 = dot(v0, v0);
+    let dot01 = dot(v0, v1);
+    let dot02 = dot(v0, v2);
+    let dot11 = dot(v1, v1);
+    let dot12 = dot(v1, v2);
+    let denominator = dot00 * dot11 - dot01 * dot01;
+    if denominator.abs() <= 1e-18 {
+        return false;
+    }
+    let inverse = 1.0 / denominator;
+    let u = (dot11 * dot02 - dot01 * dot12) * inverse;
+    let v = (dot00 * dot12 - dot01 * dot02) * inverse;
+    u >= -1e-9 && v >= -1e-9 && u + v <= 1.0 + 1e-9
 }
 
 fn sampled_span<F>(start: f64, end: f64, step: f64, target: f64, probe: F) -> Option<f64>

@@ -78,7 +78,7 @@ const BASELINE_SCHEMA_CONTRACTS: [(&str, &str, &str, &str, &str, &str); 16] = [
         "threeterm.command.save/1",
         "threeterm.command.save.request/1",
         "threeterm.command.save.response/1",
-        "849b03bf4fbdbc5ff292252db290bf2320f8bfe5afbacbfe5141309ae1b60019",
+        "70c4f431f0c9e1c7377b5d461f28bcfbc9e20c8e223004d761640eb5d4a8521f",
         "127fedb41c0c183f5c79fddbf91a6ebab39d58ab454e9c3b403a16ec4839d0d9",
     ),
     (
@@ -310,6 +310,41 @@ fn root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("threeterm-domain-executor-{label}-{suffix}"))
 }
 
+#[test]
+fn save_rejects_a_stale_expected_revision_without_mutation() {
+    let root = root("save-stale-revision");
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("seed project persists");
+    let before = host.identity(&root).expect("seed identity reads");
+    let error = host
+        .execute_domain_command(
+            SAVE_COMMAND_ID,
+            json!({
+                "bundle_path": root,
+                "feature_id": "stale-save",
+                "kind": "checkpoint",
+                "expected_revision": "stale-revision"
+            }),
+        )
+        .expect_err("stale save revision is rejected");
+
+    assert!(format!("{error:?}").contains("save source revision"));
+    assert_eq!(
+        host.identity(&root).expect("identity remains readable"),
+        before
+    );
+    assert_eq!(
+        Bundle::at(&root)
+            .open()
+            .expect("bundle remains readable")
+            .log
+            .len(),
+        1
+    );
+    fs::remove_dir_all(root).expect("stale save fixture removes");
+}
+
 fn filesystem_snapshot(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     fn visit(path: &std::path::Path, root: &std::path::Path, entries: &mut Vec<(String, Vec<u8>)>) {
         let metadata = fs::symlink_metadata(path).expect("filesystem metadata");
@@ -458,7 +493,8 @@ fn registry_request(name: &str, path: &std::path::Path, revision: &str) -> Value
         "save" => json!({
             "bundle_path": bundle_path,
             "feature_id": "box",
-            "kind": "cube"
+            "kind": "cube",
+            "expected_revision": revision
         }),
         "bracket" => json!({
             "bundle_path": bundle_path,

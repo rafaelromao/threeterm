@@ -12,6 +12,7 @@ for expected in \
     'production_tui_ghostty_session' \
     'production_tui_create_project_extrude' \
     'production_tui_keyboard_navigation' \
+    'production_tui_reinforcement' \
     'production_tui_mirror_pattern_reinforcing_features' \
     'production_tui_tapered_lofted_reinforcements' \
     '--tui-binary' \
@@ -63,13 +64,20 @@ jq -e '
     .test == "production_tui_keyboard_navigation"
 ' <<<"${navigation_plan}" >/dev/null
 
+reinforcement_plan="$(bash "${RUNNER}" production_tui_reinforcement --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.reinforcement/1" and
+    .result == "not_run" and
+    .test == "production_tui_reinforcement"
+' <<<"${reinforcement_plan}" >/dev/null
+
+reinforcement_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
 reinforcing_plan="$(bash "${RUNNER}" production_tui_mirror_pattern_reinforcing_features --print-plan)"
 jq -e '
     .schema_version == "threeterm.graphical-tui.mirror-pattern-reinforcing-features/1" and
     .result == "not_run" and
     .test == "production_tui_mirror_pattern_reinforcing_features"
 ' <<<"${reinforcing_plan}" >/dev/null
-reinforcement_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
 jq -e '
     .schema_version == "threeterm.graphical-tui.tapered-lofted-reinforcements/1" and
     .result == "not_run" and
@@ -91,6 +99,7 @@ for required in \
     'threeterm.graphical-tui/1' \
     'threeterm.graphical-tui.create-project-extrude/1' \
     'threeterm.graphical-tui.keyboard-navigation/1' \
+    'threeterm.graphical-tui.reinforcement/1' \
     'threeterm.graphical-tui.mirror-pattern-reinforcing-features/1' \
     'threeterm.graphical-tui.tapered-lofted-reinforcements/1' \
     'empty-startup.png' \
@@ -115,6 +124,11 @@ for required in \
     'failure.png' \
     'navigation_project_generation_digest' \
     'rendered_selected_viewport_ready' \
+    'reinforcement_viewport_ready' \
+    'reinforcement-transcript.jsonl' \
+    'collar.png' \
+    'opening.png' \
+    'reinforcement.png' \
     'reinforcing_viewport_phase' \
     'reinforcing_frame_ready' \
     'reinforcing_transcript' \

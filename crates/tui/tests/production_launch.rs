@@ -11,9 +11,11 @@ use threeterm_occt_worker::{
 };
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
 use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::schema;
 use threeterm_protocol::schema::{BRACKET_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID};
 use threeterm_tui::{
-    InteractiveTerminal, LaunchError, TerminalInput, decode_terminal_input, launch, launch_command,
+    InteractiveTerminal, LaunchError, TerminalInput, TuiSession, decode_terminal_input, launch,
+    launch_command,
 };
 use threeterm_viewport::{
     CapabilityProbeIo, CleanupSignal, SceneSolid, TerminalEnvironment, ViewportScene, parse_ack,
@@ -152,6 +154,81 @@ fn assert_authenticated_brep(root: &Path, entry: &LogEntry) {
     assert_eq!(entry.brep_byte_count, Some(bytes.len() as u64));
     let digest = threeterm_occt_worker::sha256_file(&path).expect("committed BREP hashes");
     assert_eq!(entry.brep_sha256.as_deref(), Some(digest.as_str()));
+}
+
+const REINFORCEMENT_RECIPE: &str =
+    include_str!("../../host/tests/data/bracket_reinforcement_recipe.v1.json");
+
+fn selected_edge_for_recipe(step: &Value, revision: &str) -> Value {
+    let selection = &step["edge_selection"];
+    let midpoint: [f64; 3] = serde_json::from_value(selection["midpoint"].clone())
+        .expect("recipe edge midpoint is a 3-vector");
+    let tangent: [f64; 3] = serde_json::from_value(selection["tangent"].clone())
+        .expect("recipe edge tangent is a 3-vector");
+    let length = selection["length"]
+        .as_f64()
+        .expect("recipe edge length is numeric");
+    let semantic_input =
+        serde_json::to_vec(&(midpoint, tangent, length)).expect("recipe edge evidence serializes");
+    json!({
+        "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
+        "provenance": {
+            "source_feature_id": step["request"]["base_feature_id"],
+            "source_revision_id": revision,
+            "source_edge_id": selection["source_edge_id"]
+        },
+        "role": selection["role"],
+        "evidence": {
+            "midpoint": midpoint,
+            "tangent": tangent,
+            "length": length
+        }
+    })
+}
+
+fn prepare_reinforcement_foundation(host: &Host, root: &Path) -> String {
+    let recipe: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+    host.execute_domain_command(
+        schema::NEW_PROJECT_COMMAND_ID,
+        json!({"destination": root.to_string_lossy()}),
+    )
+    .expect("foundation project creates");
+    let mut revision = host
+        .identity(root)
+        .expect("foundation identity reads")
+        .revision_hash;
+
+    for step in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .take(12)
+    {
+        let command_name = step["command"]
+            .as_str()
+            .expect("recipe command is a string");
+        let command = schema::find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe command is registered: {command_name}"));
+        let mut request = step["request"].clone();
+        request["bundle_path"] = root.to_string_lossy().into_owned().into();
+        if matches!(command_name, "extrude" | "fillet" | "chamfer" | "hole") {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_for_recipe(step, &revision);
+        }
+        let response = host
+            .execute_domain_command(command.id, request)
+            .unwrap_or_else(|error| {
+                panic!("foundation step {} succeeds: {error:?}", step["index"])
+            });
+        revision = response["revision_hash"]
+            .as_str()
+            .expect("foundation response has a revision")
+            .to_string();
+    }
+    revision
 }
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -2600,6 +2677,403 @@ fn production_launch_assembles_bracket_foundation_through_tui_controls() {
     assert_eq!(reopened_scene, before_scene);
     assert_eq!(snapshot_tree(&root), before_read_only);
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_drives_one_revolve_draft_through_preview_and_commit() {
+    let worker = OcctWorker::locate().expect("interactive revolve command requires OCCT worker");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-revolve-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    host.save(&root, "seed", "box")
+        .expect("project is persisted");
+
+    let request = br#"{"feature_id":"revolved-collar","profile":[[20,28],[22,28],[22,32],[20,32]],"axis_point":[10,0,0],"axis_direction":[0,-1,0],"angle":1.5707963267948966}"#;
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec(), b"\x10".to_vec()];
+    script.extend(b"revolve".iter().map(|byte| vec![*byte]));
+    script.push(b"\r".to_vec());
+    script.extend(request.iter().map(|byte| vec![*byte]));
+    script.push(b"\x16".to_vec());
+    script.push(b"\x1b[13;5u".to_vec());
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("production revolve palette flow succeeds");
+
+    let identity = host.identity(&root).expect("committed identity reads");
+    assert_eq!(identity.transaction_count, 2);
+    assert!(root.join("brep/revolved-collar.brep").is_file());
+    let output = String::from_utf8_lossy(&terminal.writes);
+    assert!(output.contains("command preview ready"));
+    assert!(output.contains("command committed"));
+    assert!(output.contains("[selection-glyph]"));
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("committed bundle opens read-only");
+    assert!(matches!(
+        bundle
+            .log
+            .entries()
+            .last()
+            .and_then(|entry| entry.intent.as_ref()),
+        Some(CanonicalIntent::Revolve(_))
+    ));
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker"]
+fn production_launch_drives_the_frozen_reinforcement_recipe_through_the_tui() {
+    let worker = OcctWorker::locate().expect("reinforcement recipe requires OCCT worker");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "threeterm-production-launch-reinforcement-{}-{suffix}",
+        std::process::id()
+    ));
+    let host = Host::new();
+    prepare_reinforcement_foundation(&host, &root);
+    let recipe: Value =
+        serde_json::from_str(REINFORCEMENT_RECIPE).expect("reinforcement recipe is valid JSON");
+
+    let mut script = vec![b"\x1b_Gi=1;OK\x1b\\".to_vec()];
+    for (image_id, step) in (2..).zip(
+        recipe["steps"]
+            .as_array()
+            .expect("recipe steps are an array")
+            .iter()
+            .skip(12),
+    ) {
+        let command = step["command"]
+            .as_str()
+            .expect("recipe command is a string");
+        let request = serde_json::to_vec(&step["request"]).expect("recipe request serializes");
+        script.push(b"\x10".to_vec());
+        script.extend(command.bytes().map(|byte| vec![byte]));
+        script.push(b"\r".to_vec());
+        script.extend(request.iter().map(|byte| vec![*byte]));
+        script.push(b"\x16".to_vec());
+        script.push(b"\x1b[13;5u".to_vec());
+        script.push(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
+    }
+    script.push(b"q".to_vec());
+    script.reverse();
+    let mut terminal = ScriptedTerminal {
+        events: script,
+        ..Default::default()
+    };
+
+    launch(&host, &root, &mut terminal, official_environment())
+        .expect("reinforcement recipe keyboard workflow succeeds");
+
+    let identity = host.identity(&root).expect("reinforcement identity reads");
+    assert_eq!(identity.transaction_count, 19);
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("reinforcement bundle opens read-only");
+    let expected_features = recipe["expectations"]["final_feature_ids"]
+        .as_array()
+        .expect("recipe final feature IDs are an array")
+        .iter()
+        .map(|feature| feature.as_str().expect("recipe feature ID is a string"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bundle
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_features
+    );
+    for command in [
+        "revolve",
+        "extrude",
+        "shell",
+        "hole",
+        "boolean-fuse",
+        "save",
+    ] {
+        assert!(
+            String::from_utf8_lossy(&terminal.writes)
+                .contains(&format!("[selection-glyph] Commit: {command}")),
+            "TUI transcript omits commit acknowledgement for {command}"
+        );
+    }
+    let output = String::from_utf8_lossy(&terminal.writes);
+    let removed_volume = output
+        .split("removed_volume=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("TUI transcript includes the removed-volume measurement");
+    assert!((removed_volume - 58.90486225480863).abs() <= 0.001);
+    assert!(bundle.log.entries()[..18].iter().all(|entry| {
+        entry.brep_path.is_some() && entry.brep_sha256.is_some() && entry.intent.is_some()
+    }));
+    let expected_commands = recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .take(18)
+        .map(|step| {
+            step["command"]
+                .as_str()
+                .expect("recipe command is a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bundle.log.entries()[..18]
+            .iter()
+            .map(|entry| entry
+                .intent
+                .as_ref()
+                .expect("geometry entry retains intent")
+                .command())
+            .collect::<Vec<_>>(),
+        expected_commands
+    );
+    assert!(bundle.log.entries()[..18].windows(2).all(|entries| {
+        entries[0]
+            .intent
+            .as_ref()
+            .expect("geometry entry retains intent")
+            .source_revision()
+            != entries[1]
+                .intent
+                .as_ref()
+                .expect("geometry entry retains intent")
+                .source_revision()
+    }));
+    for (step, entry) in recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array")
+        .iter()
+        .skip(12)
+        .take(6)
+        .zip(bundle.log.entries()[12..18].iter())
+    {
+        let intent = entry
+            .intent
+            .as_ref()
+            .expect("recipe geometry entry retains intent");
+        let canonical = serde_json::to_value(intent).expect("canonical intent serializes");
+        let request = &step["request"];
+        assert_eq!(
+            canonical["affected_semantic_ids"],
+            json!([step["feature_id"].clone()])
+        );
+        match step["command"]
+            .as_str()
+            .expect("recipe command is a string")
+        {
+            "revolve" => {
+                assert_eq!(
+                    canonical["deterministic_inputs"]["profile"],
+                    request["profile"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["axis_point"],
+                    request["axis_point"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["axis_direction"],
+                    request["axis_direction"]
+                );
+                assert_eq!(canonical["deterministic_inputs"]["angle"], request["angle"]);
+            }
+            "extrude" => {
+                assert_eq!(
+                    canonical["deterministic_inputs"]["profile"],
+                    request["profile"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["height"],
+                    request["height"]
+                );
+                assert_eq!(canonical["mode"], request["mode"]);
+            }
+            "shell" => {
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["thickness"], request["thickness"]);
+            }
+            "hole" => {
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["hole_kind"], request["hole_kind"]);
+                assert_eq!(
+                    canonical["deterministic_inputs"]["position"],
+                    request["position"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["direction"],
+                    request["direction"]
+                );
+                assert_eq!(
+                    canonical["deterministic_inputs"]["diameter"],
+                    request["diameter"]
+                );
+            }
+            "boolean-fuse" => {
+                assert_eq!(canonical["operation"], "fuse");
+                assert_eq!(canonical["base_feature_id"], request["base_feature_id"]);
+                assert_eq!(canonical["tool_feature_id"], request["tool_feature_id"]);
+            }
+            command => panic!("unexpected frozen recipe command: {command}"),
+        }
+    }
+    assert!(
+        bundle.log.entries()[..18]
+            .windows(2)
+            .all(|entries| entries[0].terminal_digest != entries[1].terminal_digest)
+    );
+    assert!(bundle.log.entries()[18].intent.is_none());
+
+    let mut breps = BTreeMap::new();
+    for feature_id in expected_features.iter().filter(|feature_id| {
+        **feature_id != "foundation-snapshot" && **feature_id != "reinforcement-snapshot"
+    }) {
+        let path = root.join("brep").join(format!("{feature_id}.brep"));
+        assert!(path.is_file(), "committed BREP is missing for {feature_id}");
+        breps.insert(
+            (*feature_id).to_string(),
+            fs::read(path).expect("committed BREP reads"),
+        );
+    }
+    let log_before_replay = fs::read(root.join("transactions.log")).expect("transaction log reads");
+
+    let collar_measurements = worker
+        .inspect_edges(
+            "revolved-collar-measurement",
+            root.join("brep/revolved-collar.brep"),
+            "revolved-collar",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"revolved-collar","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("collar edges inspect");
+    for expected_length in [15.707963267948966_f64, 18.84955592153876_f64] {
+        assert!(collar_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "fillet-transition"
+                && (candidate.length - expected_length).abs() <= 1e-3
+                && (28.0..=32.0).contains(&candidate.midpoint[1])
+        }));
+    }
+    let shell_measurements = worker
+        .inspect_edges(
+            "hollow-detail-measurement",
+            root.join("brep/hollow-detail.brep"),
+            "hollow-detail",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"hollow-detail","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("shell edges inspect");
+    assert!(
+        (shell_measurements
+            .material_volume
+            .expect("shell material volume")
+            - 1167.0)
+            .abs()
+            <= 0.001
+    );
+    for expected_length in [10.0_f64, 7.0_f64] {
+        assert!(shell_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - expected_length).abs() <= 1e-3
+        }));
+    }
+    let final_measurements = worker
+        .inspect_edges(
+            "reinforced-foundation-measurement",
+            root.join("brep/reinforced-foundation.brep"),
+            "reinforced-foundation",
+            identity.revision_hash.clone(),
+            json!({"source_feature_id":"reinforced-foundation","source_revision_id":identity.revision_hash,"source_edge_id":"measurement-anchor"}),
+        )
+        .expect("final edges inspect");
+    assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && (candidate.length - 15.707963267948966).abs() <= 1e-3
+            && candidate
+                .midpoint
+                .into_iter()
+                .zip([49.5, 10.0, 20.0])
+                .all(|(actual, expected)| (actual - expected).abs() <= 1e-3)
+    }));
+    for expected_length in [10.0_f64, 7.0_f64] {
+        assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+            candidate.role == "outer-perimeter"
+                && (candidate.length - expected_length).abs() <= 1e-3
+        }));
+    }
+    assert!(final_measurements.edge_candidates.iter().any(|candidate| {
+        candidate.role == "fillet-transition"
+            && candidate.length > 1e-3
+            && (28.0..=32.0).contains(&candidate.midpoint[1])
+            && candidate.midpoint[0] >= 20.0
+    }));
+
+    fs::remove_dir_all(root.join("brep")).expect("derived BREPs remove");
+    let replay_host = Host::new();
+    let replayed = replay_host
+        .load_with_geometry_replay(&root)
+        .expect("reinforcement geometry replay succeeds");
+    assert_eq!(replayed.revision_hash, identity.revision_hash);
+    assert_eq!(
+        fs::read(root.join("transactions.log")).expect("replayed log reads"),
+        log_before_replay
+    );
+    for (feature_id, original) in breps {
+        assert_eq!(
+            fs::read(root.join("brep").join(format!("{feature_id}.brep")))
+                .expect("replayed BREP reads"),
+            original,
+            "replayed geometry for {feature_id}"
+        );
+    }
+    assert!(
+        replay_host
+            .presentation_viewport_scene()
+            .expect("replayed viewport scene reads")
+            .solids
+            .iter()
+            .any(|solid| solid.feature_id == "reinforced-foundation")
+    );
+    let replayed_bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("replayed bundle opens read-only");
+    let mut replay_selector =
+        TuiSession::from_feature_graph(&replayed_bundle.graph, replayed.revision_hash.clone());
+    let mut selected_final = false;
+    for _ in 0..=replayed_bundle.graph.features().count() * 2 {
+        if replay_selector.state().selected_target.as_deref() == Some("reinforced-foundation") {
+            selected_final = true;
+            break;
+        }
+        replay_selector
+            .process_terminal_input(b"\x1b[B")
+            .expect("replayed feature selection advances");
+    }
+    assert!(selected_final, "replayed final feature remains selectable");
+    assert!(
+        replayed_bundle
+            .graph
+            .contains_feature("reinforced-foundation")
+    );
     let _ = fs::remove_dir_all(root);
 }
 

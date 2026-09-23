@@ -349,11 +349,12 @@ pub static REHEARSE_FAILURE_DIAGNOSTIC_SCHEMA: LazyLock<Value> = LazyLock::new(|
 pub static SAVE_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "type": "object",
-        "required": ["bundle_path", "feature_id", "kind"],
+        "required": ["bundle_path", "feature_id", "kind", "expected_revision"],
         "properties": {
             "bundle_path": { "type": "string", "minLength": 1 },
             "feature_id": { "type": "string", "minLength": 1 },
-            "kind": { "type": "string", "minLength": 1 }
+            "kind": { "type": "string", "minLength": 1 },
+            "expected_revision": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false
     })

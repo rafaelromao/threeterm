@@ -1408,7 +1408,10 @@ fn bracket_base_foundation_qualifies_through_public_commands() {
         let feature_id = step["feature_id"].as_str().expect("step has a feature ID");
         let mut request = step["request"].clone();
         request["bundle_path"] = workspace.root.to_string_lossy().into_owned().into();
-        if matches!(command_name, "extrude" | "fillet" | "chamfer" | "hole") {
+        if matches!(
+            command_name,
+            "extrude" | "fillet" | "chamfer" | "hole" | "save"
+        ) {
             request["expected_revision"] = revision.clone().into();
         }
         if matches!(command_name, "fillet" | "chamfer") {
@@ -1629,7 +1632,7 @@ fn bracket_reinforced_details_qualify_through_public_commands() {
         request["bundle_path"] = workspace.root.to_string_lossy().into_owned().into();
         if matches!(
             command_name,
-            "extrude" | "fillet" | "chamfer" | "hole" | "shell"
+            "extrude" | "fillet" | "chamfer" | "hole" | "shell" | "save"
         ) {
             request["expected_revision"] = revision.clone().into();
         }
@@ -1854,6 +1857,7 @@ fn bracket_complete_recipe_qualifies_through_public_commands() {
                 | "circular-pattern"
                 | "draft"
                 | "loft"
+                | "save"
         ) {
             request["expected_revision"] = revision.clone().into();
         }

@@ -837,7 +837,7 @@ fn assert_bracket_mesh(
     let thickness = mesh_number(mesh_recipe, "base_thickness");
     for (center, label) in [
         ([15.0, 2.0], "horizontal base thickness"),
-        ([10.0, 30.0], "vertical base thickness"),
+        ([2.0, 30.0], "vertical base thickness"),
     ] {
         let measured =
             horizontal_surface_span(mesh, center, contact_z, thickness, linear_tolerance)

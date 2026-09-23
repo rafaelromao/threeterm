@@ -40,11 +40,15 @@ STARTUP_VIEWPORT_CROP=''
 SELECTION_SCREENSHOT=''
 PAN_SCREENSHOT=''
 ZOOM_SCREENSHOT=''
+MIRROR_SCREENSHOT=''
+LINEAR_PATTERN_SCREENSHOT=''
+CIRCULAR_PATTERN_SCREENSHOT=''
 SELECTION_VIEWPORT_CROP=''
 ORBIT_VIEWPORT_CROP=''
 PAN_VIEWPORT_CROP=''
 ZOOM_VIEWPORT_CROP=''
 NAVIGATION_TRANSCRIPT=''
+REINFORCING_TRANSCRIPT=''
 BRACKET_TRANSCRIPT=''
 BRACKET_STEPS_DIR=''
 PROJECT_CREATED_SCREENSHOT=''
@@ -101,6 +105,7 @@ navigation_project_generation_digest_before=''
 navigation_project_generation_digest_after=''
 navigation_previous_image_id=''
 navigation_previous_viewport_crop_sha256=''
+reinforcing_viewport_phase=0
 bracket_step_index=0
 bracket_previous_image_id=''
 path_failure_code=''
@@ -116,6 +121,7 @@ Usage:
   graphical-tui.sh production_tui_create_project_extrude --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_keyboard_navigation --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_reinforcement --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_mirror_pattern_reinforcing_features --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_tapered_lofted_reinforcements --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_bracket_foundation --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
@@ -155,7 +161,17 @@ die() {
 
 validate_viewport_evidence() {
     local payload="$1"
-    jq -e --arg expected_feature "$EXPECTED_FEATURE_ID" '
+    local reinforcing=false
+    local reinforcing_test=false
+    if [[ "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
+        reinforcing_test=true
+        [[ "$reinforcing_viewport_phase" -gt 0 ]] && reinforcing=true
+    fi
+    jq -e \
+        --arg expected_feature "$EXPECTED_FEATURE_ID" \
+        --argjson reinforcing "$reinforcing" \
+        --argjson reinforcing_test "$reinforcing_test" \
+        --argjson reinforcing_phase "$reinforcing_viewport_phase" '
         .schema_version == "threeterm.viewport-evidence/1" and
         .acknowledgement == "viewport-presented" and
         (.frame.frame_token | type == "number" and . > 0) and
@@ -163,7 +179,23 @@ validate_viewport_evidence() {
         (.frame.generation | type == "number") and
         (.frame.revision | type == "string" and length > 0) and
         .frame.width == 800 and .frame.height == 480 and
-        (.scene.solids | type == "array" and length == 1 and .[0].feature_id == $expected_feature and .[0].triangle_count > 0) and
+        (if $reinforcing then
+            (.scene.solids | type == "array" and
+                (if $reinforcing_phase == 3 then
+                    length == 3 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-mirror-pad"]
+                 elif $reinforcing_phase == 4 then
+                    length == 4 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-linear-pads", "tui-mirror-pad"]
+                 else
+                    length == 5 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad", "tui-circular-lugs", "tui-linear-pads", "tui-mirror-pad"]
+                 end) and all(.[]; .triangle_count > 0))
+         else
+            (.scene.solids | type == "array" and
+                (if $reinforcing_test and $reinforcing == false then
+                    length == 2 and (map(.feature_id) | sort) == ["l-bracket", "reinforce-pad"]
+                 else
+                    length == 1 and .[0].feature_id == $expected_feature and .[0].triangle_count > 0
+                 end) and all(.[]; .triangle_count > 0))
+         end) and
         (.scene.triangle_count == (.scene.solids | map(.triangle_count) | add)) and
         (.scene.triangle_count | type == "number" and . > 0) and
         (.scene.body_pixels | type == "number" and . > 0) and
@@ -339,7 +371,7 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_reinforcement|production_tui_tapered_lofted_reinforcements|production_tui_bracket_foundation)
+        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_reinforcement|production_tui_mirror_pattern_reinforcing_features|production_tui_tapered_lofted_reinforcements|production_tui_bracket_foundation)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
             if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
@@ -352,6 +384,9 @@ while (($# > 0)); do
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.reinforcement/1'
                 EXPECTED_FEATURE_ID='bracket-foundation'
+            elif [[ "$TEST_NAME" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.mirror-pattern-reinforcing-features/1'
             elif [[ "$TEST_NAME" == 'production_tui_tapered_lofted_reinforcements' ]]; then
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.tapered-lofted-reinforcements/1'
@@ -453,6 +488,12 @@ if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
     PAN_VIEWPORT_CROP="${EVIDENCE_ROOT}/pan-viewport.png"
     ZOOM_VIEWPORT_CROP="${EVIDENCE_ROOT}/zoom-viewport.png"
     NAVIGATION_TRANSCRIPT="${EVIDENCE_ROOT}/navigation-transcript.jsonl"
+fi
+if [[ "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
+    MIRROR_SCREENSHOT="${EVIDENCE_ROOT}/mirror.png"
+    LINEAR_PATTERN_SCREENSHOT="${EVIDENCE_ROOT}/linear-pattern.png"
+    CIRCULAR_PATTERN_SCREENSHOT="${EVIDENCE_ROOT}/circular-pattern.png"
+    REINFORCING_TRANSCRIPT="${EVIDENCE_ROOT}/reinforcing-transcript.jsonl"
 fi
 if [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
     BRACKET_TRANSCRIPT="${EVIDENCE_ROOT}/bracket-transcript.jsonl"
@@ -770,7 +811,8 @@ orbit_ready() {
         validate_viewport_evidence "$viewport_evidence" || return 1
     fi
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ||
-        "$TEST_ID" == 'production_tui_tapered_lofted_reinforcements' ]]; then
+        "$TEST_ID" == 'production_tui_tapered_lofted_reinforcements' ||
+        "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
         [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$(jq -r '.frame.revision' <<<"$viewport_workflow_evidence")" ]] || return 1
         [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$(jq -r '.frame.image_id' <<<"$viewport_workflow_evidence")" ]] || return 1
     elif [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
@@ -1220,6 +1262,83 @@ run_create_project_extrude() {
     local image_id
     image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
     evidence_wire_ready "$image_id" || die workflow_not_acknowledged 'final fresh workflow frame did not receive a Kitty acknowledgement'
+    viewport_workflow_evidence="$viewport_evidence"
+    workflow_status='passed'
+}
+
+reinforcing_frame_ready() {
+    extract_viewport_evidence || return 1
+    validate_viewport_evidence "$viewport_evidence" || return 1
+    local image_id
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    [[ "$image_id" != "$final_image_id" ]] || return 1
+    evidence_wire_ready "$image_id" || return 1
+    final_image_id="$image_id"
+    final_image_id_json="$image_id"
+}
+
+run_reinforcing_features() {
+    [[ "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]] || return 0
+    : >"$REINFORCING_TRANSCRIPT"
+
+    local mirror_request='{"feature_id":"tui-mirror-pad","base_feature_id":"reinforce-pad","plane_point":[0,0,0],"plane_normal":[1,-1,0]}'
+    local linear_request='{"feature_id":"tui-linear-pads","base_feature_id":"reinforce-pad","direction":[1,0,0],"count":3,"spacing":12}'
+    local circular_request='{"feature_id":"tui-circular-lugs","base_feature_id":"reinforce-pad","axis_point":[30,15,0],"axis_normal":[0,0,1],"angle_step":1.5707963267948966,"count":4}'
+
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'compositor keyboard input could not open the mirror palette'
+    wtype mirror || die input_injection_failed 'compositor keyboard input could not type mirror'
+    wtype -k Return || die input_injection_failed 'compositor keyboard input could not select mirror'
+    wtype "$mirror_request" || die input_injection_failed 'compositor keyboard input could not type the mirror request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'compositor keyboard input could not request the mirror preview'
+    wait_for_output_marker '[dashed-outline] Preview: mirror'
+    wtype -k Escape || die input_injection_failed 'compositor keyboard input could not cancel the mirror draft'
+    wait_for_output_marker '[cancellation-glyph] Cancellation: command draft discarded'
+    jq -n \
+        --arg command mirror \
+        --argjson request "$mirror_request" \
+        '{command:$command,request:$request,preview_marker:"[dashed-outline] Preview: mirror",cancellation_marker:"[cancellation-glyph] Cancellation: command draft discarded",outcome:"cancelled"}' \
+        >>"$REINFORCING_TRANSCRIPT"
+    reinforcing_commit() {
+        local command="$1"
+        local request="$2"
+        local screenshot="$3"
+        local marker="[selection-glyph] Commit: ${command}"
+        local ocr screenshot_sha
+        case "$command" in
+            mirror) reinforcing_viewport_phase=3 ;;
+            linear-pattern) reinforcing_viewport_phase=4 ;;
+            circular-pattern) reinforcing_viewport_phase=5 ;;
+        esac
+        wtype -M ctrl -k p -m ctrl || die input_injection_failed "compositor keyboard input could not open the ${command} palette"
+        wtype "$command" || die input_injection_failed "compositor keyboard input could not type ${command}"
+        wtype -k Return || die input_injection_failed "compositor keyboard input could not select ${command}"
+        wtype "$request" || die input_injection_failed "compositor keyboard input could not type the ${command} request"
+        wtype -M ctrl -k v -m ctrl || die input_injection_failed "compositor keyboard input could not request the ${command} preview"
+        wait_for_output_marker "[dashed-outline] Preview: ${command}"
+        wtype -M ctrl -k Return -m ctrl || die input_injection_failed "compositor keyboard input could not commit ${command}"
+        wait_for_output_marker "$marker"
+        wait_until "$RUNNER_TIMEOUT_SECONDS" reinforcing_frame_ready ||
+            die reinforcing_viewport_invalid "${command} did not produce valid five-solid viewport evidence"
+        capture_screenshot "$screenshot" || die reinforcing_screenshot_failed "${command} screenshot was not fixed at 800x600"
+        ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
+        grep -Fq 'Viewport presented' <<<"$ocr" || die reinforcing_viewport_marker_not_visible "${command} viewport evidence was not visible in the screenshot"
+        grep -Fq "$command" <<<"$ocr" || die reinforcing_marker_not_visible "${command} acknowledgement was not visible in the screenshot"
+        rendered_viewport_ready "$screenshot" || die reinforcing_not_rendered "${command} screenshot does not contain palette-bound rendered geometry"
+        screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
+        jq -n \
+            --arg command "$command" \
+            --argjson request "$request" \
+            --arg marker "$marker" \
+            --arg screenshot "$screenshot" \
+            --arg screenshot_sha256 "$screenshot_sha" \
+            --argjson viewport "$viewport_evidence" \
+            '{command:$command,request:$request,preview_marker:("[dashed-outline] Preview: " + $command),commit_marker:$marker,response:{feature_id:("tui-" + (if $command == "linear-pattern" then "linear-pads" elif $command == "circular-pattern" then "circular-lugs" else "mirror-pad" end)),revision:$viewport.frame.revision},feature_ids:($viewport.scene.solids | map(.feature_id)),frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+            >>"$REINFORCING_TRANSCRIPT"
+    }
+
+    reinforcing_commit mirror "$mirror_request" "$MIRROR_SCREENSHOT"
+    reinforcing_commit linear-pattern "$linear_request" "$LINEAR_PATTERN_SCREENSHOT"
+    reinforcing_commit circular-pattern "$circular_request" "$CIRCULAR_PATTERN_SCREENSHOT"
     viewport_workflow_evidence="$viewport_evidence"
     workflow_status='passed'
 }
@@ -1719,6 +1838,8 @@ write_manifest() {
         "$TAPERED_SCREENSHOT" "$LOFTED_SCREENSHOT" "$WORKFLOW_TRANSCRIPT"
         "$STARTUP_VIEWPORT_CROP" "$SELECTION_VIEWPORT_CROP" "$ORBIT_VIEWPORT_CROP"
         "$PAN_VIEWPORT_CROP" "$ZOOM_VIEWPORT_CROP" "$NAVIGATION_TRANSCRIPT"
+        "$MIRROR_SCREENSHOT" "$LINEAR_PATTERN_SCREENSHOT" "$CIRCULAR_PATTERN_SCREENSHOT"
+        "$REINFORCING_TRANSCRIPT"
         "$CLEANUP_SCREENSHOT" "$FAILURE_SCREENSHOT"
         "$DIFF_LOG" "${EVIDENCE_ROOT}/window-ready.png" "$STIMULUS_ERROR"
     )
@@ -1730,6 +1851,8 @@ write_manifest() {
         tapered_committed_screenshot lofted_committed_screenshot reinforcement_transcript
         startup_viewport_crop selection_viewport_crop orbit_viewport_crop
         pan_viewport_crop zoom_viewport_crop navigation_transcript
+        mirror_screenshot linear_pattern_screenshot circular_pattern_screenshot
+        reinforcing_transcript
         cleanup_screenshot failure_screenshot
         orbit_difference window_screenshot probe_stimulus_error
     )
@@ -1891,7 +2014,9 @@ fi
 if [[ "$TEST_ID" == 'production_tui_reinforcement' ]]; then
     run_reinforcement_workflow
 fi
-if [[ "$TEST_ID" == 'production_tui_tapered_lofted_reinforcements' ]]; then
+if [[ "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
+    run_reinforcing_features
+elif [[ "$TEST_ID" == 'production_tui_tapered_lofted_reinforcements' ]]; then
     run_tapered_lofted_reinforcements
 fi
 if [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then

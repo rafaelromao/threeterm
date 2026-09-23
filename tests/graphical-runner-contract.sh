@@ -13,6 +13,7 @@ for expected in \
     'production_tui_create_project_extrude' \
     'production_tui_keyboard_navigation' \
     'production_tui_reinforcement' \
+    'production_tui_mirror_pattern_reinforcing_features' \
     'production_tui_tapered_lofted_reinforcements' \
     '--tui-binary' \
     '--project-root' \
@@ -70,12 +71,18 @@ jq -e '
     .test == "production_tui_reinforcement"
 ' <<<"${reinforcement_plan}" >/dev/null
 
-tapered_lofted_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
+reinforcement_plan="$(bash "${RUNNER}" production_tui_tapered_lofted_reinforcements --print-plan)"
+reinforcing_plan="$(bash "${RUNNER}" production_tui_mirror_pattern_reinforcing_features --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.mirror-pattern-reinforcing-features/1" and
+    .result == "not_run" and
+    .test == "production_tui_mirror_pattern_reinforcing_features"
+' <<<"${reinforcing_plan}" >/dev/null
 jq -e '
     .schema_version == "threeterm.graphical-tui.tapered-lofted-reinforcements/1" and
     .result == "not_run" and
     .test == "production_tui_tapered_lofted_reinforcements"
-' <<<"${tapered_lofted_plan}" >/dev/null
+' <<<"${reinforcement_plan}" >/dev/null
 
 for required in \
     'LC_ALL=C.UTF-8' \
@@ -93,6 +100,7 @@ for required in \
     'threeterm.graphical-tui.create-project-extrude/1' \
     'threeterm.graphical-tui.keyboard-navigation/1' \
     'threeterm.graphical-tui.reinforcement/1' \
+    'threeterm.graphical-tui.mirror-pattern-reinforcing-features/1' \
     'threeterm.graphical-tui.tapered-lofted-reinforcements/1' \
     'empty-startup.png' \
     'project-created.png' \
@@ -121,6 +129,12 @@ for required in \
     'collar.png' \
     'opening.png' \
     'reinforcement.png' \
+    'reinforcing_viewport_phase' \
+    'reinforcing_frame_ready' \
+    'reinforcing_transcript' \
+    'mirror_screenshot' \
+    'linear_pattern_screenshot' \
+    'circular_pattern_screenshot' \
     'empty-session-source' \
     'project_generation_digest' \
     'cancellation_changed_routing' \

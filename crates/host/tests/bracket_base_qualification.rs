@@ -2984,4 +2984,97 @@ fn e2e_stl_api_all_tools_l_bracket() {
         empty.graph.features().next().is_none(),
         "journey starts with no model fixture"
     );
+
+    let initial_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    let mut revision = initial_identity["revision_hash"]
+        .as_str()
+        .expect("journey identity has a revision hash")
+        .to_string();
+
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("journey step command");
+        let feature_id = step["feature_id"].as_str().expect("journey feature ID");
+        let mut request = step["request"].clone();
+        request["bundle_path"] = workspace.root.to_string_lossy().into_owned().into();
+        if matches!(
+            command_name,
+            "extrude"
+                | "revolve"
+                | "fillet"
+                | "chamfer"
+                | "hole"
+                | "shell"
+                | "mirror"
+                | "linear-pattern"
+                | "circular-pattern"
+                | "draft"
+                | "loft"
+                | "save"
+        ) {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_from_recipe(
+                request["base_feature_id"]
+                    .as_str()
+                    .expect("finishing request has a base feature ID"),
+                &revision,
+                &step["edge_selection"],
+            );
+        }
+
+        let response = command_response(&host, command_name, request);
+        let next_revision = response["revision_hash"]
+            .as_str()
+            .expect("journey response has a revision hash")
+            .to_string();
+        assert_ne!(
+            next_revision, revision,
+            "step {feature_id} advances revision"
+        );
+        if command_name != "save" {
+            assert_eq!(response["status"], "ok", "step {feature_id} succeeds");
+            assert_eq!(response["operation"], command_name);
+            assert_eq!(response["feature_id"], feature_id);
+        }
+        record_evidence(&mut evidence, command_name, feature_id);
+        revision = next_revision;
+    }
+
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        if matches!(*required, "load" | "validate" | "export") {
+            continue;
+        }
+        assert!(
+            evidence.iter().any(|entry| entry["command"] == *required),
+            "per-tool evidence omits required command {required}"
+        );
+    }
+
+    let saved = Bundle::at(&workspace.root)
+        .open()
+        .expect("journey bundle opens after the recipe");
+    assert_eq!(
+        saved.log.len(),
+        recipe_steps(&recipe).len(),
+        "journey retains every recipe transaction"
+    );
+    assert_reinforcement_intents(&recipe, &saved);
+    assert!(
+        saved.log.entries()[19..32]
+            .iter()
+            .all(|entry| entry.intent.is_some()),
+        "complete geometry steps retain canonical intents"
+    );
+    assert!(saved.log.entries()[32].intent.is_none());
+    assert_complete_intents(&recipe, &saved);
+    assert_eq!(
+        saved.graph.features().count(),
+        recipe_steps(&recipe).len(),
+        "journey feature graph retains every recipe feature"
+    );
 }

@@ -56,6 +56,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Solid.hxx>
@@ -72,10 +73,12 @@
 
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_Plane.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
@@ -993,10 +996,107 @@ bool analyze_brep(const TopoDS_Shape& shape) {
 }
 
 void orient_closed_solid(TopoDS_Shape& shape) {
-    if (shape.ShapeType() != TopAbs_SOLID) return;
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID) return;
     TopoDS_Solid solid = TopoDS::Solid(shape);
     BRepLib::OrientClosedSolid(solid);
     shape = solid;
+}
+
+// Boolean and offset results are frequently COMPOUND/COMPSOLID wrappers
+// around solid(s). `OrientClosedSolid` only accepts `TopAbs_SOLID`, so
+// skipping the unwrap leaves inverted solids uncorrected and poisons
+// every later boolean (outer shell walls get classified as internal and
+// vanish). Unwrap a single solid when present; when a shape legitimately
+// holds several bodies, orient each solid and keep the compound.
+bool orient_solids_in_shape(TopoDS_Shape& shape, std::string& error) {
+    if (shape.IsNull()) {
+        error = "null shape has no TopoDS_Solid";
+        return false;
+    }
+    if (shape.ShapeType() == TopAbs_SOLID) {
+        orient_closed_solid(shape);
+        return true;
+    }
+    std::vector<TopoDS_Solid> solids;
+    for (TopExp_Explorer ex(shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+        solids.push_back(TopoDS::Solid(ex.Current()));
+    }
+    if (solids.empty()) {
+        error = "shape contains no TopoDS_Solid";
+        return false;
+    }
+    for (TopoDS_Solid& solid : solids) {
+        TopoDS_Shape oriented = solid;
+        orient_closed_solid(oriented);
+        solid = TopoDS::Solid(oriented);
+    }
+    if (solids.size() == 1) {
+        shape = solids.front();
+        return true;
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Solid& solid : solids) {
+        builder.Add(compound, solid);
+    }
+    shape = compound;
+    return true;
+}
+
+bool extract_single_solid(TopoDS_Shape& shape, std::string& error) {
+    if (shape.IsNull()) {
+        error = "null shape has no TopoDS_Solid";
+        return false;
+    }
+    if (shape.ShapeType() == TopAbs_SOLID) return true;
+    TopoDS_Solid found;
+    int count = 0;
+    for (TopExp_Explorer ex(shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+        found = TopoDS::Solid(ex.Current());
+        ++count;
+        if (count > 1) {
+            error = "expected a single solid result but the shape holds multiple solids";
+            return false;
+        }
+    }
+    if (count == 0) {
+        error = "shape contains no TopoDS_Solid";
+        return false;
+    }
+    shape = found;
+    return true;
+}
+
+// Orient every solid; unwrap to a single solid only when the shape holds
+// exactly one. Booleans accept multi-body compounds, so this must not
+// reject them.
+bool normalize_solid(TopoDS_Shape& shape, std::string& error) {
+    return orient_solids_in_shape(shape, error);
+}
+
+// Operations that need exactly one body (shell offset, etc.).
+bool require_single_solid(TopoDS_Shape& shape, std::string& error) {
+    if (!orient_solids_in_shape(shape, error)) return false;
+    if (!extract_single_solid(shape, error)) return false;
+    orient_closed_solid(shape);
+    return true;
+}
+
+bool shape_bounds_match(const TopoDS_Shape& left, const TopoDS_Shape& right,
+                        double tolerance) {
+    Bnd_Box left_box;
+    Bnd_Box right_box;
+    BRepBndLib::Add(left, left_box);
+    BRepBndLib::Add(right, right_box);
+    if (left_box.IsVoid() || right_box.IsVoid()) return false;
+    double lx1, ly1, lz1, lx2, ly2, lz2;
+    double rx1, ry1, rz1, rx2, ry2, rz2;
+    left_box.Get(lx1, ly1, lz1, lx2, ly2, lz2);
+    right_box.Get(rx1, ry1, rz1, rx2, ry2, rz2);
+    return std::abs(lx1 - rx1) <= tolerance && std::abs(ly1 - ry1) <= tolerance &&
+           std::abs(lz1 - rz1) <= tolerance && std::abs(lx2 - rx2) <= tolerance &&
+           std::abs(ly2 - ry2) <= tolerance && std::abs(lz2 - rz2) <= tolerance;
 }
 
 bool handle_planar_face_evidence(const JsonParser::Value& request, std::string& error) {
@@ -1155,6 +1255,14 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
             error = "could not read subtractive target BREP";
             return false;
         }
+        if (!normalize_solid(target, error)) {
+            error = "subtractive extrude target has no solid: " + error;
+            return false;
+        }
+        if (!normalize_solid(solid, error)) {
+            error = "subtractive extrude tool has no solid: " + error;
+            return false;
+        }
         BRepAlgoAPI_Cut cut(target, solid);
         cut.Build();
         if (!cut.IsDone() || cut.Shape().IsNull()) {
@@ -1173,6 +1281,10 @@ bool handle_extrude(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         solid = cut.Shape();
+        if (!normalize_solid(solid, error)) {
+            error = "subtractive extrusion result has no solid: " + error;
+            return false;
+        }
     }
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
@@ -1265,6 +1377,10 @@ bool handle_bracket(const JsonParser::Value& request, std::string& error) {
         return false;
     }
     TopoDS_Shape solid = fuse.Shape();
+    if (!normalize_solid(solid, error)) {
+        error = "bracket plate fuse has no solid: " + error;
+        return false;
+    }
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
         std::error_code ec;
@@ -1427,8 +1543,16 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         error = "BREP file produced a null TopoDS_Shape";
         return false;
     }
+    if (!normalize_solid(base, error)) {
+        error = "boolean_fuse base has no solid: " + error;
+        return false;
+    }
+    if (!normalize_solid(tool, error)) {
+        error = "boolean_fuse tool has no solid: " + error;
+        return false;
+    }
 
-    BRepAlgoAPI_Fuse fuse(tool, base);
+    BRepAlgoAPI_Fuse fuse(base, tool);
     fuse.SetFuzzyValue(1.0e-6);
     fuse.SetRunParallel(Standard_False);
     fuse.Build();
@@ -1437,7 +1561,10 @@ bool handle_boolean_fuse(const JsonParser::Value& request, std::string& error) {
         return false;
     }
     TopoDS_Shape fused = fuse.Shape();
-    orient_closed_solid(fused);
+    if (!normalize_solid(fused, error)) {
+        error = "boolean_fuse result has no solid: " + error;
+        return false;
+    }
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
@@ -1506,6 +1633,14 @@ bool handle_boolean_cut(const JsonParser::Value& request, std::string& error) {
         error = "BREP file produced a null TopoDS_Shape";
         return false;
     }
+    if (!normalize_solid(base, error)) {
+        error = "boolean_cut base has no solid: " + error;
+        return false;
+    }
+    if (!normalize_solid(tool, error)) {
+        error = "boolean_cut tool has no solid: " + error;
+        return false;
+    }
 
     BRepAlgoAPI_Cut cut(base, tool);
     cut.SetFuzzyValue(1.0e-6);
@@ -1516,7 +1651,10 @@ bool handle_boolean_cut(const JsonParser::Value& request, std::string& error) {
         return false;
     }
     TopoDS_Shape result = cut.Shape();
-    orient_closed_solid(result);
+    if (!normalize_solid(result, error)) {
+        error = "boolean_cut result has no solid: " + error;
+        return false;
+    }
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
@@ -1585,6 +1723,14 @@ bool handle_boolean_common(const JsonParser::Value& request, std::string& error)
         error = "BREP file produced a null TopoDS_Shape";
         return false;
     }
+    if (!normalize_solid(base, error)) {
+        error = "boolean_common base has no solid: " + error;
+        return false;
+    }
+    if (!normalize_solid(tool, error)) {
+        error = "boolean_common tool has no solid: " + error;
+        return false;
+    }
 
     BRepAlgoAPI_Common common(base, tool);
     common.SetFuzzyValue(1.0e-6);
@@ -1594,6 +1740,10 @@ bool handle_boolean_common(const JsonParser::Value& request, std::string& error)
         return false;
     }
     TopoDS_Shape result = common.Shape();
+    if (!normalize_solid(result, error)) {
+        error = "boolean_common result has no solid: " + error;
+        return false;
+    }
 
     std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
     if (output_path.has_parent_path()) {
@@ -2086,6 +2236,10 @@ bool handle_split(const JsonParser::Value& request, std::string& error) {
             error = "could not read base BREP at " + base_path_str;
             return false;
         }
+        if (!normalize_solid(base, error)) {
+            error = "split base has no solid: " + error;
+            return false;
+        }
         Bnd_Box bounds;
         BRepBndLib::Add(base, bounds);
         double xmin = 0.0;
@@ -2341,6 +2495,10 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
+        if (!normalize_solid(base, error)) {
+            error = "hole base has no solid: " + error;
+            return false;
+        }
 
         // Span the base bounding box from either side of the requested
         // point, independent of the base's world-space location.
@@ -2388,6 +2546,10 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         TopoDS_Shape tool = cylinder.Shape();
+        if (!normalize_solid(tool, error)) {
+            error = "hole cutter has no solid: " + error;
+            return false;
+        }
 
         BRepAlgoAPI_Cut cut(base, tool);
         cut.SetFuzzyValue(1.0e-6);
@@ -2398,7 +2560,10 @@ bool handle_hole(const JsonParser::Value& request, std::string& error) {
             return false;
         }
         TopoDS_Shape result = cut.Shape();
-        orient_closed_solid(result);
+        if (!normalize_solid(result, error)) {
+            error = "hole result has no solid: " + error;
+            return false;
+        }
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
         if (output_path.has_parent_path()) {
@@ -2868,6 +3033,10 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
+        if (!normalize_solid(base, error)) {
+            error = "linear_pattern base has no solid: " + error;
+            return false;
+        }
 
         double norm = std::sqrt(direction_norm_squared);
         gp_Vec step(direction[0] / norm * spacing,
@@ -2889,6 +3058,10 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
                 return false;
             }
             TopoDS_Shape copy = translated.Shape();
+            if (!normalize_solid(copy, error)) {
+                error = "linear_pattern copy has no solid: " + error;
+                return false;
+            }
             BRepAlgoAPI_Fuse fuse(result, copy);
             fuse.SetFuzzyValue(1.0e-6);
             fuse.Build();
@@ -2897,6 +3070,10 @@ bool handle_linear_pattern(const JsonParser::Value& request, std::string& error)
                 return false;
             }
             result = fuse.Shape();
+            if (!normalize_solid(result, error)) {
+                error = "linear_pattern fuse result has no solid: " + error;
+                return false;
+            }
         }
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
@@ -3006,6 +3183,10 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
+        if (!normalize_solid(base, error)) {
+            error = "circular_pattern base has no solid: " + error;
+            return false;
+        }
 
         double norm = std::sqrt(normal_norm_squared);
         gp_Pnt origin(axis_point[0], axis_point[1], axis_point[2]);
@@ -3029,6 +3210,10 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
                 return false;
             }
             TopoDS_Shape copy = rotated.Shape();
+            if (!normalize_solid(copy, error)) {
+                error = "circular_pattern copy has no solid: " + error;
+                return false;
+            }
             BRepAlgoAPI_Fuse fuse(result, copy);
             fuse.SetFuzzyValue(1.0e-6);
             fuse.Build();
@@ -3037,6 +3222,10 @@ bool handle_circular_pattern(const JsonParser::Value& request, std::string& erro
                 return false;
             }
             result = fuse.Shape();
+            if (!normalize_solid(result, error)) {
+                error = "circular_pattern fuse result has no solid: " + error;
+                return false;
+            }
         }
 
         std::filesystem::path output_path = std::filesystem::path(output_dir) / output_filename;
@@ -3138,6 +3327,10 @@ bool handle_boolean_pattern(const JsonParser::Value& request, std::string& error
             error = "BREP file produced a null TopoDS_Shape";
             return false;
         }
+        if (!normalize_solid(result, error)) {
+            error = "boolean_pattern base has no solid: " + error;
+            return false;
+        }
 
         Bnd_Box bounds;
         BRepBndLib::Add(result, bounds);
@@ -3171,6 +3364,10 @@ bool handle_boolean_pattern(const JsonParser::Value& request, std::string& error
                     return false;
                 }
                 result = cut.Shape();
+                if (!normalize_solid(result, error)) {
+                    error = "boolean_pattern cut result has no solid: " + error;
+                    return false;
+                }
                 ++completed;
                 const unsigned percent = static_cast<unsigned>(
                     (static_cast<std::uint64_t>(completed) * 100U) / total);
@@ -3261,24 +3458,14 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         }
         // `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` expects a
         // single `TopoDS_Solid`. Boolean-fused inputs can come back as
-        // a COMPSOLID (touching solids) or a COMPOUND; pick the first
-        // inner solid so the offset algorithm has a single body to
+        // a COMPSOLID (touching solids) or a COMPOUND; unwrap to exactly
+        // one oriented solid so the offset algorithm has a single body to
         // shell.
-        TopoDS_Solid base_solid;
-        if (base.ShapeType() == TopAbs_SOLID) {
-            base_solid = TopoDS::Solid(base);
-        } else if (base.ShapeType() == TopAbs_COMPSOLID ||
-                   base.ShapeType() == TopAbs_COMPOUND) {
-            for (TopExp_Explorer ex(base, TopAbs_SOLID); ex.More();
-                 ex.Next()) {
-                base_solid = TopoDS::Solid(ex.Current());
-                break;
-            }
-        }
-        if (base_solid.IsNull()) {
-            error = "shell base has no TopoDS_Solid";
+        if (!require_single_solid(base, error)) {
+            error = "shell base is not a single solid: " + error;
             return false;
         }
+        TopoDS_Solid base_solid = TopoDS::Solid(base);
 
         // `BRepOffsetAPI_MakeThickSolid` requires C1-continuous
         // surfaces and refuses mixed-valence vertices. A BooleanFuse
@@ -3295,19 +3482,11 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         if (unified.IsNull()) {
             unified = base_solid;
         }
-        if (unified.ShapeType() == TopAbs_SOLID) {
-            base_solid = TopoDS::Solid(unified);
-        } else {
-            for (TopExp_Explorer ex(unified, TopAbs_SOLID); ex.More();
-                 ex.Next()) {
-                base_solid = TopoDS::Solid(ex.Current());
-                break;
-            }
-        }
-        if (base_solid.IsNull()) {
-            error = "shell base has no TopoDS_Solid after unification";
+        if (!require_single_solid(unified, error)) {
+            error = "shell base has no single solid after unification: " + error;
             return false;
         }
+        base_solid = TopoDS::Solid(unified);
 
         // Rebuild the solid from its outer shell so the offset
         // algorithm operates on a closed, single-shell body without
@@ -3334,32 +3513,94 @@ bool handle_shell(const JsonParser::Value& request, std::string& error) {
         // the negative offset shrinks every face inward by
         // `thickness` and the closing walls are stitched to the outer
         // shell, yielding a single solid bounded by the original
-        // outer surface and an inner offset shell.
+        // outer surface and an inner offset shell. Accept the result
+        // only when it is a single oriented solid whose outer bounds
+        // still match the seed; otherwise rebuild the hollow by cutting
+        // an inward-offset core from the seed so the outer faces of the
+        // seed are the ones that survive.
+        TopoDS_Shape shelled;
+        std::string shell_failure;
         BRepOffsetAPI_MakeThickSolid thickener;
         thickener.MakeThickSolidByJoin(
             clean_solid, TopTools_ListOfShape(),
             -thickness, 1.0e-6,
             BRepOffset_Skin, Standard_False, Standard_False,
             GeomAbs_Arc, Standard_False);
-        if (!thickener.IsDone()) {
-            error = "BRepOffsetAPI_MakeThickSolid did not complete";
-            return false;
+        if (thickener.IsDone() && !thickener.Shape().IsNull()) {
+            TopoDS_Shape candidate = thickener.Shape();
+            std::string candidate_error;
+            if (require_single_solid(candidate, candidate_error) &&
+                shape_bounds_match(clean_solid, candidate, 1.0e-3)) {
+                shelled = candidate;
+            } else {
+                shell_failure = candidate_error.empty()
+                                    ? "thick solid changed the outer bounding box"
+                                    : candidate_error;
+            }
+        } else {
+            shell_failure = "BRepOffsetAPI_MakeThickSolid did not complete";
         }
-        TopoDS_Shape shelled = thickener.Shape();
         if (shelled.IsNull()) {
-            error = "BRepOffsetAPI_MakeThickSolid returned a null shape";
+            BRepOffsetAPI_MakeOffsetShape shrinker;
+            shrinker.PerformByJoin(
+                clean_solid, -thickness, 1.0e-6,
+                BRepOffset_Skin, Standard_False, Standard_False,
+                GeomAbs_Arc, Standard_False);
+            if (shrinker.IsDone() && !shrinker.Shape().IsNull()) {
+                TopoDS_Shape shrunk = shrinker.Shape();
+                std::string shrunk_error;
+                if (require_single_solid(shrunk, shrunk_error)) {
+                    BRepAlgoAPI_Cut hollow(clean_solid, shrunk);
+                    hollow.SetFuzzyValue(1.0e-6);
+                    hollow.SetRunParallel(Standard_False);
+                    hollow.Build();
+                    if (hollow.IsDone()) {
+                        TopoDS_Shape candidate = hollow.Shape();
+                        std::string candidate_error;
+                        if (require_single_solid(candidate, candidate_error) &&
+                            shape_bounds_match(clean_solid, candidate, 1.0e-3)) {
+                            shelled = candidate;
+                        } else if (shell_failure.empty()) {
+                            shell_failure = candidate_error.empty()
+                                                ? "hollow cut changed the outer bounding box"
+                                                : candidate_error;
+                        }
+                    } else if (shell_failure.empty()) {
+                        shell_failure = "shell hollow cut did not complete";
+                    }
+                } else if (shell_failure.empty()) {
+                    shell_failure = "shell offset shrink is not a single solid: " + shrunk_error;
+                }
+            } else if (shell_failure.empty()) {
+                shell_failure = "BRepOffsetAPI_MakeOffsetShape did not complete";
+            }
+        }
+        if (shelled.IsNull()) {
+            error = "shell could not produce a hollow solid preserving the base bounds: ";
+            error += shell_failure;
             return false;
         }
-        if (shelled.ShapeType() == TopAbs_SOLID) {
-            TopoDS_Solid oriented_shelled = TopoDS::Solid(shelled);
-            BRepLib::OrientClosedSolid(oriented_shelled);
-            shelled = oriented_shelled;
+        ShapeFix_Shape shell_fix(shelled);
+        shell_fix.Perform();
+        if (!shell_fix.Shape().IsNull()) {
+            TopoDS_Shape repaired = shell_fix.Shape();
+            std::string repaired_error;
+            if (require_single_solid(repaired, repaired_error) &&
+                shape_bounds_match(clean_solid, repaired, 1.0e-3)) {
+                shelled = repaired;
+            }
         }
         GProp_GProps material_properties;
         BRepGProp::VolumeProperties(shelled, material_properties);
         const double material_volume = material_properties.Mass();
         if (!std::isfinite(material_volume) || !(material_volume > 0.0)) {
             error = "shell material volume is not a positive finite number";
+            return false;
+        }
+        GProp_GProps seed_properties;
+        BRepGProp::VolumeProperties(clean_solid, seed_properties);
+        if (material_volume >= seed_properties.Mass() - 1.0e-9) {
+            error = "shell material volume does not shrink the seed solid";
             return false;
         }
 
